@@ -3,11 +3,17 @@ import { ConfigModule } from '@nestjs/config';
 import { LoggerModule } from 'nestjs-pino';
 import { AuthModule } from './auth/auth.module';
 import { AuthzModule } from './authz/authz.module';
+import { ApiKeysModule } from './api-keys/api-keys.module';
 import { CommonModule } from './common/common.module';
 import { resolveRequestId } from './common/request-id';
 import { validateEnv } from './config/env.schema';
+import { EndpointSecretsModule } from './endpoint-secrets/endpoint-secrets.module';
+import { EndpointsModule } from './endpoints/endpoints.module';
 import { HealthModule } from './health/health.module';
 import { PrismaModule } from './infrastructure/prisma/prisma.module';
+import { MembersModule } from './members/members.module';
+import { OrganizationsModule } from './organizations/organizations.module';
+import { ProjectsModule } from './projects/projects.module';
 
 @Module({
   imports: [
@@ -53,9 +59,17 @@ import { PrismaModule } from './infrastructure/prisma/prisma.module';
     // Tenant resolution + RBAC. Global, so every Phase 2 controller can use
     // @Authorized() without importing anything (ARCHITECTURE.md 10).
     AuthzModule,
-    // Phase 2 modules land here: users, organizations, memberships,
-    // projects, api-keys, endpoints, endpoint-secrets, webhook-subscriptions,
-    // retry-policies, rate-limits, events, deliveries, audit, admin.
+    // Phase 2 tenant resources. Ordered along the ownership chain -
+    // organization -> project -> endpoint - so the dependency direction is
+    // legible; Nest itself does not care about the order.
+    OrganizationsModule,
+    MembersModule,
+    ProjectsModule,
+    ApiKeysModule,
+    EndpointsModule,
+    EndpointSecretsModule,
+    // Still to come: webhook-subscriptions, retry-policies, rate-limits,
+    // events, deliveries, audit, admin.
   ],
 })
 export class AppModule {}
