@@ -1,7 +1,5 @@
 import { NavLink, Outlet, useParams } from 'react-router-dom';
-import { Badge } from '../components';
 import { useLogout, useSession } from '../features/auth/api';
-import { usingMockApi } from '../lib/api';
 import { cn } from '../lib/cn';
 import { Menu, MenuLabel } from './Menu';
 import { organizationNav, projectNav, type NavItem } from './navigation';
@@ -19,7 +17,6 @@ export function AppLayout() {
     <div className="flex min-h-screen bg-canvas">
       <Sidebar orgId={orgId} projectId={projectId} />
       <div className="flex min-w-0 flex-1 flex-col">
-        {usingMockApi && <MockBanner />}
         <main id="main" className="min-w-0 flex-1 px-6 py-6">
           <Outlet />
         </main>
@@ -152,14 +149,3 @@ function Wordmark() {
   );
 }
 
-function MockBanner() {
-  return (
-    <p className="flex items-center gap-2 border-b border-warn/25 bg-warn-soft px-6 py-1.5 text-2xs text-warn">
-      <Badge tone="warn" dot>
-        Mock data
-      </Badge>
-      The control API is not wired up yet. Set{' '}
-      <code className="font-mono">VITE_API_TRANSPORT=http</code> to use it.
-    </p>
-  );
-}

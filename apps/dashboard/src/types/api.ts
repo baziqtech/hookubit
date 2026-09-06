@@ -29,6 +29,8 @@ export type ApiErrorCode =
   | 'invalid_request'
   | 'unauthenticated'
   | 'forbidden'
+  /** 403 on login when the address has not been confirmed yet. */
+  | 'email_not_verified'
   | 'not_found'
   | 'conflict'
   | 'idempotency_key_reused'

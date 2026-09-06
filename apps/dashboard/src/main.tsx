@@ -2,6 +2,7 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import React from 'react';
 import ReactDOM from 'react-dom/client';
 import { RouterProvider } from 'react-router-dom';
+import { DemoDataBanner } from './components/DemoDataBanner';
 import './index.css';
 import { ApiRequestError } from './lib/api';
 import { router } from './routes/router';
@@ -30,6 +31,9 @@ if (window.matchMedia('(prefers-color-scheme: dark)').matches) {
 ReactDOM.createRoot(document.getElementById('root')!).render(
   <React.StrictMode>
     <QueryClientProvider client={queryClient}>
+      {/* Above the router on purpose: the auth pages render outside the app
+          shell, and a build serving mock data must say so there too. */}
+      <DemoDataBanner />
       <RouterProvider router={router} />
     </QueryClientProvider>
   </React.StrictMode>,

@@ -1,0 +1,374 @@
+import { Injectable, Logger } from '@nestjs/common';
+import { Endpoint, Prisma } from '@prisma/client';
+import {
+  AuditService,
+  CROSS_TENANT_MESSAGE,
+  RequestContext,
+  TenantScope,
+  TenantScopeFactory,
+} from '../authz';
+import { AppError } from '../common/errors';
+import { newId } from '../common/ids';
+import { EndpointSecretsService } from '../endpoint-secrets/endpoint-secrets.service';
+import {
+  CreateEndpointDto,
+  CreatedEndpointDto,
+  EndpointDto,
+  ListEndpointsQueryDto,
+  UpdateEndpointDto,
+  toEndpointDto,
+} from './dto';
+import { normaliseCustomHeaders } from './endpoint-headers';
+import { normaliseEndpointUrl } from './endpoint-url';
+
+/**
+ * The columns a request body is allowed to reach, named one by one.
+ *
+ * Derived from Prisma's scalars-only create input so a column that is renamed or
+ * retyped in `schema.prisma` breaks the build here rather than silently ceasing
+ * to be written. `projectId`, `status`, `enabled` and the circuit breaker's
+ * columns are absent on purpose - none of them is a request field.
+ */
+type EndpointColumns = Partial<
+  Pick<
+    Prisma.EndpointCreateManyInput,
+    | 'description'
+    | 'timeoutMs'
+    | 'maxConcurrency'
+    | 'rateLimit'
+    | 'rateLimitWindowSeconds'
+    | 'retryPolicyId'
+    | 'customHeaders'
+  >
+>;
+
+/**
+ * Endpoint configuration: the customer-owned URLs this platform delivers to.
+ *
+ * ## Soft delete, always
+ *
+ * `deliveries.endpoint_id` is `ON DELETE RESTRICT` (see HANDOFF, "Delivery
+ * ledger is no longer cascade-deletable") and that is not an accident to be
+ * worked around. The delivery ledger is the answer to "did finance ever receive
+ * this?", and that question outlives the endpoint by years - it is usually asked
+ * *because* something was changed or removed. A hard delete would either fail on
+ * the constraint or, before it existed, take months of `delivery_attempts` with
+ * it through two cascade chains.
+ *
+ * So removal is `status = 'deleted'`: the row stays, the ledger still joins, and
+ * the endpoint disappears from listings. Nothing in this service calls
+ * `deleteById`.
+ *
+ * ## Two flags, two owners
+ *
+ * `enabled` is operator intent - what a human asked for. `status` is the current
+ * state, and `disabled_reason`/`disabled_at` belong to the circuit breaker in
+ * the data plane. Pausing an endpoint from here therefore sets `enabled` and
+ * `status` and deliberately does NOT write the breaker's columns; the reason a
+ * human gave goes to the audit log, where a reason belongs. Enabling clears the
+ * breaker's columns, because an operator re-enabling an auto-disabled endpoint
+ * is exactly the deliberate override those columns are waiting for.
+ */
+@Injectable()
+export class EndpointsService {
+  private readonly logger = new Logger(EndpointsService.name);
+
+  constructor(
+    private readonly scopes: TenantScopeFactory,
+    private readonly audit: AuditService,
+    private readonly secrets: EndpointSecretsService,
+  ) {}
+
+  async list(context: RequestContext, query: ListEndpointsQueryDto): Promise<EndpointDto[]> {
+    const where: Prisma.EndpointWhereInput = query.status
+      ? { status: query.status }
+      : query.include_deleted
+        ? {}
+        : { status: { not: 'deleted' } };
+
+    const endpoints = await this.scopes.for(context).endpoints.findMany({
+      where,
+      orderBy: { createdAt: 'desc' },
+      take: query.limit,
+      skip: query.offset,
+    });
+    return endpoints.map(toEndpointDto);
+  }
+
+  /**
+   * A soft-deleted endpoint IS returned here, with `status: "deleted"`.
+   *
+   * That is deliberate and is the other half of the soft delete: a delivery in
+   * the ledger points at this id, and an operator following that link at 2am
+   * needs to see the URL it went to, not a 404 that makes the ledger row
+   * unreadable.
+   */
+  async get(context: RequestContext, endpointId: string): Promise<EndpointDto> {
+    return toEndpointDto(await this.require(this.scopes.for(context), endpointId));
+  }
+
+  /**
+   * Create the endpoint and its version 1 signing secret.
+   *
+   * The endpoint is inserted **paused** and only flipped to active once the
+   * secret exists. That ordering is what keeps the signing invariant true
+   * without a transaction (`ScopedRepository` cannot open one without the raw
+   * client, which is banned in this module): an endpoint that never becomes
+   * active while it has no secret can never be dispatched to, so
+   * `signing.Header` can never be asked to sign for it and fail closed.
+   *
+   * The plaintext comes back only to a caller who may read signing secrets.
+   * `endpoints.write` is held by `developer`; `endpoint-secrets.*` is owner and
+   * admin only, deliberately, because whoever holds a signing secret can forge a
+   * webhook into the customer's own consumers. A developer therefore creates a
+   * working endpoint and an owner rotates once to obtain the credential.
+   */
+  async create(context: RequestContext, dto: CreateEndpointDto): Promise<CreatedEndpointDto> {
+    const scope = this.scopes.for(context);
+    await this.requireRetryPolicy(scope, dto.retry_policy_id);
+
+    const id = newId('endpoint');
+    const now = new Date();
+    await scope.endpoints.create({
+      id,
+      ...this.writableColumns(dto),
+      name: dto.name,
+      url: normaliseEndpointUrl(dto.url),
+      // Paused until the secret lands. See the docblock.
+      status: 'paused',
+      enabled: false,
+      // Stated rather than defaulted, so `created_at` and `updated_at` come off
+      // one clock reading and an endpoint is never newer than the secret that
+      // was minted for it.
+      createdAt: now,
+      updatedAt: now,
+    });
+
+    let minted: { secret: string; version: number };
+    try {
+      minted = await this.secrets.mintInitial(context, id);
+    } catch (err) {
+      // The endpoint is inert (paused, never dispatched to) but it is litter, and
+      // litter in a customer's endpoint list gets enabled by someone eventually.
+      // Mark it removed on the way out; the original failure is what the caller
+      // needs to see, so a failure here is logged and swallowed rather than
+      // replacing it.
+      await scope.endpoints
+        .updateById(id, { status: 'deleted', enabled: false })
+        .catch((cleanupError: unknown) =>
+          this.logger.error(
+            `Endpoint ${id} was created but its signing secret could not be minted, and marking ` +
+              `it deleted also failed. It is paused and has no secret; remove it manually. ` +
+              `${String(cleanupError)}`,
+          ),
+        );
+      throw err;
+    }
+
+    const live = await scope.endpoints.updateById(id, { status: 'active', enabled: true });
+
+    await this.audit.recordFor(context, {
+      action: 'endpoint.created',
+      resourceType: 'endpoint',
+      resourceId: id,
+      metadata: { url: live.url, name: live.name, secret_version: minted.version },
+    });
+
+    return {
+      ...toEndpointDto(live),
+      // Withheld from a caller who may create endpoints but not read their
+      // secrets. The secret exists either way; only this response varies.
+      secret: context.has('endpoint-secrets.write') ? minted.secret : null,
+      secret_version: minted.version,
+    };
+  }
+
+  async update(
+    context: RequestContext,
+    endpointId: string,
+    dto: UpdateEndpointDto,
+  ): Promise<EndpointDto> {
+    const scope = this.scopes.for(context);
+    const current = await this.require(scope, endpointId);
+    EndpointsService.assertNotDeleted(current);
+    await this.requireRetryPolicy(scope, dto.retry_policy_id);
+
+    const data: EndpointColumns & { name?: string; url?: string } = this.writableColumns(dto);
+    if (dto.name !== undefined) data.name = dto.name;
+    if (dto.url !== undefined) data.url = normaliseEndpointUrl(dto.url);
+
+    if (Object.keys(data).length === 0) return toEndpointDto(current);
+
+    const updated = await scope.endpoints.updateById(endpointId, data);
+    await this.audit.recordFor(context, {
+      action: 'endpoint.updated',
+      resourceType: 'endpoint',
+      resourceId: endpointId,
+      metadata: {
+        fields: Object.keys(data).sort(),
+        // The destination is the security-relevant field, so both sides of a
+        // change to it are recorded rather than just "url changed".
+        ...(data.url !== undefined && current.url !== updated.url
+          ? { url_from: current.url, url_to: updated.url }
+          : {}),
+      },
+    });
+    return toEndpointDto(updated);
+  }
+
+  /**
+   * Resume deliveries.
+   *
+   * Refused when the endpoint has no live signing secret. An enabled endpoint
+   * with none is the exact state `signing.Header` returns `ErrNoSecrets` for, so
+   * enabling would not produce deliveries - it would produce a queue of
+   * permanently failing ones and a customer wondering why.
+   */
+  async enable(context: RequestContext, endpointId: string): Promise<EndpointDto> {
+    const scope = this.scopes.for(context);
+    const current = await this.require(scope, endpointId);
+    EndpointsService.assertNotDeleted(current);
+
+    if (!(await this.secrets.hasLiveSecret(context, endpointId))) {
+      throw new AppError(
+        'conflict',
+        'This endpoint has no active signing secret, so its deliveries could not be signed. ' +
+          'Rotate a secret first, then enable it.',
+      );
+    }
+
+    const updated = await scope.endpoints.updateById(endpointId, {
+      enabled: true,
+      status: 'active',
+      // An operator enabling an auto-disabled endpoint is the deliberate
+      // override the breaker's columns are waiting for. Leaving them set would
+      // make the next reader think it is still tripped.
+      disabledReason: null,
+      disabledAt: null,
+    });
+    await this.audit.recordFor(context, {
+      action: 'endpoint.enabled',
+      resourceType: 'endpoint',
+      resourceId: endpointId,
+      metadata: { previous_status: current.status },
+    });
+    return toEndpointDto(updated);
+  }
+
+  /**
+   * Stop delivering, keep everything.
+   *
+   * `disabled_reason`/`disabled_at` are NOT written: they are the circuit
+   * breaker's record of an automatic disable, and overwriting them from here
+   * would erase why the platform stopped delivering. The human's reason goes to
+   * the audit log.
+   */
+  async disable(
+    context: RequestContext,
+    endpointId: string,
+    reason?: string,
+  ): Promise<EndpointDto> {
+    const scope = this.scopes.for(context);
+    const current = await this.require(scope, endpointId);
+    EndpointsService.assertNotDeleted(current);
+
+    const updated = await scope.endpoints.updateById(endpointId, {
+      enabled: false,
+      status: 'paused',
+    });
+    await this.audit.recordFor(context, {
+      action: 'endpoint.disabled',
+      resourceType: 'endpoint',
+      resourceId: endpointId,
+      metadata: { previous_status: current.status, reason: reason ?? null },
+    });
+    return toEndpointDto(updated);
+  }
+
+  /**
+   * Soft delete. Idempotent: removing an already-removed endpoint succeeds.
+   *
+   * The row is never deleted - see the class docblock. `deliveries` and
+   * `delivery_attempts` keep pointing at it, so every past delivery stays
+   * explainable after the endpoint is gone from the UI.
+   */
+  async remove(context: RequestContext, endpointId: string): Promise<void> {
+    const scope = this.scopes.for(context);
+    const current = await this.require(scope, endpointId);
+    if (current.status === 'deleted') return;
+
+    await scope.endpoints.updateById(endpointId, { status: 'deleted', enabled: false });
+    await this.audit.recordFor(context, {
+      action: 'endpoint.deleted',
+      resourceType: 'endpoint',
+      resourceId: endpointId,
+      metadata: { url: current.url, name: current.name, soft_delete: true },
+    });
+  }
+
+  // ---------------------------------------------------------------------------
+
+  /**
+   * 404 with the layer's single message, for an absent id and for an id in
+   * another tenant alike. Never a fetch-then-check: the tenant predicate is
+   * already in the WHERE clause, so a foreign id matches no row in the database.
+   */
+  private async require(scope: TenantScope, endpointId: string): Promise<Endpoint> {
+    const endpoint = await scope.endpoints.findById(endpointId);
+    if (!endpoint) throw new AppError('not_found', CROSS_TENANT_MESSAGE);
+    return endpoint;
+  }
+
+  /**
+   * Prove a caller-supplied `retry_policy_id` belongs to this project.
+   *
+   * `ScopedRepository` checks declared foreign keys on write too, so this is
+   * belt and braces - but it is checked HERE so the refusal carries the same
+   * `Resource not found.` every other cross-tenant miss in this module carries,
+   * rather than a per-resource sentence that would let a caller tell the two
+   * apart.
+   */
+  private async requireRetryPolicy(
+    scope: TenantScope,
+    retryPolicyId: string | null | undefined,
+  ): Promise<void> {
+    if (retryPolicyId === undefined || retryPolicyId === null) return;
+    const policy = await scope.retryPolicies.findById(retryPolicyId);
+    if (!policy) throw new AppError('not_found', CROSS_TENANT_MESSAGE);
+  }
+
+  private static assertNotDeleted(endpoint: Endpoint): void {
+    if (endpoint.status !== 'deleted') return;
+    // Not a 404: the caller is inside the tenant and can see the row through
+    // GET, so hiding it here would be confusing rather than protective.
+    throw new AppError(
+      'conflict',
+      'This endpoint has been deleted. Deleted endpoints are kept so the delivery ledger ' +
+        'stays readable, but they cannot be modified.',
+    );
+  }
+
+  /**
+   * The subset of the DTO that maps to columns, snake_case to camelCase.
+   *
+   * Explicit rather than a spread: a spread would let any future request field
+   * reach the write payload, and `ScopedRepository` would only catch the ones
+   * that happen to collide with a column name. `status` is absent on purpose -
+   * it has its own routes with their own preconditions.
+   */
+  private writableColumns(dto: CreateEndpointDto | UpdateEndpointDto): EndpointColumns {
+    const data: EndpointColumns = {};
+    if (dto.description !== undefined) data.description = dto.description;
+    if (dto.timeout_ms !== undefined) data.timeoutMs = dto.timeout_ms;
+    if (dto.max_concurrency !== undefined) data.maxConcurrency = dto.max_concurrency;
+    if (dto.rate_limit !== undefined) data.rateLimit = dto.rate_limit;
+    if (dto.rate_limit_window_seconds !== undefined) {
+      data.rateLimitWindowSeconds = dto.rate_limit_window_seconds;
+    }
+    if (dto.retry_policy_id !== undefined) data.retryPolicyId = dto.retry_policy_id;
+    if (dto.custom_headers !== undefined) {
+      data.customHeaders = normaliseCustomHeaders(dto.custom_headers) ?? Prisma.DbNull;
+    }
+    return data;
+  }
+}

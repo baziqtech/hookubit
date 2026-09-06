@@ -11,6 +11,7 @@ export { Button } from './Button';
 export type { ButtonProps } from './Button';
 export { CodeBlock } from './CodeBlock';
 export type { CodeBlockProps } from './CodeBlock';
+export { DemoDataBanner } from './DemoDataBanner';
 export { Dialog } from './Dialog';
 export type { DialogProps } from './Dialog';
 export { EmptyState } from './EmptyState';

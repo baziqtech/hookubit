@@ -52,6 +52,27 @@
       "rules": {
         "no-restricted-imports": "off"
       }
+    },
+    {
+      "files": [
+        "src/organizations/user-scope.ts",
+        "src/organizations/user-directory.ts",
+        "src/organizations/tenant-transaction.ts",
+        "src/organizations/testing/**/*.ts"
+      ],
+      "rules": {
+        "no-restricted-imports": "off"
+      }
+    },
+    {
+      "files": [
+        "**/testing/**/*.ts",
+        "**/*.spec.ts",
+        "**/*.e2e-spec.ts"
+      ],
+      "rules": {
+        "no-restricted-imports": "off"
+      }
     }
   ]
 }

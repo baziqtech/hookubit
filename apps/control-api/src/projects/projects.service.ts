@@ -1,0 +1,222 @@
+import { Injectable, Logger } from '@nestjs/common';
+import { Environment, Prisma, Project, ProjectStatus } from '@prisma/client';
+import { AuditService, RequestContext, ScopedUpdateInput, TenantScopeFactory } from '../authz';
+import { AppError } from '../common/errors';
+import { newId } from '../common/ids';
+import {
+  CreateProjectDto,
+  ListProjectsQueryDto,
+  ProjectDto,
+  UpdateProjectDto,
+  toProjectDto,
+} from './dto';
+import { slugFromName } from './slug';
+import { isUniqueViolationOn, uniqueViolationTarget } from './unique-violation';
+
+type ProjectUpdate = ScopedUpdateInput<Prisma.ProjectUncheckedUpdateManyInput>;
+
+/**
+ * Projects: the unit of tenancy everything below an organization hangs off.
+ *
+ * Two invariants this service exists to hold, both of which are cheap now and
+ * unfixable later:
+ *
+ * **`environment` is immutable.** A project's environment decides which API
+ * keys authenticate against it (`wk_live_` vs `wk_test_`, re-checked by the Go
+ * ingest path on every request) and which traffic its endpoints receive. A flip
+ * from `test` to `live` would not migrate anything - it would silently
+ * invalidate every key under the project and start routing production traffic
+ * at endpoints that were configured as throwaways. There is no safe version of
+ * that operation, so it is not offered; create a second project instead.
+ *
+ * **Deletion is soft.** `status = 'deleted'`, never `DELETE`. The delivery
+ * ledger under a project is the record of what we promised a customer we would
+ * send, and `deliveries.endpoint_id` is `ON DELETE RESTRICT` precisely so it
+ * cannot be erased by a cascade from up here (HANDOFF: "Delivery ledger is no
+ * longer cascade-deletable"). `TenantResolver` treats a deleted project as
+ * absent, so it disappears from this API immediately; the data plane refuses
+ * its API keys because `ProjectStatus != active` (`internal/ingest/handler.go`).
+ *
+ * Every query goes through `TenantScopeFactory`, so no method here names an
+ * organization id and none of them can be pointed at another tenant's row.
+ */
+@Injectable()
+export class ProjectsService {
+  private readonly logger = new Logger(ProjectsService.name);
+
+  constructor(
+    private readonly scopes: TenantScopeFactory,
+    private readonly audit: AuditService,
+  ) {}
+
+  async list(context: RequestContext, query: ListProjectsQueryDto): Promise<ProjectDto[]> {
+    // Soft-deleted projects are excluded unless asked for by name. They are
+    // still listable on purpose: a deleted project keeps its slug, so this is
+    // the only way a customer can find out why a create just 409'd.
+    const where: Prisma.ProjectWhereInput = query.status
+      ? { status: query.status }
+      : { status: { not: ProjectStatus.deleted } };
+
+    const projects = await this.scopes.for(context).projects.findMany({
+      where,
+      orderBy: { createdAt: 'desc' },
+      take: query.limit,
+      skip: query.offset,
+    });
+    return projects.map(toProjectDto);
+  }
+
+  async get(context: RequestContext, projectId: string): Promise<ProjectDto> {
+    // requireById, not findUnique-then-check: the tenant predicate is in the
+    // WHERE clause, so another organization's id matches zero rows and answers
+    // the same 404 as an id that never existed.
+    return toProjectDto(await this.scopes.for(context).projects.requireById(projectId));
+  }
+
+  async create(context: RequestContext, dto: CreateProjectDto): Promise<ProjectDto> {
+    const name = dto.name.trim();
+    const slug = dto.slug ?? slugFromName(name);
+    if (!slug) {
+      throw new AppError(
+        'invalid_request',
+        'Could not derive a slug from that name. Supply "slug" explicitly (lowercase letters, digits and hyphens).',
+      );
+    }
+    const environment = dto.environment ?? Environment.test;
+    const id = newId('project');
+
+    let project: Project;
+    try {
+      project = await this.scopes.for(context).projects.create({ id, name, slug, environment });
+    } catch (err) {
+      throw this.translateSlugCollision(err, slug);
+    }
+
+    await this.audit.recordFor(context, {
+      action: 'project.created',
+      resourceType: 'project',
+      resourceId: project.id,
+      metadata: { name, slug, environment },
+    });
+    return toProjectDto(project);
+  }
+
+  async update(
+    context: RequestContext,
+    projectId: string,
+    dto: UpdateProjectDto,
+  ): Promise<ProjectDto> {
+    ProjectsService.assertEnvironmentNotSupplied(dto);
+    ProjectsService.assertStatusNotSupplied(dto);
+
+    // Built field by field rather than spread, so a property that is not name
+    // or slug cannot reach the database even if it survives validation.
+    const data: ProjectUpdate = {};
+    const changed: Record<string, unknown> = {};
+    if (dto.name !== undefined) {
+      data.name = dto.name.trim();
+      changed.name = data.name;
+    }
+    if (dto.slug !== undefined) {
+      data.slug = dto.slug;
+      changed.slug = dto.slug;
+    }
+    if (Object.keys(data).length === 0) {
+      throw new AppError('invalid_request', 'Supply at least one of "name" or "slug".');
+    }
+
+    let project: Project;
+    try {
+      project = await this.scopes.for(context).projects.updateById(projectId, data);
+    } catch (err) {
+      throw this.translateSlugCollision(err, dto.slug);
+    }
+
+    await this.audit.recordFor(context, {
+      action: 'project.updated',
+      resourceType: 'project',
+      resourceId: project.id,
+      metadata: changed,
+    });
+    return toProjectDto(project);
+  }
+
+  /**
+   * Soft delete. The row, its endpoints, its API keys and its entire delivery
+   * history stay exactly where they are; only the status changes.
+   *
+   * The project's API keys are deliberately NOT revoked here. The ingest path
+   * already refuses every key whose project is not `active`, so revoking would
+   * add a second, weaker copy of the same rule - and it would be the copy that
+   * has to be undone by hand if the deletion turns out to be a mistake.
+   */
+  async remove(context: RequestContext, projectId: string): Promise<ProjectDto> {
+    const project = await this.scopes
+      .for(context)
+      .projects.updateById(projectId, { status: ProjectStatus.deleted });
+
+    await this.audit.recordFor(context, {
+      action: 'project.deleted',
+      resourceType: 'project',
+      resourceId: project.id,
+      metadata: { slug: project.slug, soft_delete: true },
+    });
+    return toProjectDto(project);
+  }
+
+  /**
+   * Turn a P2002 into the truth, or rethrow.
+   *
+   * `projects` has exactly one unique index the caller can collide with -
+   * `(organization_id, slug)` - and it is entirely within their own
+   * organization, so naming the slug back to them discloses nothing across a
+   * tenant boundary. Anything else is rethrown: the auth module's version of
+   * this function matched on the error CODE and reported every unique violation
+   * as "email already exists", which sent people looking in the wrong place for
+   * a slug race.
+   */
+  private translateSlugCollision(err: unknown, slug?: string): unknown {
+    if (isUniqueViolationOn(err, 'slug')) {
+      return new AppError(
+        'conflict',
+        slug
+          ? `A project with the slug "${slug}" already exists in this organization. Deleted projects keep their slug; list with ?status=deleted to check.`
+          : 'A project with that slug already exists in this organization.',
+        { field: 'slug', value: slug },
+      );
+    }
+    const target = uniqueViolationTarget(err);
+    if (target !== null) {
+      // A unique index we do not model. Do not launder it into a 409 the caller
+      // cannot act on; let it 500 with a stack trace and a log line naming it.
+      this.logger.error(`Unhandled unique violation on projects; meta.target="${target}"`);
+    }
+    return err;
+  }
+
+  /**
+   * The immutability rule, enforced in code and not only in the DTO.
+   *
+   * The global ValidationPipe (`forbidNonWhitelisted`) already refuses an
+   * `environment` key, but that is configuration in main.ts and this is the
+   * business rule; a caller that reaches the service another way still gets a
+   * message that explains itself instead of a silently ignored field.
+   */
+  private static assertEnvironmentNotSupplied(dto: UpdateProjectDto): void {
+    if (!Object.prototype.hasOwnProperty.call(dto, 'environment')) return;
+    throw new AppError(
+      'invalid_request',
+      "A project's environment is fixed at creation. Changing it would re-scope every API key and endpoint under the project without migrating anything. Create a new project instead.",
+      { field: 'environment' },
+    );
+  }
+
+  private static assertStatusNotSupplied(dto: UpdateProjectDto): void {
+    if (!Object.prototype.hasOwnProperty.call(dto, 'status')) return;
+    throw new AppError(
+      'invalid_request',
+      'Project status is not editable here. Use DELETE to soft-delete a project.',
+      { field: 'status' },
+    );
+  }
+}
