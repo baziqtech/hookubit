@@ -1,0 +1,90 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    color-scheme: light;
+    --c-canvas: 250 250 249;
+    --c-panel: 255 255 255;
+    --c-raised: 245 245 244;
+    --c-line: 231 229 228;
+    --c-line-strong: 214 211 209;
+    --c-ink: 28 25 23;
+    --c-ink-muted: 87 83 78;
+    --c-ink-subtle: 138 133 127;
+    --c-accent: 67 56 202;
+    --c-accent-ink: 255 255 255;
+    --c-accent-soft: 238 238 255;
+    --c-ok: 21 128 61;
+    --c-ok-soft: 220 252 231;
+    --c-warn: 180 83 9;
+    --c-warn-soft: 254 243 199;
+    --c-danger: 185 28 28;
+    --c-danger-soft: 254 226 226;
+    --c-info: 29 78 216;
+    --c-info-soft: 219 234 254;
+  }
+
+  :root[data-theme='dark'] {
+    color-scheme: dark;
+    --c-canvas: 12 12 14;
+    --c-panel: 22 22 25;
+    --c-raised: 30 30 34;
+    --c-line: 42 42 47;
+    --c-line-strong: 60 60 66;
+    --c-ink: 244 244 245;
+    --c-ink-muted: 168 166 170;
+    --c-ink-subtle: 120 118 123;
+    --c-accent: 129 140 248;
+    --c-accent-ink: 17 17 20;
+    --c-accent-soft: 41 41 63;
+    --c-ok: 74 222 128;
+    --c-ok-soft: 20 45 30;
+    --c-warn: 251 191 36;
+    --c-warn-soft: 56 41 12;
+    --c-danger: 248 113 113;
+    --c-danger-soft: 60 22 22;
+    --c-info: 96 165 250;
+    --c-info-soft: 23 37 68;
+  }
+
+  html {
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+  }
+
+  body {
+    @apply bg-canvas text-ink font-sans text-sm;
+  }
+
+  /* One focus treatment for the whole product, so keyboard users always get
+     the same affordance regardless of which primitive they land on. */
+  :where(a, button, input, select, textarea, [tabindex]):focus-visible {
+    @apply outline-none ring-2 ring-accent/70 ring-offset-2 ring-offset-canvas;
+  }
+
+  ::selection {
+    @apply bg-accent/25;
+  }
+}
+
+@layer utilities {
+  .tabular {
+    font-variant-numeric: tabular-nums;
+  }
+
+  .scrollbar-thin {
+    scrollbar-width: thin;
+    scrollbar-color: rgb(var(--c-line-strong)) transparent;
+  }
+
+  .scrollbar-thin::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+  }
+
+  .scrollbar-thin::-webkit-scrollbar-thumb {
+    @apply rounded-full border-[3px] border-solid border-transparent bg-line-strong bg-clip-content;
+  }
+}
