@@ -417,3 +417,220 @@ Still no live database and no live Redis: `RedisThrottleStore` is tested against
 a fake implementing the three commands it uses, so the INCR/PTTL/PEXPIRE sequence
 and the degraded path are pinned, but nothing here has spoken to a real Redis.
 Worth one manual check against `dev:infra` before it fronts production traffic.
+
+---
+
+## Authorization layer (2026-09-06) — `src/authz`
+
+Built **before** any Phase 2 CRUD module, deliberately. `SessionUser` is
+`{userId, email, sessionId}` and carries no tenant context; fourteen modules
+written against that would each have to remember `organizationId`/`projectId`
+scoping by hand, and retrofitting it afterwards is how IDOR ships. This layer
+exists so tenant scoping is what you get by *default* and bypassing it is what
+takes effort.
+
+### The permission model
+
+`src/authz/permissions.ts` holds a single matrix. `Permission` is derived from
+its keys and `MemberRole` comes from `schema.prisma`, so **the mapping cannot be
+incomplete**: a new permission does not exist as a type until it has a row, and
+a new role makes every row fail `satisfies Record<string, Record<MemberRole,
+boolean>>`. A missing grant is a compile error, never a silent deny.
+
+| | owner | admin | developer | viewer | billing |
+|---|---|---|---|---|---|
+| `projects.read` | ✓ | ✓ | ✓ | ✓ | ✓ |
+| `projects.write` | ✓ | ✓ | | | |
+| `endpoints.read` | ✓ | ✓ | ✓ | ✓ | |
+| `endpoints.write` | ✓ | ✓ | ✓ | | |
+| `subscriptions.read` | ✓ | ✓ | ✓ | ✓ | |
+| `subscriptions.write` | ✓ | ✓ | ✓ | | |
+| `api-keys.read` | ✓ | ✓ | ✓ | | |
+| `api-keys.write` | ✓ | ✓ | ✓ | | |
+| `events.read` | ✓ | ✓ | ✓ | ✓ | |
+| `events.replay` | ✓ | ✓ | ✓ | | |
+| `deliveries.read` | ✓ | ✓ | ✓ | ✓ | |
+| `deliveries.replay` | ✓ | ✓ | ✓ | | |
+| `members.read` | ✓ | ✓ | ✓ | ✓ | ✓ |
+| `members.write` | ✓ | ✓ | | | |
+| `billing.read` | ✓ | ✓ | | | ✓ |
+| `billing.write` | ✓ | | | | ✓ |
+
+`api-keys.*` and `subscriptions.*` are additions to the ARCHITECTURE.md 10 list;
+the module list implies both. Judgement calls worth arguing with rather than
+inheriting: developers may issue API keys (it is the integration work) but may
+not change the team or create projects; viewers cannot read the API-key
+inventory and cannot replay, because a replay puts real HTTP traffic on a
+customer's endpoint and is a write; admin cannot do `billing.write`.
+
+**Suspension.** A `suspended` organization or project narrows the caller's set to
+reads plus `billing.write` — locking a customer out of the payment form is how a
+billing suspension becomes permanent. `deleted` is treated as absent (404).
+
+### Not-found vs forbidden — the rule, applied everywhere
+
+- **404 `not_found`** whenever the caller is *outside* the tenant that owns the
+  resource: no membership, a project belonging to another organization, an
+  endpoint/event/delivery under someone else's project, or a genuinely absent
+  row. All four give the same code **and the same message**, so a 403 cannot be
+  used as an existence oracle to enumerate a competitor's infrastructure.
+- **403 `forbidden`** only once membership is proven and the caller's *role* is
+  what falls short. They already know the tenant exists — they are in it — so
+  the response names the missing permission and their role.
+
+This matches the ingest path (`TestKeyForAnotherProjectIsNotFound`), so the two
+planes cannot be played off against each other. The rationale lives in the
+`CROSS_TENANT` docblock in `tenant-resolver.service.ts`; keep it in sync if the
+policy ever changes.
+
+**Corollary for every module:** never `findUnique({ where: { id } })` and then
+check ownership. By then you have already decided to answer differently for a
+real id. Put the tenant predicate in the WHERE clause — which is what
+`ScopedRepository` does for you.
+
+### How a new module uses this
+
+`AuthzModule` is `@Global`, so there is nothing to import. The worked example is
+`ExampleController` in `src/authz/authz.http.spec.ts` — it is a real controller
+run by a real Nest app in that suite, so it cannot rot.
+
+```ts
+@Controller('v1/organizations/:orgId/projects/:projectId/endpoints')
+export class EndpointsController {
+  constructor(private readonly endpoints: EndpointsService) {}
+
+  @Get()
+  @Authorized('endpoints.read')                 // mounts SessionGuard + TenantGuard
+  list(@Tenant() ctx: RequestContext) {
+    return this.endpoints.list(ctx);
+  }
+
+  @Post()
+  @Authorized('endpoints.write')
+  create(@Tenant() ctx: RequestContext, @Body() dto: CreateEndpointDto) {
+    return this.endpoints.create(ctx, dto);
+  }
+}
+
+@Injectable()
+export class EndpointsService {
+  // Inject the scope factory, NOT PrismaService.
+  constructor(
+    private readonly scopes: TenantScopeFactory,
+    private readonly audit: AuditService,
+  ) {}
+
+  list(ctx: RequestContext) {
+    // Already fenced to ctx's organization + project. No projectId in sight.
+    return this.scopes.for(ctx).endpoints.findMany({ orderBy: { createdAt: 'desc' } });
+  }
+
+  async create(ctx: RequestContext, dto: CreateEndpointDto) {
+    const scope = this.scopes.for(ctx);
+    const endpoint = await scope.endpoints.create({ id: newId('endpoint'), ...dto });
+    await this.audit.recordFor(ctx, {
+      action: 'endpoint.created',
+      resourceType: 'endpoint',
+      resourceId: endpoint.id,
+    });
+    return endpoint;
+  }
+
+  // 404 for an id in another tenant, never 403, and never a fetch-then-check.
+  get(ctx: RequestContext, id: string) {
+    return this.scopes.for(ctx).endpoints.requireById(id);
+  }
+}
+```
+
+Route-parameter convention: `:orgId` (or `:organizationId`) and `:projectId`.
+**Not `:id`** — a bare `:id` is ambiguous and a resolver that guessed would one
+day guess in the direction that grants access. For resource-addressed routes
+where the tenant is not in the path, declare the anchor:
+
+```ts
+@Get('v1/deliveries/:deliveryId')
+@Authorized('deliveries.read')
+@ResolveTenantFrom('delivery', 'deliveryId')   // delivery → endpoint → project → org
+```
+
+Transactions: `scope.withClient(tx)` inside `prisma.$transaction`, and pass the
+same `tx` to `audit.recordFor(ctx, entry, tx)` so the audit row commits with the
+change it describes.
+
+Things that fail loudly rather than quietly: a guarded route with no tenant in
+the path (500, not an unscoped 200); `requireProject()` on an organization-level
+route (500); `create()` on a table whose tenancy comes from a parent (500).
+
+### What is structurally guaranteed, and what is not
+
+`ScopedRepository` deliberately does **not** expose `findUnique`, `update` or
+`delete` — all three take a bare primary key. Everything routes through
+`findFirst`/`updateMany`/`deleteMany` with the tenant predicate ANDed in, so a
+caller-supplied `{ projectId: theirs }` becomes `AND [{ mine }, { theirs }]` and
+matches nothing. `create()` fills the tenant columns itself and omits them from
+the caller's input type. Nested tables use relation filters
+(`endpoint_secrets → endpoints → projects`, `delivery_attempts → deliveries`), so
+the join happens in PostgreSQL and no unscoped row ever exists in memory.
+
+**Not guaranteed:** `PrismaService` is still globally injectable. That is the
+escape hatch and it is meant to be conspicuous — a `PrismaService` in a feature
+service's constructor should draw a review comment. There is no lint rule
+enforcing this; consider one when Phase 2 starts.
+
+**Known trade-off:** `scope.deliveries` and `scope.events` filter on the
+denormalised `organization_id`/`project_id` columns, because that is what the
+`(project_id, status, created_at)` index is for. A delivery row whose columns
+disagreed with its endpoint's real owner would therefore appear in a *listing*.
+Id-addressed access does not have this weakness: `@ResolveTenantFrom('delivery',
+…)` walks the real chain and refuses on any mismatch, logging it at error level.
+The columns are written by the fan-out router from the endpoint's own project, so
+a mismatch is a data-integrity bug, not an attack path — but if that ever becomes
+untrue, switch the two predicates to relation filters and accept the index loss.
+
+### Deliberately left out
+
+- **No CRUD.** No controllers, no DTOs, no modules for organizations/projects/
+  endpoints. This is the layer they will be written against.
+- **No relation loading in `ScopedRepository`.** `findMany` takes
+  `where`/`orderBy`/`take`/`skip` and returns the model row. `include`/`select`
+  would need per-model result typing; add it when a module actually needs it,
+  and keep `where()` as the way to build the predicate.
+- **No API-key principal.** `RequestContext` is built from a browser session.
+  Server-to-server ingest authenticates in the Go data plane; when the control
+  API grows key-authenticated routes, add a second resolver that produces the
+  same `RequestContext` shape from `api_keys.scopes` — `AuditActor.apiKeyId`
+  already exists for it.
+- **No invitation / role-change flows.** `members.write` is the permission; the
+  module that uses it is Phase 2.
+- **No audit call sites.** `AuditService` is the hook; nothing was retrofitted,
+  because there is nothing to retrofit yet. It is not an interceptor on purpose —
+  an automatic "log every mutating request" layer records HTTP verbs, not
+  business facts, and cannot know the id of a thing it just created.
+- **Suspension is enforced at the permission level only.** Nothing stops the
+  data plane delivering for a suspended tenant; that belongs with billing.
+
+### Verified
+
+`prisma:generate`, `lint`, `build`, `test` all pass — **323 tests, 18 suites**
+(was 234/12). New suites, all under `src/authz`: `permissions.spec.ts` (the
+matrix restated independently, so a change nobody meant fails), 
+`tenant-resolver.spec.ts` (membership, the `/orgs/A/projects/<B>` IDOR, deleted
+and suspended tenants, every anchor, the denormalised-column mismatch),
+`tenant-scope.spec.ts` (cross-tenant reads, writes and deletes, and that a
+caller's own `where` — including an `OR` — cannot escape the predicate),
+`tenant.guard.spec.ts` (403-vs-404, developer attempting `members.write`, class
+vs handler metadata), `audit.service.spec.ts`, and `authz.http.spec.ts` (a real
+Nest app on a real port, asserting the status codes on the wire).
+
+Tests run against `src/authz/testing/tenant-prisma.fake.ts` — a new in-memory
+fake in the spirit of the auth one, but with a WHERE evaluator that really
+understands `AND`/`OR`/`NOT` and one-hop relation filters. That matters: a fake
+that ignored `where` would make every isolation test pass vacuously.
+
+**Still no live database** (Docker daemon down), so nothing here has run against
+real PostgreSQL. The two things a live run should confirm: that Prisma's
+generated SQL for a relation filter nested inside `AND` is what these tests
+assume (`endpoint_secrets` → `endpoints` → `projects`), and that
+`organization_members` compound-unique lookups behave as the fake models them.
+Neither is exotic, but neither has been executed.

@@ -2,6 +2,7 @@ import { Module } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
 import { LoggerModule } from 'nestjs-pino';
 import { AuthModule } from './auth/auth.module';
+import { AuthzModule } from './authz/authz.module';
 import { CommonModule } from './common/common.module';
 import { resolveRequestId } from './common/request-id';
 import { validateEnv } from './config/env.schema';
@@ -49,6 +50,9 @@ import { PrismaModule } from './infrastructure/prisma/prisma.module';
     CommonModule,
     HealthModule,
     AuthModule,
+    // Tenant resolution + RBAC. Global, so every Phase 2 controller can use
+    // @Authorized() without importing anything (ARCHITECTURE.md 10).
+    AuthzModule,
     // Phase 2 modules land here: users, organizations, memberships,
     // projects, api-keys, endpoints, endpoint-secrets, webhook-subscriptions,
     // retry-policies, rate-limits, events, deliveries, audit, admin.
