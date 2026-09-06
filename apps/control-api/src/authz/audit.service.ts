@@ -46,8 +46,12 @@ interface AuditLogWriter {
  * `endpoint_secret_id` are references, not secrets, and losing them would make
  * the log useless for the thing it exists to answer.
  */
-const SENSITIVE_KEY = /(secret|password|passwd|token|credential|authorization|signature|api_?key)/i;
+const SENSITIVE_KEY =
+  /(secret|password|passwd|token|credential|authorization|signature|api[-_]?key)/i;
 const REFERENCE_KEY = /(_id|Id)$/;
+
+export const REDACTED = '[redacted]';
+export const TRUNCATED = '[truncated]';
 
 /**
  * The audit hook (schema: `audit_logs`).
@@ -69,12 +73,21 @@ export class AuditService {
   constructor(private readonly prisma: PrismaService) {}
 
   /**
-   * Record a privileged action against a tenant.
+   * The actual write. PRIVATE on purpose.
+   *
+   * It takes a free-form `organizationId`, so as an exported method it let any
+   * caller file an audit row against any organization - including one it had no
+   * membership in - and pick the actor it was attributed to. Everything
+   * controller-driven goes through `recordFor`, where all three come off the
+   * resolved tenant context and none of them can be stated by the caller.
+   *
+   * `AuditActor.apiKeyId` stays on the type for the day an API-key principal
+   * carries a resolved context; there is no path that sets it from the wire.
    *
    * @param client pass the `$transaction` client to make this atomic with the
    *               change being audited.
    */
-  async record(
+  private async write(
     organizationId: string,
     actor: AuditActor,
     entry: AuditEntry,
@@ -109,7 +122,7 @@ export class AuditService {
     entry: AuditEntry,
     client?: TenantClient,
   ): Promise<string> {
-    return this.record(
+    return this.write(
       context.organization.id,
       {
         userId: context.user.userId,
@@ -118,10 +131,15 @@ export class AuditService {
       },
       // The project a privileged action happened in is part of the fact, and
       // `audit_logs` has no project_id column, so it goes in the metadata.
+      //
+      // The resolved id goes AFTER the spread. Before, caller metadata won, so
+      // a `project_id` key anywhere in a spread DTO overwrote the resolved one
+      // and the log recorded an action against a project it did not happen in -
+      // forgeable by the caller, and invisible afterwards.
       context.project
         ? {
             ...entry,
-            metadata: { project_id: context.project.id, ...(entry.metadata ?? {}) },
+            metadata: { ...(entry.metadata ?? {}), project_id: context.project.id },
           }
         : entry,
       client,
@@ -129,12 +147,16 @@ export class AuditService {
   }
 
   /**
-   * Drop values whose key looks like a credential.
+   * Drop values whose key looks like a credential, at EVERY depth.
    *
    * Audit metadata is written by fourteen modules and read by whoever is
-   * debugging at 2am; sooner or later someone will spread a whole DTO into it.
-   * A key-name filter does not catch a secret stored under an innocent name, so
-   * it is a backstop, not a licence - do not put secrets in here.
+   * debugging at 2am; sooner or later someone spreads a whole DTO into it. A
+   * top-level-only walk copied nested objects and arrays by reference, so
+   * `{ endpoint: { signing_secret: '...' } }` landed in `audit_logs.metadata`
+   * in plaintext - a table every `audit.read` holder can query.
+   *
+   * A key-name filter still does not catch a secret stored under an innocent
+   * name, so it is a backstop, not a licence - do not put secrets in here.
    */
   private static sanitise(
     metadata: Record<string, unknown> | undefined,
@@ -143,11 +165,38 @@ export class AuditService {
     // to say, not the JSON value `null`, which reads back as a present-but-null
     // field and would make "was any metadata recorded?" unanswerable.
     if (!metadata) return Prisma.DbNull;
+    return AuditService.redactObject(metadata, 0) as Prisma.InputJsonValue;
+  }
+
+  /**
+   * Deep enough for the nesting a real DTO has, shallow enough that a cyclic or
+   * pathological object cannot turn one audit write into a stack overflow. A
+   * cycle is cut by the same cap, so no `seen` set is needed.
+   */
+  private static readonly MAX_METADATA_DEPTH = 6;
+
+  private static redactObject(value: Record<string, unknown>, depth: number): unknown {
     const safe: Record<string, unknown> = {};
-    for (const [key, value] of Object.entries(metadata)) {
+    for (const [key, nested] of Object.entries(value)) {
       safe[key] =
-        SENSITIVE_KEY.test(key) && !REFERENCE_KEY.test(key) ? '[redacted]' : value;
+        SENSITIVE_KEY.test(key) && !REFERENCE_KEY.test(key)
+          ? REDACTED
+          : AuditService.redactValue(nested, depth + 1);
     }
-    return safe as Prisma.InputJsonValue;
+    return safe;
+  }
+
+  private static redactValue(value: unknown, depth: number): unknown {
+    if (value === null || typeof value !== 'object') return value;
+    if (value instanceof Date) return value.toISOString();
+    // Binary is never something the log needs and is very often key material.
+    if (ArrayBuffer.isView(value) || value instanceof ArrayBuffer) return '[binary]';
+    if (depth >= AuditService.MAX_METADATA_DEPTH) return TRUNCATED;
+    if (Array.isArray(value)) {
+      return value.map((item) => AuditService.redactValue(item, depth + 1));
+    }
+    // Own enumerable keys, so a class instance spread into metadata is walked
+    // exactly like the plain object it will be serialised as.
+    return AuditService.redactObject(value as Record<string, unknown>, depth);
   }
 }

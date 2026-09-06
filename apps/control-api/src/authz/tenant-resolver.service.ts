@@ -54,6 +54,23 @@ interface TenantCoordinates {
  */
 const CROSS_TENANT = 'not_found' as const;
 
+/**
+ * The ONE client-facing sentence for every cross-tenant or absent outcome.
+ *
+ * `AppError.message` is serialised verbatim into the response body by
+ * `AppExceptionFilter`, so per-resource wording WAS the existence oracle this
+ * policy exists to close: an id that misses everywhere answered "Endpoint not
+ * found.", while an id that hits in a FOREIGN tenant reached the membership
+ * check and answered "Organization not found." Two distinguishable strings, one
+ * status code - enough to confirm that an id scraped from an old dashboard URL,
+ * a support ticket or a log export is live infrastructure belonging to another
+ * customer.
+ *
+ * The specific reason is still recorded, at debug level, for the operator who
+ * has to answer "why did this 404?". It just never crosses the wire.
+ */
+export const CROSS_TENANT_MESSAGE = 'Resource not found.';
+
 @Injectable()
 export class TenantResolver {
   private readonly logger = new Logger(TenantResolver.name);
@@ -94,10 +111,14 @@ export class TenantResolver {
     // means the client asked for someone else's resource under a path it does
     // have access to. Same answer as any other cross-tenant miss.
     if (claimedOrganizationId && claimedOrganizationId !== coordinates.organizationId) {
-      throw TenantResolver.crossTenant('Resource not found.');
+      throw this.crossTenant(
+        `path claims organization ${claimedOrganizationId}, anchor resolved ${coordinates.organizationId}`,
+      );
     }
     if (claimedProjectId && claimedProjectId !== coordinates.projectId) {
-      throw TenantResolver.crossTenant('Resource not found.');
+      throw this.crossTenant(
+        `path claims project ${claimedProjectId}, anchor resolved ${String(coordinates.projectId)}`,
+      );
     }
 
     const membership = await this.prisma.organizationMember.findUnique({
@@ -110,7 +131,9 @@ export class TenantResolver {
       select: { id: true, role: true },
     });
     // No membership is indistinguishable from "no such organization" on purpose.
-    if (!membership) throw TenantResolver.crossTenant('Organization not found.');
+    if (!membership) throw this.crossTenant(
+      `user ${user.userId} is not a member of organization ${coordinates.organizationId}`,
+    );
 
     const organization = await this.loadOrganization(coordinates.organizationId);
     const project = coordinates.projectId
@@ -166,7 +189,7 @@ export class TenantResolver {
           where: { id },
           select: { id: true, organizationId: true },
         });
-        if (!project) throw TenantResolver.crossTenant('Project not found.');
+        if (!project) throw this.crossTenant(`no project ${id}`);
         return { organizationId: project.organizationId, projectId: project.id };
       }
 
@@ -175,7 +198,7 @@ export class TenantResolver {
           where: { id },
           select: { projectId: true, project: { select: { organizationId: true } } },
         });
-        if (!endpoint) throw TenantResolver.crossTenant('Endpoint not found.');
+        if (!endpoint) throw this.crossTenant(`no endpoint ${id}`);
         return {
           organizationId: endpoint.project.organizationId,
           projectId: endpoint.projectId,
@@ -187,7 +210,7 @@ export class TenantResolver {
           where: { id },
           select: { projectId: true, project: { select: { organizationId: true } } },
         });
-        if (!subscription) throw TenantResolver.crossTenant('Subscription not found.');
+        if (!subscription) throw this.crossTenant(`no subscription ${id}`);
         return {
           organizationId: subscription.project.organizationId,
           projectId: subscription.projectId,
@@ -199,7 +222,7 @@ export class TenantResolver {
           where: { id },
           select: { projectId: true, project: { select: { organizationId: true } } },
         });
-        if (!apiKey) throw TenantResolver.crossTenant('API key not found.');
+        if (!apiKey) throw this.crossTenant(`no api key ${id}`);
         return { organizationId: apiKey.project.organizationId, projectId: apiKey.projectId };
       }
 
@@ -212,7 +235,7 @@ export class TenantResolver {
             project: { select: { organizationId: true } },
           },
         });
-        if (!event) throw TenantResolver.crossTenant('Event not found.');
+        if (!event) throw this.crossTenant(`no event ${id}`);
         // `events.organization_id` is denormalised. The project chain is
         // authoritative; a disagreement is a data-integrity bug, and the safe
         // reading of a corrupt ownership row is "you cannot have it".
@@ -239,7 +262,7 @@ export class TenantResolver {
             },
           },
         });
-        if (!delivery) throw TenantResolver.crossTenant('Delivery not found.');
+        if (!delivery) throw this.crossTenant(`no delivery ${id}`);
         this.assertDenormalisedAgreement(
           'delivery',
           id,
@@ -270,7 +293,7 @@ export class TenantResolver {
     this.logger.error(
       `Tenant ownership mismatch on ${resource} ${id}: denormalised column says ${denormalised}, ownership chain says ${authoritative}. Refusing the request.`,
     );
-    throw TenantResolver.crossTenant('Resource not found.');
+    throw this.crossTenant(`denormalised ownership mismatch on ${resource} ${id}`);
   }
 
   private async loadOrganization(id: string): Promise<ResolvedOrganization> {
@@ -280,9 +303,9 @@ export class TenantResolver {
     });
     // Membership already matched, so this is either a race with a hard delete or
     // a dangling member row. Either way there is nothing to act on.
-    if (!organization) throw TenantResolver.crossTenant('Organization not found.');
+    if (!organization) throw this.crossTenant(`no organization ${id} behind a live membership`);
     if (organization.status === 'deleted') {
-      throw TenantResolver.crossTenant('Organization not found.');
+      throw this.crossTenant(`organization ${id} is deleted`);
     }
     return organization;
   }
@@ -299,14 +322,16 @@ export class TenantResolver {
         status: true,
       },
     });
-    if (!project) throw TenantResolver.crossTenant('Project not found.');
+    if (!project) throw this.crossTenant(`no project ${id}`);
     // THE cross-tenant check. Without it, `/v1/organizations/A/projects/<B's
     // project>` passes the membership test on A and then serves B's endpoints,
     // events and deliveries.
     if (project.organizationId !== organizationId) {
-      throw TenantResolver.crossTenant('Project not found.');
+      throw this.crossTenant(
+        `project ${id} belongs to organization ${project.organizationId}, request resolved ${organizationId}`,
+      );
     }
-    if (project.status === 'deleted') throw TenantResolver.crossTenant('Project not found.');
+    if (project.status === 'deleted') throw this.crossTenant(`project ${id} is deleted`);
     return project;
   }
 
@@ -371,9 +396,16 @@ export class TenantResolver {
     return value;
   }
 
-  /** See the CROSS_TENANT docblock: outside your tenant is indistinguishable from absent. */
-  private static crossTenant(message: string): AppError {
-    return new AppError(CROSS_TENANT, message);
+  /**
+   * See the CROSS_TENANT docblock: outside your tenant is indistinguishable
+   * from absent, and that has to hold in the MESSAGE as well as the status.
+   *
+   * `reason` is for the log only. Never pass it, or anything derived from the
+   * resource, to the client.
+   */
+  private crossTenant(reason: string): AppError {
+    this.logger.debug(`Cross-tenant or absent resource refused: ${reason}`);
+    return new AppError(CROSS_TENANT, CROSS_TENANT_MESSAGE);
   }
 
   private static clientIp(request: TenantRequest): string | null {

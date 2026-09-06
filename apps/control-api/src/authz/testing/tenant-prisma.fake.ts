@@ -37,6 +37,7 @@ const SCHEMA: Record<string, Record<string, Relation>> = {
   project: { organization: { table: 'organization', fk: 'organizationId' } },
   endpoint: { project: { table: 'project', fk: 'projectId' } },
   endpointSecret: { endpoint: { table: 'endpoint', fk: 'endpointId' } },
+  endpointHealth: { endpoint: { table: 'endpoint', fk: 'endpointId' } },
   webhookSubscription: {
     project: { table: 'project', fk: 'projectId' },
     endpoint: { table: 'endpoint', fk: 'endpointId' },
@@ -117,8 +118,12 @@ export class FakeTenantPrisma {
         continue;
       }
       if (key === 'NOT') {
+        // Prisma's NOT over a list is NOT(a AND b), not NOT(a) AND NOT(b). The
+        // difference matters here: the wrong reading makes a NOT filter STRICTER
+        // than production, so an isolation test could pass against the fake and
+        // leak against PostgreSQL.
         const clauses = Array.isArray(value) ? value : [value];
-        if (clauses.some((clause) => this.matches(table, row, clause as Row))) return false;
+        if (clauses.every((clause) => this.matches(table, row, clause as Row))) return false;
         continue;
       }
 
@@ -191,6 +196,28 @@ export class FakeTenantPrisma {
     return flat;
   }
 
+  /** `_count` (true or per-field) and `_sum`; enough for the dashboard queries. */
+  private static summarise(rows: Row[], args: { _count?: unknown; _sum?: unknown }): Row {
+    const out: Row = {};
+    if (args._count === true) {
+      out._count = rows.length;
+    } else if (args._count && typeof args._count === 'object') {
+      const counts: Row = {};
+      for (const field of Object.keys(args._count as Row)) {
+        counts[field] = rows.filter((row) => row[field] !== null && row[field] !== undefined).length;
+      }
+      out._count = counts;
+    }
+    if (args._sum && typeof args._sum === 'object') {
+      const sums: Row = {};
+      for (const field of Object.keys(args._sum as Row)) {
+        sums[field] = rows.reduce((total, row) => total + Number(row[field] ?? 0), 0);
+      }
+      out._sum = sums;
+    }
+    return out;
+  }
+
   private find(table: TableName, args: FindArgs): Row[] {
     const where = FakeTenantPrisma.flattenUnique(args.where);
     this.queries.push({ table, op: 'find', where: args.where });
@@ -234,6 +261,36 @@ export class FakeTenantPrisma {
         }
         return { count: targets.length };
       },
+      aggregate: async (args: {
+        where?: Row;
+        _count?: unknown;
+        _sum?: unknown;
+      }): Promise<Row> => {
+        this.queries.push({ table, op: 'aggregate', where: args.where });
+        const rows = this.find(table, { where: args.where });
+        return FakeTenantPrisma.summarise(rows, args);
+      },
+      groupBy: async (args: {
+        by: readonly string[];
+        where?: Row;
+        _count?: unknown;
+        _sum?: unknown;
+      }): Promise<Row[]> => {
+        this.queries.push({ table, op: 'groupBy', where: args.where });
+        const rows = this.find(table, { where: args.where });
+        const groups = new Map<string, Row[]>();
+        for (const row of rows) {
+          const key = JSON.stringify(args.by.map((field) => row[field] ?? null));
+          const bucket = groups.get(key);
+          if (bucket) bucket.push(row);
+          else groups.set(key, [row]);
+        }
+        return [...groups.values()].map((bucket) => {
+          const head: Row = {};
+          for (const field of args.by) head[field] = bucket[0][field] ?? null;
+          return { ...head, ...FakeTenantPrisma.summarise(bucket, args) };
+        });
+      },
       deleteMany: async (args: { where?: Row } = {}): Promise<{ count: number }> => {
         const targets = this.find(table, { where: args.where });
         this.queries.push({ table, op: 'deleteMany', where: args.where });
@@ -249,6 +306,7 @@ export class FakeTenantPrisma {
   readonly project = this.delegate('project');
   readonly endpoint = this.delegate('endpoint');
   readonly endpointSecret = this.delegate('endpointSecret');
+  readonly endpointHealth = this.delegate('endpointHealth');
   readonly webhookSubscription = this.delegate('webhookSubscription');
   readonly apiKey = this.delegate('apiKey');
   readonly retryPolicy = this.delegate('retryPolicy');

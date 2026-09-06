@@ -1,4 +1,9 @@
-export { AuthzModule } from './authz.module';
+export {
+  AuthzModule,
+  assertRoutesAreGuarded,
+  findUnguardedRoutes,
+  type UnguardedRoute,
+} from './authz.module';
 export {
   Authorized,
   RequirePermission,
@@ -6,12 +11,20 @@ export {
   Tenant,
 } from './authz.decorators';
 export { TenantGuard } from './tenant.guard';
-export { TenantResolver } from './tenant-resolver.service';
+export { CROSS_TENANT_MESSAGE, TenantResolver } from './tenant-resolver.service';
 export { TenantScope, TenantScopeFactory, type TenantClient } from './tenant-scope.factory';
 export {
+  DEFAULT_PAGE_SIZE,
+  MAX_PAGE_SIZE,
   ScopedRepository,
   tenantPredicate,
+  type AggregateArgs,
+  type GroupByArgs,
   type ModelDelegate,
+  type OwnedRepository,
+  type OwnershipVerifier,
+  type ScopedCreateInput,
+  type ScopedUpdateInput,
   type TenantPredicate,
   type TenantScopeKind,
 } from './tenant-scope';
@@ -26,12 +39,18 @@ export {
   PERMISSIONS,
   READ_PERMISSIONS,
   ROLE_PERMISSIONS,
+  ROLE_RANK,
+  TENANT_SCOPE_PERMISSIONS,
+  assertMemberRemovalAllowed,
+  assertRoleChangeAllowed,
   isPermission,
   isReadPermission,
   permissionsForRole,
   permissionsUnderSuspension,
+  mayAssignRole,
   roleHasPermission,
   type Permission,
+  type RoleChange,
 } from './permissions';
 export {
   DEFAULT_TENANT_SPEC,

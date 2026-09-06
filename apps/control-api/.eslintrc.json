@@ -1,15 +1,57 @@
 {
   "parser": "@typescript-eslint/parser",
-  "parserOptions": { "sourceType": "module" },
-  "plugins": ["@typescript-eslint"],
-  "extends": ["eslint:recommended", "plugin:@typescript-eslint/recommended"],
+  "parserOptions": {
+    "sourceType": "module"
+  },
+  "plugins": [
+    "@typescript-eslint"
+  ],
+  "extends": [
+    "eslint:recommended",
+    "plugin:@typescript-eslint/recommended"
+  ],
   "root": true,
-  "env": { "node": true, "jest": true },
-  "ignorePatterns": [".eslintrc.json", "dist"],
+  "env": {
+    "node": true,
+    "jest": true
+  },
+  "ignorePatterns": [
+    ".eslintrc.json",
+    "dist"
+  ],
   "rules": {
     "@typescript-eslint/interface-name-prefix": "off",
     "@typescript-eslint/explicit-function-return-type": "off",
     "@typescript-eslint/explicit-module-boundary-types": "off",
-    "@typescript-eslint/no-explicit-any": "error"
-  }
+    "@typescript-eslint/no-explicit-any": "error",
+    "no-restricted-imports": [
+      "error",
+      {
+        "patterns": [
+          {
+            "group": [
+              "**/infrastructure/prisma/prisma.service",
+              "**/prisma/prisma.service",
+              "**/prisma.service"
+            ],
+            "message": "Inject TenantScopeFactory instead. PrismaService is the unscoped client: a query written against it carries no tenant predicate, so a cross-tenant id returns the row instead of nothing. If a module genuinely needs it (auth, infrastructure, cli, health), add it to the allowlist in .eslintrc.json and say why in review."
+          }
+        ]
+      }
+    ]
+  },
+  "overrides": [
+    {
+      "files": [
+        "src/authz/**/*.ts",
+        "src/auth/**/*.ts",
+        "src/infrastructure/**/*.ts",
+        "src/cli/**/*.ts",
+        "src/health/**/*.ts"
+      ],
+      "rules": {
+        "no-restricted-imports": "off"
+      }
+    }
+  ]
 }

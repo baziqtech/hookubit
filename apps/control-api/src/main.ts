@@ -7,6 +7,7 @@ import cookieParser from 'cookie-parser';
 import helmet from 'helmet';
 import { Logger } from 'nestjs-pino';
 import { AppModule } from './app.module';
+import { assertRoutesAreGuarded } from './authz';
 import { AppExceptionFilter } from './common/errors';
 import { applyTrustProxy } from './config/trust-proxy';
 
@@ -54,6 +55,12 @@ async function bootstrap(): Promise<void> {
   } else {
     bootLogger.log('APP_ENV=production: /docs and the OpenAPI JSON are not mounted.');
   }
+
+  // FIX 7: a route that declares @RequirePermission or @ResolveTenantFrom
+  // without the guard that reads them serves unauthenticated, and the metadata
+  // looks correct in review. Fail the deploy here rather than one request at a
+  // time in production.
+  assertRoutesAreGuarded(app);
 
   // Graceful shutdown (ARCHITECTURE.md 47).
   app.enableShutdownHooks();

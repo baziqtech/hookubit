@@ -6,9 +6,16 @@ import {
   TenantAnchorKind,
   TenantSpec,
 } from './tenant-context';
-import { TenantResolver } from './tenant-resolver.service';
+import { CROSS_TENANT_MESSAGE, TenantResolver } from './tenant-resolver.service';
 import { IDS, requestWith, seedWorld, sessionUser } from './testing/fixtures';
 import { FakeTenantPrisma } from './testing/tenant-prisma.fake';
+
+// The resolver records the specific reason for every refusal at debug level.
+// Silence it here so the suite's output stays readable; one test below asserts
+// it is still emitted.
+beforeAll(() => {
+  jest.spyOn(Logger.prototype, 'debug').mockImplementation(() => undefined);
+});
 
 /** Asserts the AppError code, which IS the not-found/forbidden policy. */
 async function expectCode(promise: Promise<unknown>, code: ErrorCode): Promise<AppError> {
@@ -266,5 +273,115 @@ describe('TenantResolver - resource anchors', () => {
     );
     expect(context.project).toBeNull();
     expect(context.role).toBe('viewer');
+  });
+});
+
+/**
+ * THE EXISTENCE ORACLE.
+ *
+ * The status code was always 404, but the MESSAGE was not: `AppError.message`
+ * is serialised verbatim into the body, an id that missed everywhere answered
+ * "Endpoint not found." and an id that hit inside a FOREIGN tenant fell through
+ * to the membership check and answered "Organization not found.". Two
+ * distinguishable answers is a working oracle - scrape ids from old dashboard
+ * URLs, support tickets or log exports and learn which are live infrastructure
+ * belonging to another customer.
+ *
+ * This table is every anchor kind crossed with {absent, foreign}, asserting one
+ * identical string. It fails if anyone reintroduces a per-resource message.
+ */
+describe('TenantResolver - absent and foreign are indistinguishable on the wire', () => {
+  interface OracleCase {
+    kind: TenantAnchorKind;
+    param: string;
+    /** An id that exists, inside organization B. */
+    foreign: string;
+    /** An id that exists nowhere. */
+    absent: string;
+  }
+
+  const FOREIGN_KEY = 'key_b1';
+  const FOREIGN_SUBSCRIPTION = 'sub_b1';
+
+  function buildWithEveryAnchor(): TenantResolver {
+    const db = seedWorld();
+    db.insert('apiKey', { id: FOREIGN_KEY, projectId: IDS.projectB1, name: 'b key' });
+    db.insert('webhookSubscription', {
+      id: FOREIGN_SUBSCRIPTION,
+      projectId: IDS.projectB1,
+      endpointId: IDS.endpointB1,
+      name: 'b sub',
+    });
+    return new TenantResolver(db.asPrisma());
+  }
+
+  const CASES: OracleCase[] = [
+    { kind: 'organization', param: 'organization', foreign: IDS.orgB, absent: 'org_nope' },
+    { kind: 'project', param: 'projectId', foreign: IDS.projectB1, absent: 'proj_nope' },
+    { kind: 'endpoint', param: 'endpointId', foreign: IDS.endpointB1, absent: 'ep_nope' },
+    { kind: 'subscription', param: 'subId', foreign: FOREIGN_SUBSCRIPTION, absent: 'sub_nope' },
+    { kind: 'apiKey', param: 'keyId', foreign: FOREIGN_KEY, absent: 'key_nope' },
+    { kind: 'event', param: 'eventId', foreign: IDS.eventB1, absent: 'evt_nope' },
+    { kind: 'delivery', param: 'deliveryId', foreign: IDS.deliveryB1, absent: 'del_nope' },
+  ];
+
+  /** Every message the layer can produce for "you cannot have this". */
+  async function messagesFor(outcome: 'foreign' | 'absent'): Promise<string[]> {
+    const resolver = buildWithEveryAnchor();
+    const messages: string[] = [];
+    for (const testCase of CASES) {
+      const error = await expectCode(
+        resolve(
+          resolver,
+          IDS.ownerA,
+          { [testCase.param]: testCase[outcome] },
+          { from: 'anchor', kind: testCase.kind, param: testCase.param },
+        ),
+        'not_found',
+      );
+      messages.push(error.message);
+    }
+    // The default (route-parameter) path too - the one path the old suite
+    // covered, and the only one where the two messages already agreed.
+    const params: Record<string, string> =
+      outcome === 'foreign' ? { orgId: IDS.orgB } : { orgId: 'org_nope' };
+    messages.push((await expectCode(resolve(resolver, IDS.ownerA, params), 'not_found')).message);
+    const nested: Record<string, string> =
+      outcome === 'foreign'
+        ? { orgId: IDS.orgA, projectId: IDS.projectB1 }
+        : { orgId: IDS.orgA, projectId: 'proj_nope' };
+    messages.push((await expectCode(resolve(resolver, IDS.ownerA, nested), 'not_found')).message);
+    return messages;
+  }
+
+  it('answers one identical string for every anchor kind, absent or foreign', async () => {
+    const all = [...(await messagesFor('absent')), ...(await messagesFor('foreign'))];
+    expect(all).toHaveLength((CASES.length + 2) * 2);
+    expect(new Set(all).size).toBe(1);
+    expect(all[0]).toBe(CROSS_TENANT_MESSAGE);
+  });
+
+  it('names no resource type in the client-facing message', async () => {
+    for (const message of await messagesFor('foreign')) {
+      expect(message.toLowerCase()).not.toMatch(
+        /endpoint|organization|project|event|delivery|subscription|api key/,
+      );
+    }
+  });
+
+  it('still records the specific reason for the operator, at debug level only', async () => {
+    const debug = jest.spyOn(Logger.prototype, 'debug').mockImplementation(() => undefined);
+    const resolver = buildWithEveryAnchor();
+    await expectCode(
+      resolve(
+        resolver,
+        IDS.ownerA,
+        { endpointId: IDS.endpointB1 },
+        { from: 'anchor', kind: 'endpoint', param: 'endpointId' },
+      ),
+      'not_found',
+    );
+    expect(debug).toHaveBeenCalledWith(expect.stringContaining(IDS.orgB));
+    debug.mockRestore();
   });
 });

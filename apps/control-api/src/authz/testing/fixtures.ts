@@ -43,6 +43,11 @@ export const IDS = {
   deliveryCorrupt: 'del_corrupt',
   attemptA1: 'att_a1',
   attemptB1: 'att_b1',
+  /** Hangs off del_corrupt, so the same disagreement is reachable one hop down. */
+  attemptCorrupt: 'att_corrupt',
+  retryPolicyA1: 'rp_a1',
+  retryPolicyB1: 'rp_b1',
+  subscriptionA1: 'sub_a1',
 } as const;
 
 export function seedWorld(): FakeTenantPrisma {
@@ -118,6 +123,31 @@ export function seedWorld(): FakeTenantPrisma {
     status: 'active',
   });
 
+  db.insert('retryPolicy', {
+    id: IDS.retryPolicyA1,
+    projectId: IDS.projectA1,
+    name: 'a1',
+    maxAttempts: 8,
+  });
+  db.insert('retryPolicy', {
+    id: IDS.retryPolicyB1,
+    projectId: IDS.projectB1,
+    name: 'b1',
+    maxAttempts: 8,
+  });
+
+  db.insert('webhookSubscription', {
+    id: IDS.subscriptionA1,
+    projectId: IDS.projectA1,
+    endpointId: IDS.endpointA1,
+    eventTypes: ['*'],
+    enabled: true,
+  });
+
+  // Circuit-breaker state is keyed by endpoint_id, not id.
+  db.insert('endpointHealth', { endpointId: IDS.endpointA1, state: 'healthy' });
+  db.insert('endpointHealth', { endpointId: IDS.endpointB1, state: 'open' });
+
   db.insert('endpointSecret', { id: IDS.secretA1, endpointId: IDS.endpointA1, version: 1 });
   db.insert('endpointSecret', { id: IDS.secretB1, endpointId: IDS.endpointB1, version: 1 });
 
@@ -168,6 +198,11 @@ export function seedWorld(): FakeTenantPrisma {
   db.insert('deliveryAttempt', {
     id: IDS.attemptB1,
     deliveryId: IDS.deliveryB1,
+    attemptNumber: 1,
+  });
+  db.insert('deliveryAttempt', {
+    id: IDS.attemptCorrupt,
+    deliveryId: IDS.deliveryCorrupt,
     attemptNumber: 1,
   });
 

@@ -18,14 +18,17 @@ async function build(
   return { db, audit: new AuditService(db.asPrisma()), context };
 }
 
+const metadataOf = (db: FakeTenantPrisma): Record<string, unknown> =>
+  db.all('auditLog')[0].metadata as Record<string, unknown>;
+
 describe('AuditService', () => {
   it('writes an entry with a prefixed id, the actor and the resource', async () => {
-    const { db, audit } = await build();
-    const id = await audit.record(
-      IDS.orgA,
-      { userId: IDS.ownerA, ipAddress: '198.51.100.4', userAgent: 'curl/8' },
-      { action: 'endpoint.created', resourceType: 'endpoint', resourceId: IDS.endpointA1 },
-    );
+    const { db, audit, context } = await build();
+    const id = await audit.recordFor(context, {
+      action: 'endpoint.created',
+      resourceType: 'endpoint',
+      resourceId: IDS.endpointA1,
+    });
 
     expect(id).toMatch(/^aud_/);
     const [row] = db.all('auditLog');
@@ -37,9 +40,23 @@ describe('AuditService', () => {
       action: 'endpoint.created',
       resourceType: 'endpoint',
       resourceId: IDS.endpointA1,
-      ipAddress: '198.51.100.4',
-      userAgent: 'curl/8',
+      ipAddress: '203.0.113.9',
+      userAgent: 'jest',
     });
+  });
+
+  /**
+   * The write itself took a free-form organizationId and a free-form actor, and
+   * was exported: any caller could file a row against any organization, in
+   * anyone's name. `recordFor` is the only door, and it takes all three off the
+   * resolved context.
+   */
+  it('exposes no way to name the organization or the actor', () => {
+    const audit = new AuditService({} as never);
+    expect((audit as unknown as Record<string, unknown>).record).toBeUndefined();
+    expect(Object.getOwnPropertyNames(AuditService.prototype).sort()).toEqual(
+      ['constructor', 'recordFor', 'write'].sort(),
+    );
   });
 
   it('fills actor, organization and request metadata from the tenant context', async () => {
@@ -63,10 +80,26 @@ describe('AuditService', () => {
       metadata: { url: 'https://new.example.com' },
     });
 
-    expect(db.all('auditLog')[0].metadata).toEqual({
+    expect(metadataOf(db)).toEqual({
       project_id: IDS.projectA1,
       url: 'https://new.example.com',
     });
+  });
+
+  /**
+   * The resolved id used to be spread FIRST, so caller metadata won: a
+   * `project_id` key anywhere in a spread DTO rewrote the fact the row exists
+   * to record, and nothing downstream could tell.
+   */
+  it('cannot be told which project an action happened in', async () => {
+    const { db, audit, context } = await build();
+    await audit.recordFor(context, {
+      action: 'endpoint.deleted',
+      resourceType: 'endpoint',
+      metadata: { project_id: IDS.projectB1, note: 'forged' },
+    });
+
+    expect(metadataOf(db).project_id).toBe(IDS.projectA1);
   });
 
   it('omits the project key on an organization-level action', async () => {
@@ -77,29 +110,111 @@ describe('AuditService', () => {
   });
 
   it('redacts credential-shaped metadata keys but keeps references', async () => {
-    const { db, audit } = await build();
-    await audit.record(
-      IDS.orgA,
-      { userId: IDS.ownerA },
-      {
-        action: 'endpoint.secret_rotated',
-        resourceType: 'endpoint',
-        metadata: {
-          api_key_id: 'key_123',
-          signing_secret: 'shhh',
-          password: 'hunter2',
-          reset_token: 'abc',
-          version: 2,
-        },
+    const { db, audit, context } = await build();
+    await audit.recordFor(context, {
+      action: 'endpoint.secret_rotated',
+      resourceType: 'endpoint',
+      metadata: {
+        api_key_id: 'key_123',
+        signing_secret: 'shhh',
+        password: 'hunter2',
+        reset_token: 'abc',
+        version: 2,
       },
-    );
+    });
 
-    expect(db.all('auditLog')[0].metadata).toEqual({
+    expect(metadataOf(db)).toEqual({
+      project_id: IDS.projectA1,
       api_key_id: 'key_123',
       signing_secret: '[redacted]',
       password: '[redacted]',
       reset_token: '[redacted]',
       version: 2,
+    });
+  });
+
+  /**
+   * The whole reason the redaction exists: someone spreads a DTO. A top-level
+   * walk copied the nested object by reference and wrote the plaintext HMAC
+   * secret into a table every `audit.read` holder can query.
+   */
+  it('redacts NESTED credentials, including inside arrays', async () => {
+    const { db, audit, context } = await build();
+    await audit.recordFor(context, {
+      action: 'endpoint.updated',
+      resourceType: 'endpoint',
+      metadata: {
+        endpoint: {
+          id: IDS.endpointA1,
+          url: 'https://a.example.com/hook',
+          secret: 'whsec_live_plaintext',
+          auth: { authorization: 'Bearer abc', headers: { 'x-api-key': 'k' } },
+        },
+        secrets: [
+          { version: 1, signing_secret: 'one' },
+          { version: 2, signing_secret: 'two' },
+        ],
+      },
+    });
+
+    expect(metadataOf(db)).toEqual({
+      project_id: IDS.projectA1,
+      endpoint: {
+        id: IDS.endpointA1,
+        url: 'https://a.example.com/hook',
+        secret: '[redacted]',
+        auth: { authorization: '[redacted]', headers: { 'x-api-key': '[redacted]' } },
+      },
+      // The key name `secrets` is itself credential-shaped, so the array never
+      // gets walked - it is replaced wholesale.
+      secrets: '[redacted]',
+    });
+    expect(JSON.stringify(metadataOf(db))).not.toContain('whsec_live_plaintext');
+  });
+
+  it('walks a class instance spread into metadata like the object it serialises to', async () => {
+    class EndpointDto {
+      constructor(
+        readonly name: string,
+        readonly signingSecret: string,
+      ) {}
+    }
+    const { db, audit, context } = await build();
+    await audit.recordFor(context, {
+      action: 'endpoint.created',
+      resourceType: 'endpoint',
+      metadata: { dto: new EndpointDto('a1', 'whsec_live') },
+    });
+
+    expect(metadataOf(db).dto).toEqual({ name: 'a1', signingSecret: '[redacted]' });
+  });
+
+  it('truncates past a depth cap rather than recursing forever on a cycle', async () => {
+    const cyclic: Record<string, unknown> = { level: 0 };
+    cyclic.self = cyclic;
+    const { db, audit, context } = await build();
+    await audit.recordFor(context, {
+      action: 'project.updated',
+      resourceType: 'project',
+      metadata: { root: cyclic },
+    });
+
+    expect(JSON.stringify(metadataOf(db))).toContain('[truncated]');
+  });
+
+  it('keeps scalars, dates and nulls readable', async () => {
+    const { db, audit, context } = await build();
+    await audit.recordFor(context, {
+      action: 'project.updated',
+      resourceType: 'project',
+      metadata: { at: new Date('2026-01-02T03:04:05.000Z'), count: 3, on: true, gone: null },
+    });
+
+    expect(metadataOf(db)).toMatchObject({
+      at: '2026-01-02T03:04:05.000Z',
+      count: 3,
+      on: true,
+      gone: null,
     });
   });
 
@@ -109,15 +224,5 @@ describe('AuditService', () => {
       await audit.recordFor(context, { action: 'project.deleted', resourceType: 'project' }, tx);
     });
     expect(db.all('auditLog')).toHaveLength(1);
-  });
-
-  it('records an API key actor with no user', async () => {
-    const { db, audit } = await build();
-    await audit.record(
-      IDS.orgA,
-      { apiKeyId: 'key_1' },
-      { action: 'event.ingested', resourceType: 'event', resourceId: IDS.eventA1 },
-    );
-    expect(db.all('auditLog')[0]).toMatchObject({ userId: null, apiKeyId: 'key_1' });
   });
 });

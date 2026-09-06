@@ -472,8 +472,16 @@ billing suspension becomes permanent. `deleted` is treated as absent (404).
 - **404 `not_found`** whenever the caller is *outside* the tenant that owns the
   resource: no membership, a project belonging to another organization, an
   endpoint/event/delivery under someone else's project, or a genuinely absent
-  row. All four give the same code **and the same message**, so a 403 cannot be
-  used as an existence oracle to enumerate a competitor's infrastructure.
+  row. All four give the same code **and the same message** — one exported
+  constant, `CROSS_TENANT_MESSAGE` (`'Resource not found.'`) — so neither the
+  status nor the body can be used as an existence oracle to enumerate a
+  competitor's infrastructure. It used to be per-resource wording (`'Endpoint
+  not found.'` for an absent id, `'Organization not found.'` for one that hit
+  inside a foreign tenant), which was exactly that oracle; the specific reason
+  is now logged at debug level and never crosses the wire. `permissions.spec.ts`
+  and `tenant-resolver.spec.ts` assert one identical string across every anchor
+  kind × {absent, foreign}. **Any new not-found in any module must use that
+  constant, never a resource name.**
 - **403 `forbidden`** only once membership is proven and the caller's *role* is
   what falls short. They already know the tenant exists — they are in it — so
   the response names the missing permission and their role.
@@ -490,7 +498,27 @@ real id. Put the tenant predicate in the WHERE clause — which is what
 
 ### How a new module uses this
 
-`AuthzModule` is `@Global`, so there is nothing to import. The worked example is
+`AuthzModule` is `@Global`, so there is nothing to import for authorization.
+`PrismaModule` is NOT global any more: a module that genuinely needs the raw
+client must put `PrismaModule` in its `imports`, and `.eslintrc.json` bans
+importing `PrismaService` outside `src/authz`, `src/auth`, `src/infrastructure`,
+`src/cli` and `src/health`. Feature modules inject `TenantScopeFactory`.
+
+`@RequirePermission` and `@ResolveTenantFrom` enforce nothing on their own — a
+route that declares one without `@Authorized()`/`@UseGuards(TenantGuard)` serves
+unauthenticated. `assertRoutesAreGuarded(app)` in `main.ts` walks every
+registered controller at boot and throws with the offending
+`Controller.handler` list, so that mistake fails the deploy rather than one
+request.
+
+Role changes have invariants beyond `members.write`: call `mayAssignRole`,
+`assertRoleChangeAllowed` and `assertMemberRemovalAllowed` from
+`authz/permissions.ts` in the members module. `members.write` alone lets an
+admin set its own row to `owner` and hold `billing.write` a request later.
+
+`AuditService.record` is private; controller-driven paths call `recordFor`,
+which takes organization, actor, IP and user agent off the resolved context.
+ The worked example is
 `ExampleController` in `src/authz/authz.http.spec.ts` — it is a real controller
 run by a real Nest app in that suite, so it cannot rot.
 
@@ -634,3 +662,113 @@ generated SQL for a relation filter nested inside `AND` is what these tests
 assume (`endpoint_secrets` → `endpoints` → `projects`), and that
 `organization_members` compound-unique lookups behave as the fake models them.
 Neither is exotic, but neither has been executed.
+
+### Note for the concurrent tenant-scope work (2026-09-06)
+
+- Lint, build and the full suite (397 tests) pass across the package as of this
+  note, with both sets of changes in the tree.
+- `permissions.spec.ts` now asserts that **every getter on `TenantScope`** maps
+  to a declared permission in `TENANT_SCOPE_PERMISSIONS`
+  (`authz/permissions.ts`), and that the map names nothing `TenantScope` does
+  not expose. `organization` and `endpointHealth` are mapped; a new accessor
+  needs one line there or that test fails.
+- New permissions exist: `endpoint-secrets.read/.write` (owner/admin only —
+  secrets no longer ride along on `endpoints.read`), `audit.read` (owner/admin),
+  `policies.read/.write`.
+
+## Write-side fixes to `ScopedRepository` (2026-09-06, second pass)
+
+Both independent reviews landed the same verdict on the *write* side: the layer
+inverted its own governing principle. `where` was fenced, `data` was not, so the
+two most natural calls a module author makes — `create` with a required sibling
+foreign key, and `updateById` with a request body — were the two that crossed the
+tenant boundary, while the types, names and docblocks all said "scoping is
+handled". That is worse than no layer: an author who trusts it does not write the
+ownership check they would have written from scratch.
+
+What changed, all inside `tenant-scope.ts` / `tenant-scope.factory.ts`:
+
+1. **The tenant columns are not writable.** `create` takes
+   `ScopedCreateInput<TCreate>` and `updateById`/`updateMany` take
+   `ScopedUpdateInput<TUpdate>` (`Omit<…, 'organizationId' | 'projectId' | 'id'>`),
+   and the same keys are *rejected at runtime* — types are erased and compiled JS
+   callers exist. A row can no longer be moved out of the tenant that the `where`
+   predicate just proved owns it. `updateById` also runs its `updateMany` and its
+   read-back in one `$transaction`, against a delegate bound to the transaction
+   client, so it can no longer report 404 for a write that committed.
+2. **Sibling foreign keys are proved, not trusted.** Each repository declares its
+   tenant-owned FKs (`subscriptions: { endpointId: 'endpoints' }`,
+   `deliveries: { eventId, endpointId, subscriptionId, replayOfDeliveryId }`,
+   `endpoints: { retryPolicyId }`, …) and every one present in a payload is
+   resolved through *its own* scoped repository before the write — 404, never a
+   cross-tenant binding. `requireOwned(field, id)` / `assertOwned(field, id)`
+   expose the same check for ids used outside a column.
+3. **Nested relation writes are gone.** `TCreate`/`TUpdate` are now Prisma's
+   scalars-only `*CreateManyInput`/`*UncheckedUpdateManyInput`, so
+   `{ secrets: { connect: [{ id }] } }` does not typecheck; a DMMF-derived
+   allowlist of each model's scalar fields rejects it at runtime too. `connect`,
+   `set`, `disconnect`, `delete`, `deleteMany` and `upsert` all take bare unique
+   keys with no tenant filter — the exact unscoped access this class removed from
+   `where`, re-entering through `data`.
+4. **`deliveries`/`deliveryAttempts` now agree with `TenantResolver`.** Scoped via
+   `{ endpoint: { projectId } }` (and `{ delivery: { endpoint: … } }`), with the
+   denormalised `organization_id`/`project_id` kept as an extra AND conjunct for
+   index selectivity. `del_corrupt` used to be refused by the id-addressed anchor
+   and served by the listing, in the same commit.
+5. **Coverage, so authors are not pushed onto `PrismaService`** (which is
+   `@Global()`, so reaching for it costs them nothing): `endpointHealth` (keyed by
+   `endpoint_id` — the repository now takes an `idField`), `organization`
+   (predicate `{ id: <resolved org> }`), and `aggregate`/`groupBy` wrappers that
+   AND the predicate exactly as `where()` does. The deliveries dashboard is
+   entirely aggregates.
+6. **Bounded reads and deliberate bulk writes.** `take` is clamped to
+   `MAX_PAGE_SIZE` (200) and defaults to `DEFAULT_PAGE_SIZE` (50);
+   `updateMany`/`deleteMany` now require a non-empty `where`, because
+   `await scope.endpoints.deleteMany()` read as innocuous and hard-deleted every
+   endpoint in the organization.
+
+`tenant-scope.spec.ts` proves each of these as a *negative* (43 tests): a
+cross-tenant FK, a nested `connect`, a tenant-column write, an unfiltered bulk
+delete and an oversized `take` are each rejected, with the fixture asserting the
+victim row was left untouched. The fake's `NOT: [a, b]` was also corrected to
+Prisma's `NOT(a AND b)`; it was `NOT(a) AND NOT(b)`, which is *stricter* than
+production and could have let an isolation test pass against the fake while
+leaking against PostgreSQL.
+
+### Needed from whoever owns `index.ts`
+
+Please re-export from `./tenant-scope`, none of which is exported today:
+
+```ts
+export {
+  DEFAULT_PAGE_SIZE,
+  MAX_PAGE_SIZE,
+  type AggregateArgs,
+  type GroupByArgs,
+  type OwnedRepository,
+  type OwnershipVerifier,
+  type ScopedCreateInput,
+  type ScopedUpdateInput,
+  type TransactionRunner,
+} from './tenant-scope';
+export { type TenantRepositoryName } from './tenant-scope.factory';
+```
+
+A Phase 2 controller that paginates needs `MAX_PAGE_SIZE` to validate its query
+DTO against the same ceiling the repository enforces, and a service that takes a
+`ScopedUpdateInput<…>` in its own signature needs the type.
+
+### Two deliberate gaps, for the next author
+
+- **`endpointSecrets`/`endpointHealth`/`deliveryAttempts` still cannot be
+  created** through the scope: their tenancy comes from a parent, so there is no
+  column to stamp, and `create` raises `internal_error` pointing at the parent
+  transaction. Secret *rotation* will want this. It is now safe to allow — the FK
+  ownership check proves the `endpointId` — but it is a behaviour change with a
+  test pinning the current refusal, so it was left alone.
+- **`usageRecords.projectId` cannot be set.** `usage_records` is organization-
+  scoped (org rollups carry `project_id NULL`), but `projectId` is one of the two
+  banned tenant columns everywhere, so per-project rollups cannot be written
+  through the scope. The billing aggregator is not built yet; when it is, either
+  give that repository an explicit `projectId`-taking method that validates
+  through `projects`, or make the banned set depend on the scope kind.
