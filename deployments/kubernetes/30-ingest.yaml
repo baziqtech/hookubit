@@ -1,0 +1,110 @@
+# Data plane, role `ingest`. Every Go role below comes from the SAME image and
+# differs only by its argv - one build, one version, one credential set to
+# rotate, roles still independently scalable (ADR-0005).
+#
+# Ingest is the public write path: it must stay up when the control plane is
+# down, because a 202 means the event is durable in PostgreSQL alone.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ingest
+  namespace: webhook-platform
+  labels: &labels
+    app.kubernetes.io/name: webhook-platform
+    app.kubernetes.io/component: ingest
+    app.kubernetes.io/part-of: webhook-platform
+spec:
+  replicas: 2
+  revisionHistoryLimit: 5
+  strategy:
+    type: RollingUpdate
+    rollingUpdate: { maxSurge: 1, maxUnavailable: 0 }
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: webhook-platform
+      app.kubernetes.io/component: ingest
+  template:
+    metadata:
+      labels: *labels
+      annotations:
+        prometheus.io/scrape: 'true'
+        prometheus.io/port: '9090'
+        prometheus.io/path: /metrics
+    spec:
+      automountServiceAccountToken: false
+      # webhookd's in-process drain budget is 25s (cmd/webhookd/main.go
+      # shutdownGrace). Stay comfortably above it or SIGKILL lands mid-drain.
+      terminationGracePeriodSeconds: 60
+      securityContext:
+        # distroless nonroot.
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile: { type: RuntimeDefault }
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: webhook-platform
+              app.kubernetes.io/component: ingest
+      containers:
+        - name: webhookd
+          image: ghcr.io/shaq/webhook-data-plane:0.1.0
+          imagePullPolicy: IfNotPresent
+          args: ['ingest']
+          ports:
+            - { name: http, containerPort: 8080, protocol: TCP }
+            - { name: probes, containerPort: 9090, protocol: TCP }
+          envFrom:
+            # webhook-platform-data-plane, NOT webhook-platform-app: this
+            # process reads DATABASE_URL, REDIS_URL and the S3 credentials and
+            # nothing else. JWT_SECRET and SESSION_SECRET are not projected
+            # into a role that makes outbound HTTP to customer-controlled URLs.
+            - configMapRef: { name: webhook-platform-config }
+            - secretRef: { name: webhook-platform-data-plane }
+          # Liveness never touches PostgreSQL (ARCHITECTURE.md 46).
+          livenessProbe:
+            httpGet: { path: /health/live, port: probes }
+            initialDelaySeconds: 5
+            periodSeconds: 20
+            timeoutSeconds: 3
+            failureThreshold: 3
+          # Readiness does check PostgreSQL, and flips to draining on SIGTERM so
+          # the Service stops sending work before the process winds down.
+          readinessProbe:
+            httpGet: { path: /health/ready, port: probes }
+            initialDelaySeconds: 3
+            periodSeconds: 10
+            timeoutSeconds: 4
+            failureThreshold: 3
+          resources:
+            requests: { cpu: 100m, memory: 64Mi }
+            limits: { cpu: 500m, memory: 256Mi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: ['ALL'] }
+          volumeMounts:
+            - { name: tmp, mountPath: /tmp }
+      volumes:
+        - { name: tmp, emptyDir: {} }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ingest
+  namespace: webhook-platform
+  labels:
+    app.kubernetes.io/name: webhook-platform
+    app.kubernetes.io/component: ingest
+    app.kubernetes.io/part-of: webhook-platform
+spec:
+  type: ClusterIP
+  ports:
+    - { name: http, port: 8080, targetPort: http, protocol: TCP }
+    - { name: probes, port: 9090, targetPort: probes, protocol: TCP }
+  selector:
+    app.kubernetes.io/name: webhook-platform
+    app.kubernetes.io/component: ingest

@@ -1,0 +1,39 @@
+{{/*
+PodDisruptionBudgets cover voluntary disruption (node drains, cluster
+upgrades), not crashes.
+
+`scheduler` has podDisruptionBudget.enabled=false by default and should stay
+that way: it is a singleton, and a budget over a singleton blocks every node
+drain indefinitely. Losing the scheduler for one reschedule delays retries; it
+loses nothing.
+*/}}
+{{- $root := . -}}
+{{- $components := list
+      (dict "name" "control-api" "cfg" .Values.controlApi.podDisruptionBudget)
+      (dict "name" "dashboard"   "cfg" .Values.dashboard.podDisruptionBudget)
+      (dict "name" "ingest"      "cfg" .Values.dataPlane.ingest.podDisruptionBudget)
+      (dict "name" "router"      "cfg" .Values.dataPlane.router.podDisruptionBudget)
+      (dict "name" "scheduler"   "cfg" .Values.dataPlane.scheduler.podDisruptionBudget)
+      (dict "name" "worker"      "cfg" .Values.dataPlane.worker.podDisruptionBudget)
+-}}
+{{- range $c := $components }}
+{{- if $c.cfg.enabled }}
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "webhook-platform.fullname" $root }}-{{ $c.name }}
+  labels:
+    {{- include "webhook-platform.labels" $root | nindent 4 }}
+    app.kubernetes.io/component: {{ $c.name }}
+spec:
+  {{- if hasKey $c.cfg "maxUnavailable" }}
+  maxUnavailable: {{ $c.cfg.maxUnavailable }}
+  {{- else }}
+  minAvailable: {{ default 1 $c.cfg.minAvailable }}
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- include "webhook-platform.selectorLabels" (dict "ctx" $root "component" $c.name) | nindent 6 }}
+{{- end }}
+{{- end }}

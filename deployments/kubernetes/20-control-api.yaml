@@ -1,0 +1,107 @@
+# Control plane. It can be down without stopping queued deliveries
+# (ARCHITECTURE.md 54) - which is why it carries no PDB stronger than
+# minAvailable 1 and is never in the worker hot path.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: control-api
+  namespace: webhook-platform
+  labels: &labels
+    app.kubernetes.io/name: webhook-platform
+    app.kubernetes.io/component: control-api
+    app.kubernetes.io/part-of: webhook-platform
+spec:
+  replicas: 2
+  revisionHistoryLimit: 5
+  strategy:
+    type: RollingUpdate
+    rollingUpdate: { maxSurge: 1, maxUnavailable: 0 }
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: webhook-platform
+      app.kubernetes.io/component: control-api
+  template:
+    metadata:
+      labels: *labels
+    spec:
+      automountServiceAccountToken: false
+      # Above the Node HTTP server's own drain; a rollout must not cut an
+      # in-flight request (ARCHITECTURE.md 47).
+      terminationGracePeriodSeconds: 45
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        seccompProfile: { type: RuntimeDefault }
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: webhook-platform
+              app.kubernetes.io/component: control-api
+      containers:
+        - name: control-api
+          image: ghcr.io/shaq/webhook-control-api:0.1.0
+          imagePullPolicy: IfNotPresent
+          ports:
+            - { name: http, containerPort: 3000, protocol: TCP }
+          envFrom:
+            - configMapRef: { name: webhook-platform-config }
+            - secretRef: { name: webhook-platform-database }
+            - secretRef: { name: webhook-platform-app }
+          env:
+            - name: CORS_ORIGINS
+              value: 'https://webhooks.example.com'
+            - name: DASHBOARD_URL
+              value: 'https://webhooks.example.com'
+          # Liveness answers "is the process alive?" and must never touch
+          # PostgreSQL (ARCHITECTURE.md 46) - a database blip that restarts every
+          # pod turns a recoverable incident into an outage.
+          livenessProbe:
+            httpGet: { path: /health/live, port: http }
+            initialDelaySeconds: 10
+            periodSeconds: 20
+            timeoutSeconds: 3
+            failureThreshold: 3
+          readinessProbe:
+            httpGet: { path: /health/ready, port: http }
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          startupProbe:
+            httpGet: { path: /health/live, port: http }
+            periodSeconds: 5
+            failureThreshold: 24
+          resources:
+            requests: { cpu: 200m, memory: 256Mi }
+            limits: { cpu: '1', memory: 768Mi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: ['ALL'] }
+          volumeMounts:
+            - { name: tmp, mountPath: /tmp }
+      volumes:
+        - name: tmp
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: control-api
+  namespace: webhook-platform
+  labels:
+    app.kubernetes.io/name: webhook-platform
+    app.kubernetes.io/component: control-api
+    app.kubernetes.io/part-of: webhook-platform
+spec:
+  type: ClusterIP
+  ports:
+    - { name: http, port: 3000, targetPort: http, protocol: TCP }
+  selector:
+    app.kubernetes.io/name: webhook-platform
+    app.kubernetes.io/component: control-api

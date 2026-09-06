@@ -1,0 +1,77 @@
+# Replace both hostnames and the ingressClassName before applying.
+#
+# Two hosts on purpose. The ingest path is a machine API taking bursts from
+# publishers; the dashboard/control host is a browser surface. Separating them
+# lets you rate-limit, size bodies and eventually scale them independently -
+# and lets ingest survive a WAF rule aimed at the UI.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: webhook-platform
+  namespace: webhook-platform
+  labels:
+    app.kubernetes.io/name: webhook-platform
+    app.kubernetes.io/part-of: webhook-platform
+  annotations:
+    # cert-manager.io/cluster-issuer: letsencrypt-prod
+    nginx.ingress.kubernetes.io/proxy-body-size: 2m
+    nginx.ingress.kubernetes.io/force-ssl-redirect: 'true'
+spec:
+  ingressClassName: nginx
+  tls:
+    - hosts: ['webhooks.example.com']
+      secretName: webhook-platform-tls
+  rules:
+    - host: webhooks.example.com
+      http:
+        paths:
+          - path: /v1
+            pathType: Prefix
+            backend:
+              service:
+                name: control-api
+                port: { name: http }
+          - path: /docs
+            pathType: Prefix
+            backend:
+              service:
+                name: control-api
+                port: { name: http }
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: dashboard
+                port: { name: http }
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: webhook-platform-ingest
+  namespace: webhook-platform
+  labels:
+    app.kubernetes.io/name: webhook-platform
+    app.kubernetes.io/component: ingest
+    app.kubernetes.io/part-of: webhook-platform
+  annotations:
+    # cert-manager.io/cluster-issuer: letsencrypt-prod
+    # PAYLOAD_MAX_BYTES is 1 MiB; the proxy cap sits just above it so an
+    # oversized publish is rejected by the application with a useful error
+    # rather than by the proxy with a bare 413.
+    nginx.ingress.kubernetes.io/proxy-body-size: 2m
+    nginx.ingress.kubernetes.io/force-ssl-redirect: 'true'
+spec:
+  ingressClassName: nginx
+  tls:
+    - hosts: ['ingest.example.com']
+      secretName: webhook-platform-ingest-tls
+  rules:
+    - host: ingest.example.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: ingest
+                port: { name: http }

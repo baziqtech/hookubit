@@ -1,0 +1,31 @@
+# `kubectl apply -k deployments/kubernetes` deploys the application.
+#
+# 10-migration-job.yaml is deliberately NOT listed. Schema changes are an
+# explicit, separate step (ARCHITECTURE.md 41); no application apply should ever
+# be able to migrate the database as a side effect.
+#
+# 02-secret.template.yaml is deliberately NOT listed either. It contains
+# placeholders; create the real Secrets out of band from your secret manager.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: webhook-platform
+
+resources:
+  - 00-namespace.yaml
+  - 01-configmap.yaml
+  - 20-control-api.yaml
+  - 21-dashboard.yaml
+  - 30-ingest.yaml
+  - 31-router.yaml
+  - 32-scheduler.yaml
+  - 33-worker.yaml
+  - 40-pdb.yaml
+  - 41-ingress.yaml
+
+images:
+  - name: ghcr.io/shaq/webhook-control-api
+    newTag: 0.1.0
+  - name: ghcr.io/shaq/webhook-data-plane
+    newTag: 0.1.0
+  - name: ghcr.io/shaq/webhook-dashboard
+    newTag: 0.1.0

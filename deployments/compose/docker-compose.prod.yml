@@ -1,0 +1,135 @@
+# Self-hosted production stack.
+#
+# There is deliberately NO postgres service here. The customer supplies the
+# database and the platform connects to it; that is what makes "delete every
+# container, reinstall, keep your history" true (ARCHITECTURE.md 67).
+#
+#   1. Provision PostgreSQL      2. Set DATABASE_URL     3. Optionally set REDIS_URL
+#   4. Configure secrets         5. Run the migrate job  6. docker compose up -d
+name: webhook-platform
+
+# OPTIONAL VARIABLES ARE PASSED THROUGH, NOT DEFAULTED TO ''.
+#
+# A key with no value is resolved from the host environment and is simply ABSENT
+# from the container when the host does not set it. `${REDIS_URL:-}` is not the
+# same thing: it always sets the variable, to the empty string. The control
+# API's env schema takes an optional URL - it accepts undefined and REJECTS "" -
+# so the documented "run without Redis" path used to produce a control plane
+# that threw in validateEnv before it listened. Same reasoning for S3 and OTEL.
+#
+# Required values keep `:?`, which fails the command with a readable message
+# instead of starting a container that cannot work.
+x-common-env: &common-env
+  APP_ENV: production
+  LOG_LEVEL: ${LOG_LEVEL:-info}
+  DATABASE_URL: ${DATABASE_URL:?DATABASE_URL is required - this platform does not ship a database}
+  ENCRYPTION_KEY: ${ENCRYPTION_KEY:?ENCRYPTION_KEY is required}
+  REDIS_URL:
+  S3_ENDPOINT:
+  S3_BUCKET:
+  S3_REGION:
+  S3_ACCESS_KEY:
+  S3_SECRET_KEY:
+  OTEL_EXPORTER_OTLP_ENDPOINT:
+
+services:
+  # Migrations run as an explicit one-shot job, never on application start
+  # (ARCHITECTURE.md 41, engineering rule 21).
+  #   docker compose -f docker-compose.prod.yml run --rm migrate
+  migrate:
+    # The `migrate` TARGET of control-api.Dockerfile, not the runtime image.
+    #
+    # The runtime image is pruned to production dependencies and has no prisma
+    # CLI (it is a devDependency) and no package.json at the working directory.
+    # `npx prisma` there does not fail - npx in a non-TTY silently downloads the
+    # package, so this used to fetch prisma@latest (6.x) from the registry and
+    # apply a migration history authored by 5.22 with whatever major shipped
+    # that morning. On a host with no egress it fails instead, confusingly.
+    #
+    # `--no-install` makes that impossible even if the image is ever wrong.
+    image: ${IMAGE_CONTROL_API_MIGRATE:-ghcr.io/shaq/webhook-control-api:latest-migrate}
+    working_dir: /app/apps/control-api
+    command: ['npx', '--no-install', 'prisma', 'migrate', 'deploy']
+    environment:
+      <<: *common-env
+      # schema.prisma declares directUrl = env("DIRECT_DATABASE_URL"). It must
+      # bypass PgBouncer: transaction pooling breaks DDL and the session-scoped
+      # advisory lock Prisma takes.
+      DIRECT_DATABASE_URL: ${DIRECT_DATABASE_URL:-${DATABASE_URL}}
+      HOME: /tmp
+      NPM_CONFIG_CACHE: /tmp/.npm
+    profiles: ['migrate']
+    restart: 'no'
+
+  control-api:
+    image: ${IMAGE_CONTROL_API:-ghcr.io/shaq/webhook-control-api:latest}
+    environment:
+      <<: *common-env
+      JWT_SECRET: ${JWT_SECRET:?JWT_SECRET is required}
+      SESSION_SECRET: ${SESSION_SECRET:?SESSION_SECRET is required}
+      CONTROL_API_PORT: 3000
+      CORS_ORIGINS: ${CORS_ORIGINS:-}
+    ports:
+      - '${CONTROL_API_BIND:-127.0.0.1:3000}:3000'
+    # Docker's default is 10s. Above the Nest shutdown path so in-flight
+    # requests finish rather than being SIGKILLed mid-response.
+    stop_grace_period: 30s
+    healthcheck:
+      test: ['CMD', 'node', '-e', "require('http').get('http://127.0.0.1:3000/health/live',r=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+    restart: unless-stopped
+
+  ingest:
+    image: ${IMAGE_DATA_PLANE:-ghcr.io/shaq/webhook-data-plane:latest}
+    command: ['ingest']
+    environment:
+      <<: *common-env
+      INGEST_PORT: 8080
+    ports:
+      - '${INGEST_BIND:-0.0.0.0:8080}:8080'
+    # Docker's default stop_grace_period is 10s. webhookd's in-process drain is
+    # 25s (cmd/webhookd/main.go shutdownGrace) and ingest's own drain is 15s, so
+    # the default SIGKILLed ingest mid-drain: a publish whose event row had
+    # already COMMITted never got its 202 written, and the publisher - correctly
+    # - republished it. Duplicate events from a routine `compose down`.
+    stop_grace_period: 40s
+    restart: unless-stopped
+
+  router:
+    image: ${IMAGE_DATA_PLANE:-ghcr.io/shaq/webhook-data-plane:latest}
+    command: ['router']
+    environment: *common-env
+    # Above webhookd's 25s in-process drain. Docker's 10s default is not.
+    stop_grace_period: 40s
+    restart: unless-stopped
+
+  scheduler:
+    image: ${IMAGE_DATA_PLANE:-ghcr.io/shaq/webhook-data-plane:latest}
+    command: ['scheduler']
+    environment: *common-env
+    # Above webhookd's 25s in-process drain. Docker's 10s default is not.
+    stop_grace_period: 40s
+    restart: unless-stopped
+
+  # The throughput dial. Scale this, not the control plane:
+  #   docker compose -f docker-compose.prod.yml up -d --scale worker=8
+  worker:
+    image: ${IMAGE_DATA_PLANE:-ghcr.io/shaq/webhook-data-plane:latest}
+    command: ['worker']
+    environment:
+      <<: *common-env
+      WORKER_CONCURRENCY: ${WORKER_CONCURRENCY:-64}
+    deploy:
+      replicas: ${WORKER_REPLICAS:-2}
+    # Above the in-process drain budget AND above one full outbound attempt
+    # (EGRESS_TOTAL_TIMEOUT_MS, 30s), so SIGTERM finishes in-flight work.
+    stop_grace_period: 60s
+    restart: unless-stopped
+
+  dashboard:
+    image: ${IMAGE_DASHBOARD:-ghcr.io/shaq/webhook-dashboard:latest}
+    ports:
+      - '${DASHBOARD_BIND:-127.0.0.1:8088}:8080'
+    restart: unless-stopped

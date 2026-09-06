@@ -1,0 +1,74 @@
+# Data plane, role `router`: drains the transactional outbox into delivery rows.
+# Safe to run more than one - fan-out inserts are keyed on
+# (event_id, endpoint_id), so a re-run cannot double-materialise.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: router
+  namespace: webhook-platform
+  labels: &labels
+    app.kubernetes.io/name: webhook-platform
+    app.kubernetes.io/component: router
+    app.kubernetes.io/part-of: webhook-platform
+spec:
+  replicas: 2
+  revisionHistoryLimit: 5
+  strategy:
+    type: RollingUpdate
+    rollingUpdate: { maxSurge: 1, maxUnavailable: 0 }
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: webhook-platform
+      app.kubernetes.io/component: router
+  template:
+    metadata:
+      labels: *labels
+      annotations:
+        prometheus.io/scrape: 'true'
+        prometheus.io/port: '9090'
+        prometheus.io/path: /metrics
+    spec:
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 60
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: webhookd
+          image: ghcr.io/shaq/webhook-data-plane:0.1.0
+          imagePullPolicy: IfNotPresent
+          args: ['router']
+          ports:
+            - { name: probes, containerPort: 9090, protocol: TCP }
+          envFrom:
+            # webhook-platform-data-plane, NOT webhook-platform-app: this
+            # process reads DATABASE_URL, REDIS_URL and the S3 credentials and
+            # nothing else. JWT_SECRET and SESSION_SECRET are not projected
+            # into a role that makes outbound HTTP to customer-controlled URLs.
+            - configMapRef: { name: webhook-platform-config }
+            - secretRef: { name: webhook-platform-data-plane }
+          livenessProbe:
+            httpGet: { path: /health/live, port: probes }
+            initialDelaySeconds: 5
+            periodSeconds: 20
+            timeoutSeconds: 3
+            failureThreshold: 3
+          readinessProbe:
+            httpGet: { path: /health/ready, port: probes }
+            initialDelaySeconds: 3
+            periodSeconds: 10
+            timeoutSeconds: 4
+            failureThreshold: 3
+          resources:
+            requests: { cpu: 100m, memory: 64Mi }
+            limits: { cpu: 500m, memory: 256Mi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: ['ALL'] }
+          volumeMounts:
+            - { name: tmp, mountPath: /tmp }
+      volumes:
+        - { name: tmp, emptyDir: {} }

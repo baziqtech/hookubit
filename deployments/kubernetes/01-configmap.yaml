@@ -1,0 +1,67 @@
+# Non-secret configuration only. Anything sensitive belongs in 02-secret.template.yaml
+# (ARCHITECTURE.md 42/43).
+#
+# There is deliberately no `postgres` Service anywhere in this directory. The
+# database is external and its address arrives via DATABASE_URL in the Secret
+# (ARCHITECTURE.md 36, engineering rule 4).
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: webhook-platform-config
+  namespace: webhook-platform
+  labels:
+    app.kubernetes.io/name: webhook-platform
+    app.kubernetes.io/part-of: webhook-platform
+data:
+  APP_ENV: 'production'
+  LOG_LEVEL: 'info'
+
+  # Control plane
+  CONTROL_API_PORT: '3000'
+  ALLOW_OPEN_REGISTRATION: 'false'
+
+  # Data plane
+  INGEST_PORT: '8080'
+  DATA_PLANE_METRICS_PORT: '9090'
+  DATABASE_MAX_CONNECTIONS: '20'
+
+  WORKER_CONCURRENCY: '64'
+  WORKER_POLL_INTERVAL_MS: '250'
+  WORKER_CLAIM_BATCH_SIZE: '100'
+  DELIVERY_LEASE_SECONDS: '120'
+  OUTBOX_POLL_INTERVAL_MS: '250'
+  OUTBOX_BATCH_SIZE: '200'
+
+  # Tenant fairness ceilings (ARCHITECTURE.md 24)
+  MAX_CONCURRENCY_GLOBAL: '512'
+  MAX_CONCURRENCY_PER_ORG: '128'
+  MAX_CONCURRENCY_PER_PROJECT: '64'
+  MAX_CONCURRENCY_PER_ENDPOINT: '16'
+
+  # Outbound HTTP limits (ARCHITECTURE.md 31) - never unbounded
+  EGRESS_DNS_TIMEOUT_MS: '2000'
+  EGRESS_CONNECT_TIMEOUT_MS: '3000'
+  EGRESS_TLS_TIMEOUT_MS: '3000'
+  EGRESS_RESPONSE_HEADER_TIMEOUT_MS: '10000'
+  EGRESS_TOTAL_TIMEOUT_MS: '30000'
+  EGRESS_MAX_RESPONSE_BYTES: '65536'
+  EGRESS_MAX_REDIRECTS: '0'
+
+  # SSRF guard (ARCHITECTURE.md 30).
+  #
+  # THIS CANNOT BE SET TO 'true' HERE. internal/config/config.go hard-fails when
+  # EGRESS_ALLOW_PRIVATE_NETWORKS is true and APP_ENV=production, and APP_ENV
+  # above is production - so flipping this does not loosen the guard, it stops
+  # all four Go roles from starting at all (CrashLoopBackOff, no deliveries).
+  #
+  # To deliver to consumers on the cluster's own private network, put specific
+  # CIDRs in EGRESS_PRIVATE_ALLOWLIST below. That works in production.
+  EGRESS_ALLOW_PRIVATE_NETWORKS: 'false'
+  EGRESS_PRIVATE_ALLOWLIST: ''
+
+  PAYLOAD_INLINE_MAX_BYTES: '65536'
+  PAYLOAD_MAX_BYTES: '1048576'
+
+  # Observability
+  OTEL_SERVICE_NAMESPACE: 'webhook-platform'
+  OTEL_EXPORTER_OTLP_ENDPOINT: ''

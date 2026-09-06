@@ -1,0 +1,40 @@
+# Expected schema drift — the ONLY differences `prisma migrate diff` may report
+# between apps/control-api/prisma/migrations and apps/control-api/prisma/schema.prisma.
+#
+# READ THIS BEFORE YOU "FIX" A RED schema-drift JOB.
+#
+# The migration 20260906010000_review_fixes contains three indexes that Prisma's
+# datamodel language CANNOT express. Both that migration's header and
+# schema.prisma say so in the file. `prisma migrate diff` compares the migration
+# history against the datamodel, so it reports these three as drift BY
+# CONSTRUCTION, forever. That is expected. It is not a mistake, and it is not
+# something `prisma migrate dev` should be asked to reconcile.
+#
+# DO NOT RUN `prisma migrate dev` TO MAKE THIS GREEN. It will generate a
+# migration that DROPS deliveries_event_endpoint_original_key. That index is the
+# ON CONFLICT arbiter the router names when it materialises fan-out. Without it
+# a router that inserted its delivery rows and then died before marking the
+# outbox row processed is re-run on restart — and every subscriber receives
+# every event a second time. Dropping it silently converts a crash into
+# duplicate deliveries for every customer.
+#
+# What to do instead:
+#   - Adding a NEW hand-written index Prisma cannot express? Add its name here,
+#     with a comment saying why it cannot live in schema.prisma.
+#   - Seeing any OTHER identifier in the CI failure output? That is real drift.
+#     schema.prisma and the migrations genuinely disagree; write a migration.
+#
+# One index name per line. Blank lines and #-comments are ignored.
+
+# Partial unique index (WHERE replay_of_delivery_id IS NULL). Prisma has no
+# partial-index syntax. This is the fan-out idempotency arbiter — see above.
+deliveries_event_endpoint_original_key
+
+# NULLS NOT DISTINCT (PostgreSQL 15+). Prisma always emits NULLS DISTINCT, under
+# which the scope-wide policy row (resource_id IS NULL) never matched its own
+# upsert and was INSERTed again on every write.
+rate_limit_policies_project_id_scope_resource_id_key
+
+# NULLS NOT DISTINCT, same reason: the org-wide usage row (project_id IS NULL)
+# duplicated instead of accumulating.
+usage_records_organization_id_project_id_metric_period_star_key

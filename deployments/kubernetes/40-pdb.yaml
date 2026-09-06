@@ -1,0 +1,75 @@
+# PodDisruptionBudgets protect against voluntary disruption (node drains,
+# cluster upgrades), not crashes.
+#
+# There is no PDB for `scheduler`: it is a single replica, and a PDB over a
+# singleton blocks every node drain indefinitely. Losing the scheduler for the
+# length of a pod reschedule delays retries; it loses nothing.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: control-api
+  namespace: webhook-platform
+  labels: { app.kubernetes.io/name: webhook-platform, app.kubernetes.io/part-of: webhook-platform }
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: webhook-platform
+      app.kubernetes.io/component: control-api
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: dashboard
+  namespace: webhook-platform
+  labels: { app.kubernetes.io/name: webhook-platform, app.kubernetes.io/part-of: webhook-platform }
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: webhook-platform
+      app.kubernetes.io/component: dashboard
+---
+# Ingest is the write path. If it is all gone, publishers get connection errors
+# and events are lost at the source - it is the one component where a drain must
+# never take the last pod.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: ingest
+  namespace: webhook-platform
+  labels: { app.kubernetes.io/name: webhook-platform, app.kubernetes.io/part-of: webhook-platform }
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: webhook-platform
+      app.kubernetes.io/component: ingest
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: router
+  namespace: webhook-platform
+  labels: { app.kubernetes.io/name: webhook-platform, app.kubernetes.io/part-of: webhook-platform }
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: webhook-platform
+      app.kubernetes.io/component: router
+---
+# Percentage, not a count: the worker replica count is owned by the HPA, so a
+# fixed minAvailable would be wrong at both ends of the scaling range.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: worker
+  namespace: webhook-platform
+  labels: { app.kubernetes.io/name: webhook-platform, app.kubernetes.io/part-of: webhook-platform }
+spec:
+  maxUnavailable: 25%
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: webhook-platform
+      app.kubernetes.io/component: worker

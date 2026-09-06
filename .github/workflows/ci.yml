@@ -1,0 +1,420 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # One place for the toolchain version. services/data-plane/go.mod still
+  # declares `go 1.21` - that is the minimum language version, not the
+  # toolchain, so 1.23 here is not a conflict. Raising go.mod is the data-plane
+  # owner's change, not CI's.
+  GO_VERSION: '1.23'
+  NODE_VERSION: '22'
+  PNPM_VERSION: '9'
+
+  # CI-only values. Real secrets never live in a workflow file.
+  DATABASE_URL: postgresql://webhook:webhook@localhost:5432/webhook_platform_test?schema=public
+  DIRECT_DATABASE_URL: postgresql://webhook:webhook@localhost:5432/webhook_platform_test?schema=public
+  REDIS_URL: redis://localhost:6379/0
+  JWT_SECRET: ci-only-jwt-secret-value-at-least-32-chars
+  SESSION_SECRET: ci-only-session-secret-value-at-least-32-chars
+  ENCRYPTION_KEY: AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=
+
+jobs:
+  data-plane:
+    name: Go data plane
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache-dependency-path: services/data-plane/go.sum
+      - name: Verify modules are tidy
+        working-directory: services/data-plane
+        run: |
+          go mod tidy
+          git diff --exit-code go.mod go.sum
+      - name: Vet
+        working-directory: services/data-plane
+        run: go vet ./...
+      - name: Test
+        working-directory: services/data-plane
+        run: go test -race -count=1 ./...
+
+  control-plane:
+    name: Control plane and dashboard
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: webhook
+          POSTGRES_PASSWORD: webhook
+          POSTGRES_DB: webhook_platform_test
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U webhook"
+          --health-interval 5s --health-timeout 3s --health-retries 10
+      redis:
+        image: redis:7-alpine
+        ports: ['6379:6379']
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s --health-timeout 3s --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: ${{ env.PNPM_VERSION }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Generate Prisma client
+        run: pnpm --filter @webhook/control-api prisma:generate
+      - name: Apply migrations
+        run: pnpm --filter @webhook/control-api prisma:deploy
+      - name: Lint
+        run: pnpm -r lint
+      - name: Build
+        run: pnpm -r build
+      - name: Test
+        run: pnpm -r test
+
+  schema-drift:
+    name: Schema drift
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: webhook
+          POSTGRES_PASSWORD: webhook
+          POSTGRES_DB: webhook_platform_test
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U webhook"
+          --health-interval 5s --health-timeout 3s --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with: { version: '${{ env.PNPM_VERSION }}' }
+      - uses: actions/setup-node@v4
+        with: { node-version: '${{ env.NODE_VERSION }}', cache: pnpm }
+      - run: pnpm install --frozen-lockfile
+      # ══════════════════════════════════════════════════════════════════
+      #  READ deployments/ci/expected-schema-drift.txt BEFORE TOUCHING THIS.
+      #
+      #  DO NOT "FIX" A RED RUN HERE WITH `prisma migrate dev`.
+      #
+      #  apps/control-api/prisma/migrations/20260906010000_review_fixes/migration.sql
+      #  contains three indexes Prisma's datamodel CANNOT express - one partial
+      #  unique index and two NULLS NOT DISTINCT indexes. Its header and
+      #  schema.prisma both say so. A bare `migrate diff --exit-code` therefore
+      #  returns 2 by construction on every commit, forever; that is why this
+      #  step compares the drift against a committed fixture instead.
+      #
+      #  `prisma migrate dev` "resolves" that drift by generating a migration
+      #  that DROPS deliveries_event_endpoint_original_key - the ON CONFLICT
+      #  arbiter the router names when it materialises fan-out. Drop it and a
+      #  router that is re-run after a crash re-delivers every event to every
+      #  subscriber. The check below fails on any identifier that is NOT in the
+      #  fixture, which is the drift that actually means something.
+      # ══════════════════════════════════════════════════════════════════
+      - name: Migrations match schema.prisma (except the documented, inexpressible drift)
+        working-directory: apps/control-api
+        run: |
+          set -euo pipefail
+          npx prisma migrate diff \
+            --from-migrations prisma/migrations \
+            --to-schema-datamodel prisma/schema.prisma \
+            --shadow-database-url "$DATABASE_URL" \
+            --script > /tmp/drift.sql
+
+          echo "--- raw drift script ---"
+          cat /tmp/drift.sql
+
+          # Statements only: drop comments and blanks.
+          grep -vE '^[[:space:]]*(--|$)' /tmp/drift.sql > /tmp/drift.stmts || true
+
+          # Every remaining statement must name only expected identifiers.
+          grep -vE '^[[:space:]]*(#|$)' ../../deployments/ci/expected-schema-drift.txt > /tmp/expected.txt
+          unexpected=0
+          while IFS= read -r line; do
+            [ -z "$line" ] && continue
+            matched=0
+            while IFS= read -r name; do
+              case "$line" in *"$name"*) matched=1; break;; esac
+            done < /tmp/expected.txt
+            if [ "$matched" -eq 0 ]; then
+              echo "::error::Unexpected schema drift: $line"
+              unexpected=1
+            fi
+          done < /tmp/drift.stmts
+
+          if [ "$unexpected" -ne 0 ]; then
+            echo "::error::schema.prisma and prisma/migrations genuinely disagree. Write a migration for the difference above. Do NOT run \`prisma migrate dev\` - see deployments/ci/expected-schema-drift.txt, it will drop the fan-out idempotency index."
+            exit 1
+          fi
+          echo "OK - drift is limited to the documented inexpressible indexes"
+
+      # The other half of the guarantee: prove the hand-written indexes really
+      # exist after the committed migrations are applied. The step above proves
+      # the drift is the expected drift; this proves the index the router's
+      # ON CONFLICT names is actually in the database.
+      - name: Hand-written indexes survive a real migrate deploy
+        working-directory: apps/control-api
+        env:
+          # libpq rejects Prisma's ?schema= parameter, so psql gets its own URL.
+          PGURL: postgresql://webhook:webhook@localhost:5432/webhook_platform_test
+        run: |
+          set -euo pipefail
+          npx prisma migrate deploy
+          missing=0
+          for idx in $(grep -vE '^[[:space:]]*(#|$)' ../../deployments/ci/expected-schema-drift.txt); do
+            if [ "$(psql "$PGURL" -tAc "SELECT count(*) FROM pg_indexes WHERE schemaname='public' AND indexname='$idx'")" != "1" ]; then
+              echo "::error::Index $idx is missing after \`prisma migrate deploy\`."
+              missing=1
+            else
+              echo "OK - $idx present"
+            fi
+          done
+          if [ "$missing" -ne 0 ]; then
+            echo "::error::deliveries_event_endpoint_original_key is the ON CONFLICT arbiter the router names when it materialises fan-out. Without it, a router re-run after a crash delivers every event to every subscriber a second time. Restore the index in a new migration; do not regenerate the history."
+            exit 1
+          fi
+
+  security:
+    name: Security checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with: { go-version: '${{ env.GO_VERSION }}', cache-dependency-path: services/data-plane/go.sum }
+      # The SSRF guard is the platform's most security-critical code; run its
+      # suite on its own so a failure is unmissable in the checks list.
+      - name: Egress / SSRF suite
+        working-directory: services/data-plane
+        run: go test -race -count=1 -v ./internal/egress/ ./internal/signing/
+      - name: Vulnerability scan
+        working-directory: services/data-plane
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@latest
+          govulncheck ./...
+
+  images:
+    name: Container images
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: control-api
+            dockerfile: deployments/docker/control-api.Dockerfile
+            target: runtime
+          # The runtime image is pruned to production dependencies and the
+          # Prisma CLI is a devDependency, so migrations run from their own
+          # target (deployments/kubernetes/10-migration-job.yaml).
+          - name: control-api-migrate
+            dockerfile: deployments/docker/control-api.Dockerfile
+            target: migrate
+          - name: data-plane
+            dockerfile: deployments/docker/data-plane.Dockerfile
+            target: ''
+          - name: dashboard
+            dockerfile: deployments/docker/dashboard.Dockerfile
+            target: ''
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      # Build only. Publishing is a release concern, not a per-PR one - a CI
+      # job with registry write credentials on every pull_request is a supply
+      # chain hole waiting to be found.
+      - name: Build ${{ matrix.name }}
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ${{ matrix.dockerfile }}
+          target: ${{ matrix.target }}
+          push: false
+          load: false
+          tags: webhook-${{ matrix.name }}:ci
+          cache-from: type=gha,scope=${{ matrix.name }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.name }}
+
+  dockerfile-lint:
+    name: Dockerfile lint
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        dockerfile:
+          - deployments/docker/control-api.Dockerfile
+          - deployments/docker/data-plane.Dockerfile
+          - deployments/docker/dashboard.Dockerfile
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hadolint/hadolint-action@v3.1.0
+        with:
+          dockerfile: ${{ matrix.dockerfile }}
+          failure-threshold: warning
+
+  manifests:
+    name: Kubernetes manifests and Helm chart
+    runs-on: ubuntu-latest
+    env:
+      KUBECONFORM_VERSION: '0.6.7'
+      # Schema set to validate against. Bump alongside the chart's kubeVersion.
+      K8S_VERSION: '1.29.0'
+      # Lint values. Never real credentials - these only have to satisfy the
+      # schema so the templates render.
+      CI_DB_URL: 'postgresql://ci:ci@postgres.invalid:6432/webhook_platform?schema=public'
+      CI_DIRECT_DB_URL: 'postgresql://ci:ci@postgres.invalid:5432/webhook_platform?schema=public'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: azure/setup-helm@v4
+        with: { version: v3.16.3 }
+      - name: Install kubeconform
+        run: |
+          curl -fsSL "https://github.com/yannh/kubeconform/releases/download/v${KUBECONFORM_VERSION}/kubeconform-linux-amd64.tar.gz" \
+            | tar -xz -C /usr/local/bin kubeconform
+          kubeconform -v
+
+      # The chart must not be installable without an external database. This is
+      # the guardrail behind "PostgreSQL is external and customer-owned"
+      # (ARCHITECTURE.md 36): if values.schema.json ever stops requiring
+      # externalDatabase.url, this step goes green and the guardrail is gone.
+      #
+      # SUPPLY EVERY OTHER REQUIRED VALUE AND WITHHOLD ONLY THE DATABASE.
+      # The earlier version of this step ran `helm lint` on bare defaults and
+      # asserted it failed - but it failed on the empty jwtSecret guard first,
+      # so deleting `"required": ["url"]` from values.schema.json left this
+      # step green and the guardrail gone. Failing is not enough; it has to fail
+      # FOR THE RIGHT REASON, so the message is grepped.
+      - name: Chart refuses to install without externalDatabase.url
+        run: |
+          set +e
+          out=$(helm lint deployments/helm/webhook-platform \
+            --set secrets.jwtSecret=ci \
+            --set secrets.sessionSecret=ci \
+            --set secrets.encryptionKey=ci 2>&1)
+          rc=$?
+          set -e
+          echo "$out"
+          if [ $rc -eq 0 ]; then
+            echo "::error::helm lint SUCCEEDED with every secret supplied and no externalDatabase.url. values.schema.json no longer requires it - this chart must never be installable without an external database."
+            exit 1
+          fi
+          if ! echo "$out" | grep -q 'externalDatabase'; then
+            echo "::error::helm lint failed, but not because of externalDatabase - so this step proves nothing about the database guardrail. Output above."
+            exit 1
+          fi
+          echo "OK - rejected specifically for the missing externalDatabase.url"
+
+      - name: helm lint
+        run: |
+          helm lint deployments/helm/webhook-platform \
+            --set externalDatabase.url="$CI_DB_URL" \
+            --set externalDatabase.directUrl="$CI_DIRECT_DB_URL" \
+            --set secrets.jwtSecret=ci \
+            --set secrets.sessionSecret=ci \
+            --set secrets.encryptionKey=ci
+
+      - name: Render chart and validate against Kubernetes schemas
+        run: |
+          # Render with every optional feature ON, because /tmp/rendered.yaml is
+          # also what the "no bundled database" guard greps.
+          helm template ci deployments/helm/webhook-platform \
+            --namespace webhook-platform \
+            --set externalDatabase.url="$CI_DB_URL" \
+            --set externalDatabase.directUrl="$CI_DIRECT_DB_URL" \
+            --set externalRedis.url="rediss://redis.invalid:6379/0" \
+            --set secrets.jwtSecret=ci \
+            --set secrets.sessionSecret=ci \
+            --set secrets.encryptionKey=ci \
+            --set ingress.enabled=true \
+            --set migrations.enabled=true > /tmp/rendered.yaml
+          kubeconform -strict -summary -ignore-missing-schemas \
+            -kubernetes-version "$K8S_VERSION" /tmp/rendered.yaml
+
+      - name: Validate raw manifests
+        run: |
+          kubeconform -strict -summary -ignore-missing-schemas \
+            -kubernetes-version "$K8S_VERSION" deployments/kubernetes/*.yaml
+
+      # Optional configuration must be ABSENT, not empty. envFrom projects every
+      # key in a Secret as a SET environment variable, and the control API's env
+      # schema takes an optional URL - which accepts undefined and REJECTS "".
+      # A rendered `REDIS_URL: ""` is therefore a control plane that throws in
+      # validateEnv before it listens, on the documented no-Redis install path.
+      - name: Optional keys are omitted, not emptied
+        run: |
+          set -euo pipefail
+          helm template ci deployments/helm/webhook-platform \
+            --namespace webhook-platform \
+            --set externalDatabase.url="$CI_DB_URL" \
+            --set externalDatabase.directUrl="$CI_DIRECT_DB_URL" \
+            --set secrets.jwtSecret=ci \
+            --set secrets.sessionSecret=ci \
+            --set secrets.encryptionKey=ci > /tmp/rendered-no-redis.yaml
+          if grep -nE '^[[:space:]]*(REDIS_URL|S3_ACCESS_KEY|S3_SECRET_KEY):[[:space:]]*("")?[[:space:]]*$' /tmp/rendered-no-redis.yaml; then
+            echo "::error::An optional key rendered with an empty value. Wrap it in an {{- if }} so unset means unset."
+            exit 1
+          fi
+          if grep -nE '^\s*REDIS_URL:' deployments/kubernetes/02-secret.template.yaml; then
+            echo "::error::02-secret.template.yaml sets REDIS_URL. Optional keys must be commented out, not set to an empty string."
+            exit 1
+          fi
+          echo "OK - optional keys are absent when unset"
+
+      # There is no database in the deployment manifests and there must never
+      # be one. Containers are disposable; customer data is not.
+      #
+      # This greps the RENDERED chart, not just the sources. A Chart.yaml
+      # `dependencies:` entry on bitnami/postgresql matches no source pattern at
+      # all and only becomes a StatefulSet after `helm dependency build` and a
+      # render - which is exactly how a bundled database gets in by accident.
+      # PersistentVolumeClaim and volumeClaimTemplates are storage the platform
+      # must never own, and compose prod is production too.
+      - name: No bundled database in production manifests
+        run: |
+          set -euo pipefail
+          PATTERN='kind:[[:space:]]*StatefulSet|kind:[[:space:]]*PersistentVolumeClaim|volumeClaimTemplates|image:.*(postgres|timescale|pgvector|mysql|mariadb|mongo|redis)'
+          fail=0
+
+          # 1. Rendered chart output (written by the step above, all features on).
+          if grep -nEi "$PATTERN" /tmp/rendered.yaml; then
+            echo "::error::A database, StatefulSet or PVC appeared in the RENDERED chart."
+            fail=1
+          fi
+
+          # 2. Sources, for anything gated behind a flag CI does not enable.
+          if grep -rnEi "$PATTERN" deployments/kubernetes deployments/helm; then
+            echo "::error::A database, StatefulSet or PVC appeared in the deployment manifest sources."
+            fail=1
+          fi
+
+          # 3. Compose production stack. (docker-compose.dev.yml is exempt - the
+          #    dev stack is supposed to run a throwaway postgres.)
+          if grep -nEi "$PATTERN" deployments/compose/docker-compose.prod.yml; then
+            echo "::error::A database appeared in deployments/compose/docker-compose.prod.yml."
+            fail=1
+          fi
+
+          # 4. Any chart dependency at all. A subchart is the fastest way to
+          #    lose delivery history to a `helm uninstall`.
+          if grep -nE '^[[:space:]]*dependencies:' deployments/helm/webhook-platform/Chart.yaml; then
+            echo "::error::Chart.yaml declares dependencies. This chart bundles nothing - least of all a database."
+            fail=1
+          fi
+
+          [ "$fail" -eq 0 ] || exit 1
+          echo "OK - no bundled database, no bundled storage, no subcharts"

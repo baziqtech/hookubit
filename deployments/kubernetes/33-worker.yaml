@@ -1,0 +1,141 @@
+# Data plane, role `worker`: the throughput dial (ARCHITECTURE.md 53 stage 2).
+# Scale this, never the control plane.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: worker
+  namespace: webhook-platform
+  labels: &labels
+    app.kubernetes.io/name: webhook-platform
+    app.kubernetes.io/component: worker
+    app.kubernetes.io/part-of: webhook-platform
+spec:
+  # Omitted deliberately when the HPA below is applied - if `replicas` is set
+  # here, every `kubectl apply` fights the autoscaler. The HPA owns this field.
+  revisionHistoryLimit: 5
+  strategy:
+    type: RollingUpdate
+    rollingUpdate: { maxSurge: 2, maxUnavailable: 0 }
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: webhook-platform
+      app.kubernetes.io/component: worker
+  template:
+    metadata:
+      labels: *labels
+      annotations:
+        prometheus.io/scrape: 'true'
+        prometheus.io/port: '9090'
+        prometheus.io/path: /metrics
+    spec:
+      automountServiceAccountToken: false
+      # The longest single outbound attempt is EGRESS_TOTAL_TIMEOUT_MS (30s) and
+      # the in-process drain budget is 25s. 90s leaves room for an attempt that
+      # started just before SIGTERM to finish and release its lease, instead of
+      # being SIGKILLed and waiting DELIVERY_LEASE_SECONDS to be reclaimed.
+      terminationGracePeriodSeconds: 90
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile: { type: RuntimeDefault }
+      topologySpreadConstraints:
+        - maxSkew: 2
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: webhook-platform
+              app.kubernetes.io/component: worker
+      containers:
+        - name: webhookd
+          image: ghcr.io/shaq/webhook-data-plane:0.1.0
+          imagePullPolicy: IfNotPresent
+          args: ['worker']
+          ports:
+            - { name: probes, containerPort: 9090, protocol: TCP }
+          envFrom:
+            # webhook-platform-data-plane, NOT webhook-platform-app: this
+            # process reads DATABASE_URL, REDIS_URL and the S3 credentials and
+            # nothing else. JWT_SECRET and SESSION_SECRET are not projected
+            # into a role that makes outbound HTTP to customer-controlled URLs.
+            - configMapRef: { name: webhook-platform-config }
+            - secretRef: { name: webhook-platform-data-plane }
+          livenessProbe:
+            httpGet: { path: /health/live, port: probes }
+            initialDelaySeconds: 5
+            periodSeconds: 20
+            timeoutSeconds: 3
+            failureThreshold: 3
+          readinessProbe:
+            httpGet: { path: /health/ready, port: probes }
+            initialDelaySeconds: 3
+            periodSeconds: 10
+            timeoutSeconds: 4
+            failureThreshold: 3
+          resources:
+            # Workers are I/O bound: most of a worker's life is waiting on a
+            # customer endpoint. Requests are sized for the pool and the
+            # scheduler, not for CPU burn.
+            requests: { cpu: 250m, memory: 128Mi }
+            limits: { cpu: '1', memory: 512Mi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: ['ALL'] }
+          volumeMounts:
+            - { name: tmp, mountPath: /tmp }
+      volumes:
+        - { name: tmp, emptyDir: {} }
+---
+# CPU is a proxy, not the real signal. Workers are I/O bound, so a queue-depth
+# metric (delivery rows ready to claim, exported on /metrics) scaled through
+# prometheus-adapter or KEDA is the correct trigger. CPU is what works with no
+# extra components installed; swap it once metrics are wired up.
+#
+# maxReplicas is a DATABASE ceiling, not a CPU one. Every worker pod opens
+# DATABASE_MAX_CONNECTIONS and calls pool.Ping in db.Open at startup; a pod that
+# cannot get its connections exits 1. A ceiling the database cannot serve
+# therefore does not produce throughput - it produces CrashLoopBackOff at
+# exactly the moment traffic spiked.
+#
+# (maxReplicas 8 + ingest 2 + router 2 + scheduler 1) x DATABASE_MAX_CONNECTIONS
+# (10) = 130 backend connections, plus the control API's Prisma pool. Raise
+# either number only against a measured max_connections / default_pool_size.
+#
+# There is no memory metric: nothing has measured this workload's memory
+# profile, and an unmeasured target scales on Go heap retention, not on load.
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: worker
+  namespace: webhook-platform
+  labels:
+    app.kubernetes.io/name: webhook-platform
+    app.kubernetes.io/component: worker
+    app.kubernetes.io/part-of: webhook-platform
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: worker
+  minReplicas: 2
+  maxReplicas: 8
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target: { type: Utilization, averageUtilization: 70 }
+  behavior:
+    scaleUp:
+      stabilizationWindowSeconds: 30
+      policies:
+        - { type: Percent, value: 100, periodSeconds: 30 }
+        - { type: Pods, value: 4, periodSeconds: 30 }
+      selectPolicy: Max
+    scaleDown:
+      # Slow. Every scale-down evicts pods that are mid-delivery, and the queue
+      # is the thing being drained.
+      stabilizationWindowSeconds: 300
+      policies:
+        - { type: Pods, value: 1, periodSeconds: 60 }
