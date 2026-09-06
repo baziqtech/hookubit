@@ -1,0 +1,21 @@
+# The build context is the whole repo, and Docker does not read .gitignore.
+# Without this, `docker build` copies a developer's .env — DATABASE_URL,
+# JWT_SECRET, ENCRYPTION_KEY — into the builder stage, which the `migrate`
+# target ships verbatim because it is FROM builder with no pruning. Prisma also
+# auto-loads .env from the schema directory at migrate time.
+**/.env
+**/.env.*
+!**/.env.example
+
+# Host artefacts: the pnpm symlink farm and stale builds are not reproducible
+# against CI's clean checkout, and would be copied over the freshly installed tree.
+**/node_modules
+**/dist
+**/build
+**/*.tsbuildinfo
+**/coverage
+
+.git
+.github
+**/.DS_Store
+*.log
