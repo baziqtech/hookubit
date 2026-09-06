@@ -1,0 +1,57 @@
+import { Module } from '@nestjs/common';
+import { ConfigModule } from '@nestjs/config';
+import { LoggerModule } from 'nestjs-pino';
+import { AuthModule } from './auth/auth.module';
+import { CommonModule } from './common/common.module';
+import { resolveRequestId } from './common/request-id';
+import { validateEnv } from './config/env.schema';
+import { HealthModule } from './health/health.module';
+import { PrismaModule } from './infrastructure/prisma/prisma.module';
+
+@Module({
+  imports: [
+    ConfigModule.forRoot({
+      isGlobal: true,
+      validate: validateEnv,
+      envFilePath: ['.env.local', '.env', '../../.env'],
+    }),
+    LoggerModule.forRoot({
+      pinoHttp: {
+        level: process.env.LOG_LEVEL ?? 'info',
+        // A client-supplied x-request-id is honoured only if it looks like an
+        // id (FIX 7). It was previously taken verbatim, so anything a caller
+        // typed - a log-injection payload, a 40KB string, a fake JSON fragment -
+        // became a first-class `req.id` field in centralised logging and came
+        // back in a response header and in every error body. Nothing downstream
+        // parses it, so the cheapest correct answer is to refuse anything that
+        // is not an id and mint one instead.
+        genReqId: (req, res) => {
+          const id = resolveRequestId(req.headers['x-request-id']);
+          res.setHeader('x-request-id', id);
+          return id;
+        },
+        // Never log secrets (engineering rule 12).
+        redact: {
+          paths: [
+            'req.headers.authorization',
+            'req.headers.cookie',
+            'req.body.password',
+            'req.body.secret',
+            'res.headers["set-cookie"]',
+          ],
+          remove: true,
+        },
+        transport:
+          process.env.APP_ENV === 'development' ? { target: 'pino-pretty' } : undefined,
+      },
+    }),
+    PrismaModule,
+    CommonModule,
+    HealthModule,
+    AuthModule,
+    // Phase 2 modules land here: users, organizations, memberships,
+    // projects, api-keys, endpoints, endpoint-secrets, webhook-subscriptions,
+    // retry-policies, rate-limits, events, deliveries, audit, admin.
+  ],
+})
+export class AppModule {}

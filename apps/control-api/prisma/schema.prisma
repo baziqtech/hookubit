@@ -1,0 +1,685 @@
+// ---------------------------------------------------------------------------
+// Webhook Platform - PostgreSQL schema
+//
+// Prisma owns all DDL for this database (ADR-0002). The Go data plane reads and
+// writes these tables with hand-written SQL via pgx; it never runs migrations.
+//
+// Identifiers are prefixed, lexicographically sortable ULIDs (org_, proj_,
+// evt_, del_, ep_ ...). See packages/contracts and internal/ids.
+// ---------------------------------------------------------------------------
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_DATABASE_URL")
+}
+
+// ===========================================================================
+// Tenancy
+// ===========================================================================
+
+enum OrganizationStatus {
+  active
+  suspended
+  deleted
+}
+
+model Organization {
+  id        String             @id
+  name      String
+  slug      String             @unique
+  status    OrganizationStatus @default(active)
+  planId    String?            @map("plan_id")
+  createdAt DateTime           @default(now()) @map("created_at")
+  updatedAt DateTime           @updatedAt @map("updated_at")
+
+  plan                 Plan?                 @relation(fields: [planId], references: [id])
+  members              OrganizationMember[]
+  projects             Project[]
+  auditLogs            AuditLog[]
+  usageRecords         UsageRecord[]
+  billingSubscriptions BillingSubscription[]
+  events               Event[]
+
+  @@map("organizations")
+}
+
+model User {
+  id              String    @id
+  email           String    @unique
+  name            String?
+  passwordHash    String    @map("password_hash")
+  emailVerifiedAt DateTime? @map("email_verified_at")
+  lastLoginAt     DateTime? @map("last_login_at")
+  disabledAt      DateTime? @map("disabled_at")
+  createdAt       DateTime  @default(now()) @map("created_at")
+  updatedAt       DateTime  @updatedAt @map("updated_at")
+
+  memberships OrganizationMember[]
+  auditLogs   AuditLog[]
+  tokens      UserToken[]
+  sessions    Session[]
+
+  @@map("users")
+}
+
+/// Server-side browser sessions.
+///
+/// The cookie is still a signed JWT, but it now carries `sid` and every
+/// authenticated request checks this row. That is what makes revocation real:
+/// a stateless JWT cannot be withdrawn once copied off the machine, so logout
+/// was previously advisory only. Costs one indexed primary-key lookup per
+/// request; the alternative (a token-version column on `users`) cannot express
+/// "sign out this one device".
+model Session {
+  id            String    @id
+  userId        String    @map("user_id")
+  ipAddress     String?   @map("ip_address")
+  userAgent     String?   @map("user_agent")
+  lastSeenAt    DateTime? @map("last_seen_at")
+  expiresAt     DateTime  @map("expires_at")
+  revokedAt     DateTime? @map("revoked_at")
+  /// logout | password_reset | admin | expired
+  revokedReason String?   @map("revoked_reason")
+  createdAt     DateTime  @default(now()) @map("created_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, revokedAt])
+  @@index([expiresAt])
+  @@map("sessions")
+}
+
+enum UserTokenType {
+  email_verification
+  password_reset
+  invitation
+}
+
+/// Single-use, hashed, expiring tokens. The raw token is never stored.
+model UserToken {
+  id         String        @id
+  userId     String?       @map("user_id")
+  email      String
+  type       UserTokenType
+  tokenHash  String        @unique @map("token_hash")
+  metadata   Json?
+  expiresAt  DateTime      @map("expires_at")
+  consumedAt DateTime?     @map("consumed_at")
+  createdAt  DateTime      @default(now()) @map("created_at")
+
+  user User? @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([email, type])
+  @@index([expiresAt])
+  @@map("user_tokens")
+}
+
+enum MemberRole {
+  owner
+  admin
+  developer
+  viewer
+  billing
+}
+
+model OrganizationMember {
+  id             String     @id
+  organizationId String     @map("organization_id")
+  userId         String     @map("user_id")
+  role           MemberRole
+  createdAt      DateTime   @default(now()) @map("created_at")
+  updatedAt      DateTime   @updatedAt @map("updated_at")
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  user         User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([organizationId, userId])
+  @@index([userId])
+  @@map("organization_members")
+}
+
+enum Environment {
+  test
+  live
+}
+
+enum ProjectStatus {
+  active
+  suspended
+  deleted
+}
+
+model Project {
+  id             String        @id
+  organizationId String        @map("organization_id")
+  name           String
+  slug           String
+  environment    Environment   @default(test)
+  status         ProjectStatus @default(active)
+  createdAt      DateTime      @default(now()) @map("created_at")
+  updatedAt      DateTime      @updatedAt @map("updated_at")
+
+  organization      Organization       @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  apiKeys           ApiKey[]
+  endpoints         Endpoint[]
+  subscriptions     WebhookSubscription[]
+  events            Event[]
+  retryPolicies     RetryPolicy[]
+  rateLimitPolicies RateLimitPolicy[]
+  idempotencyKeys   IdempotencyKey[]
+
+  @@unique([organizationId, slug])
+  @@map("projects")
+}
+
+// ===========================================================================
+// Credentials
+// ===========================================================================
+
+/// Only the hash is stored. The plaintext key is shown once, at creation.
+model ApiKey {
+  id         String      @id
+  projectId  String      @map("project_id")
+  name       String
+  keyHash    String      @unique @map("key_hash")
+  keyPrefix  String      @map("key_prefix")
+  scopes     String[]    @default([])
+  environment Environment
+  expiresAt  DateTime?   @map("expires_at")
+  lastUsedAt DateTime?   @map("last_used_at")
+  revokedAt  DateTime?   @map("revoked_at")
+  createdAt  DateTime    @default(now()) @map("created_at")
+  updatedAt  DateTime    @updatedAt @map("updated_at")
+
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@index([projectId])
+  @@map("api_keys")
+}
+
+// ===========================================================================
+// Endpoints
+// ===========================================================================
+
+enum EndpointStatus {
+  active
+  paused
+  disabled
+  deleted
+}
+
+model Endpoint {
+  id             String         @id
+  projectId      String         @map("project_id")
+  name           String
+  url            String
+  description    String?
+  status         EndpointStatus @default(active)
+  enabled        Boolean        @default(true)
+  /// Set by the circuit breaker when an endpoint is auto-disabled; a human or
+  /// the half-open probe clears it. Distinct from `enabled`, which is operator intent.
+  disabledReason String?        @map("disabled_reason")
+  disabledAt     DateTime?      @map("disabled_at")
+  timeoutMs      Int            @default(30000) @map("timeout_ms")
+  maxConcurrency Int            @default(16) @map("max_concurrency")
+  rateLimit      Int?           @map("rate_limit")
+  rateLimitWindowSeconds Int    @default(1) @map("rate_limit_window_seconds")
+  retryPolicyId  String?        @map("retry_policy_id")
+  customHeaders  Json?          @map("custom_headers")
+  createdAt      DateTime       @default(now()) @map("created_at")
+  updatedAt      DateTime       @updatedAt @map("updated_at")
+
+  project       Project               @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  retryPolicy   RetryPolicy?          @relation(fields: [retryPolicyId], references: [id])
+  secrets       EndpointSecret[]
+  subscriptions WebhookSubscription[]
+  deliveries    Delivery[]
+  health        EndpointHealth?
+
+  @@index([projectId])
+  @@map("endpoints")
+}
+
+/// HMAC signing secrets. Encrypted at rest (AES-256-GCM, ENCRYPTION_KEY).
+/// Rotation keeps the old secret active until `expiresAt`, so consumers can
+/// verify against either during the overlap window (ARCHITECTURE.md 28).
+model EndpointSecret {
+  id              String    @id
+  endpointId      String    @map("endpoint_id")
+  secretEncrypted String    @map("secret_encrypted")
+  version         Int
+  active          Boolean   @default(true)
+  createdAt       DateTime  @default(now()) @map("created_at")
+  expiresAt       DateTime? @map("expires_at")
+  rotatedAt       DateTime? @map("rotated_at")
+
+  endpoint Endpoint @relation(fields: [endpointId], references: [id], onDelete: Cascade)
+
+  @@unique([endpointId, version])
+  @@index([endpointId, active])
+  @@map("endpoint_secrets")
+}
+
+enum EndpointHealthState {
+  healthy
+  degraded
+  open
+  half_open
+}
+
+/// Circuit-breaker state, kept out of `endpoints` so hot failure counters do not
+/// contend with configuration rows read on every delivery. Redis may front this
+/// for speed; PostgreSQL remains authoritative (ARCHITECTURE.md 26).
+model EndpointHealth {
+  endpointId          String              @id @map("endpoint_id")
+  state               EndpointHealthState @default(healthy)
+  consecutiveFailures Int                 @default(0) @map("consecutive_failures")
+  consecutiveSuccesses Int                @default(0) @map("consecutive_successes")
+  lastSuccessAt       DateTime?           @map("last_success_at")
+  lastFailureAt       DateTime?           @map("last_failure_at")
+  openedAt            DateTime?           @map("opened_at")
+  /// When the breaker may next admit a probe request.
+  probeAfter          DateTime?           @map("probe_after")
+  updatedAt           DateTime            @updatedAt @map("updated_at")
+
+  endpoint Endpoint @relation(fields: [endpointId], references: [id], onDelete: Cascade)
+
+  @@index([state, probeAfter])
+  @@map("endpoint_health")
+}
+
+// ===========================================================================
+// Subscriptions & policies
+// ===========================================================================
+
+/// Binds an endpoint to the event types it should receive. `eventTypes` supports
+/// exact matches and trailing wildcards ("payment.*", "*").
+/// Filters are a core, always-on feature - never licence-gated.
+model WebhookSubscription {
+  id         String   @id
+  projectId  String   @map("project_id")
+  endpointId String   @map("endpoint_id")
+  name       String?
+  eventTypes String[] @default(["*"]) @map("event_types")
+  /// Optional JSON predicate applied to the payload after event-type matching.
+  payloadFilter Json? @map("payload_filter")
+  enabled    Boolean  @default(true)
+  createdAt  DateTime @default(now()) @map("created_at")
+  updatedAt  DateTime @updatedAt @map("updated_at")
+
+  project  Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  endpoint Endpoint @relation(fields: [endpointId], references: [id], onDelete: Cascade)
+
+  @@index([projectId, enabled])
+  @@index([endpointId])
+  @@map("webhook_subscriptions")
+}
+
+model RetryPolicy {
+  id           String   @id
+  projectId    String   @map("project_id")
+  name         String
+  isDefault    Boolean  @default(false) @map("is_default")
+  /// exponential | linear | constant
+  strategy     String   @default("exponential")
+  maxAttempts  Int      @default(8) @map("max_attempts")
+  initialDelayMs Int    @default(5000) @map("initial_delay_ms")
+  maxDelayMs   Int      @default(3600000) @map("max_delay_ms")
+  multiplier   Float    @default(2.0)
+  jitterRatio  Float    @default(0.2) @map("jitter_ratio")
+  maxRetryDurationMs Int @default(86400000) @map("max_retry_duration_ms")
+  createdAt    DateTime @default(now()) @map("created_at")
+  updatedAt    DateTime @updatedAt @map("updated_at")
+
+  project   Project    @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  endpoints Endpoint[]
+
+  @@index([projectId])
+  @@map("retry_policies")
+}
+
+enum RateLimitScope {
+  organization
+  project
+  endpoint
+  ingest
+}
+
+model RateLimitPolicy {
+  id            String         @id
+  projectId     String         @map("project_id")
+  scope         RateLimitScope
+  /// Null means the policy applies to every resource in `scope`.
+  resourceId    String?        @map("resource_id")
+  limit         Int
+  windowSeconds Int            @map("window_seconds")
+  burst         Int?
+  createdAt     DateTime       @default(now()) @map("created_at")
+  updatedAt     DateTime       @updatedAt @map("updated_at")
+
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  /// Replaced in 20260906010000_review_fixes by a NULLS NOT DISTINCT index of
+  /// the same name: `resourceId` NULL means "every resource in this scope", and
+  /// that is precisely the row that must be unique. PostgreSQL indexes are
+  /// NULLS DISTINCT by default, so the generated constraint enforced nothing on
+  /// exactly the rows that mattered. Kept here so Prisma still types the
+  /// compound `where` for upserts.
+  @@unique([projectId, scope, resourceId])
+  @@map("rate_limit_policies")
+}
+
+// ===========================================================================
+// Event ingestion
+// ===========================================================================
+
+enum EventStatus {
+  received
+  processing
+  processed
+  failed
+}
+
+model Event {
+  id             String      @id
+  organizationId String      @map("organization_id")
+  projectId      String      @map("project_id")
+  eventType      String      @map("event_type")
+  idempotencyKey String?     @map("idempotency_key")
+  /// AUTHORITATIVE PAYLOAD. The exact bytes received on the wire, byte for
+  /// byte. Signing (ARCHITECTURE.md 28) and outbound delivery MUST read this
+  /// column and nothing else. Null when the payload was offloaded to object
+  /// storage (see payloadLocation).
+  payloadRaw     Bytes?      @map("payload_raw")
+  /// NON-AUTHORITATIVE. A jsonb projection of payloadRaw, for filtering,
+  /// search and the operator UI only. PostgreSQL normalises jsonb - key order,
+  /// insignificant whitespace and duplicate keys are not preserved - so these
+  /// bytes are NOT the bytes that were received. Signing over this column
+  /// produces signatures the consumer cannot verify. Never sign it, never
+  /// deliver it. Section 32 mentions jsonb; section 28 governs.
+  payload        Json?
+  /// s3://bucket/key when the payload exceeded PAYLOAD_INLINE_MAX_BYTES.
+  payloadLocation String?    @map("payload_location")
+  payloadSize    Int         @map("payload_size")
+  /// SHA-256 of payloadRaw (the exact raw request bytes).
+  payloadHash    String      @map("payload_hash")
+  /// Opt-in serialisation key carried from the ingest API (docs/API.md) onto
+  /// every delivery this event fans out to. Null means unordered.
+  orderingKey    String?     @map("ordering_key")
+  headers        Json?
+  status         EventStatus @default(received)
+  createdAt      DateTime    @default(now()) @map("created_at")
+  processedAt    DateTime?   @map("processed_at")
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  project      Project      @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  outbox       EventOutbox[]
+  deliveries   Delivery[]
+
+  @@index([projectId, createdAt(sort: Desc)])
+  @@index([projectId, eventType, createdAt(sort: Desc)])
+  @@index([organizationId, createdAt(sort: Desc)])
+  @@map("events")
+}
+
+/// Idempotency ledger (ARCHITECTURE.md 17). `requestHash` lets a replayed key
+/// with a different body be rejected as a conflict rather than silently aliased.
+model IdempotencyKey {
+  id          String   @id
+  projectId   String   @map("project_id")
+  key         String
+  requestHash String   @map("request_hash")
+  eventId     String?  @map("event_id")
+  expiresAt   DateTime @map("expires_at")
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@unique([projectId, key])
+  @@index([expiresAt])
+  @@map("idempotency_keys")
+}
+
+enum OutboxStatus {
+  pending
+  processing
+  processed
+  failed
+}
+
+/// Transactional outbox (ARCHITECTURE.md 15). Written in the SAME transaction as
+/// the event. Nothing is published to Redis before this row is committed, so an
+/// ingest crash between COMMIT and publish loses time, never data.
+model EventOutbox {
+  id          String       @id
+  eventId     String       @map("event_id")
+  /// event.created | event.replay
+  type        String
+  status      OutboxStatus @default(pending)
+  attempts    Int          @default(0)
+  availableAt DateTime     @default(now()) @map("available_at")
+  lockedBy    String?      @map("locked_by")
+  lockedUntil DateTime?    @map("locked_until")
+  lastError   String?      @map("last_error")
+  processedAt DateTime?    @map("processed_at")
+  createdAt   DateTime     @default(now()) @map("created_at")
+
+  event Event @relation(fields: [eventId], references: [id], onDelete: Cascade)
+
+  @@index([status, availableAt])
+  @@map("event_outbox")
+}
+
+// ===========================================================================
+// Delivery
+// ===========================================================================
+
+enum DeliveryStatus {
+  pending
+  scheduled
+  queued
+  processing
+  succeeded
+  failed
+  retrying
+  exhausted
+  cancelled
+}
+
+/// Materialised fan-out: one row per (event, endpoint) match, each with its own
+/// independent retry chain. Written BEFORE any delivery is attempted, so this
+/// table is the record of what should be delivered - which is what makes replay
+/// and "did finance ever receive this?" answerable.
+model Delivery {
+  id             String         @id
+  eventId        String         @map("event_id")
+  endpointId     String         @map("endpoint_id")
+  subscriptionId String?        @map("subscription_id")
+  organizationId String         @map("organization_id")
+  projectId      String         @map("project_id")
+  status         DeliveryStatus @default(pending)
+  attemptCount   Int            @default(0) @map("attempt_count")
+  maxAttempts    Int            @map("max_attempts")
+  nextAttemptAt  DateTime?      @map("next_attempt_at")
+  lastAttemptAt  DateTime?      @map("last_attempt_at")
+  completedAt    DateTime?      @map("completed_at")
+  /// Opt-in serialisation key. Stored from day one; enforcement is deferred
+  /// (ADR-0004). Null means unordered.
+  orderingKey    String?        @map("ordering_key")
+  /// Worker lease. A delivery whose lease has expired is reclaimable, which is
+  /// how a worker crash mid-delivery recovers.
+  lockedBy       String?        @map("locked_by")
+  lockedUntil    DateTime?      @map("locked_until")
+  /// Set when this delivery was created by replaying an earlier one. The
+  /// original row is never mutated (ARCHITECTURE.md 34).
+  replayOfDeliveryId String?    @map("replay_of_delivery_id")
+  replayedBy     String?        @map("replayed_by")
+  lastError      String?        @map("last_error")
+  createdAt      DateTime       @default(now()) @map("created_at")
+  updatedAt      DateTime       @updatedAt @map("updated_at")
+
+  /// Restrict, not Cascade. `delivery_attempts` is append-only and this table is
+  /// the answer to "did finance ever receive this?"; a single
+  /// `prisma.endpoint.delete()` must not be able to erase months of history.
+  /// Endpoint and project removal is a soft delete (`status = 'deleted'`).
+  event    Event             @relation(fields: [eventId], references: [id], onDelete: Restrict)
+  endpoint Endpoint          @relation(fields: [endpointId], references: [id], onDelete: Restrict)
+  attempts DeliveryAttempt[]
+
+  /// The scheduler's claim query. Partial index keeps it small as succeeded
+  /// deliveries accumulate.
+  @@index([status, nextAttemptAt])
+  /// NOTE: `deliveries_event_endpoint_original_key` - a PARTIAL unique index on
+  /// (event_id, endpoint_id) WHERE replay_of_delivery_id IS NULL - is created by
+  /// hand in migration 20260906010000_review_fixes. Prisma cannot express a
+  /// partial unique index, so it is invisible here and to `migrate diff`.
+  /// It is the ON CONFLICT arbiter the fan-out router names; without it a
+  /// re-run router double-fans-out. Replays are exempt by design.
+  @@index([eventId])
+  @@index([endpointId, createdAt(sort: Desc)])
+  @@index([projectId, status, createdAt(sort: Desc)])
+  @@map("deliveries")
+}
+
+enum AttemptStatus {
+  success
+  failure
+  timeout
+  error
+}
+
+/// Append-only per-attempt history. Never updated after completion.
+model DeliveryAttempt {
+  id              String        @id
+  deliveryId      String        @map("delivery_id")
+  attemptNumber   Int           @map("attempt_number")
+  startedAt       DateTime      @map("started_at")
+  completedAt     DateTime?     @map("completed_at")
+  status          AttemptStatus
+  httpStatus      Int?          @map("http_status")
+  requestHeaders  Json?         @map("request_headers")
+  responseHeaders Json?         @map("response_headers")
+  /// Truncated to EGRESS_MAX_RESPONSE_BYTES. Larger bodies go to object storage.
+  responseBody    String?       @map("response_body")
+  responseBodyLocation String?  @map("response_body_location")
+  responseSize    Int?          @map("response_size")
+  errorCode       String?       @map("error_code")
+  errorMessage    String?       @map("error_message")
+  durationMs      Int?          @map("duration_ms")
+  workerId        String?       @map("worker_id")
+  createdAt       DateTime      @default(now()) @map("created_at")
+
+  delivery Delivery @relation(fields: [deliveryId], references: [id], onDelete: Cascade)
+
+  @@unique([deliveryId, attemptNumber])
+  @@index([deliveryId])
+  @@map("delivery_attempts")
+}
+
+// ===========================================================================
+// Audit, usage, billing
+// ===========================================================================
+
+model AuditLog {
+  id             String   @id
+  organizationId String   @map("organization_id")
+  userId         String?  @map("user_id")
+  /// Set when the actor was an API key rather than a user.
+  apiKeyId       String?  @map("api_key_id")
+  action         String
+  resourceType   String   @map("resource_type")
+  resourceId     String?  @map("resource_id")
+  metadata       Json?
+  ipAddress      String?  @map("ip_address")
+  userAgent      String?  @map("user_agent")
+  createdAt      DateTime @default(now()) @map("created_at")
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  user         User?        @relation(fields: [userId], references: [id])
+
+  @@index([organizationId, createdAt(sort: Desc)])
+  @@index([organizationId, action, createdAt(sort: Desc)])
+  @@map("audit_logs")
+}
+
+/// Aggregated asynchronously, never inside the ingest transaction
+/// (ARCHITECTURE.md 50).
+model UsageRecord {
+  id             String   @id
+  organizationId String   @map("organization_id")
+  projectId      String?  @map("project_id")
+  /// events_ingested | deliveries | delivery_attempts | bytes_egress | replays
+  metric         String
+  quantity       BigInt
+  /// Start of the aggregation bucket (hourly).
+  periodStart    DateTime @map("period_start")
+  periodEnd      DateTime @map("period_end")
+  createdAt      DateTime @default(now()) @map("created_at")
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  /// Replaced in 20260906010000_review_fixes by a NULLS NOT DISTINCT index of
+  /// the same name. Org-level rows carry projectId NULL; under the default
+  /// NULLS DISTINCT semantics the hourly aggregator's upsert never matched an
+  /// existing row and INSERTed a duplicate on every run, so billing summed the
+  /// same hour repeatedly and over-billed. Kept here for Prisma's upsert typing.
+  @@unique([organizationId, projectId, metric, periodStart])
+  @@index([organizationId, periodStart])
+  @@map("usage_records")
+}
+
+model Plan {
+  id                   String   @id
+  name                 String
+  slug                 String   @unique
+  /// Business rules live here, not in the delivery engine (ARCHITECTURE.md 51).
+  retentionDays        Int      @map("retention_days")
+  maxProjects          Int?     @map("max_projects")
+  maxEndpoints         Int?     @map("max_endpoints")
+  maxMembers           Int?     @map("max_members")
+  includedEventsPerMonth BigInt? @map("included_events_per_month")
+  ingestRateLimit      Int?     @map("ingest_rate_limit")
+  features             Json?
+  active               Boolean  @default(true)
+  createdAt            DateTime @default(now()) @map("created_at")
+  updatedAt            DateTime @updatedAt @map("updated_at")
+
+  organizations        Organization[]
+  billingSubscriptions BillingSubscription[]
+
+  @@map("plans")
+}
+
+enum BillingStatus {
+  trialing
+  active
+  past_due
+  canceled
+}
+
+model BillingSubscription {
+  id                 String        @id
+  organizationId     String        @map("organization_id")
+  planId             String        @map("plan_id")
+  status             BillingStatus @default(trialing)
+  provider           String?
+  providerCustomerId String?       @map("provider_customer_id")
+  providerSubscriptionId String?   @map("provider_subscription_id")
+  currentPeriodStart DateTime?     @map("current_period_start")
+  currentPeriodEnd   DateTime?     @map("current_period_end")
+  cancelAt           DateTime?     @map("cancel_at")
+  canceledAt         DateTime?     @map("canceled_at")
+  createdAt          DateTime      @default(now()) @map("created_at")
+  updatedAt          DateTime      @updatedAt @map("updated_at")
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  plan         Plan         @relation(fields: [planId], references: [id])
+
+  @@index([organizationId])
+  @@map("billing_subscriptions")
+}
