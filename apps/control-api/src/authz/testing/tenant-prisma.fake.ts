@@ -138,13 +138,40 @@ export class FakeTenantPrisma {
       }
 
       if (value !== null && typeof value === 'object') {
-        const operator = value as { in?: unknown[]; not?: unknown };
+        const operator = value as {
+          in?: unknown[];
+          not?: unknown;
+          gt?: unknown;
+          gte?: unknown;
+          lt?: unknown;
+          lte?: unknown;
+        };
         if (Array.isArray(operator.in)) {
           if (!operator.in.includes(row[key])) return false;
           continue;
         }
         if ('not' in operator) {
           if (row[key] === operator.not) return false;
+          continue;
+        }
+        // Ordering comparisons, string-compared the way PostgreSQL compares the
+        // text primary keys these tables use. `forEachPage` walks a keyset
+        // (`WHERE id > <last seen>`), so without these the exhaustive paging
+        // tests would be testing nothing.
+        const comparisons = ['gt', 'gte', 'lt', 'lte'] as const;
+        if (comparisons.some((name) => name in operator)) {
+          const actual = row[key];
+          if (actual === null || actual === undefined) return false;
+          const left = String(actual);
+          for (const name of comparisons) {
+            if (!(name in operator)) continue;
+            const right = String(operator[name]);
+            const sign = left < right ? -1 : left > right ? 1 : 0;
+            if (name === 'gt' && sign <= 0) return false;
+            if (name === 'gte' && sign < 0) return false;
+            if (name === 'lt' && sign >= 0) return false;
+            if (name === 'lte' && sign > 0) return false;
+          }
           continue;
         }
         throw new Error(`FakeTenantPrisma: unsupported filter on ${table}.${key}`);

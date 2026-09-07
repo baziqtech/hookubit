@@ -66,8 +66,9 @@ const CROSS_TENANT = 'not_found' as const;
  * a support ticket or a log export is live infrastructure belonging to another
  * customer.
  *
- * The specific reason is still recorded, at debug level, for the operator who
- * has to answer "why did this 404?". It just never crosses the wire.
+ * The specific reason is still recorded in the log, at info level, for the
+ * operator who has to answer "why did this 404?". It just never crosses the
+ * wire.
  */
 export const CROSS_TENANT_MESSAGE = 'Resource not found.';
 
@@ -404,7 +405,13 @@ export class TenantResolver {
    * resource, to the client.
    */
   private crossTenant(reason: string): AppError {
-    this.logger.debug(`Cross-tenant or absent resource refused: ${reason}`);
+    // Info, not debug. LOG_LEVEL defaults to `info` (app.module.ts), so at debug
+    // this line existed nowhere an operator could reach: not on the wire, by
+    // design, and not in the log either - and "why did this 404?" at 2am is the
+    // question this product exists to answer. The reason carries only ids the
+    // request itself supplied plus the organization we resolved for the caller,
+    // so it is safe at this level; it still never crosses the wire.
+    this.logger.log(`Cross-tenant or absent resource refused: ${reason}`);
     return new AppError(CROSS_TENANT, CROSS_TENANT_MESSAGE);
   }
 

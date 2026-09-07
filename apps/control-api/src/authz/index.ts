@@ -22,6 +22,7 @@ export {
   type GroupByArgs,
   type ModelDelegate,
   type OwnedRepository,
+  type Page,
   type OwnershipVerifier,
   type ScopedCreateInput,
   type ScopedUpdateInput,

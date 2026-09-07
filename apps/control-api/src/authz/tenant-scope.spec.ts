@@ -150,15 +150,71 @@ describe('ScopedRepository - nested ownership chains', () => {
     await expectCode(scope.deliveryAttempts.requireById(IDS.attemptB1), 'not_found');
   });
 
-  it('refuses to create a row whose tenancy comes from a parent', async () => {
-    const { scope } = await scopeFor(IDS.ownerA, { orgId: IDS.orgA, projectId: IDS.projectA1 });
+  /**
+   * FIX 1. These three replace a single test that pinned the blanket refusal of
+   * `create` on a parent-scoped table. The refusal was right in general and
+   * wrong for the one write that matters: secret rotation (ARCHITECTURE.md 28)
+   * inserts a NEW `endpoint_secrets` row for an EXISTING endpoint, with no
+   * parent transaction to be created alongside. The parent key is now REQUIRED
+   * and PROVED, which is a stronger guarantee than the refusal was - a row
+   * cannot be created with no parent, and cannot be created under a parent in
+   * another tenant.
+   */
+  it('creates a parent-scoped row when the parent is proved to be in this tenant', async () => {
+    const { db, scope } = await scopeFor(IDS.ownerA, { orgId: IDS.orgA, projectId: IDS.projectA1 });
+    const created = await scope.endpointSecrets.create({
+      id: 'eps_new',
+      endpointId: IDS.endpointA1,
+      secretEncrypted: 'v1.k1.x.y.z',
+      version: 2,
+    });
+    expect(created.endpointId).toBe(IDS.endpointA1);
+    expect(db.rows('endpointSecret').has('eps_new')).toBe(true);
+    // And it is visible through the scope that created it, i.e. it really did
+    // land inside this tenant rather than merely being inserted.
+    expect((await scope.endpointSecrets.findById('eps_new'))?.id).toBe('eps_new');
+  });
+
+  it('refuses a parent-scoped create with no parent key at all', async () => {
+    const { db, scope } = await scopeFor(IDS.ownerA, { orgId: IDS.orgA, projectId: IDS.projectA1 });
+    // `as never`: the type already requires `endpointId`, which is the first
+    // line of defence. This asserts the second one, because types are erased and
+    // this layer is called from compiled JavaScript.
     await expectCode(
       scope.endpointSecrets.create({
-        id: 'eps_new',
-        endpointId: IDS.endpointA1,
+        id: 'eps_orphan',
+        secretEncrypted: 'v1.k1.x.y.z',
+        version: 2,
+      } as never),
+      'invalid_request',
+    );
+    expect(db.rows('endpointSecret').has('eps_orphan')).toBe(false);
+  });
+
+  it("refuses a parent-scoped create under another tenant's parent, and writes nothing", async () => {
+    const { db, scope } = await scopeFor(IDS.ownerA, { orgId: IDS.orgA, projectId: IDS.projectA1 });
+    await expectCode(
+      scope.endpointSecrets.create({
+        id: 'eps_cross',
+        endpointId: IDS.endpointB1,
         secretEncrypted: 'v1.k1.x.y.z',
         version: 2,
       }),
+      'not_found',
+    );
+    expect(db.rows('endpointSecret').has('eps_cross')).toBe(false);
+    // Not a single row moved: org B's endpoint still has only its own secret.
+    expect(db.all('endpointSecret').filter((row) => row.endpointId === IDS.endpointB1)).toHaveLength(
+      1,
+    );
+  });
+
+  it('still refuses a create on a table that has no parent to prove', async () => {
+    const { scope } = await scopeFor(IDS.ownerA, { orgId: IDS.orgA, projectId: IDS.projectA1 });
+    // `organizationSelf` gets no PARENT_KEY entry: an organization has no parent
+    // inside the tenant, so creating one is not a tenant-scoped operation.
+    await expectCode(
+      scope.organization.create({ id: 'org_new', name: 'new', slug: 'new' }),
       'internal_error',
     );
   });
@@ -469,12 +525,96 @@ describe('ScopedRepository - bounded reads and deliberate bulk writes (FIX 5)', 
     }
   }
 
-  it('clamps take to the page ceiling and defaults it', async () => {
+  it('clamps take to the page ceiling', async () => {
     const { db, scope } = await scopeFor(IDS.ownerA, { orgId: IDS.orgA, projectId: IDS.projectA1 });
     seedEndpoints(db, 300);
     expect(await scope.endpoints.findMany({ take: 1_000_000 })).toHaveLength(MAX_PAGE_SIZE);
-    expect(await scope.endpoints.findMany()).toHaveLength(DEFAULT_PAGE_SIZE);
     expect(await scope.endpoints.findMany({ take: 10 })).toHaveLength(10);
+  });
+
+  /**
+   * FIX 4. The negative: a truncated read must be distinguishable from a
+   * complete one. `findMany()` with no `take` used to return exactly
+   * `DEFAULT_PAGE_SIZE` rows out of 301 and say nothing, so "disable every
+   * endpoint on suspension" covered 50 and reported success.
+   */
+  it('refuses a defaulted findMany that would silently truncate', async () => {
+    const { db, scope } = await scopeFor(IDS.ownerA, { orgId: IDS.orgA, projectId: IDS.projectA1 });
+    seedEndpoints(db, 300);
+    await expectCode(scope.endpoints.findMany(), 'internal_error');
+  });
+
+  it('still answers a defaulted findMany that fits in one page', async () => {
+    const { db, scope } = await scopeFor(IDS.ownerA, { orgId: IDS.orgA, projectId: IDS.projectA1 });
+    seedEndpoints(db, DEFAULT_PAGE_SIZE - 1);
+    // 49 seeded + endpointA1 = exactly DEFAULT_PAGE_SIZE, and nothing is hidden.
+    expect(await scope.endpoints.findMany()).toHaveLength(DEFAULT_PAGE_SIZE);
+  });
+
+  it('reports whether a page is the whole answer', async () => {
+    const { db, scope } = await scopeFor(IDS.ownerA, { orgId: IDS.orgA, projectId: IDS.projectA1 });
+    seedEndpoints(db, 300);
+
+    const truncated = await scope.endpoints.findPage({ take: 10 });
+    expect(truncated.rows).toHaveLength(10);
+    expect(truncated.hasMore).toBe(true);
+    expect(truncated.nextSkip).toBe(10);
+
+    const complete = await scope.endpoints.findPage({
+      where: { id: IDS.endpointA1 },
+      take: 10,
+    });
+    expect(complete.rows).toHaveLength(1);
+    expect(complete.hasMore).toBe(false);
+    expect(complete.nextSkip).toBeNull();
+
+    // The last page of a walk is complete even though it is full-width upstream.
+    const last = await scope.endpoints.findPage({ take: 200, skip: 200 });
+    expect(last.rows).toHaveLength(101);
+    expect(last.hasMore).toBe(false);
+  });
+
+  it('pages to exhaustion, and stays correct while the handler mutates the rows', async () => {
+    const { db, scope } = await scopeFor(IDS.ownerA, { orgId: IDS.orgA, projectId: IDS.projectA1 });
+    seedEndpoints(db, 300);
+    const seen: string[] = [];
+
+    // The bulk shape from the review: "disable every endpoint on suspension".
+    // The handler is what stops each row matching the predicate, which is
+    // precisely what an offset walk gets wrong.
+    const processed = await scope.endpoints.forEachPage(
+      async (rows) => {
+        for (const row of rows) seen.push(row.id);
+        await scope.endpoints.updateMany(
+          { id: { in: rows.map((row) => row.id) } },
+          { status: 'paused' },
+        );
+      },
+      { where: { status: 'active' }, pageSize: 25 },
+    );
+
+    expect(processed).toBe(301);
+    expect(new Set(seen).size).toBe(301);
+    expect(
+      db
+        .all('endpoint')
+        .filter((row) => row.projectId === IDS.projectA1 && row.status === 'active'),
+    ).toHaveLength(0);
+    // Org B is untouched: the tenant predicate is on every page, not just the first.
+    expect(db.rows('endpoint').get(IDS.endpointB1)?.status).toBe('active');
+  });
+
+  it('applies the ceiling to groupBy and refuses a defaulted rollup that overflows', async () => {
+    const { db, scope } = await scopeFor(IDS.ownerA, { orgId: IDS.orgA, projectId: IDS.projectA1 });
+    seedEndpoints(db, 300);
+    // Grouped by a high-cardinality column: 301 groups, no `take`. This used to
+    // be an unbounded read - the ceiling only applied when `take` was given.
+    await expectCode(scope.endpoints.groupBy({ by: ['id'], _count: true }), 'internal_error');
+    // An explicit take is the caller declaring a page, and is honoured and clamped.
+    expect(await scope.endpoints.groupBy({ by: ['id'], take: 1_000_000 })).toHaveLength(
+      MAX_PAGE_SIZE,
+    );
+    expect(await scope.endpoints.groupBy({ by: ['id'], take: 5 })).toHaveLength(5);
   });
 
   it('refuses an unfiltered bulk delete', async () => {
@@ -482,6 +622,46 @@ describe('ScopedRepository - bounded reads and deliberate bulk writes (FIX 5)', 
     await expectCode(scope.endpoints.deleteMany(undefined as never), 'internal_error');
     await expectCode(scope.endpoints.deleteMany({}), 'internal_error');
     expect(db.rows('endpoint').has(IDS.endpointA1)).toBe(true);
+  });
+
+  /**
+   * FIX 2. The guard counted keys, so the empty CONJUNCTION walked past it:
+   * `{ AND: [] }` has one key, constrains nothing, and matched every row in the
+   * organization. One character between "refuses an unfiltered bulk write" and
+   * not refusing it.
+   */
+  it('refuses an empty conjunction, which has a key but selects everything', async () => {
+    const { db, scope } = await scopeFor(IDS.ownerA, { orgId: IDS.orgA, projectId: IDS.projectA1 });
+    const shapes: unknown[] = [
+      { AND: [] },
+      { OR: [] },
+      { NOT: {} },
+      { AND: {} },
+      { AND: undefined },
+      { AND: [{}] },
+      { AND: [{ AND: [] }] },
+      { OR: [{ AND: [{ OR: [] }] }] },
+      { AND: [], OR: [] },
+    ];
+    for (const where of shapes) {
+      await expectCode(scope.endpoints.deleteMany(where as never), 'internal_error');
+      await expectCode(
+        scope.endpoints.updateMany(where as never, { status: 'deleted' }),
+        'internal_error',
+      );
+    }
+    // Nothing was rewritten or removed while proving it.
+    expect(db.rows('endpoint').get(IDS.endpointA1)?.status).toBe('active');
+    expect(db.all('endpoint')).toHaveLength(2);
+  });
+
+  it('still allows a conjunction that actually constrains something', async () => {
+    const { db, scope } = await scopeFor(IDS.ownerA, { orgId: IDS.orgA, projectId: IDS.projectA1 });
+    expect(
+      await scope.endpoints.updateMany({ AND: [{ status: 'active' }] }, { status: 'paused' }),
+    ).toBe(1);
+    expect(db.rows('endpoint').get(IDS.endpointA1)?.status).toBe('paused');
+    expect(db.rows('endpoint').get(IDS.endpointB1)?.status).toBe('active');
   });
 
   it('refuses an unfiltered bulk update', async () => {

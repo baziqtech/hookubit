@@ -10,11 +10,11 @@ import { CROSS_TENANT_MESSAGE, TenantResolver } from './tenant-resolver.service'
 import { IDS, requestWith, seedWorld, sessionUser } from './testing/fixtures';
 import { FakeTenantPrisma } from './testing/tenant-prisma.fake';
 
-// The resolver records the specific reason for every refusal at debug level.
+// The resolver records the specific reason for every refusal in the log.
 // Silence it here so the suite's output stays readable; one test below asserts
 // it is still emitted.
 beforeAll(() => {
-  jest.spyOn(Logger.prototype, 'debug').mockImplementation(() => undefined);
+  jest.spyOn(Logger.prototype, 'log').mockImplementation(() => undefined);
 });
 
 /** Asserts the AppError code, which IS the not-found/forbidden policy. */
@@ -369,10 +369,18 @@ describe('TenantResolver - absent and foreign are indistinguishable on the wire'
     }
   });
 
-  it('still records the specific reason for the operator, at debug level only', async () => {
+  /**
+   * FIX 5. The reason went to `logger.debug`, and LOG_LEVEL defaults to `info`
+   * (app.module.ts), so in production it reached nobody: not the client, by
+   * design, and not the log either. "Why did this 404?" at 2am is the question
+   * this product exists to answer, so it is emitted at info and asserted here at
+   * info - a regression back to debug fails this test rather than going quiet.
+   */
+  it('records the specific reason for the operator at info level, never on the wire', async () => {
+    const info = jest.spyOn(Logger.prototype, 'log').mockImplementation(() => undefined);
     const debug = jest.spyOn(Logger.prototype, 'debug').mockImplementation(() => undefined);
     const resolver = buildWithEveryAnchor();
-    await expectCode(
+    const error = await expectCode(
       resolve(
         resolver,
         IDS.ownerA,
@@ -381,7 +389,12 @@ describe('TenantResolver - absent and foreign are indistinguishable on the wire'
       ),
       'not_found',
     );
-    expect(debug).toHaveBeenCalledWith(expect.stringContaining(IDS.orgB));
+    expect(info).toHaveBeenCalledWith(expect.stringContaining(IDS.orgB));
+    expect(debug).not.toHaveBeenCalled();
+    // The reason is for the log alone; the client still learns nothing.
+    expect(error.message).not.toContain(IDS.orgB);
+    expect(error.message).not.toContain(IDS.endpointB1);
+    info.mockRestore();
     debug.mockRestore();
   });
 });

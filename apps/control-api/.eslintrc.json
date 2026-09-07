@@ -27,6 +27,13 @@
     "no-restricted-imports": [
       "error",
       {
+        "paths": [
+          {
+            "name": "@prisma/client",
+            "importNames": ["PrismaClient"],
+            "message": "Inject TenantScopeFactory instead. `new PrismaClient()` is the same unscoped client as PrismaService by another name, so banning the prisma.service path alone left the fence one import away from being walked around. Type-only uses of the generated types (Prisma, Endpoint, Delivery, ...) are unaffected - only the PrismaClient constructor is restricted. If a module genuinely needs it (auth, infrastructure, cli, health), add it to the allowlist in .eslintrc.json and say why in review."
+          }
+        ],
         "patterns": [
           {
             "group": [

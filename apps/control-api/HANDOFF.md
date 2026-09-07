@@ -1376,3 +1376,103 @@ the SQL these tests assume; that the `(endpoint_id, version)` unique index reall
 serialises two concurrent rotations into one `conflict` (the P2002 path is
 exercised with a stubbed error, not a real race); and that `updateById`'s
 `updateMany`-plus-read-back sees its own write under READ COMMITTED.
+
+## Authz residual fixes (2026-09-06) — `src/authz`, `.eslintrc.json`
+
+Five findings from the third pass. Code only, no schema change. `lint`, `build`
+and the whole `src/authz` suite pass.
+
+### FIX 1 — `create` on a parent-scoped table now works, and is stricter
+
+**Landed exactly as specified above.** `PARENT_KEY` (`viaEndpoint → endpointId`,
+`viaDelivery → deliveryId`) sits next to `tenantColumns` in `tenant-scope.ts`, and
+`create` requires the parent key, requires it to be a declared foreign key, and
+resolves it through the sibling scoped repository *before* the insert.
+`organizationSelf` has no entry and stays refused. No change to
+`tenant-scope.factory.ts` was needed.
+
+Net effect: a parent-scoped row cannot be created with no parent, and cannot be
+created under another tenant's parent (404, before any INSERT). That is a
+stronger guarantee than the blanket refusal it replaces.
+
+> **ACTION FOR THE ENDPOINT-SECRETS OWNER: `withCreatableSecrets` in
+> `src/endpoint-secrets/testing/harness.ts` is now obsolete and must be deleted,**
+> along with `testScopeFactory`'s use of it. The suite currently proves the
+> behaviour of a Proxy shim; it should run against the real repository, which
+> implements the same contract. I did not delete it — that file is under review.
+> Everything else in the harness stays.
+
+### FIX 2 — `requirePredicate` counted keys, so the empty conjunction walked past
+
+`updateMany({})` threw; `updateMany({ AND: [] })` did not, and matched every row
+in the tenant — the one guard between a typo and an organization-wide rewrite.
+`isEmptyPredicate` is now recursive: an empty object, an empty/all-empty
+`AND`/`OR`/`NOT`, and nested combinations of those (`{ AND: [{ AND: [] }] }`) are
+all empty at every depth. Deliberately conservative — `{ OR: [] }` arguably means
+"match nothing" in Prisma, and is still refused, because a caller who means
+nothing can say so and the cost of guessing wrong the other way is every row.
+
+### FIX 3 — the lint fence covered a path, not the class
+
+`import { PrismaClient } from '@prisma/client'; new PrismaClient()` was
+unrestricted and handed a feature module the same unscoped client the
+`**/prisma.service` pattern bans. `.eslintrc.json` now carries a `paths` entry
+restricting the **`PrismaClient` import name only**, so type-only imports of the
+generated types (`Prisma`, `Endpoint`, `Delivery`, …) are untouched. Every
+existing allowlist override still applies verbatim, including `**/testing/**` and
+`*.spec.ts`.
+
+### FIX 4 — "I processed everything" is now expressible
+
+`findMany()` truncated at `DEFAULT_PAGE_SIZE` and returned a bare array, so a
+bulk operation over the result ("revoke every API key", "disable every endpoint
+on suspension", "expire every secret older than N") covered 50 rows and reported
+success. Three changes in `tenant-scope.ts`:
+
+- **`findPage(args)` → `Page<T> = { rows, hasMore, nextSkip }`.** Reads `take + 1`
+  and discards the probe row, so a full page is distinguishable from a complete
+  one. `Page` is exported from `src/authz`.
+- **`forEachPage(handler, { where, pageSize })` → number of rows processed.** Pages
+  to exhaustion by **keyset** (`WHERE id > <last seen>`), not by `skip`,
+  deliberately: an offset walk over rows the handler is mutating — the usual
+  reason to want this — shifts the window and skips rows. Iteration order is
+  primary key ascending.
+- **`findMany` with an explicit `take` is unchanged** (the caller declared a page).
+  **`findMany` with no `take` now throws `internal_error` when it would have
+  truncated**, naming `findPage`/`forEachPage`. Every current module caller passes
+  an explicit `take`, so nothing breaks today.
+- **`groupBy` is bounded.** The ceiling applied only when `take` was given; an
+  omitted `take` was an unbounded read. It is now capped at `MAX_PAGE_SIZE`, and a
+  defaulted rollup that overflows throws rather than returning a silently partial
+  one. `orderBy` defaults to the grouped columns ascending, because `take` on a
+  `groupBy` needs an order to be stable (and Prisma requires one).
+
+> **ACTION FOR MODULE OWNERS — two call sites are the dangerous shape:**
+>
+> 1. `src/endpoint-secrets/endpoint-secrets.service.ts` `secretsFor()` reads
+>    `findMany({ where: { endpointId }, take: MAX_PAGE_SIZE })` and then makes
+>    rotation/expiry decisions across the result **as if it were every secret**. At
+>    201 secrets on one endpoint that silently becomes wrong, and it is the exact
+>    "expire every secret older than N" shape. Use `forEachPage`, or `findPage`
+>    and refuse loudly on `hasMore`.
+> 2. The list endpoints in `projects`, `endpoints`, `api-keys` and `members` page
+>    correctly but return no `has_more`/next-cursor to the client, so an API
+>    consumer has the same problem one layer out. `findPage` now gives you the
+>    flag; surfacing it is an API-contract change for `docs/API.md`.
+
+### FIX 5 — the cross-tenant 404 reason was invisible in production
+
+`TenantResolver.crossTenant` logged the per-resource reason at `debug`, and
+`app.module.ts` defaults `LOG_LEVEL` to `info`, so an operator got neither the
+message on the wire (by design) nor the line in the log. It is now
+`logger.log` (info). The reason contains only ids the request already supplied
+plus the organization id we resolved for the caller; it still never crosses the
+wire, and `tenant-resolver.spec.ts` asserts both halves — emitted at info,
+absent from `AppError.message`.
+
+### Note on the test run
+
+`src/members/zz-probe.spec.ts` (untracked, written by the concurrent members
+reviewer) fails with two deliberate probes showing a last-owner race in
+`MembersService`. Unrelated to `src/authz` — it fails identically with these
+changes reverted. Everything else passes: 681 of 683.

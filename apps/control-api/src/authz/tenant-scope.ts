@@ -91,6 +91,25 @@ function tenantColumns(
 }
 
 /**
+ * Tables whose tenancy comes from a parent ROW rather than from a column, and
+ * the foreign key that names that parent. A create against one of these is
+ * legal exactly when that key is present in the payload and resolves inside the
+ * caller's tenant through its own scoped repository - which is the same proof
+ * `create` already demands of every other tenant-owned foreign key.
+ *
+ * This is what makes secret rotation expressible (ARCHITECTURE.md 28): rotation
+ * inserts a NEW `endpoint_secrets` row for an EXISTING endpoint, and there is no
+ * parent transaction to create it alongside.
+ *
+ * `organizationSelf` deliberately has no entry: an organization has no parent
+ * inside the tenant, and creating one is not a tenant-scoped operation.
+ */
+const PARENT_KEY: Partial<Record<TenantScopeKind, string>> = {
+  viaEndpoint: 'endpointId',
+  viaDelivery: 'deliveryId',
+};
+
+/**
  * The columns that carry a row's tenancy. A caller may never supply them, on
  * create or on update: the `where` predicate proves you own the row BEFORE the
  * statement, and says nothing about where the row lands after it. Any OTHER
@@ -108,6 +127,18 @@ const TENANT_COLUMNS: readonly string[] = ['organizationId', 'projectId'];
  */
 export const MAX_PAGE_SIZE = 200;
 export const DEFAULT_PAGE_SIZE = 50;
+
+/**
+ * A bounded read plus the one fact a bare array cannot carry: whether the bound
+ * was reached. `hasMore` is what makes "I processed everything" expressible.
+ */
+export interface Page<TRecord> {
+  rows: TRecord[];
+  /** True when more rows match the predicate than this page carries. */
+  hasMore: boolean;
+  /** `skip` for the next page, or null when this page was the last one. */
+  nextSkip: number | null;
+}
 
 /**
  * The subset of a Prisma model delegate the scoped repository is allowed to
@@ -327,18 +358,119 @@ export class ScopedRepository<
     return { AND: clauses } as TWhere;
   }
 
+  /**
+   * One page of rows, and whether there are more.
+   *
+   * This is the honest `findMany`. Every list read here is bounded (see
+   * `MAX_PAGE_SIZE`), and a bounded read that returns a bare array cannot tell
+   * its caller whether the bound was reached - which is how "revoke every API
+   * key in this project" completes over the first 50 and reports success.
+   */
+  async findPage(args?: {
+    where?: TWhere;
+    orderBy?: TOrderBy;
+    take?: number;
+    skip?: number;
+  }): Promise<Page<TRecord>> {
+    const take = ScopedRepository.pageSize(args?.take);
+    const skip = ScopedRepository.offset(args?.skip) ?? 0;
+    // take + 1: one probe row, discarded, is what turns "I got exactly `take`
+    // rows" - which is ambiguous - into "there are more".
+    const rows = await this.delegate.findMany({
+      where: this.where(args?.where),
+      orderBy: args?.orderBy,
+      take: take + 1,
+      skip,
+    });
+    const hasMore = rows.length > take;
+    return {
+      rows: hasMore ? rows.slice(0, take) : rows,
+      hasMore,
+      nextSkip: hasMore ? skip + take : null,
+    };
+  }
+
+  /**
+   * A page of rows as a plain array.
+   *
+   * `take` is the caller declaring a page size, so a full page is an answer to
+   * the question that was asked. **Omitting `take` is not**: it used to mean an
+   * implicit `DEFAULT_PAGE_SIZE` truncation with nothing on the wire to say so,
+   * and a caller that then looped over the result to revoke keys, disable
+   * endpoints or expire secrets covered 50 rows and reported success. When the
+   * limit was never stated and the result is short of the truth, this now throws
+   * instead of lying. Use `findPage` (a page plus `hasMore`) or `forEachPage`
+   * (paged to exhaustion) - or say `take` and mean it.
+   */
   async findMany(args?: {
     where?: TWhere;
     orderBy?: TOrderBy;
     take?: number;
     skip?: number;
   }): Promise<TRecord[]> {
-    return this.delegate.findMany({
-      where: this.where(args?.where),
-      orderBy: args?.orderBy,
-      take: ScopedRepository.pageSize(args?.take),
-      skip: ScopedRepository.offset(args?.skip),
-    });
+    const page = await this.findPage(args);
+    if (page.hasMore && args?.take === undefined) {
+      throw new AppError(
+        'internal_error',
+        `${this.resourceName}.findMany matched more rows than the default page of ${DEFAULT_PAGE_SIZE} and no 'take' was given, so the array returned would silently be a fraction of the matching rows. Use findPage() and read hasMore, forEachPage() to process all of them, or pass an explicit take.`,
+      );
+    }
+    return page.rows;
+  }
+
+  /**
+   * Every matching row in this tenant, one page at a time, to exhaustion.
+   *
+   * This is the only sanctioned way to say "I processed everything". It pages by
+   * primary key (`WHERE id > <last seen>`), not by `skip`, deliberately: an
+   * offset walk over rows the handler is mutating - the usual reason to want
+   * this - shifts the window under itself and skips rows. The keyset only ever
+   * moves forward, so each row is handed to the handler exactly once even when
+   * the handler is what stops it matching `where`.
+   *
+   * Iteration order is primary key ascending and is not negotiable; a caller who
+   * needs another order wants `findPage`.
+   *
+   * Returns the number of rows handed to `handler`.
+   */
+  async forEachPage(
+    handler: (rows: TRecord[], pageIndex: number) => Promise<void> | void,
+    args?: { where?: TWhere; pageSize?: number },
+  ): Promise<number> {
+    const size = ScopedRepository.pageSize(args?.pageSize);
+    const orderBy = { [this.idField]: 'asc' } as TOrderBy;
+    let cursor: string | undefined;
+    let processed = 0;
+    let pageIndex = 0;
+
+    for (;;) {
+      const where =
+        cursor === undefined
+          ? args?.where
+          : ({
+              AND: [args?.where ?? {}, { [this.idField]: { gt: cursor } }],
+            } as TWhere);
+      const rows = await this.delegate.findMany({
+        where: this.where(where),
+        orderBy,
+        take: size,
+      });
+      if (rows.length === 0) return processed;
+
+      await handler(rows, pageIndex);
+      pageIndex += 1;
+      processed += rows.length;
+
+      const last = (rows[rows.length - 1] as Record<string, unknown>)[this.idField];
+      if (typeof last !== 'string' || last.length === 0) {
+        throw new AppError(
+          'internal_error',
+          `${this.resourceName}.forEachPage cannot page: '${this.idField}' is not a string on the rows it read.`,
+        );
+      }
+      cursor = last;
+      if (rows.length < size) return processed;
+    }
   }
 
   async findFirst(args?: { where?: TWhere; orderBy?: TOrderBy }): Promise<TRecord | null> {
@@ -354,14 +486,37 @@ export class ScopedRepository<
     return this.delegate.aggregate({ ...args, where: this.where(args.where) });
   }
 
-  /** `groupBy`, fenced by the same predicate, with the same paging ceiling. */
+  /**
+   * `groupBy`, fenced by the same predicate, and bounded.
+   *
+   * The ceiling used to apply only when `take` was given, so an omitted `take`
+   * was an unbounded read of a table of raw webhook payloads grouped by a
+   * high-cardinality column - the same exhaustion vector `findMany` was clamped
+   * for. It is now capped at `MAX_PAGE_SIZE`, and an omitted `take` that hits
+   * the cap throws rather than handing a dashboard a silently partial rollup.
+   *
+   * `orderBy` defaults to the grouped columns ascending: `take` on a `groupBy`
+   * needs an order to be meaningful (and Prisma requires one), and picking it
+   * here keeps the bound from changing which groups a caller sees run to run.
+   */
   async groupBy(args: GroupByArgs<TWhere>): Promise<Array<Record<string, unknown>>> {
-    return this.delegate.groupBy({
+    const explicit = args.take !== undefined;
+    const limit = explicit ? ScopedRepository.pageSize(args.take) : MAX_PAGE_SIZE;
+    const groups = await this.delegate.groupBy({
       ...args,
       where: this.where(args.where),
-      take: args.take === undefined ? undefined : ScopedRepository.pageSize(args.take),
+      orderBy: args.orderBy ?? args.by.map((field) => ({ [field]: 'asc' })),
+      take: limit + 1,
       skip: ScopedRepository.offset(args.skip),
     });
+    if (groups.length <= limit) return groups;
+    if (!explicit) {
+      throw new AppError(
+        'internal_error',
+        `${this.resourceName}.groupBy produced more than ${MAX_PAGE_SIZE} groups and no 'take' was given; the array returned would be a silently partial rollup. Narrow the grouping or page it with an explicit take/skip.`,
+      );
+    }
+    return groups.slice(0, limit);
   }
 
   /** Null for "not in this tenant" as well as "does not exist" - same answer. */
@@ -425,15 +580,37 @@ export class ScopedRepository<
    */
   async create(data: ScopedCreateInput<TCreate>): Promise<TRecord> {
     const columns = tenantColumns(this.kind, this.context);
-    if (!columns) {
+    const parentKey = PARENT_KEY[this.kind];
+    if (!columns && !parentKey) {
       throw new AppError(
         'internal_error',
         `${this.resourceName} rows are scoped through a parent and cannot be created by a scoped repository; create them alongside their parent inside a transaction.`,
       );
     }
+
     const payload = this.sanitize(data, 'create');
+
+    if (!columns && parentKey) {
+      // There is no tenant column to stamp: the parent IS the tenancy, so it
+      // must be stated, and it must be a declared foreign key so that
+      // assertForeignKeysOwned below actually resolves it.
+      const parent = payload[parentKey];
+      if (typeof parent !== 'string' || parent.length === 0) {
+        throw new AppError(
+          'invalid_request',
+          `${this.resourceName}: '${parentKey}' is required - it is what places this row in a tenant.`,
+        );
+      }
+      if (!this.foreignKeys[parentKey]) {
+        throw new AppError(
+          'internal_error',
+          `${this.resourceName} does not declare '${parentKey}' in its foreignKeys map; add it in tenant-scope.factory.ts or this row could be created under another tenant's parent.`,
+        );
+      }
+    }
+
     await this.assertForeignKeysOwned(payload);
-    return this.delegate.create({ data: { ...payload, ...columns } as TCreate });
+    return this.delegate.create({ data: { ...payload, ...(columns ?? {}) } as TCreate });
   }
 
   /**
@@ -582,12 +759,36 @@ export class ScopedRepository<
     }
   }
 
+  /**
+   * True for a predicate that constrains nothing.
+   *
+   * Counting keys was not enough: `{ AND: [] }`, `{ OR: [] }`, `{ NOT: {} }` and
+   * `{ AND: [{ AND: [] }] }` all have a key and all still select every row in
+   * the tenant, so the one guard standing between a typo and an organization-wide
+   * rewrite let them through. An empty conjunction is an empty predicate at every
+   * depth, and a combinator whose every branch is empty is empty too.
+   *
+   * Deliberately conservative: a shape that is arguably "matches nothing" rather
+   * than "matches everything" (Prisma reads `{ OR: [] }` that way) is still
+   * refused, because a caller who meant nothing can say so, and the cost of
+   * being wrong in the other direction is every row in the organization.
+   */
+  private static isEmptyPredicate(where: unknown): boolean {
+    if (where === undefined || where === null) return true;
+    if (typeof where !== 'object') return false;
+    if (Array.isArray(where)) return where.every((item) => ScopedRepository.isEmptyPredicate(item));
+
+    const entries = Object.entries(where as Record<string, unknown>);
+    if (entries.length === 0) return true;
+    return entries.every(
+      ([key, value]) =>
+        (key === 'AND' || key === 'OR' || key === 'NOT') &&
+        ScopedRepository.isEmptyPredicate(value),
+    );
+  }
+
   private requirePredicate(where: TWhere | undefined, method: string): void {
-    const empty =
-      where === undefined ||
-      where === null ||
-      (typeof where === 'object' && Object.keys(where as object).length === 0);
-    if (empty) {
+    if (ScopedRepository.isEmptyPredicate(where)) {
       throw new AppError(
         'internal_error',
         `${this.resourceName}.${method} requires an explicit where clause; an unfiltered bulk write would affect every row in the tenant.`,
