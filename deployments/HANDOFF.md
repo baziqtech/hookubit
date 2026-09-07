@@ -33,6 +33,7 @@ Apply with `kubectl apply -k deployments/kubernetes`.
 | `33-worker.yaml` | `webhookd worker` Deployment + HPA (2–8, a database ceiling) |
 | `40-pdb.yaml` | PodDisruptionBudgets for everything except the scheduler |
 | `41-ingress.yaml` | Two Ingresses: app host and ingest host |
+| `50-networkpolicy.yaml` | Default-deny + five allow policies. **In the kustomization** — read its header before applying |
 
 All four Go roles run **one image**, `ghcr.io/shaq/webhook-data-plane`, and
 differ only by argv (ADR-0005).
@@ -59,7 +60,7 @@ delivery waits out `DELIVERY_LEASE_SECONDS` before another worker reclaims it),
 
 `Chart.yaml` (v0.1.0, `kubeVersion >=1.25`, **no dependencies** — a bundled
 PostgreSQL subchart is the fastest way to lose delivery history to a
-`helm uninstall`), `values.yaml`, `values.schema.json`, eleven templates and
+`helm uninstall`), `values.yaml`, `values.schema.json`, twelve templates and
 `NOTES.txt` carrying the six-step install.
 
 `values.schema.json` makes `externalDatabase.url` **required**, with a
@@ -95,9 +96,15 @@ them. Three jobs added:
 - **`dockerfile-lint`** — hadolint over all three Dockerfiles,
   `failure-threshold: warning`.
 - **`manifests`** — `helm lint`, `helm template`, `kubeconform -strict` over both
-  the rendered chart and the raw manifests, plus two guardrail steps: the chart
-  must *fail* to lint with default values, and no database may appear in the
-  manifests.
+  the rendered chart and the raw manifests, plus three guardrail steps: the
+  chart must *fail* to lint with default values, no database may appear in the
+  manifests, and the default-deny NetworkPolicies must survive a render with
+  the private ranges still excluded from the worker's egress.
+- **`supply-chain`** — `pnpm audit` (gate: production tree, `critical`; full
+  tree reported non-blocking) and `gitleaks` over both git history and the
+  working tree, configured by `.github/gitleaks.toml`.
+
+The workflow carries a top-level `permissions: { contents: read }`.
 
 ---
 
@@ -383,13 +390,256 @@ Actually executed:
   mentions an identifier outside those three, CI will say so — which is the
   intent, but the first run on this branch is the first real execution.
 
+---
+
+## Follow-up pass (this one)
+
+Four things were cleared. `helm` v3.16.3, `kubeconform` v0.6.7 and `gitleaks`
+v8.30.1 really ran; **Docker's daemon was not running, so no image was built**
+and nothing was applied to a cluster.
+
+### 1. `services/data-plane/go.mod` now says `go 1.23`
+
+Was follow-up 1. CI, both Dockerfiles and go.mod now name the same version, and
+the stale comment in `ci.yml`'s `env:` block explaining the mismatch is gone.
+
+Verified by running `go build ./...`, `go vet ./...` and `go test -count=1 ./...`
+under a real go1.23.4 toolchain — all pass. `go mod tidy` leaves the file
+unchanged apart from that one line, which is what the `data-plane` job's
+`git diff --exit-code go.mod go.sum` step asserts.
+
+### 2. Dashboard transport
+
+`deployments/docker/dashboard.Dockerfile` now takes
+`ARG VITE_API_TRANSPORT`, **defaulting to `mock`**.
+
+The default is deliberate and is written down in the Dockerfile as well as
+here. The control API today exposes auth, health, organizations, members,
+projects, api-keys, endpoints and endpoint-secrets — and nothing else. An image
+built with `http` right now would 404 on events, deliveries, attempts,
+subscriptions and replay, which reads as an outage rather than as an unfinished
+feature. The mock build is not silent: `apps/dashboard/src/components/DemoDataBanner.tsx`
+renders a non-dismissible "Demo data — not connected to an API" bar on every
+page including the auth pages.
+
+> **═══ FLIP IT WHEN THE CONTROL API IS FEATURE-COMPLETE ═══**
+>
+> One line in `deployments/docker/dashboard.Dockerfile`:
+>
+> ```dockerfile
+> ARG VITE_API_TRANSPORT=http
+> ```
+>
+> Or, without editing the file:
+> `docker build --build-arg VITE_API_TRANSPORT=http -f deployments/docker/dashboard.Dockerfile .`
+>
+> Nothing else changes. When it is flipped, `src/lib/mock/` can be deleted and
+> the banner goes with it.
+
+The value is passed on the `RUN` line rather than through
+`ENV VITE_API_TRANSPORT=${VITE_API_TRANSPORT}` — a self-referential ENV is
+hadolint DL3044, and the `dockerfile-lint` job fails at `warning`.
+
+Verified without Docker, at the layer that actually matters: the dashboard was
+built twice on this machine. With no environment variable, the string
+`Demo data` is present in `dist/assets/*.js`. With `VITE_API_TRANSPORT=http`
+exported into the build, it is **absent** — Vite reads `VITE_`-prefixed vars
+from `process.env` and tree-shakes the mock away. So the ARG reaches the bundle;
+the untested part is only the `docker build --build-arg` plumbing around it.
+
+### 3. Prisma-in-the-deploy-tree: **the Dockerfile fix still works**
+
+Re-verified against the current control API (six new modules, a new authz
+layer), by reproducing the deploy tree with pnpm exactly as the earlier review
+did:
+
+- `pnpm deploy --filter @webhook/control-api --prod <tmp>` — the tree contains
+  **no `prisma` CLI** (`node_modules/.bin` has none), confirming `--prod` still
+  strips it.
+- `require('@prisma/client')` in that tree still throws
+  `Cannot find module '.prisma/client/default'`. **The defect is unchanged and
+  the Dockerfile's second `prisma generate` is still load-bearing.**
+- Running the Dockerfile's exact repair —
+  `pnpm --filter @webhook/control-api exec prisma generate --schema=<tmp>/prisma/schema.prisma`
+  — then `new PrismaClient()` under `env -i` with cwd `/` (no `DATABASE_URL`,
+  no cwd, which is what the build-time `node --eval` assertion does):
+  **constructs, with 24 model delegates.**
+
+So the image is fine. Follow-up 2 below stands unchanged: the durable one-line
+fix is still the control-api owner's, and it is now worth more than it was —
+`prisma` in `dependencies` deletes the second generate, the whole `migrate`
+Dockerfile target, its CI matrix entry, `migrations.image` in the chart and the
+separate migrate image in compose.
+
+### 4. NetworkPolicies — default-deny, on by default
+
+Was follow-up 5. `deployments/kubernetes/50-networkpolicy.yaml` (in the
+kustomization) and `deployments/helm/webhook-platform/templates/networkpolicy.yaml`
+(`networkPolicy.enabled: true`).
+
+**Why on by default.** `internal/egress/ssrf.go` is good code and it is one
+process making one decision about URLs a customer typed into a form. A
+DNS-rebinding race it does not win, a redirect path that skips the check, or a
+future `http.Client` built somewhere else all end with a worker pod opening a
+socket to 10.x or to 169.254.169.254. A security control that is opt-in is a
+security control nobody has.
+
+Six policies:
+
+| Policy | Effect |
+|---|---|
+| `default-deny` | Empty podSelector, `[Ingress, Egress]`. A workload added later is denied by omission, not allowed by it |
+| `allow-dns` | :53 to `kube-system` only |
+| `allow-datastore-egress` | Control API + four Go roles + migrate Job → RFC1918/RFC6598, **ports 5432/6432/6379 only** |
+| `allow-worker-public-egress` | **Worker only** → `0.0.0.0/0` minus eleven private/reserved ranges, all ports |
+| `allow-http-ingress` | :3000 (control API) and :8080 (dashboard, ingest) |
+| `allow-metrics-scrape` | :9090 on the four Go roles |
+
+The datastore rule is the one that demotes the SSRF guard from load-bearing to
+redundant: those pods *can* reach `10.0.0.0/8`, but only on datastore ports, so
+a forged request to an internal HTTP service, to the API server on 443, or to
+the metadata endpoint on 80 is dropped by the kernel whatever the process
+intended. All ports on the public rule, deliberately: `ssrf.go` constrains the
+*scheme* to http/https, not the port, so `https://hooks.example.com:8443` is a
+legal endpoint and a 80/443-only rule would drop those deliveries into a retry
+loop with no diagnosable cause. Only the worker gets it — the router, scheduler
+and ingest never dial a customer.
+
+**Two ways this breaks an install. Check both before applying.**
+
+1. **Your CNI must enforce NetworkPolicy.** Calico, Cilium, Antrea and Weave do.
+   Stock EKS (amazon-vpc-cni with no policy agent), flannel, and a default
+   kind/minikube **accept these objects and ignore them** — which is worse than
+   nothing, because you will believe you are covered. Verify with a test pod.
+2. **A database on a public address is not covered.** `datastoreCidrs` is
+   private space; Neon, Upstash, Supabase and a public RDS endpoint are not in
+   it, and the control plane will fail readiness with a connection timeout. Add
+   the provider's range to `networkPolicy.datastoreCidrs` (or the raw
+   `allow-datastore-egress` rule), or set `networkPolicy.enabled: false` and put
+   that in your runbook.
+
+Tighten `networkPolicy.ingressControllerNamespace` and `.monitoringNamespace`
+once you know them — empty means "from anywhere in the cluster, on the service
+ports only". IPv6 egress is **not** granted (a dual-stack cluster cannot reach
+an IPv6-only customer endpoint); adding it means an `ipBlock` on `::/0` with
+`fc00::/7`, `::1/128`, `fe80::/10` and `64:ff9b::/96` excepted — never a bare
+`::/0`, which re-opens the NAT64 spelling of the metadata address `ssrf.go`
+closes. `networkPolicy.extraEgress` is the hatch for that and for OTLP
+collectors, SMTP relays and the like.
+
+A new `manifests` step, **Default-deny NetworkPolicies survive a render**,
+fails if the rendered chart has no NetworkPolicy, no `default-deny`, if
+`50-networkpolicy.yaml` leaves the kustomization, or if any of
+`169.254.0.0/16`, `10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16` or
+`127.0.0.0/8` stops being excluded from the worker's egress in either the chart
+or the raw manifests. The point is that the metadata block cannot be quietly
+trimmed out of `blockedEgressCidrs`.
+
+### 5. CI: a `permissions:` block, dependency audit, secret scanning
+
+**Least privilege.** `ci.yml` had no top-level `permissions:`, so the repository
+default applied to `GITHUB_TOKEN` — read-write `contents` on an older repo or
+org, which a compromised action or a malicious transitive dependency in a build
+step can push with. It is now `permissions: { contents: read }` at workflow
+level. Nothing here publishes anything; a job that ever needs more should raise
+it in its own block.
+
+**New `supply-chain` job.** `pnpm audit` plus `gitleaks` v8.30.1 (pinned
+tarball, not `gitleaks-action`, which demands a `GITLEAKS_LICENSE` for
+organisation-owned repositories and fails closed without one).
+
+Both gates were measured before being written, because a check that merges red
+is a check nobody reads:
+
+- **The audit gate is `--prod --audit-level=critical`.** On the day it was
+  written the full tree had 34 advisories (1 critical, 11 high) and the
+  production tree had 21 (0 critical, 7 high). Gating on `high` would have
+  merged permanently red. The single critical is vitest's dev-server file read
+  (GHSA-5xrq-8626-4rwp) — dev-only, in no image, hence `--prod`. A second,
+  non-blocking step prints the **full** audit to the job summary on every run,
+  so the highs stay visible rather than silently excluded.
+- **Secret scanning runs twice** — `detect` over history at `fetch-depth: 0` (a
+  credential committed and later deleted is still in the objects) and
+  `detect --no-git` over the working tree.
+
+**`.github/gitleaks.toml`** keeps every default rule on and allowlists only the
+*shape* of this repo's synthetic fixtures: the literal run `0123456789abcdef`,
+one base64 test token, and bare `VAR=` env names in docs. It deliberately does
+**not** exempt `*_test.go` or `*.spec.ts` by path — test files are one of the
+most common places a real credential actually gets committed, and a path
+allowlist would turn the job into a check that passes because it stopped
+looking. The only path entries are `dist/`, `node_modules/`, `.pnpm-store/` and
+`coverage/`.
+
+> **Dependency audit — for the control-api and dashboard owners.** Seven `high`
+> advisories in the **production** tree today: four in `multer` (all DoS, via
+> `@nestjs/platform-express`), two in `js-yaml` (quadratic CPU, via
+> `@nestjs/swagger`) and one in `lodash` (code injection via `_.template`).
+> They are dependency bumps in `apps/control-api` and `apps/dashboard`, not a
+> CI change. **Once they are cleared, tighten the gate to
+> `pnpm audit --prod --audit-level=high`** — it is one word in
+> `.github/workflows/ci.yml`.
+
+### What this pass verified, and what it did not
+
+**Actually executed on this machine:**
+
+- `go build` / `go vet` / `go test -count=1 ./...` in `services/data-plane`
+  under go1.23.4: all pass. `go mod tidy` produces no further diff.
+- The pnpm deploy-tree reproduction, both directions: the client is missing
+  before the second `prisma generate` and constructs after it, under `env -i`
+  with cwd `/`.
+- Two real dashboard builds proving `VITE_API_TRANSPORT` reaches the bundle
+  (`Demo data` present with the default, absent with `http`).
+- `helm lint` clean; `helm template` renders **28** resources (was 22 — the six
+  new policies); `kubeconform -strict -kubernetes-version 1.29.0` reports
+  **28/28 valid** for the chart and **29 valid / 1 skipped** for the raw
+  manifests (the skip is `kustomization.yaml`).
+- `networkPolicy.enabled=false` renders **zero** NetworkPolicies;
+  `extraEgress`, `ingressControllerNamespace` and `monitoringNamespace` all
+  render correctly and kubeconform-validate; `values.schema.json` rejects a
+  malformed CIDR with the pattern error.
+- The new "Default-deny NetworkPolicies survive a render" guard script, run
+  by hand: passes, and **fails correctly under two negative controls** — a
+  render with `networkPolicy.enabled=false`, and a render with
+  `169.254.0.0/16` removed from `blockedEgressCidrs`.
+- The existing "no bundled database" greps still pass against the new files.
+- `gitleaks` v8.30.1: 8 findings before the config (all synthetic — inspected
+  unredacted, every one is `0123456789abcdef` filler, a base64 of
+  "forged-token-that-unlocks-the-account", or a bare `ENCRYPTION_KEY=`),
+  **0 findings after it**, over both history and working tree. **Negative
+  control:** a realistic `sk_live_…` key planted in a `_test.go` — the file kind
+  a path allowlist would have exempted — still trips the scan.
+- `pnpm audit`, four ways, for the numbers quoted above.
+- `ci.yml` and every changed YAML file parse; the job and step lists are as
+  intended.
+
+**Not verified:**
+
+- **No image was built. Docker's daemon was not running.** The dashboard ARG is
+  proven at the Vite layer, not the image layer; `docker build --build-arg` has
+  never run here. Same for the control-api Dockerfile's second
+  `prisma generate` — proven at the pnpm layer, as before.
+- **Nothing was applied to a cluster.** kubeconform checks shape. It does not
+  check that a CNI enforces these policies, that the worker can still reach a
+  real customer endpoint through them, or that the control API can still reach
+  its database. **The NetworkPolicies are the change in this pass with the
+  largest blast radius and they have never run.** Apply them to staging and
+  watch readiness before production.
+- **`hadolint` was not run.** Its macOS binary segfaults on this machine. The
+  `ENV`-avoidance in the dashboard Dockerfile is reasoning about DL3044, not a
+  lint result — the `dockerfile-lint` job is its first real test.
+- **The `supply-chain` job has never run on a GitHub runner.** The gitleaks
+  release URL was confirmed to resolve (HTTP 200) and the binary works locally,
+  but on `linux_x64` rather than `darwin_x64`.
+
+---
+
 ## Known issues and follow-ups, in priority order
 
-1. **`services/data-plane/go.mod` still says `go 1.21`.** Not mine to change —
-   the data-plane owner should raise it to 1.23. It is not currently a
-   conflict: `go 1.21` is the minimum *language* version, and CI and the
-   Dockerfile both run the 1.23 toolchain against it. CI now carries a comment
-   saying so, and the version lives in one `GO_VERSION` variable.
+1. ~~**`services/data-plane/go.mod` still says `go 1.21`.**~~ **DONE** — it is
+   `go 1.23`, matching `GO_VERSION` and both Dockerfiles. Build, vet and the
+   full test suite pass under go1.23.4.
 2. **`prisma` is still a devDependency of `apps/control-api`, and that is the
    root cause of two of the fixes above.** It forces the second
    `prisma generate` in the Dockerfile, the whole `migrate` target, its CI
@@ -413,12 +663,14 @@ Actually executed:
 4. **No image publishing.** CI builds but never pushes. Someone has to decide
    the registry, the tagging scheme and the release trigger. The manifests
    currently reference `ghcr.io/shaq/webhook-*:0.1.0`, which does not exist yet.
-5. **No NetworkPolicies.** The namespace is labelled for PSA `restricted` but
-   nothing restricts pod-to-pod or egress traffic. Egress policy is genuinely
-   awkward here — workers must reach arbitrary customer URLs by design, so the
-   policy has to be "deny RFC1918 and metadata, allow the internet", which
-   duplicates the in-process SSRF guard at a second layer. Worth doing;
-   deliberately out of scope for this pass.
+5. ~~**No NetworkPolicies.**~~ **DONE, but never applied to a cluster** — see
+   "NetworkPolicies" above. Six policies in both the raw manifests and the
+   chart, on by default, with a CI guard that stops the metadata range being
+   trimmed out of the worker's egress exclusions. **The two ways it can break
+   an install (a CNI that does not enforce policy; a database on a public
+   address) are documented there and you must check both.** Remaining work:
+   set `ingressControllerNamespace` / `monitoringNamespace` to your real
+   namespaces, and decide whether you need the IPv6 egress rule.
 6. **No `preStop` hook on ingest or the control API.** Endpoint removal and
    SIGTERM race, so a small number of in-flight requests can hit a pod already
    shutting down. The Go readiness flag flips to draining on SIGTERM, which
@@ -447,3 +699,29 @@ Actually executed:
     generator.** Adding a hand-written index Prisma cannot express means adding
     its name there by hand. That is deliberate — it forces the person adding it
     to write down why — but it is a step that is easy to forget.
+
+12. **Tighten the dependency-audit gate to `--audit-level=high`** once the seven
+    production `high` advisories are cleared (multer x4, js-yaml x2, lodash x1
+    — all transitive, all dependency bumps in `apps/control-api` and
+    `apps/dashboard`). One word in `.github/workflows/ci.yml`.
+
+13. **Flip `ARG VITE_API_TRANSPORT` to `http`** in
+    `deployments/docker/dashboard.Dockerfile` when the control API serves the
+    events, deliveries, attempts, subscriptions and replay endpoints. One line.
+    The dashboard's demo banner and `src/lib/mock/` can be deleted in the same
+    change.
+
+14. **`dependency-review-action` was considered and not added.** It is the
+    better tool for a pull request — it diffs the manifests and only flags what
+    the PR *introduces*, rather than the whole tree — but it needs the
+    Dependency Graph enabled, and on a private repository it needs GitHub
+    Advanced Security. Neither could be confirmed from here, and an action that
+    hard-fails on every PR because a feature is not licensed is worse than the
+    `pnpm audit` gate that is there now. Add it (with `permissions:
+    contents: read, pull-requests: write`) once the repo's plan is known.
+
+15. **The NetworkPolicies have never been enforced by a real CNI.** Highest
+    remaining risk in this pass. Apply to staging, confirm with a test pod that
+    egress to `169.254.169.254` and to an internal HTTP service is actually
+    dropped from a worker pod, and that the control API still reaches its
+    database — then promote.

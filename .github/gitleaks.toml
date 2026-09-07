@@ -1,0 +1,68 @@
+# gitleaks configuration for the CI `supply-chain` job.
+#
+# THE RULE THIS FILE FOLLOWS: suppress the SHAPE of a known-synthetic value,
+# never the file or directory it lives in.
+#
+# The tempting fix for a false positive is `paths = ['''.*_test\.go$''']` or
+# `.*\.spec\.ts$`. Do not do that. Test files and fixtures are one of the most
+# common places a real credential actually gets committed - someone pastes a
+# live key to reproduce a bug and never takes it out. Excluding them turns this
+# job into a check that passes because it stopped looking.
+#
+# Everything below is allowlisted by matching the SECRET ITSELF, so the same
+# file still fails on a credential that does not have one of these shapes.
+#
+# Baseline when this was written: gitleaks 8.30.1 found eight findings across
+# the repository, all synthetic - four `0123456789abcdef` filler keys in
+# apps/control-api and services/data-plane tests, one base64 of the ASCII
+# string "forged-token-that-unlocks-the-account", and one bare `ENCRYPTION_KEY=`
+# in an ARCHITECTURE.md shell snippet with no value after it.
+
+[extend]
+# Every default rule stays on. This file only adds allowlists.
+useDefault = true
+
+[[allowlists]]
+description = """
+Sequential-filler test keys. A secret containing the literal run
+0123456789abcdef is a fixture by construction - no generator produces it. This
+covers wk_live_/wk_test_/sk_live_ fixtures in apps/control-api and
+services/data-plane without exempting the files they live in, so a real key
+pasted beside one still fails the build.
+"""
+regexTarget = "secret"
+regexes = ['''0123456789abcdef''']
+
+[[allowlists]]
+description = """
+The deliberately-obvious forged token in apps/control-api's mailer tests: this
+is base64 of the ASCII string "forged-token-that-unlocks-the-account". It is
+matched literally, so it stops being allowlisted the moment it changes.
+"""
+regexTarget = "secret"
+regexes = ['''Zm9yZ2VkLXRva2VuLXRoYXQtdW5sb2Nrcy10aGUtYWNjb3VudA''']
+
+[[allowlists]]
+description = """
+An environment variable NAME with no value after it - `JWT_SECRET=` /
+`ENCRYPTION_KEY=` in a documentation shell snippet. The regex is anchored and
+requires the string to end at the `=`, so `ENCRYPTION_KEY=hunter2` is still a
+finding.
+"""
+regexTarget = "secret"
+regexes = ['''^[A-Z][A-Z0-9_]{2,40}=$''']
+
+[[allowlists]]
+description = """
+Build output and installed packages. These are gitignored, so CI never sees
+them, but a local `gitleaks detect --no-git` walks the working tree and would
+otherwise re-report every finding twice - once from src/, once from dist/.
+This is a PATH allowlist and is the only one in this file; it is safe because
+nothing here is a source of truth. Do not add source directories to it.
+"""
+paths = [
+  '''(^|/)dist/''',
+  '''(^|/)node_modules/''',
+  '''(^|/)\.pnpm-store/''',
+  '''(^|/)coverage/''',
+]

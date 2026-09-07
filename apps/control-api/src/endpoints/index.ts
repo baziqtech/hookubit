@@ -1,6 +1,7 @@
 export { EndpointsModule } from './endpoints.module';
 export { EndpointsService } from './endpoints.service';
-export { ENDPOINT_LIMITS } from './endpoint-limits';
+export { BooleanQuery } from './dto';
+export { ENDPOINT_LIMITS, MAX_ENDPOINTS_PER_PROJECT } from './endpoint-limits';
 export {
   MAX_CUSTOM_HEADERS,
   RESERVED_HEADER_NAMES,

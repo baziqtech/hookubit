@@ -9,6 +9,7 @@ import {
   Patch,
   Post,
   Query,
+  UseGuards,
 } from '@nestjs/common';
 import {
   ApiAcceptedResponse,
@@ -23,6 +24,7 @@ import {
   ApiTags,
 } from '@nestjs/swagger';
 import { Authorized, RequestContext, Tenant } from '../authz';
+import { Throttle, ThrottleGuard } from '../common/throttle.guard';
 import { PageQueryDto } from '../organizations';
 import {
   InvitationAcceptedDto,
@@ -44,9 +46,20 @@ import { MembersService } from './members.service';
  * tenant, and it is resolved through `scope.members.requireById`, which ANDs
  * the tenant predicate into the WHERE clause - a member id from another
  * organization matches zero rows and answers 404, never 403.
+ *
+ * `POST` is throttled, and it is the one route here that needs it: it is an
+ * outbound-mail primitive. The invitation carries an attacker-chosen
+ * organization name (up to 200 characters), goes to any address the caller
+ * names, and leaves from the platform's own sending domain - i.e. a member with
+ * `members.write` had an unlimited, reputable-domain mail cannon. The limit is
+ * charged per address AND per recipient, so neither one caller nor one victim
+ * mailbox can be used without bound.
  */
+const HOUR = 60 * 60 * 1000;
+
 @ApiTags('members')
 @ApiCookieAuth('session')
+@UseGuards(ThrottleGuard)
 @Controller('organizations/:orgId/members')
 export class MembersController {
   constructor(private readonly members: MembersService) {}
@@ -66,6 +79,10 @@ export class MembersController {
 
   @Post()
   @Authorized('members.write')
+  // `byBodyField: 'email'` is the important half: it caps how many invitations
+  // one MAILBOX can be sent, across every caller and organization on the
+  // platform. The address is hashed before it becomes a bucket key.
+  @Throttle({ name: 'members.invite', limit: 20, windowMs: HOUR, byBodyField: 'email' })
   @HttpCode(HttpStatus.ACCEPTED)
   @ApiOperation({
     summary: 'Invite someone to the organization',

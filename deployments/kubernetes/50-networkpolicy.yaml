@@ -1,0 +1,199 @@
+# NetworkPolicies: default-deny, then the narrowest set of holes the platform
+# actually needs.
+#
+# WHY THIS FILE EXISTS. `internal/egress/ssrf.go` resolves every customer URL
+# and refuses RFC1918, loopback, link-local and the cloud metadata address -
+# including the IPv4-mapped and NAT64 spellings of 169.254.169.254. It is good
+# code, and it is ONE process making ONE decision. A DNS-rebinding race it does
+# not win, a redirect path that skips the check, a future code path that builds
+# its own http.Client, or a dependency with a request-forging bug all end with a
+# worker pod - which by design dials URLs a customer typed into a form - opening
+# a socket to 10.x or to the instance metadata endpoint. A second layer that
+# lives in the kernel and knows nothing about Go is what makes the guard stop
+# being a single point of failure.
+#
+# THE MODEL:
+#   * everything is denied, ingress and egress;
+#   * DNS is allowed to kube-dns only;
+#   * the control API and the four Go roles may reach private address space
+#     ONLY on datastore ports (PostgreSQL 5432, PgBouncer 6432, Redis 6379).
+#     An SSRF to http://10.0.0.5/ is refused by the kernel: wrong port.
+#   * ONLY the worker may reach the public internet - all ports, because a
+#     customer endpoint may legitimately be on :8443, but with every private
+#     range subtracted. The router, scheduler and ingest never dial a customer,
+#     so they get no internet egress at all;
+#   * IPv6 egress is not granted. On a dual-stack cluster this denies IPv6-only
+#     customer endpoints. Fixing that means an `- ipBlock: {cidr: "::/0", ...}`
+#     with fc00::/7, ::1/128, fe80::/10 and 64:ff9b::/96 in `except` - do not
+#     add a bare ::/0, it re-opens the NAT64 metadata path ssrf.go closes.
+#
+# ═══ BEFORE YOU APPLY THIS ═══
+# 1. Your CNI must enforce NetworkPolicy. Calico, Cilium, Antrea and Weave do.
+#    On stock EKS (amazon-vpc-cni without the policy agent), flannel, or a
+#    kind/minikube default, these objects are ACCEPTED AND IGNORED - you get
+#    the illusion of a control, which is worse than none. Verify with a test
+#    pod before believing this file.
+# 2. If your database or Redis is NOT in private address space - a public
+#    Neon/Upstash/Supabase host, say - the datastore rule below does not cover
+#    it. Add its egress CIDR, or the control plane cannot reach its database.
+# 3. The ingress rules deliberately do not name your ingress controller's
+#    namespace, because this repo cannot know it. They allow the service ports
+#    from anywhere in the cluster, which still removes lateral access to every
+#    OTHER port. TIGHTEN THEM: add a namespaceSelector for your controller.
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny
+  namespace: webhook-platform
+  labels:
+    app.kubernetes.io/name: webhook-platform
+    app.kubernetes.io/part-of: webhook-platform
+spec:
+  # Empty podSelector = every pod in the namespace. Both directions, so a
+  # workload added later is denied by default rather than allowed by omission.
+  podSelector: {}
+  policyTypes: [Ingress, Egress]
+---
+# DNS. Without this every other rule is theatre: the datastore hostname, and
+# every customer hostname, has to resolve first.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-dns
+  namespace: webhook-platform
+  labels:
+    app.kubernetes.io/name: webhook-platform
+    app.kubernetes.io/part-of: webhook-platform
+spec:
+  podSelector: {}
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              # Set automatically by the API server since Kubernetes 1.21.
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - { protocol: UDP, port: 53 }
+        - { protocol: TCP, port: 53 }
+---
+# Datastores. Private address space, datastore ports only.
+#
+# This is the rule that makes the SSRF guard redundant rather than load-bearing:
+# these pods CAN reach 10.0.0.0/8, but only on 5432/6432/6379, so a forged
+# request to an internal HTTP service, a Kubernetes API server on 443, or the
+# metadata endpoint on 80 is dropped by the kernel regardless of what the
+# process intended.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-datastore-egress
+  namespace: webhook-platform
+  labels:
+    app.kubernetes.io/name: webhook-platform
+    app.kubernetes.io/part-of: webhook-platform
+spec:
+  podSelector:
+    matchExpressions:
+      - key: app.kubernetes.io/component
+        operator: In
+        values: [control-api, ingest, router, scheduler, worker, migrate]
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - ipBlock: { cidr: 10.0.0.0/8 }
+        - ipBlock: { cidr: 172.16.0.0/12 }
+        - ipBlock: { cidr: 192.168.0.0/16 }
+        # Pod/service CIDRs on EKS and GKE frequently land here.
+        - ipBlock: { cidr: 100.64.0.0/10 }
+      ports:
+        - { protocol: TCP, port: 5432 }  # PostgreSQL direct
+        - { protocol: TCP, port: 6432 }  # PgBouncer (ARCHITECTURE.md 36)
+        - { protocol: TCP, port: 6379 }  # Redis
+---
+# Customer webhook delivery. The worker, and only the worker.
+#
+# All ports: a customer endpoint on https://hooks.example.com:8443 is legal and
+# `internal/egress/ssrf.go` permits it (it constrains the SCHEME to http/https,
+# not the port). Restricting this to 80/443 would silently drop those deliveries
+# into a retry loop with no diagnosable cause.
+#
+# The `except` list is the layer-3 mirror of ssrf.go's blocklist. Every entry is
+# a range a customer URL must never resolve to.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-worker-public-egress
+  namespace: webhook-platform
+  labels:
+    app.kubernetes.io/name: webhook-platform
+    app.kubernetes.io/part-of: webhook-platform
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/component: worker
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 0.0.0.0/8          # "this network"
+              - 10.0.0.0/8         # RFC1918
+              - 100.64.0.0/10      # RFC6598 CGNAT - EKS/GKE pod space
+              - 127.0.0.0/8        # loopback
+              - 169.254.0.0/16     # link-local: 169.254.169.254 lives here
+              - 172.16.0.0/12      # RFC1918
+              - 192.0.0.0/24       # IETF protocol assignments
+              - 192.168.0.0/16     # RFC1918
+              - 198.18.0.0/15      # benchmarking
+              - 224.0.0.0/4        # multicast
+              - 240.0.0.0/4        # reserved
+---
+# Ingress: the two HTTP surfaces the Ingress objects in 41-ingress.yaml front.
+#
+# TIGHTEN ME - see note 3 in the header. Adding
+#   - namespaceSelector: { matchLabels: { kubernetes.io/metadata.name: ingress-nginx } }
+# under `from` restricts this to your controller instead of the whole cluster.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-http-ingress
+  namespace: webhook-platform
+  labels:
+    app.kubernetes.io/name: webhook-platform
+    app.kubernetes.io/part-of: webhook-platform
+spec:
+  podSelector:
+    matchExpressions:
+      - key: app.kubernetes.io/component
+        operator: In
+        values: [control-api, dashboard, ingest]
+  policyTypes: [Ingress]
+  ingress:
+    - ports:
+        - { protocol: TCP, port: 3000 }  # control API
+        - { protocol: TCP, port: 8080 }  # dashboard (nginx-unprivileged) and ingest
+---
+# Prometheus scrape. Data-plane pods carry prometheus.io/scrape annotations and
+# serve /metrics on 9090; the control API serves its own on 3000, already
+# allowed above.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-metrics-scrape
+  namespace: webhook-platform
+  labels:
+    app.kubernetes.io/name: webhook-platform
+    app.kubernetes.io/part-of: webhook-platform
+spec:
+  podSelector:
+    matchExpressions:
+      - key: app.kubernetes.io/component
+        operator: In
+        values: [ingest, router, scheduler, worker]
+  policyTypes: [Ingress]
+  ingress:
+    - ports:
+        - { protocol: TCP, port: 9090 }

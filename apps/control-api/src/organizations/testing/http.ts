@@ -6,6 +6,8 @@ import { AuditService, TenantGuard, TenantResolver, TenantScopeFactory } from '.
 import { SessionGuard } from '../../auth/session.guard';
 import { SESSION_COOKIE, SessionService, SessionUser } from '../../auth/session.service';
 import { AppExceptionFilter } from '../../common/errors';
+import { ThrottleGuard } from '../../common/throttle.guard';
+import { InMemoryThrottleStore, THROTTLE_STORE } from '../../common/throttle.store';
 import { PrismaService } from '../../infrastructure/prisma/prisma.service';
 import { OrganizationsService } from '../organizations.service';
 import { TenantTransactionRunner } from '../tenant-transaction';
@@ -68,6 +70,11 @@ export async function createHarness(
       UserDirectory,
       TenantTransactionRunner,
       OrganizationsService,
+      // The real guard and the real fixed-window store, one per harness, so a
+      // throttle test counts only its own requests. `CommonModule` provides
+      // both in production; this suite builds its module by hand.
+      ThrottleGuard,
+      { provide: THROTTLE_STORE, useClass: InMemoryThrottleStore },
       ...(extraProviders ?? []),
     ],
   }).compile();

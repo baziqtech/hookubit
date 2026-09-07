@@ -1,6 +1,7 @@
 import { IDS } from '../authz/testing/fixtures';
 import { CROSS_TENANT_MESSAGE } from '../authz';
-import { ProjectDto } from './dto';
+import { ProjectDto, ProjectListDto } from './dto';
+import { PROJECT_CREATE_THROTTLE } from './project-limits';
 import { Harness, startProjectsApp } from './testing/harness';
 
 /**
@@ -29,10 +30,10 @@ describe('projects over HTTP', () => {
   // -------------------------------------------------------------------------
 
   it('lists only the projects of the caller\'s own organization, hiding deleted ones', async () => {
-    const res = await h.call<ProjectDto[]>('GET', projectsOf(IDS.orgA), { as: IDS.viewerA });
+    const res = await h.call<ProjectListDto>('GET', projectsOf(IDS.orgA), { as: IDS.viewerA });
 
     expect(res.status).toBe(200);
-    const ids = (res.body as unknown as ProjectDto[]).map((project) => project.id).sort();
+    const ids = res.body.data.map((project) => project.id).sort();
     expect(ids).toEqual([IDS.projectA1, IDS.projectA2, IDS.projectASuspended].sort());
     expect(ids).not.toContain(IDS.projectB1);
     expect(ids).not.toContain(IDS.projectADeleted);
@@ -321,8 +322,8 @@ describe('projects over HTTP', () => {
     expect(h.db.rows('project').get(IDS.projectA2)).toBeDefined();
     expect(h.db.rows('project').get(IDS.projectA2)?.status).toBe('deleted');
 
-    const list = await h.call<ProjectDto[]>('GET', projectsOf(IDS.orgA), { as: IDS.ownerA });
-    expect((list.body as unknown as ProjectDto[]).map((p) => p.id)).not.toContain(IDS.projectA2);
+    const list = await h.call<ProjectListDto>('GET', projectsOf(IDS.orgA), { as: IDS.ownerA });
+    expect(list.body.data.map((p) => p.id)).not.toContain(IDS.projectA2);
 
     expect(h.db.all('auditLog')[0]).toMatchObject({
       action: 'project.deleted',
@@ -346,14 +347,12 @@ describe('projects over HTTP', () => {
   });
 
   it('lists deleted projects only when asked, so a 409 on their slug is explainable', async () => {
-    const res = await h.call<ProjectDto[]>('GET', `${projectsOf(IDS.orgA)}?status=deleted`, {
+    const res = await h.call<ProjectListDto>('GET', `${projectsOf(IDS.orgA)}?status=deleted`, {
       as: IDS.ownerA,
     });
 
     expect(res.status).toBe(200);
-    expect((res.body as unknown as ProjectDto[]).map((p) => p.id)).toEqual([
-      IDS.projectADeleted,
-    ]);
+    expect(res.body.data.map((p) => p.id)).toEqual([IDS.projectADeleted]);
   });
 
   // -------------------------------------------------------------------------
@@ -380,11 +379,214 @@ describe('projects over HTTP', () => {
     expect(res.status).toBe(400);
   });
 
-  it('pages', async () => {
-    const first = await h.call<ProjectDto[]>('GET', `${projectsOf(IDS.orgA)}?limit=1`, {
+  it('pages, and says so: has_more plus an offset that fetches the rest', async () => {
+    // Three live projects in org A (A1, A2, A-suspended); the deleted one is
+    // hidden. A page of one is therefore the first of three.
+    const first = await h.call<ProjectListDto>('GET', `${projectsOf(IDS.orgA)}?limit=1`, {
       as: IDS.ownerA,
     });
+
     expect(first.status).toBe(200);
-    expect(first.body as unknown as ProjectDto[]).toHaveLength(1);
+    expect(first.body.data).toHaveLength(1);
+    expect(first.body.count).toBe(1);
+    expect(first.body.has_more).toBe(true);
+    expect(first.body.next_offset).toBe(1);
+
+    const second = await h.call<ProjectListDto>(
+      'GET',
+      `${projectsOf(IDS.orgA)}?limit=1&offset=${first.body.next_offset}`,
+      { as: IDS.ownerA },
+    );
+    expect(second.body.data).toHaveLength(1);
+    expect(second.body.data[0].id).not.toBe(first.body.data[0].id);
+    expect(second.body.has_more).toBe(true);
+  });
+
+  it('is honest at exactly the page boundary: a full page that is also the last one', async () => {
+    // THE case a bare array could not express. Three live projects, limit=3: the
+    // page is completely full, and there is nothing after it. A client that
+    // inferred "count === limit means there is more" would loop forever; one
+    // that inferred the opposite from a short page would be right by luck.
+    const exact = await h.call<ProjectListDto>('GET', `${projectsOf(IDS.orgA)}?limit=3`, {
+      as: IDS.ownerA,
+    });
+
+    expect(exact.status).toBe(200);
+    expect(exact.body.data).toHaveLength(3);
+    expect(exact.body.count).toBe(3);
+    expect(exact.body.has_more).toBe(false);
+    expect(exact.body.next_offset).toBeNull();
+
+    // One below the boundary is the other half of the pair: same data, opposite
+    // answer, so the assertion above cannot pass by always returning false.
+    const under = await h.call<ProjectListDto>('GET', `${projectsOf(IDS.orgA)}?limit=2`, {
+      as: IDS.ownerA,
+    });
+    expect(under.body.data).toHaveLength(2);
+    expect(under.body.has_more).toBe(true);
+    expect(under.body.next_offset).toBe(2);
+  });
+
+  it('reports has_more false on the last page reached through next_offset', async () => {
+    const page = await h.call<ProjectListDto>('GET', `${projectsOf(IDS.orgA)}?limit=2&offset=2`, {
+      as: IDS.ownerA,
+    });
+
+    expect(page.body.data).toHaveLength(1);
+    expect(page.body.has_more).toBe(false);
+    expect(page.body.next_offset).toBeNull();
+  });
+
+  // -------------------------------------------------------------------------
+  // FIX 1 - the per-organization ceiling
+  // -------------------------------------------------------------------------
+
+  describe('the project ceiling', () => {
+    it('refuses a create once the organization is at its limit, and writes nothing', async () => {
+      // Org A is seeded with three live projects; a ceiling of three is already
+      // reached, so the very next create must be refused.
+      const capped = await startProjectsApp({ maxProjects: 3 });
+      try {
+        const res = await capped.call('POST', projectsOf(IDS.orgA), {
+          as: IDS.ownerA,
+          body: { name: 'One too many', slug: 'one-too-many' },
+        });
+
+        expect(res.status).toBe(409);
+        expect(res.body.error?.code).toBe('conflict');
+        expect(res.body.error?.details).toMatchObject({ limit: 3, current: 3 });
+        expect(capped.db.all('project').some((row) => row.slug === 'one-too-many')).toBe(false);
+        // Refused before the write, so nothing was audited either.
+        expect(capped.db.all('auditLog')).toHaveLength(0);
+      } finally {
+        await capped.close();
+      }
+    });
+
+    it('lets a create through while below the ceiling, and refuses the one that reaches it', async () => {
+      const capped = await startProjectsApp({ maxProjects: 4 });
+      try {
+        const allowed = await capped.call<ProjectDto>('POST', projectsOf(IDS.orgA), {
+          as: IDS.ownerA,
+          body: { name: 'Fourth', slug: 'fourth' },
+        });
+        const refused = await capped.call('POST', projectsOf(IDS.orgA), {
+          as: IDS.ownerA,
+          body: { name: 'Fifth', slug: 'fifth' },
+        });
+
+        expect(allowed.status).toBe(201);
+        expect(refused.status).toBe(409);
+        expect(refused.body.error?.details).toMatchObject({ limit: 4, current: 4 });
+      } finally {
+        await capped.close();
+      }
+    });
+
+    it('does not count soft-deleted projects, so DELETE frees a slot', async () => {
+      // The ratchet this guards against: a deleted project keeps its slug and
+      // its ledger forever, so if deletions counted there would be no operation
+      // available to a tenant that frees a slot.
+      const capped = await startProjectsApp({ maxProjects: 3 });
+      try {
+        const blocked = await capped.call('POST', projectsOf(IDS.orgA), {
+          as: IDS.ownerA,
+          body: { name: 'Blocked', slug: 'blocked' },
+        });
+        expect(blocked.status).toBe(409);
+
+        await capped.call('DELETE', `${projectsOf(IDS.orgA)}/${IDS.projectA2}`, {
+          as: IDS.ownerA,
+        });
+
+        const allowed = await capped.call('POST', projectsOf(IDS.orgA), {
+          as: IDS.ownerA,
+          body: { name: 'Allowed', slug: 'allowed' },
+        });
+        expect(allowed.status).toBe(201);
+      } finally {
+        await capped.close();
+      }
+    });
+
+    it('clamps a nonsensical configured ceiling rather than locking the tenant out', async () => {
+      // MAX_PROJECTS_PER_ORGANIZATION=0 is one typo away in a values file, and
+      // an unclamped 0 would mean "this organization may never create a
+      // project" - a configuration mistake that reads as a product outage.
+      const zero = await startProjectsApp({ maxProjects: 0 });
+      try {
+        const res = await zero.call('POST', projectsOf(IDS.orgA), {
+          as: IDS.ownerA,
+          body: { name: 'Clamped', slug: 'clamped' },
+        });
+        // Clamped up to the floor of 1, which org A is already past - so this is
+        // a 409 about the ceiling, NOT a 500 and not a silently disabled limit.
+        expect(res.status).toBe(409);
+        expect(res.body.error?.details).toMatchObject({ limit: 1 });
+      } finally {
+        await zero.close();
+      }
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // FIX 1 - the create throttle
+  // -------------------------------------------------------------------------
+
+  describe('the create throttle', () => {
+    it('429s once the create limit is exceeded, with Retry-After', async () => {
+      const { limit } = PROJECT_CREATE_THROTTLE;
+      let last = await h.call('POST', projectsOf(IDS.orgA), {
+        as: IDS.ownerA,
+        body: { name: 'seed', slug: 'seed-0' },
+      });
+      for (let i = 1; i <= limit; i += 1) {
+        last = await h.call('POST', projectsOf(IDS.orgA), {
+          as: IDS.ownerA,
+          body: { name: `burst ${i}`, slug: `burst-${i}` },
+        });
+      }
+
+      expect(last.status).toBe(429);
+      expect(last.body.error?.code).toBe('rate_limited');
+      expect(last.body.error?.details?.retry_after_seconds).toBeGreaterThan(0);
+      // The refused request wrote nothing.
+      expect(h.db.all('project').some((row) => row.slug === `burst-${limit}`)).toBe(false);
+    });
+
+    it('does not throttle the reads', async () => {
+      for (let i = 0; i < PROJECT_CREATE_THROTTLE.limit + 5; i += 1) {
+        const res = await h.call('GET', projectsOf(IDS.orgA), { as: IDS.ownerA });
+        expect(res.status).toBe(200);
+      }
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // FIX 4 - one 404 vocabulary
+  // -------------------------------------------------------------------------
+
+  describe('404 message alignment', () => {
+    it('answers every not-found with CROSS_TENANT_MESSAGE, never a per-resource string', async () => {
+      const cases = [
+        await h.call('GET', `${projectsOf(IDS.orgA)}/proj_nope`, { as: IDS.ownerA }),
+        await h.call('PATCH', `${projectsOf(IDS.orgA)}/proj_nope`, {
+          as: IDS.ownerA,
+          body: { name: 'x' },
+        }),
+        await h.call('DELETE', `${projectsOf(IDS.orgA)}/proj_nope`, { as: IDS.ownerA }),
+        // Another tenant's real id, and the cross-tenant resolver's own answer.
+        await h.call('GET', `${projectsOf(IDS.orgA)}/${IDS.projectB1}`, { as: IDS.ownerA }),
+        await h.call('GET', projectsOf(IDS.orgB), { as: IDS.ownerA }),
+      ];
+
+      for (const res of cases) {
+        expect(res.status).toBe(404);
+        expect(res.body.error?.code).toBe('not_found');
+        expect(res.body.error?.message).toBe(CROSS_TENANT_MESSAGE);
+        // The old repository vocabulary, gone.
+        expect(res.body.error?.message).not.toBe('Project not found.');
+      }
+    });
   });
 });

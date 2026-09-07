@@ -1,0 +1,197 @@
+{{/*
+NetworkPolicies. The rationale, the CNI caveat and the tightening instructions
+live in deployments/kubernetes/50-networkpolicy.yaml and in HANDOFF.md; this
+template is the parameterised twin of that file.
+
+The short version: internal/egress/ssrf.go is one process making one decision
+about URLs a customer typed into a form. These policies are the second layer,
+in the kernel, so that guard stops being a single point of failure.
+
+NOTHING HERE IS ENFORCED UNLESS YOUR CNI IMPLEMENTS NetworkPolicy. Calico,
+Cilium, Antrea and Weave do. Stock EKS (amazon-vpc-cni with no policy agent),
+flannel and a default kind/minikube ACCEPT these objects and ignore them.
+*/}}
+{{- if .Values.networkPolicy.enabled }}
+{{- $fullName := include "webhook-platform.fullname" . }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ $fullName }}-default-deny
+  labels: {{- include "webhook-platform.labels" . | nindent 4 }}
+spec:
+  # Every pod in the namespace, both directions. A workload added later is
+  # denied by default rather than allowed by omission.
+  podSelector: {}
+  policyTypes: [Ingress, Egress]
+---
+{{/*
+DNS. Without this every other rule is theatre - the datastore hostname and
+every customer hostname has to resolve first.
+*/}}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ $fullName }}-allow-dns
+  labels: {{- include "webhook-platform.labels" . | nindent 4 }}
+spec:
+  podSelector: {}
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .Values.networkPolicy.dnsNamespace }}
+      ports:
+        - { protocol: UDP, port: 53 }
+        - { protocol: TCP, port: 53 }
+---
+{{/*
+Datastores: private address space, datastore ports ONLY.
+
+This is the rule that demotes the SSRF guard from load-bearing to redundant.
+These pods can reach 10.0.0.0/8, but only on 5432/6432/6379 - so a forged
+request to an internal HTTP service, to the API server on 443, or to the
+metadata endpoint on 80 is dropped by the kernel whatever the process intended.
+
+If your database or Redis is on a PUBLIC address (Neon, Upstash, a managed
+Redis with a public endpoint) these CIDRs do not cover it and the control plane
+will not reach its database. Add the provider's egress range to
+networkPolicy.datastoreCidrs.
+*/}}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ $fullName }}-allow-datastore-egress
+  labels: {{- include "webhook-platform.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchExpressions:
+      - key: app.kubernetes.io/component
+        operator: In
+        values: [control-api, ingest, router, scheduler, worker, migrate]
+      - key: app.kubernetes.io/instance
+        operator: In
+        values: [{{ .Release.Name }}]
+  policyTypes: [Egress]
+  egress:
+    - to:
+        {{- range .Values.networkPolicy.datastoreCidrs }}
+        - ipBlock: { cidr: {{ . | quote }} }
+        {{- end }}
+      ports:
+        {{- range .Values.networkPolicy.datastorePorts }}
+        - { protocol: TCP, port: {{ . }} }
+        {{- end }}
+{{- with .Values.networkPolicy.extraEgress }}
+---
+{{/* Operator-supplied egress rules, applied to every pod in the release. */}}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ $fullName }}-allow-extra-egress
+  labels: {{- include "webhook-platform.labels" $ | nindent 4 }}
+spec:
+  podSelector: {}
+  policyTypes: [Egress]
+  egress:
+    {{- toYaml . | nindent 4 }}
+{{- end }}
+---
+{{/*
+Customer webhook delivery. The worker, and only the worker: the router,
+scheduler and ingest never dial a customer URL, so they get no internet egress
+at all.
+
+ALL PORTS, deliberately. ssrf.go constrains the SCHEME to http/https, not the
+port, so https://hooks.example.com:8443 is a legal endpoint. Narrowing this to
+80/443 would drop those deliveries into a retry loop with no diagnosable cause.
+
+The `except` list is the layer-3 mirror of ssrf.go's blocklist.
+
+IPv6 egress is NOT granted: on a dual-stack cluster an IPv6-only customer
+endpoint is unreachable. Granting it means an ipBlock on ::/0 with fc00::/7,
+::1/128, fe80::/10 and 64:ff9b::/96 excepted - never a bare ::/0, which
+re-opens the NAT64 spelling of the metadata address that ssrf.go closes.
+Put it in networkPolicy.extraEgress if you need it.
+*/}}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ $fullName }}-allow-worker-public-egress
+  labels: {{- include "webhook-platform.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels: {{- include "webhook-platform.selectorLabels" (dict "ctx" . "component" "worker") | nindent 6 }}
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              {{- range .Values.networkPolicy.blockedEgressCidrs }}
+              - {{ . | quote }}
+              {{- end }}
+---
+{{/*
+Ingress to the HTTP surfaces. networkPolicy.ingressControllerNamespace is empty
+by default, which allows these ports from anywhere in the CLUSTER - still a
+removal of lateral access to every other port, but set it to your controller's
+namespace (e.g. ingress-nginx) and this becomes a real restriction.
+*/}}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ $fullName }}-allow-http-ingress
+  labels: {{- include "webhook-platform.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchExpressions:
+      - key: app.kubernetes.io/component
+        operator: In
+        values: [control-api, dashboard, ingest]
+      - key: app.kubernetes.io/instance
+        operator: In
+        values: [{{ .Release.Name }}]
+  policyTypes: [Ingress]
+  ingress:
+    -
+      {{- with .Values.networkPolicy.ingressControllerNamespace }}
+      from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ . }}
+      {{- end }}
+      ports:
+        - { protocol: TCP, port: 3000 }  # control API
+        - { protocol: TCP, port: 8080 }  # dashboard and ingest
+---
+{{/*
+Prometheus scrape of the Go roles' /metrics on 9090. The control API's metrics
+are on 3000, already allowed above.
+*/}}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ $fullName }}-allow-metrics-scrape
+  labels: {{- include "webhook-platform.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchExpressions:
+      - key: app.kubernetes.io/component
+        operator: In
+        values: [ingest, router, scheduler, worker]
+      - key: app.kubernetes.io/instance
+        operator: In
+        values: [{{ .Release.Name }}]
+  policyTypes: [Ingress]
+  ingress:
+    -
+      {{- with .Values.networkPolicy.monitoringNamespace }}
+      from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ . }}
+      {{- end }}
+      ports:
+        - { protocol: TCP, port: 9090 }
+{{- end }}

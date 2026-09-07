@@ -12,6 +12,7 @@ import {
   seedWorld,
 } from '../organizations/testing/world';
 import { UserScopeFactory } from '../organizations/user-scope';
+import { AcceptedInvitationDto } from './dto';
 import { InvitationInvite, InvitationMailer } from './invitation-mailer.port';
 import { MembersService } from './members.service';
 
@@ -33,17 +34,22 @@ describe('MembersService', () => {
   let mailer: RecordingMailer;
   let service: MembersService;
 
+  let tokens: TokenService;
+  let audit: AuditService;
+
   beforeEach(() => {
     db = seedWorld();
     const scopes = new TenantScopeFactory(db.asPrisma());
     mailer = new RecordingMailer();
+    tokens = new TokenService(db.asPrisma());
+    audit = new AuditService(db.asPrisma());
     service = new MembersService(
       scopes,
-      new TenantTransactionRunner(db.asPrisma(), scopes),
+      new TenantTransactionRunner(db.asPrisma(), scopes, audit),
       new UserScopeFactory(db.asPrisma()),
       new UserDirectory(db.asPrisma()),
-      new TokenService(db.asPrisma()),
-      new AuditService(db.asPrisma()),
+      tokens,
+      audit,
       mailer,
     );
   });
@@ -187,6 +193,62 @@ describe('MembersService', () => {
         service.invite(context, { email: 'someone@example.com', role: 'viewer' }),
       ).resolves.toEqual({ status: 'accepted' });
     });
+
+    // -------------------------------------------------------------------------
+    // FIX 6 - the audit row records what happened, not what was attempted
+    // -------------------------------------------------------------------------
+
+    it('writes no "member.invited" row when the token was never issued', async () => {
+      // The audit row used to be written first. A database failure in
+      // `tokens.issue` then left a permanent record of an invitation that does
+      // not exist, and a 202 - a log that asserts something false.
+      jest.spyOn(tokens, 'issue').mockRejectedValue(new Error('user_tokens is unavailable'));
+      const context = await contextFor(db, IDS.ownerA, IDS.orgA);
+      const before = db.all('auditLog').length;
+
+      await expect(
+        service.invite(context, { email: 'someone@example.com', role: 'viewer' }),
+      ).resolves.toEqual({ status: 'accepted' });
+
+      expect(db.all('auditLog')).toHaveLength(before);
+      expect(db.all('auditLog')).not.toContainEqual(
+        expect.objectContaining({ action: 'member.invited' }),
+      );
+      // And no mail claiming an invitation that cannot be redeemed.
+      expect(mailer.invitations).toHaveLength(0);
+    });
+
+    it('still answers 202 when issuance fails, so the enumeration posture is unchanged', async () => {
+      // The uniform 202 is the point: a degraded database that answered 500 for
+      // an unknown address and 202 for a member would be the exact oracle this
+      // endpoint exists to close.
+      jest.spyOn(tokens, 'issue').mockRejectedValue(new Error('user_tokens is unavailable'));
+      const context = await contextFor(db, IDS.ownerA, IDS.orgA);
+
+      const forStranger = await service.invite(context, {
+        email: 'nobody-here@example.com',
+        role: 'viewer',
+      });
+      const forMember = await service.invite(context, {
+        email: `${IDS.developerA}@example.com`,
+        role: 'viewer',
+      });
+      expect(forMember).toEqual(forStranger);
+    });
+
+    it('still audits an invitation that was issued but could not be mailed', async () => {
+      // The other direction: the token exists and can be redeemed, so "who
+      // invited this person" must be answerable even though the mail bounced.
+      jest.spyOn(mailer, 'sendInvitation').mockRejectedValue(new Error('smtp is down'));
+      const context = await contextFor(db, IDS.ownerA, IDS.orgA);
+
+      await service.invite(context, { email: 'someone@example.com', role: 'viewer' });
+
+      expect(db.tokenRows()).toHaveLength(1);
+      expect(db.all('auditLog')).toContainEqual(
+        expect.objectContaining({ action: 'member.invited' }),
+      );
+    });
   });
 
   // ---------------------------------------------------------------------------
@@ -262,20 +324,6 @@ describe('MembersService', () => {
       expect(roleOf(memberId(IDS.ownerA, IDS.orgA))).toBe('owner');
     });
 
-    it('counts owners inside the same transaction as the write', async () => {
-      const second = addOwner(IDS.secondOwnerA);
-      const context = await contextFor(db, IDS.ownerA, IDS.orgA);
-      db.transactions.length = 0;
-
-      await service.changeRole(context, second, { role: 'developer' });
-
-      const outer = db.transactions[0];
-      expect(outer).toBeDefined();
-      expect(outer).toContainEqual({ table: 'organizationMember', op: 'find' });
-      expect(outer).toContainEqual({ table: 'organizationMember', op: 'updateMany' });
-      expect(outer).toContainEqual({ table: 'auditLog', op: 'create' });
-    });
-
     it('answers 404, not 403, for a member id belonging to another organization', async () => {
       const context = await contextFor(db, IDS.ownerA, IDS.orgA);
       expect(
@@ -294,6 +342,115 @@ describe('MembersService', () => {
       });
       expect(result.role).toBe('viewer');
       expect(db.all('auditLog')).toHaveLength(before);
+    });
+  });
+
+  // ---------------------------------------------------------------------------
+  // FIX 1 - the last-owner invariant, asserted as a PROPERTY under concurrency
+  // ---------------------------------------------------------------------------
+
+  /**
+   * What was here before was a test called "counts owners inside the same
+   * transaction as the write". It asserted the MECHANISM - that a statement log
+   * showed the count and the update inside one `$transaction` - and it was being
+   * read as evidence for the PROPERTY. It is not evidence for it, and the
+   * property did not hold: one transaction at READ COMMITTED does nothing about
+   * two demotions of DIFFERENT rows, which take no conflicting row lock, both
+   * count two owners, and both commit. Both reviewers reproduced zero owners.
+   *
+   * So the mechanism test is gone and these run the calls CONCURRENTLY through
+   * `Promise.allSettled` and assert the only thing that matters: an owner is
+   * still there afterwards. They fail against a runner that does not set an
+   * isolation level - which is exactly what makes them worth having, because
+   * every remaining module inherits that runner.
+   */
+  describe('an organization can never be left without an owner', () => {
+    /** Both statements ran; the invariant survived anyway. */
+    const assertSurvived = (outcomes: PromiseSettledResult<unknown>[]): void => {
+      const owners = db
+        .all('organizationMember')
+        .filter((row) => row.organizationId === IDS.orgA && row.role === 'owner');
+
+      expect(owners.length).toBeGreaterThanOrEqual(1);
+      // And the refusal was a refusal, not a crash: exactly one of the two got
+      // through, and the loser was told why.
+      expect(outcomes.filter((outcome) => outcome.status === 'fulfilled')).toHaveLength(1);
+      const rejected = outcomes.find((outcome) => outcome.status === 'rejected');
+      expect((rejected as PromiseRejectedResult).reason).toBeInstanceOf(AppError);
+      expect(((rejected as PromiseRejectedResult).reason as AppError).code).toBe('conflict');
+    };
+
+    it('survives two concurrent demotions of the two remaining owners', async () => {
+      const second = addOwner(IDS.secondOwnerA);
+      const first = memberId(IDS.ownerA, IDS.orgA);
+      const byFirst = await contextFor(db, IDS.ownerA, IDS.orgA);
+      const bySecond = await contextFor(db, IDS.secondOwnerA, IDS.orgA);
+
+      // Each owner demotes the OTHER one. Different rows, so nothing contends.
+      const outcomes = await Promise.allSettled([
+        service.changeRole(byFirst, second, { role: 'admin' }),
+        service.changeRole(bySecond, first, { role: 'admin' }),
+      ]);
+
+      assertSurvived(outcomes);
+    });
+
+    it('survives two concurrent removals of the two remaining owners', async () => {
+      const second = addOwner(IDS.secondOwnerA);
+      const first = memberId(IDS.ownerA, IDS.orgA);
+      const byFirst = await contextFor(db, IDS.ownerA, IDS.orgA);
+      const bySecond = await contextFor(db, IDS.secondOwnerA, IDS.orgA);
+
+      const outcomes = await Promise.allSettled([
+        service.remove(byFirst, second),
+        service.remove(bySecond, first),
+      ]);
+
+      assertSurvived(outcomes);
+    });
+
+    it('survives a demotion racing a removal', async () => {
+      // The mixed interleave, which is the one a hand-placed lock on a single
+      // code path is most likely to miss.
+      const second = addOwner(IDS.secondOwnerA);
+      const first = memberId(IDS.ownerA, IDS.orgA);
+      const byFirst = await contextFor(db, IDS.ownerA, IDS.orgA);
+      const bySecond = await contextFor(db, IDS.secondOwnerA, IDS.orgA);
+
+      const outcomes = await Promise.allSettled([
+        service.changeRole(byFirst, second, { role: 'viewer' }),
+        service.remove(bySecond, first),
+      ]);
+
+      assertSurvived(outcomes);
+    });
+
+    it('leaves the organization administrable, not merely non-empty', async () => {
+      // The reason the invariant matters at all: after the race, somebody must
+      // still be able to promote a replacement. `mayAssignRole(admin,'owner')`
+      // is false forever, so "an owner row exists" is the whole recovery story.
+      const second = addOwner(IDS.secondOwnerA);
+      const first = memberId(IDS.ownerA, IDS.orgA);
+      const byFirst = await contextFor(db, IDS.ownerA, IDS.orgA);
+      const bySecond = await contextFor(db, IDS.secondOwnerA, IDS.orgA);
+
+      await Promise.allSettled([
+        service.changeRole(byFirst, second, { role: 'admin' }),
+        service.changeRole(bySecond, first, { role: 'admin' }),
+      ]);
+
+      const survivor = db
+        .all('organizationMember')
+        .find((row) => row.organizationId === IDS.orgA && row.role === 'owner');
+      expect(survivor).toBeDefined();
+
+      const asSurvivor = await contextFor(db, String(survivor?.userId), IDS.orgA);
+      const promoted = await service.changeRole(
+        asSurvivor,
+        memberId(IDS.adminA, IDS.orgA),
+        { role: 'owner' },
+      );
+      expect(promoted.role).toBe('owner');
     });
   });
 
@@ -425,6 +582,80 @@ describe('MembersService', () => {
       db.rows('organization').set(IDS.orgA, { ...row, status: 'suspended' });
 
       expect(await code(service.accept(principalFor(IDS.outsider), { token }))).toBe('conflict');
+    });
+
+    // -------------------------------------------------------------------------
+    // FIX 5 - two invitations to the same address, redeemed at the same moment
+    // -------------------------------------------------------------------------
+
+    it('does not 500 when two invitations for one address are redeemed concurrently', async () => {
+      // Both transactions read `existing === null` and both INSERT;
+      // `@@unique([organizationId, userId])` rejects the loser with P2002, which
+      // used to escape as a 500 for an operation that had in fact succeeded.
+      const context = await contextFor(db, IDS.ownerA, IDS.orgA);
+      await service.invite(context, { email: `${IDS.outsider}@example.com`, role: 'developer' });
+      await service.invite(context, { email: `${IDS.outsider}@example.com`, role: 'developer' });
+      const [first, second] = mailer.invitations.map((invite) => invite.rawToken);
+      const principal = principalFor(IDS.outsider);
+
+      const outcomes = await Promise.allSettled([
+        service.accept(principal, { token: first }),
+        service.accept(principal, { token: second }),
+      ]);
+
+      // The PROPERTY: nobody sees a 500, and the account is a member exactly
+      // once. Which redemption won is not interesting and is not asserted.
+      expect(outcomes.map((outcome) => outcome.status)).toEqual(['fulfilled', 'fulfilled']);
+      const memberships = db
+        .all('organizationMember')
+        .filter((row) => row.organizationId === IDS.orgA && row.userId === IDS.outsider);
+      expect(memberships).toHaveLength(1);
+      for (const outcome of outcomes) {
+        expect((outcome as PromiseFulfilledResult<AcceptedInvitationDto>).value.organization).toMatchObject(
+          { id: IDS.orgA, role: 'developer' },
+        );
+      }
+    });
+
+    it('audits the join once, from the redemption that actually created it', async () => {
+      const context = await contextFor(db, IDS.ownerA, IDS.orgA);
+      await service.invite(context, { email: `${IDS.outsider}@example.com`, role: 'developer' });
+      await service.invite(context, { email: `${IDS.outsider}@example.com`, role: 'developer' });
+      const [first, second] = mailer.invitations.map((invite) => invite.rawToken);
+      const principal = principalFor(IDS.outsider);
+
+      await Promise.allSettled([
+        service.accept(principal, { token: first }),
+        service.accept(principal, { token: second }),
+      ]);
+
+      const joins = db
+        .all('auditLog')
+        .filter((row) => row.action === 'member.joined' && row.userId === IDS.outsider);
+      expect(joins).toHaveLength(1);
+    });
+
+    it('reports the role the winner wrote, not the one the losing token asked for', async () => {
+      // Both halves of "already a member" - the branch that READS the row and
+      // the P2002 branch that re-reads it - must return the role that is
+      // actually stored. Overwriting it from the losing token would let a replay
+      // change a role somebody has since adjusted.
+      const context = await contextFor(db, IDS.ownerA, IDS.orgA);
+      await service.invite(context, { email: `${IDS.outsider}@example.com`, role: 'developer' });
+      const token = mailer.invitations[0].rawToken;
+      db.insert('organizationMember', {
+        id: 'mem_race_winner',
+        organizationId: IDS.orgA,
+        userId: IDS.outsider,
+        role: 'viewer',
+        createdAt: new Date('2026-01-04T00:00:00.000Z'),
+        updatedAt: new Date('2026-01-04T00:00:00.000Z'),
+      });
+
+      const result = await service.accept(principalFor(IDS.outsider), { token });
+
+      expect(result.organization.role).toBe('viewer');
+      expect(roleOf('mem_race_winner')).toBe('viewer');
     });
 
     it('does not change an existing role when an old invitation is replayed', async () => {

@@ -17,6 +17,7 @@ import {
 import {
   DEFAULT_PAGE_SIZE,
   MAX_PAGE_SIZE,
+  Page,
   Permission,
   RequestContext,
   ResolvedProject,
@@ -226,25 +227,50 @@ export class UserScope {
    * returned by this listing that then 404s on click would be a bug the API
    * shipped to the dashboard.
    */
-  async listMemberships(options?: { take?: number; skip?: number }): Promise<MembershipSummary[]> {
+  async listMemberships(options?: { take?: number; skip?: number }): Promise<Page<MembershipSummary>> {
+    const take = UserScope.pageSize(options?.take);
+    const skip = UserScope.offset(options?.skip) ?? 0;
+    // take + 1: the same probe `ScopedRepository.findPage` uses. A bounded read
+    // that returns a bare array cannot tell its caller whether the bound was
+    // reached, and this listing is bounded whether or not the caller said so.
     const rows = await this.client.organizationMember.findMany({
       where: this.predicate(),
       select: { id: true, role: true, organization: true },
       // Membership ids are ULIDs, so this is join order without depending on a
       // column the test fakes do not populate.
       orderBy: { id: 'asc' },
-      take: UserScope.pageSize(options?.take),
-      skip: UserScope.offset(options?.skip),
+      take: take + 1,
+      skip,
     });
-    return rows.map((row) => ({
-      membershipId: row.id,
-      role: row.role,
-      organization: row.organization,
-    }));
+    const hasMore = rows.length > take;
+    return {
+      rows: (hasMore ? rows.slice(0, take) : rows).map((row) => ({
+        membershipId: row.id,
+        role: row.role,
+        organization: row.organization,
+      })),
+      hasMore,
+      nextSkip: hasMore ? skip + take : null,
+    };
   }
 
   async countMemberships(): Promise<number> {
     return this.client.organizationMember.count({ where: this.predicate() });
+  }
+
+  /**
+   * How many live organizations this principal OWNS.
+   *
+   * `POST /v1/organizations` mints a row in a globally unique slug namespace
+   * with no tenant to charge it to, so the per-user cap is the only quantity
+   * bound on it. Owner-only rather than all memberships: being invited into
+   * fifty organizations is somebody else's decision and must not stop you
+   * creating your own.
+   */
+  async countOwnedOrganizations(): Promise<number> {
+    return this.client.organizationMember.count({
+      where: { ...this.predicate(), role: 'owner' },
+    });
   }
 
   /**
@@ -310,8 +336,38 @@ export class UserScope {
    * An existing membership is returned unchanged rather than overwritten: a
    * replayed invitation must never be able to change a role that somebody has
    * since adjusted.
+   *
+   * That "already a member" branch also has to survive a RACE, which is what
+   * the catch below is for. Two invitations to the same address, redeemed at
+   * the same moment, both read `existing === null` under READ COMMITTED and both
+   * INSERT; `@@unique([organizationId, userId])` rejects the loser with P2002
+   * and the invitee got a 500 for an operation that had in fact succeeded. The
+   * re-read happens OUTSIDE the transaction on purpose: a failed statement
+   * aborts a PostgreSQL transaction, so `tx` is unusable by then.
    */
   async joinOrganization(input: {
+    organizationId: string;
+    invitedByMembershipId: string;
+    membershipId: string;
+    role: MemberRole;
+    verify: (state: InvitationState) => void;
+    andThen?: (created: CreatedMembership, tx: Prisma.TransactionClient) => Promise<void>;
+  }): Promise<CreatedMembership> {
+    try {
+      return await this.join(input);
+    } catch (err) {
+      if (!UserScope.isMembershipCollision(err)) throw err;
+      // Someone else's redemption for this same account landed first. Report
+      // what is true: they are a member, at the role the winner wrote. No audit
+      // row here - the transaction that actually created the membership filed
+      // one.
+      const settled = await this.readMembership(input.organizationId);
+      if (!settled) throw err;
+      return settled;
+    }
+  }
+
+  private async join(input: {
     organizationId: string;
     invitedByMembershipId: string;
     membershipId: string;
@@ -360,6 +416,42 @@ export class UserScope {
       if (input.andThen) await input.andThen(created, tx);
       return created;
     });
+  }
+
+  /**
+   * The principal's membership of one organization, with the organization row.
+   * Still bound to `principal.userId`, so this reads nobody else's membership.
+   */
+  private async readMembership(organizationId: string): Promise<CreatedMembership | null> {
+    const membership = await this.client.organizationMember.findUnique({
+      where: {
+        organizationId_userId: { organizationId, userId: this.principal.userId },
+      },
+    });
+    if (!membership) return null;
+    const organization = await this.client.organization.findUnique({
+      where: { id: organizationId },
+    });
+    if (!organization) return null;
+    return { organization, membership };
+  }
+
+  /**
+   * A P2002 on `organization_members (organization_id, user_id)`, and nothing
+   * else. Duck-typed and matched by index for the reason
+   * `projects/unique-violation.ts` states at length: a bare `code === 'P2002'`
+   * would launder a collision on some other index into "you are already a
+   * member", which is a false statement about a request that failed for a
+   * different reason.
+   */
+  private static isMembershipCollision(err: unknown): boolean {
+    if (typeof err !== 'object' || err === null || !('code' in err)) return false;
+    if ((err as { code?: unknown }).code !== 'P2002') return false;
+    const raw = (err as { meta?: { target?: unknown } }).meta?.target;
+    const target = (
+      Array.isArray(raw) ? raw.join(',') : typeof raw === 'string' ? raw : ''
+    ).toLowerCase();
+    return target.includes('organization_id') || target.includes('organizationid');
   }
 
   /** The predicate, built once. Never assembled by a caller. */

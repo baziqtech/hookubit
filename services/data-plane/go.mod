@@ -1,5 +1,13 @@
 module github.com/shaq/webhook-platform/services/data-plane
 
+// The `go` directive is a MINIMUM language version, not a pin. Nothing in this
+// module uses a post-1.21 language feature, so raising it only excludes
+// contributors whose toolchain is older - and with GOTOOLCHAIN=auto it makes
+// `go build` attempt a toolchain download that fails on a restricted network.
+//
+// CI and the Dockerfiles deliberately BUILD with Go 1.23 to pick up the patched
+// standard library; a module declaring 1.21 compiles cleanly under 1.23. The
+// two numbers are allowed to differ and there is no mismatch to fix.
 go 1.21
 
 require (

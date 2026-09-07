@@ -2,7 +2,15 @@ export { ApiKeysModule } from './api-keys.module';
 export { ApiKeysService } from './api-keys.service';
 export { ApiKeysController } from './api-keys.controller';
 export {
+  API_KEYS_PER_PROJECT,
+  API_KEY_CREATE_THROTTLE,
+  API_KEY_REVOKE_THROTTLE,
+  maxApiKeysPerProject,
+} from './api-key-limits';
+export { withCrossTenantNotFound } from './not-found';
+export {
   ApiKeyDto,
+  ApiKeyListDto,
   CreateApiKeyDto,
   CreatedApiKeyDto,
   ListApiKeysQueryDto,

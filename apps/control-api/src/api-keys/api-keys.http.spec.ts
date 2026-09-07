@@ -7,7 +7,12 @@ import {
   hashApiKey,
   isValidApiKeyShape,
 } from '../common/api-key';
-import { ApiKeyDto, CreatedApiKeyDto } from './dto';
+import {
+  API_KEYS_PER_PROJECT,
+  API_KEY_CREATE_THROTTLE,
+  API_KEY_REVOKE_THROTTLE,
+} from './api-key-limits';
+import { ApiKeyDto, ApiKeyListDto, CreatedApiKeyDto } from './dto';
 import { Harness, KEY_IDS, startApiKeysApp } from './testing/harness';
 
 describe('api keys over HTTP', () => {
@@ -28,10 +33,10 @@ describe('api keys over HTTP', () => {
   // -------------------------------------------------------------------------
 
   it('lists only the keys of the project in the path', async () => {
-    const res = await h.call<ApiKeyDto[]>('GET', keysOf(IDS.projectA1), { as: IDS.ownerA });
+    const res = await h.call<ApiKeyListDto>('GET', keysOf(IDS.projectA1), { as: IDS.ownerA });
 
     expect(res.status).toBe(200);
-    const ids = (res.body as unknown as ApiKeyDto[]).map((key) => key.id).sort();
+    const ids = res.body.data.map((key) => key.id).sort();
     expect(ids).toEqual([KEY_IDS.activeA, KEY_IDS.expiredA, KEY_IDS.revokedA].sort());
     expect(ids).not.toContain(KEY_IDS.foreignB);
   });
@@ -196,8 +201,8 @@ describe('api keys over HTTP', () => {
     const plaintext = created.body.key;
     expect(plaintext).toBeTruthy();
 
-    const list = await h.call<ApiKeyDto[]>('GET', keysOf(IDS.projectA1), { as: IDS.ownerA });
-    const listed = (list.body as unknown as ApiKeyDto[]).find((k) => k.id === created.body.id);
+    const list = await h.call<ApiKeyListDto>('GET', keysOf(IDS.projectA1), { as: IDS.ownerA });
+    const listed = list.body.data.find((k) => k.id === created.body.id);
 
     expect(listed).toBeDefined();
     expect(listed?.key_prefix).toBe(created.body.key_prefix);
@@ -265,8 +270,8 @@ describe('api keys over HTTP', () => {
   });
 
   it('labels an expired key without exposing anything about it', async () => {
-    const res = await h.call<ApiKeyDto[]>('GET', keysOf(IDS.projectA1), { as: IDS.ownerA });
-    const expired = (res.body as unknown as ApiKeyDto[]).find((k) => k.id === KEY_IDS.expiredA);
+    const res = await h.call<ApiKeyListDto>('GET', keysOf(IDS.projectA1), { as: IDS.ownerA });
+    const expired = res.body.data.find((k) => k.id === KEY_IDS.expiredA);
 
     expect(expired?.status).toBe('expired');
     expect(expired?.expires_at).toBe('2026-02-01T00:00:00.000Z');
@@ -302,8 +307,8 @@ describe('api keys over HTTP', () => {
       as: IDS.ownerA,
     });
 
-    const list = await h.call<ApiKeyDto[]>('GET', keysOf(IDS.projectA1), { as: IDS.ownerA });
-    const keys = list.body as unknown as ApiKeyDto[];
+    const list = await h.call<ApiKeyListDto>('GET', keysOf(IDS.projectA1), { as: IDS.ownerA });
+    const keys = list.body.data;
     const revoked = keys.find((k) => k.id === KEY_IDS.activeA);
 
     // Still listed - a revoked credential that disappears is a credential
@@ -402,5 +407,265 @@ describe('api keys over HTTP', () => {
   it('refuses a page size above the repository ceiling', async () => {
     const res = await h.call('GET', `${keysOf(IDS.projectA1)}?limit=5000`, { as: IDS.ownerA });
     expect(res.status).toBe(400);
+  });
+
+  // -------------------------------------------------------------------------
+  // FIX 3 - paging that can be reasoned about
+  // -------------------------------------------------------------------------
+
+  describe('paging', () => {
+    it('is honest at exactly the page boundary', async () => {
+      // Project A1 holds three seeded keys. limit=3 is a completely full page
+      // that is ALSO the last one - the case a bare array could not express, and
+      // the case that matters here, because the reason to enumerate keys is
+      // "revoke everything that can authenticate as us".
+      const exact = await h.call<ApiKeyListDto>('GET', `${keysOf(IDS.projectA1)}?limit=3`, {
+        as: IDS.ownerA,
+      });
+
+      expect(exact.status).toBe(200);
+      expect(exact.body.data).toHaveLength(3);
+      expect(exact.body.count).toBe(3);
+      expect(exact.body.has_more).toBe(false);
+      expect(exact.body.next_offset).toBeNull();
+
+      const under = await h.call<ApiKeyListDto>('GET', `${keysOf(IDS.projectA1)}?limit=2`, {
+        as: IDS.ownerA,
+      });
+      expect(under.body.data).toHaveLength(2);
+      expect(under.body.has_more).toBe(true);
+      expect(under.body.next_offset).toBe(2);
+    });
+
+    it('walks to exhaustion through next_offset without repeating or dropping a key', async () => {
+      const seen: string[] = [];
+      let offset: number | null = 0;
+      for (let guard = 0; offset !== null && guard < 10; guard += 1) {
+        const page: { body: ApiKeyListDto } = await h.call<ApiKeyListDto>(
+          'GET',
+          `${keysOf(IDS.projectA1)}?limit=1&offset=${offset}`,
+          { as: IDS.ownerA },
+        );
+        seen.push(...page.body.data.map((k) => k.id));
+        offset = page.body.next_offset;
+      }
+
+      expect(seen.sort()).toEqual([KEY_IDS.activeA, KEY_IDS.expiredA, KEY_IDS.revokedA].sort());
+      expect(offset).toBeNull();
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // FIX 1 - the per-project ceiling
+  // -------------------------------------------------------------------------
+
+  describe('the API-key ceiling', () => {
+    it('refuses issuance once the project is at its limit, and mints nothing', async () => {
+      // Three seeded keys in A1, one of them already revoked, so an un-revoked
+      // count of two is the ceiling here.
+      const capped = await startApiKeysApp({ maxKeys: 2 });
+      try {
+        const before = capped.db.all('apiKey').length;
+        const res = await capped.call('POST', keysOf(IDS.projectA1), {
+          as: IDS.ownerA,
+          body: { name: 'one too many' },
+        });
+
+        expect(res.status).toBe(409);
+        expect(res.body.error?.code).toBe('conflict');
+        expect(res.body.error?.details).toMatchObject({ limit: 2, current: 2 });
+        expect(capped.db.all('apiKey')).toHaveLength(before);
+        expect(capped.db.all('auditLog')).toHaveLength(0);
+      } finally {
+        await capped.close();
+      }
+    });
+
+    it('does not count revoked keys, so revoking frees a slot', async () => {
+      // The seeded revoked key is already excluded (2 un-revoked of a limit of
+      // 2 => refused); revoking a live one drops the count to 1 and lets the
+      // next issuance through. Without this, a project that had ever rotated a
+      // key would ratchet itself shut - revoked rows are kept forever.
+      const capped = await startApiKeysApp({ maxKeys: 2 });
+      try {
+        const blocked = await capped.call('POST', keysOf(IDS.projectA1), {
+          as: IDS.ownerA,
+          body: { name: 'blocked' },
+        });
+        expect(blocked.status).toBe(409);
+
+        await capped.call('POST', `${keysOf(IDS.projectA1)}/${KEY_IDS.activeA}/revoke`, {
+          as: IDS.ownerA,
+        });
+
+        const allowed = await capped.call<CreatedApiKeyDto>('POST', keysOf(IDS.projectA1), {
+          as: IDS.ownerA,
+          body: { name: 'allowed' },
+        });
+        expect(allowed.status).toBe(201);
+        expect(allowed.body.key).toBeTruthy();
+      } finally {
+        await capped.close();
+      }
+    });
+
+    it('clamps a nonsensical configured ceiling rather than freezing issuance entirely', async () => {
+      const zero = await startApiKeysApp({ maxKeys: 0 });
+      try {
+        const res = await zero.call('POST', keysOf(IDS.projectA1), {
+          as: IDS.ownerA,
+          body: { name: 'clamped' },
+        });
+        expect(res.status).toBe(409);
+        expect(res.body.error?.details).toMatchObject({ limit: API_KEYS_PER_PROJECT.min });
+      } finally {
+        await zero.close();
+      }
+    });
+
+    it('applies the ceiling per project, not per organization', async () => {
+      // A2 is a different project in the SAME organization and holds no keys, so
+      // A1 being full must not stop it.
+      const capped = await startApiKeysApp({ maxKeys: 2 });
+      try {
+        const refused = await capped.call('POST', keysOf(IDS.projectA1), {
+          as: IDS.ownerA,
+          body: { name: 'full' },
+        });
+        const allowed = await capped.call('POST', keysOf(IDS.projectA2), {
+          as: IDS.ownerA,
+          body: { name: 'empty project' },
+        });
+
+        expect(refused.status).toBe(409);
+        expect(allowed.status).toBe(201);
+      } finally {
+        await capped.close();
+      }
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // FIX 1 - throttles on both writes
+  // -------------------------------------------------------------------------
+
+  describe('throttles', () => {
+    it('429s issuance once the create limit is exceeded, with Retry-After', async () => {
+      let last = await h.call('POST', keysOf(IDS.projectA1), {
+        as: IDS.ownerA,
+        body: { name: 'seed' },
+      });
+      for (let i = 1; i <= API_KEY_CREATE_THROTTLE.limit; i += 1) {
+        last = await h.call('POST', keysOf(IDS.projectA1), {
+          as: IDS.ownerA,
+          body: { name: `burst ${i}` },
+        });
+      }
+
+      expect(last.status).toBe(429);
+      expect(last.body.error?.code).toBe('rate_limited');
+      expect(last.body.error?.details?.retry_after_seconds).toBeGreaterThan(0);
+      expect(h.db.all('apiKey').some((row) => row.name === `burst ${API_KEY_CREATE_THROTTLE.limit}`)).toBe(
+        false,
+      );
+    });
+
+    it('counts revoke in its own bucket, so issuance cannot exhaust it', async () => {
+      // Separate `name`s in the throttle options mean a tripped create bucket
+      // must not stop an operator revoking - which is the thing they are most
+      // likely to be doing when they have just been rate limited.
+      for (let i = 0; i <= API_KEY_CREATE_THROTTLE.limit; i += 1) {
+        await h.call('POST', keysOf(IDS.projectA1), { as: IDS.ownerA, body: { name: `b${i}` } });
+      }
+
+      const revoke = await h.call<ApiKeyDto>(
+        'POST',
+        `${keysOf(IDS.projectA1)}/${KEY_IDS.activeA}/revoke`,
+        { as: IDS.ownerA },
+      );
+      expect(revoke.status).toBe(200);
+      expect(revoke.body.status).toBe('revoked');
+    });
+
+    it('429s revoke once its own, looser, limit is exceeded', async () => {
+      let last = await h.call('POST', `${keysOf(IDS.projectA1)}/${KEY_IDS.activeA}/revoke`, {
+        as: IDS.ownerA,
+      });
+      for (let i = 1; i <= API_KEY_REVOKE_THROTTLE.limit; i += 1) {
+        last = await h.call('POST', `${keysOf(IDS.projectA1)}/${KEY_IDS.activeA}/revoke`, {
+          as: IDS.ownerA,
+        });
+      }
+
+      expect(last.status).toBe(429);
+      expect(last.body.error?.code).toBe('rate_limited');
+    });
+
+    it('does not throttle the listing', async () => {
+      for (let i = 0; i < API_KEY_CREATE_THROTTLE.limit + 5; i += 1) {
+        const res = await h.call('GET', keysOf(IDS.projectA1), { as: IDS.ownerA });
+        expect(res.status).toBe(200);
+      }
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // FIX 4 - one 404 vocabulary
+  // -------------------------------------------------------------------------
+
+  describe('404 message alignment', () => {
+    it('answers every not-found with CROSS_TENANT_MESSAGE, never "API key not found."', async () => {
+      const cases = [
+        await h.call('POST', `${keysOf(IDS.projectA1)}/key_nope/revoke`, { as: IDS.ownerA }),
+        // Another project's real key id, presented under a project the caller
+        // does own: the repository matches zero rows, same as absent.
+        await h.call('POST', `${keysOf(IDS.projectA1)}/${KEY_IDS.foreignB}/revoke`, {
+          as: IDS.ownerA,
+        }),
+        // The resolver's own cross-tenant answer, for comparison.
+        await h.call('GET', keysOf(IDS.projectB1), { as: IDS.ownerA }),
+      ];
+
+      for (const res of cases) {
+        expect(res.status).toBe(404);
+        expect(res.body.error?.code).toBe('not_found');
+        expect(res.body.error?.message).toBe(CROSS_TENANT_MESSAGE);
+        expect(res.body.error?.message).not.toBe('API key not found.');
+      }
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // FIX 2 - who minted this key, recorded where it can still be found
+  // -------------------------------------------------------------------------
+
+  describe('issuer provenance', () => {
+    it('records the issuer and the role their scopes were copied from', async () => {
+      // `api_keys` has no created_by column yet (HANDOFF.md carries the
+      // migration). Until it does, this audit row is the ONLY thing tying a
+      // credential's scopes back to a human and to the role that authorised
+      // them - and the role is what a later re-derivation has to compare the
+      // stored scopes against.
+      const created = await h.call<CreatedApiKeyDto>('POST', keysOf(IDS.projectA1), {
+        as: IDS.developerA,
+        body: { name: 'developer key', scopes: ['events.read'] },
+      });
+      expect(created.status).toBe(201);
+
+      const entry = h.db.all('auditLog')[0];
+      expect(entry).toMatchObject({
+        action: 'api_key.created',
+        resourceId: created.body.id,
+        userId: IDS.developerA,
+      });
+      expect(entry.metadata).toMatchObject({
+        created_by_user_id: IDS.developerA,
+        created_by_role: 'developer',
+        scopes: ['events.read'],
+      });
+      expect(String((entry.metadata as Record<string, unknown>).created_by_membership_id)).toContain(
+        IDS.developerA,
+      );
+    });
   });
 });

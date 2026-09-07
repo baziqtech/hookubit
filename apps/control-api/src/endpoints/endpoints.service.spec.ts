@@ -78,7 +78,8 @@ describe('EndpointsService - tenant isolation', () => {
     const { endpoints, context, db } = await projectScope();
     expect(db.all('endpoint')).toHaveLength(2);
     const listed = await endpoints.list(context, {});
-    expect(listed.map((endpoint) => endpoint.id)).toEqual([IDS.endpointA1]);
+    expect(listed.data.map((endpoint) => endpoint.id)).toEqual([IDS.endpointA1]);
+    expect(listed).toMatchObject({ has_more: false, next_offset: null });
   });
 });
 
@@ -94,6 +95,7 @@ describe('EndpointsService - creation', () => {
       enabled: true,
       url: BODY.url,
       secret_version: 1,
+      secret_pending: false,
     });
     expect(created.secret).toMatch(/^whsec_/);
 
@@ -123,7 +125,9 @@ describe('EndpointsService - creation', () => {
     const created = await endpoints.create(context, BODY);
 
     expect(created.secret).toBeNull();
-    expect(created.status).toBe('active');
+    // FIX 2: the endpoint is NOT live. Going active here would sign every
+    // delivery with a key the consumer was never given.
+    expect(created).toMatchObject({ secret_pending: true, status: 'paused', enabled: false });
     expect(
       db.all('endpointSecret').filter((row) => row.endpointId === created.id),
     ).toHaveLength(1);
@@ -253,10 +257,10 @@ describe('EndpointsService - soft delete', () => {
     await endpoints.remove(context, created.id);
 
     const listed = await endpoints.list(context, {});
-    expect(listed.map((endpoint) => endpoint.id)).not.toContain(created.id);
+    expect(listed.data.map((endpoint) => endpoint.id)).not.toContain(created.id);
 
     const withDeleted = await endpoints.list(context, { include_deleted: true });
-    expect(withDeleted.map((endpoint) => endpoint.id)).toContain(created.id);
+    expect(withDeleted.data.map((endpoint) => endpoint.id)).toContain(created.id);
 
     // Followed from a delivery row at 2am; a 404 here would make the ledger
     // unreadable.

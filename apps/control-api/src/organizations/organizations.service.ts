@@ -10,9 +10,11 @@ import {
   PageQueryDto,
   SLUG_MAX_LENGTH,
   SLUG_MIN_LENGTH,
+  SLUG_PATTERN,
   UpdateOrganizationDto,
   toOrganizationDto,
 } from './dto';
+import { TenantTransactionRunner } from './tenant-transaction';
 import { UserPrincipal, UserScopeFactory, contextForNewMembership } from './user-scope';
 
 const UNIQUE_VIOLATION = 'P2002';
@@ -23,6 +25,22 @@ const UNIQUE_VIOLATION = 'P2002';
  * characters, so exhausting five is not a case worth engineering around.
  */
 const MAX_SLUG_ATTEMPTS = 5;
+
+/**
+ * How many live organizations one account may OWN.
+ *
+ * `POST /v1/organizations` is an authenticated but untenanted write into a
+ * GLOBALLY unique slug namespace: there is no tenant to charge it to, no quota
+ * behind it, and squatting the namespace costs an attacker one session and a
+ * loop. The route is throttled per address and per session as well, but a rate
+ * limit bounds the RATE and this bounds the TOTAL - a patient script defeats
+ * only the first.
+ *
+ * Ten is a working number, not a product decision: it is well above what a real
+ * account does and well below what a script wants. It belongs in the plan
+ * limits when billing lands - see HANDOFF.md.
+ */
+export const MAX_ORGANIZATIONS_PER_USER = 10;
 
 /**
  * Organizations (ARCHITECTURE.md 8).
@@ -51,6 +69,7 @@ export class OrganizationsService {
     private readonly users: UserScopeFactory,
     private readonly scopes: TenantScopeFactory,
     private readonly audit: AuditService,
+    private readonly transactions: TenantTransactionRunner,
   ) {}
 
   // -------------------------------------------------------------------------
@@ -66,17 +85,21 @@ export class OrganizationsService {
    */
   async list(principal: UserPrincipal, page: PageQueryDto): Promise<OrganizationListDto> {
     const scope = this.users.for(principal);
+    // A `Page`, not a bare array: `listMemberships` is bounded whether or not
+    // the caller named a limit, and the page carries `hasMore` so a truncated
+    // read is a fact rather than a silence. `total` is what this DTO puts on
+    // the wire, so the count is still taken.
     const [memberships, total] = await Promise.all([
       scope.listMemberships({ take: page.limit, skip: page.offset }),
       scope.countMemberships(),
     ]);
 
     return {
-      data: memberships.map((membership) =>
+      data: memberships.rows.map((membership) =>
         toOrganizationDto(membership.organization, membership.role),
       ),
       total,
-      limit: page.limit ?? memberships.length,
+      limit: page.limit ?? memberships.rows.length,
       offset: page.offset ?? 0,
     };
   }
@@ -100,6 +123,19 @@ export class OrganizationsService {
     const scope = this.users.for(principal);
     const name = dto.name.trim();
     const explicitSlug = dto.slug?.trim();
+
+    // Checked before the write and deliberately NOT inside the transaction: two
+    // simultaneous creates could take one account to eleven, which is a rounding
+    // error against a bound whose job is to stop an unbounded loop. Serialising
+    // every organization creation on the platform to make 10 exact would be a
+    // much worse trade.
+    const owned = await scope.countOwnedOrganizations();
+    if (owned >= MAX_ORGANIZATIONS_PER_USER) {
+      throw new AppError(
+        'conflict',
+        `You already own ${MAX_ORGANIZATIONS_PER_USER} organizations, which is the limit. Delete one, or ask to have the limit raised.`,
+      );
+    }
 
     for (let attempt = 0; attempt < MAX_SLUG_ATTEMPTS; attempt += 1) {
       const slug = explicitSlug ?? OrganizationsService.deriveSlug(name, attempt > 0);
@@ -191,7 +227,8 @@ export class OrganizationsService {
   }
 
   /**
-   * Soft delete. `status = 'deleted'` and nothing else.
+   * Soft delete: the organization AND every project under it, in one
+   * transaction.
    *
    * Owner only. The permission matrix has no `organizations.write` — the
    * closest declared answer for the `organization` accessor is `projects.write`,
@@ -200,9 +237,30 @@ export class OrganizationsService {
    * check is explicit here rather than smuggled into a permission, and the
    * matrix gap is written up in HANDOFF.md.
    *
-   * `TenantResolver.loadOrganization` refuses a deleted organization, so this
-   * is a one-way door through the API: every route under `:orgId` starts
-   * answering 404 immediately, for every member.
+   * ## Why the projects go too
+   *
+   * Setting `organizations.status = 'deleted'` alone stopped the CONTROL plane
+   * and nothing else, and the two halves failed in opposite directions:
+   *
+   *  - The data plane never reads `organizations`. `findAPIKeySQL`
+   *    (services/data-plane/internal/ingest/store.go) joins `api_keys` to
+   *    `projects`, and handler.go gates on `key.ProjectStatus != "active"`. So
+   *    every `wk_live_`/`wk_test_` key kept authenticating after deletion and
+   *    events kept being ingested and stored, indefinitely.
+   *  - `TenantResolver.loadOrganization` DOES refuse a deleted organization, so
+   *    every route under `/v1/organizations/:orgId` and
+   *    `/v1/projects/:projectId` answered 404 for every member. They could not
+   *    list projects, delete them, or revoke a key to stop the ingest. There is
+   *    no undelete; recovery was a psql session.
+   *
+   * Soft-deleting the projects makes the gate the data plane ALREADY has fire.
+   * No Go change is needed, and it is the same one-way door either way: this
+   * cascade is why the button is owner-only.
+   *
+   * Still no hard delete anywhere: `deliveries.event_id`/`endpoint_id` are
+   * `ON DELETE RESTRICT` and the ledger has to answer "did finance ever receive
+   * this?" months later. Members are untouched for the same reason - the audit
+   * trail names them.
    */
   async remove(context: RequestContext): Promise<void> {
     if (context.role !== 'owner') {
@@ -212,13 +270,29 @@ export class OrganizationsService {
       );
     }
 
-    const scope = this.scopes.for(context);
-    await scope.organization.updateById(context.organization.id, { status: 'deleted' });
-    await this.audit.recordFor(context, {
-      action: 'organization.deleted',
-      resourceType: 'organization',
-      resourceId: context.organization.id,
-      metadata: { name: context.organization.name, slug: context.organization.slug },
+    await this.transactions.run(context, async (scope, audit) => {
+      // Projects first: if anything fails, the transaction rolls back and the
+      // organization is still administrable. The predicate is stated rather
+      // than omitted because `ScopedRepository.updateMany` requires one - an
+      // empty `where` reads as innocuous and rewrites every row in the tenant -
+      // and it is the exact form that docblock names.
+      const projects = await scope.projects.updateMany(
+        { status: { not: 'deleted' } },
+        { status: 'deleted' },
+      );
+      await scope.organization.updateById(context.organization.id, { status: 'deleted' });
+      await audit.record({
+        action: 'organization.deleted',
+        resourceType: 'organization',
+        resourceId: context.organization.id,
+        metadata: {
+          name: context.organization.name,
+          slug: context.organization.slug,
+          // The operator question this answers at 2am: "why did that project's
+          // ingest stop?" - because this happened, and to how many.
+          projects_deleted: projects,
+        },
+      });
     });
   }
 
@@ -233,17 +307,34 @@ export class OrganizationsService {
    * an empty slug and a row nobody can address; `bootstrap` had the same bug and
    * now rejects it loudly. Here the name is already validated for length only,
    * so the fallback is a suffixed default rather than an error.
+   *
+   * The `.slice()` used to come AFTER the edge-hyphen strip and the result was
+   * never re-tested, so a name whose 48th character landed on a separator
+   * ("A very long company name ... and Partners") wrote `...-and-` - a slug that
+   * violates `SLUG_PATTERN`, which is the pattern this module's own DTO
+   * declares. It was accepted on create and then REJECTED with a 400 if an owner
+   * PATCHed the same value back, which is the worst shape a validation
+   * disagreement can take. `projects/slug.ts` already got this right: strip
+   * trailing hyphens after the slice, re-test the pattern, and treat a failure
+   * as "nothing usable survived" rather than writing it.
    */
   private static deriveSlug(name: string, forceSuffix: boolean): string {
     const base = name
       .toLowerCase()
       .replace(/[^a-z0-9]+/g, '-')
       .replace(/^-+|-+$/g, '')
-      .slice(0, SLUG_MAX_LENGTH);
+      .slice(0, SLUG_MAX_LENGTH)
+      // The slice can cut mid-separator; this is what stops `acme-` being
+      // written. Leading hyphens cannot survive the strip above.
+      .replace(/-+$/g, '');
 
-    const stem = base.length >= SLUG_MIN_LENGTH ? base : 'workspace';
-    if (!forceSuffix && base.length >= SLUG_MIN_LENGTH) return stem;
-    return `${stem.slice(0, SLUG_MAX_LENGTH - 7)}-${OrganizationsService.suffix()}`;
+    const usable = base.length >= SLUG_MIN_LENGTH && SLUG_PATTERN.test(base);
+    const stem = usable ? base : 'workspace';
+    if (!forceSuffix && usable) return stem;
+    // The suffixed form is re-tested too: `stem` is pattern-clean and the slice
+    // for the suffix can land on a hyphen just as easily.
+    const head = stem.slice(0, SLUG_MAX_LENGTH - 7).replace(/-+$/g, '') || 'workspace';
+    return `${head}-${OrganizationsService.suffix()}`;
   }
 
   private static suffix(): string {

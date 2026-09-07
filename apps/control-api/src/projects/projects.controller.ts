@@ -1,4 +1,4 @@
-import { Body, Controller, Delete, Get, Param, Patch, Post, Query } from '@nestjs/common';
+import { Body, Controller, Delete, Get, Param, Patch, Post, Query, UseGuards } from '@nestjs/common';
 import {
   ApiConflictResponse,
   ApiCookieAuth,
@@ -9,14 +9,18 @@ import {
   ApiOperation,
   ApiParam,
   ApiTags,
+  ApiTooManyRequestsResponse,
 } from '@nestjs/swagger';
 import { Authorized, RequestContext, Tenant } from '../authz';
+import { Throttle, ThrottleGuard } from '../common/throttle.guard';
 import {
   CreateProjectDto,
   ListProjectsQueryDto,
   ProjectDto,
+  ProjectListDto,
   UpdateProjectDto,
 } from './dto';
+import { PROJECT_CREATE_THROTTLE } from './project-limits';
 import { ProjectsService } from './projects.service';
 
 /**
@@ -30,6 +34,13 @@ import { ProjectsService } from './projects.service';
  *
  * The global prefix `v1` is applied in main.ts, so these routes are served at
  * `/v1/organizations/:orgId/projects`.
+ *
+ * `ThrottleGuard` is mounted for the whole controller but limits only the
+ * handlers that carry `@Throttle` - it is a no-op everywhere else, so a read can
+ * never be throttled by accident. Being a CLASS-level guard it runs BEFORE the
+ * route-level `SessionGuard`/`TenantGuard` that `@Authorized` mounts, which is
+ * deliberate: an unauthenticated flood is refused before it costs a session
+ * lookup and two tenant queries.
  */
 @ApiTags('projects')
 @ApiCookieAuth('session')
@@ -43,6 +54,12 @@ import { ProjectsService } from './projects.service';
 @ApiForbiddenResponse({
   description: 'Membership is proven but the role is short of the permission.',
 })
+@ApiTooManyRequestsResponse({
+  description:
+    'Rate limited. Carries `Retry-After` (seconds) and `details.retry_after_seconds`. Only the ' +
+    'write routes are limited.',
+})
+@UseGuards(ThrottleGuard)
 @Controller('organizations/:orgId/projects')
 export class ProjectsController {
   constructor(private readonly projects: ProjectsService) {}
@@ -51,26 +68,35 @@ export class ProjectsController {
   @Authorized('projects.read')
   @ApiOperation({
     summary: 'List the projects in an organization',
-    description: 'Newest first. Soft-deleted projects are hidden unless `status=deleted`.',
+    description:
+      'Newest first. Soft-deleted projects are hidden unless `status=deleted`. Paged: read ' +
+      '`has_more` rather than comparing `count` against `limit`, and pass `next_offset` back as ' +
+      '`offset` to continue.',
   })
-  @ApiOkResponse({ type: [ProjectDto] })
+  @ApiOkResponse({ type: ProjectListDto })
   list(
     @Tenant() context: RequestContext,
     @Query() query: ListProjectsQueryDto,
-  ): Promise<ProjectDto[]> {
+  ): Promise<ProjectListDto> {
     return this.projects.list(context, query);
   }
 
   @Post()
   @Authorized('projects.write')
+  @Throttle(PROJECT_CREATE_THROTTLE)
   @ApiOperation({
     summary: 'Create a project',
     description:
       'The `environment` chosen here is permanent. `slug` defaults to a normalised form of ' +
-      '`name` and must be unique within the organization.',
+      '`name` and must be unique within the organization. Rate limited, and subject to a ' +
+      'per-organization ceiling (`MAX_PROJECTS_PER_ORGANIZATION`) that counts live projects only.',
   })
   @ApiCreatedResponse({ type: ProjectDto })
-  @ApiConflictResponse({ description: 'The slug is already taken in this organization.' })
+  @ApiConflictResponse({
+    description:
+      'Either the slug is already taken in this organization, or the organization is at its ' +
+      'project ceiling (`details.limit` / `details.current`).',
+  })
   create(
     @Tenant() context: RequestContext,
     @Body() dto: CreateProjectDto,

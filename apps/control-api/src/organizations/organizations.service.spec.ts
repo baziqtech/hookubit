@@ -1,6 +1,8 @@
 import { AuditService, TenantScopeFactory } from '../authz';
 import { AppError } from '../common/errors';
-import { OrganizationsService } from './organizations.service';
+import { MAX_ORGANIZATIONS_PER_USER, OrganizationsService } from './organizations.service';
+import { SLUG_MAX_LENGTH, SLUG_PATTERN } from './dto';
+import { TenantTransactionRunner } from './tenant-transaction';
 import { FakeWorld, IDS, principalFor, seedWorld, contextFor } from './testing/world';
 import { UserScope, UserScopeFactory } from './user-scope';
 
@@ -12,12 +14,30 @@ describe('OrganizationsService', () => {
   beforeEach(() => {
     db = seedWorld();
     audit = new AuditService(db.asPrisma());
+    const scopes = new TenantScopeFactory(db.asPrisma());
     service = new OrganizationsService(
       new UserScopeFactory(db.asPrisma()),
-      new TenantScopeFactory(db.asPrisma()),
+      scopes,
       audit,
+      new TenantTransactionRunner(db.asPrisma(), scopes, audit),
     );
   });
+
+  /** A project in an organization, with the columns PostgreSQL would default. */
+  const seedProject = (organizationId: string, id: string, status = 'active'): void => {
+    db.insert('project', {
+      id,
+      organizationId,
+      name: id,
+      slug: id,
+      environment: 'test',
+      status,
+      createdAt: new Date('2026-01-01T00:00:00.000Z'),
+      updatedAt: new Date('2026-01-01T00:00:00.000Z'),
+    });
+  };
+
+  const statusOf = (table: string, id: string): unknown => db.rows(table).get(id)?.status;
 
   const code = async (run: Promise<unknown>): Promise<string> => {
     try {
@@ -159,6 +179,69 @@ describe('OrganizationsService', () => {
       const created = await service.create(principalFor(IDS.outsider), { name: '!!!' });
       expect(created.slug).toMatch(/^workspace-[a-z0-9]{6}$/);
     });
+
+    // -------------------------------------------------------------------------
+    // FIX 4 - a derived slug must satisfy the pattern its own DTO declares
+    // -------------------------------------------------------------------------
+
+    it('never derives a slug that its own DTO would reject', async () => {
+      // The truncation used to happen AFTER the edge-hyphen strip and was never
+      // re-tested, so a name whose cut lands on a separator wrote a trailing
+      // hyphen. The name below is built so the 48-character slice falls exactly
+      // on one.
+      const head = 'a'.repeat(SLUG_MAX_LENGTH - 1);
+      const created = await service.create(principalFor(IDS.outsider), {
+        name: `${head} and partners`,
+      });
+
+      expect(created.slug).toMatch(SLUG_PATTERN);
+      expect(created.slug.endsWith('-')).toBe(false);
+      expect(created.slug).not.toContain('--');
+      expect(created.slug.length).toBeLessThanOrEqual(SLUG_MAX_LENGTH);
+    });
+
+    it('accepts its own derived slug back on a PATCH', async () => {
+      // The actual user-visible bug: the value create wrote was rejected as
+      // invalid when the owner sent it back unchanged. Rather than re-deriving
+      // by hand, run the derivation over a spread of hostile names and check
+      // every result against the pattern the DTO enforces on the way in.
+      const names = [
+        `${'b'.repeat(SLUG_MAX_LENGTH - 1)} and partners`,
+        `${'c'.repeat(SLUG_MAX_LENGTH)}!!!!`,
+        'Acme -- Corporation',
+        '  spaced  out  ',
+        '!!!',
+        'a-',
+      ];
+
+      for (const name of names) {
+        const created = await service.create(principalFor(IDS.outsider), { name });
+        expect({ name, slug: created.slug }).toMatchObject({
+          slug: expect.stringMatching(SLUG_PATTERN),
+        });
+      }
+    });
+
+    // -------------------------------------------------------------------------
+    // FIX 7 - a per-account bound on an untenanted write
+    // -------------------------------------------------------------------------
+
+    it('refuses to create past the per-account cap', async () => {
+      for (let i = 0; i < MAX_ORGANIZATIONS_PER_USER; i += 1) {
+        await service.create(principalFor(IDS.outsider), { name: `Org ${i}` });
+      }
+      // outsider owns none from the seed, so the cap is reached exactly here.
+      expect(await code(service.create(principalFor(IDS.outsider), { name: 'One too many' }))).toBe(
+        'conflict',
+      );
+    });
+
+    it('counts only organizations the caller OWNS, not ones they were invited to', async () => {
+      // viewerA is a member of org A at viewer rank. That is somebody else's
+      // decision and must not consume their own allowance.
+      const created = await service.create(principalFor(IDS.viewerA), { name: 'Mine' });
+      expect(created.role).toBe('owner');
+    });
   });
 
   // ---------------------------------------------------------------------------
@@ -220,6 +303,83 @@ describe('OrganizationsService', () => {
       const context = await contextFor(db, IDS.adminA, IDS.orgA);
       expect(await code(service.remove(context))).toBe('forbidden');
       expect(db.rows('organization').get(IDS.orgA)?.status).toBe('active');
+    });
+  });
+
+  // ---------------------------------------------------------------------------
+  // FIX 2 - deletion has to stop INGEST, not just the control plane
+  // ---------------------------------------------------------------------------
+
+  describe('remove also retires the projects', () => {
+    it("soft-deletes every project, because that is the gate the data plane reads", async () => {
+      // The data plane never reads `organizations`: `findAPIKeySQL` joins
+      // api_keys -> projects and the handler gates on ProjectStatus. Leaving the
+      // projects active meant every wk_live_ key kept authenticating and events
+      // kept being stored after the organization was "deleted" - while every
+      // member was locked out of the control plane and could not revoke them.
+      seedProject(IDS.orgA, 'prj_a1');
+      seedProject(IDS.orgA, 'prj_a2');
+      const context = await contextFor(db, IDS.ownerA, IDS.orgA);
+
+      await service.remove(context);
+
+      expect(statusOf('project', 'prj_a1')).toBe('deleted');
+      expect(statusOf('project', 'prj_a2')).toBe('deleted');
+      expect(statusOf('organization', IDS.orgA)).toBe('deleted');
+    });
+
+    it("does not touch another organization's projects", async () => {
+      seedProject(IDS.orgA, 'prj_a1');
+      seedProject(IDS.orgB, 'prj_b1');
+      const context = await contextFor(db, IDS.ownerA, IDS.orgA);
+
+      await service.remove(context);
+
+      expect(statusOf('project', 'prj_b1')).toBe('active');
+      expect(statusOf('organization', IDS.orgB)).toBe('active');
+    });
+
+    it('is one transaction: a failure leaves the organization administrable', async () => {
+      // The half-applied state is the dangerous one. If the organization were
+      // marked deleted and the projects were not, every member would be locked
+      // out of a tenant that is still ingesting - and there is no undelete.
+      seedProject(IDS.orgA, 'prj_a1');
+      jest.spyOn(audit, 'recordFor').mockRejectedValue(new Error('audit write failed'));
+      const context = await contextFor(db, IDS.ownerA, IDS.orgA);
+
+      await expect(service.remove(context)).rejects.toThrow('audit write failed');
+
+      expect(statusOf('organization', IDS.orgA)).toBe('active');
+      expect(statusOf('project', 'prj_a1')).toBe('active');
+    });
+
+    it('records how many projects went with it', async () => {
+      seedProject(IDS.orgA, 'prj_a1');
+      seedProject(IDS.orgA, 'prj_a2');
+      seedProject(IDS.orgA, 'prj_gone', 'deleted');
+      const context = await contextFor(db, IDS.ownerA, IDS.orgA);
+
+      await service.remove(context);
+
+      expect(db.all('auditLog')).toContainEqual(
+        expect.objectContaining({
+          action: 'organization.deleted',
+          organizationId: IDS.orgA,
+          // The already-deleted one is not counted twice.
+          metadata: expect.objectContaining({ projects_deleted: 2 }),
+        }),
+      );
+    });
+
+    it('leaves the delivery-bearing rows alone: this is a status flip, not a cascade', async () => {
+      seedProject(IDS.orgA, 'prj_a1');
+      const context = await contextFor(db, IDS.ownerA, IDS.orgA);
+
+      await service.remove(context);
+
+      expect(db.rows('project').has('prj_a1')).toBe(true);
+      expect(db.rows('organization').has(IDS.orgA)).toBe(true);
+      expect(db.all('organizationMember').some((row) => row.organizationId === IDS.orgA)).toBe(true);
     });
   });
 });

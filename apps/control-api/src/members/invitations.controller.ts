@@ -1,4 +1,4 @@
-import { Body, Controller, HttpCode, HttpStatus, Post } from '@nestjs/common';
+import { Body, Controller, HttpCode, HttpStatus, Post, UseGuards } from '@nestjs/common';
 import {
   ApiBadRequestResponse,
   ApiConflictResponse,
@@ -7,6 +7,7 @@ import {
   ApiOperation,
   ApiTags,
 } from '@nestjs/swagger';
+import { Throttle, ThrottleGuard } from '../common/throttle.guard';
 import { Principal, UserPrincipal, UserScoped } from '../organizations';
 import { AcceptInvitationDto, AcceptedInvitationDto } from './dto';
 import { MembersService } from './members.service';
@@ -26,14 +27,25 @@ import { MembersService } from './members.service';
  * would depend on controller registration order to avoid being captured by
  * `:orgId`.
  */
+const HOUR = 60 * 60 * 1000;
+
 @ApiTags('members')
 @ApiCookieAuth('session')
+@UseGuards(ThrottleGuard)
 @Controller('invitations')
 export class InvitationsController {
   constructor(private readonly members: MembersService) {}
 
   @Post('accept')
   @UserScoped()
+  // Counted, not enforced per address - the same posture `auth.verify` and
+  // `auth.reset` take, and for the same reason. This route consumes a 256-bit
+  // single-use token, so guessing is not a threat rate limiting addresses;
+  // behind a proxy the per-address bucket aggregates real users, and refusing
+  // on it would deny service to everyone finishing an invitation rather than
+  // prevent an attack. The count still makes the pressure visible to an
+  // operator, and a per-subject bucket can enforce on top of it.
+  @Throttle({ name: 'invitations.accept', limit: 20, windowMs: HOUR, enforcePerIp: false })
   @HttpCode(HttpStatus.OK)
   @ApiOperation({
     summary: 'Redeem a membership invitation',

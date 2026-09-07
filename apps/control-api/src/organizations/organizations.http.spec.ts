@@ -85,6 +85,45 @@ describe('organizations over HTTP', () => {
   });
 
   // ---------------------------------------------------------------------------
+  // FIX 7 - creation is rate limited
+  // ---------------------------------------------------------------------------
+
+  it('429s creation past the limit, having 201d the ones under it', async () => {
+    // `POST /v1/organizations` is an untenanted write into a GLOBALLY unique
+    // slug namespace. Unlimited, one session was enough to squat it.
+    const attempt = (n: number): ReturnType<TestHarness['call']> =>
+      call('POST', '/v1/organizations', { as: IDS.outsider, body: { name: `Org ${n}` } });
+
+    const statuses: number[] = [];
+    for (let n = 0; n < 11; n += 1) statuses.push((await attempt(n)).status);
+
+    expect(statuses.slice(0, 10)).toEqual(Array(10).fill(201));
+    expect(statuses[10]).toBe(429);
+  });
+
+  it('charges the limit for requests that never reach the handler', async () => {
+    // The guard runs before the validation pipe on purpose: a 400 still costs a
+    // request, or the limit is trivially avoided by sending malformed bodies.
+    for (let n = 0; n < 10; n += 1) {
+      const res = await call('POST', '/v1/organizations', { as: IDS.outsider, body: { name: '' } });
+      expect(res.status).toBe(400);
+    }
+    const over = await call('POST', '/v1/organizations', {
+      as: IDS.outsider,
+      body: { name: 'Perfectly Valid' },
+    });
+    expect(over.status).toBe(429);
+    expect(over.body.error?.code).toBe('rate_limited');
+  });
+
+  it('does not throttle the reads', async () => {
+    for (let n = 0; n < 25; n += 1) {
+      const res = await call('GET', '/v1/organizations', { as: IDS.ownerA });
+      expect(res.status).toBe(200);
+    }
+  });
+
+  // ---------------------------------------------------------------------------
   // The tenanted routes
   // ---------------------------------------------------------------------------
 
@@ -153,5 +192,25 @@ describe('organizations over HTTP', () => {
     // Soft: the row and its members are still there.
     expect(db.rows('organization').has(IDS.orgA)).toBe(true);
     expect(db.all('organizationMember').some((row) => row.organizationId === IDS.orgA)).toBe(true);
+  });
+
+  it('takes the projects down with the organization, over HTTP', async () => {
+    // FIX 2, end to end: the data plane gates ingest on `projects.status`, so
+    // this is what actually stops the wk_live_ keys.
+    db.insert('project', {
+      id: 'prj_http',
+      organizationId: IDS.orgA,
+      name: 'Ingest',
+      slug: 'ingest',
+      environment: 'live',
+      status: 'active',
+      createdAt: new Date('2026-01-01T00:00:00.000Z'),
+      updatedAt: new Date('2026-01-01T00:00:00.000Z'),
+    });
+
+    const res = await call('DELETE', `/v1/organizations/${IDS.orgA}`, { as: IDS.ownerA });
+
+    expect(res.status).toBe(204);
+    expect(db.rows('project').get('prj_http')?.status).toBe('deleted');
   });
 });

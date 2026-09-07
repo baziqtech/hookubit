@@ -9,11 +9,20 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
+# Least privilege for the automatically-provisioned GITHUB_TOKEN. Without this
+# block the repository default applies, which on an older repo or org is
+# read-write on `contents` - so a compromised action, or a malicious transitive
+# dependency running in a build step, can push to a branch. Nothing in this
+# workflow publishes anything (see HANDOFF: image publishing is unimplemented),
+# so read is all it needs. A job that genuinely needs more should raise it in
+# its OWN `permissions:` block, not here.
+permissions:
+  contents: read
+
 env:
-  # One place for the toolchain version. services/data-plane/go.mod still
-  # declares `go 1.21` - that is the minimum language version, not the
-  # toolchain, so 1.23 here is not a conflict. Raising go.mod is the data-plane
-  # owner's change, not CI's.
+  # One place for the toolchain version. Keep it in step with the `go` directive
+  # in services/data-plane/go.mod (1.23) and with the builder image in
+  # deployments/docker/data-plane.Dockerfile.
   GO_VERSION: '1.23'
   NODE_VERSION: '22'
   PNPM_VERSION: '9'
@@ -209,6 +218,91 @@ jobs:
         run: |
           go install golang.org/x/vuln/cmd/govulncheck@latest
           govulncheck ./...
+
+  supply-chain:
+    name: Dependencies and secrets
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # gitleaks scans HISTORY. A shallow checkout sees one commit, so a
+          # credential that was committed and then "removed" in a later commit
+          # would pass. The whole point of scanning is to find that.
+          fetch-depth: 0
+      - uses: pnpm/action-setup@v4
+        with: { version: '${{ env.PNPM_VERSION }}' }
+      - uses: actions/setup-node@v4
+        with: { node-version: '${{ env.NODE_VERSION }}', cache: pnpm }
+      - run: pnpm install --frozen-lockfile
+
+      # ── The gate ──────────────────────────────────────────────────────────
+      # PRODUCTION tree only, and `critical` only. Both narrowings are
+      # deliberate and both are measured, not guessed:
+      #
+      #   * --prod, because the one CRITICAL advisory in this repo today is
+      #     vitest's dev-server file read (GHSA-5xrq-8626-4rwp). It ships in no
+      #     image, it is not reachable from anything that runs in production,
+      #     and blocking every merge on it teaches people to ignore this job.
+      #   * --audit-level=critical, because the production tree ALREADY carries
+      #     seven `high` advisories on the day this job was written - four in
+      #     multer (all DoS, via @nestjs/platform-express), two in js-yaml (both
+      #     quadratic-CPU, via @nestjs/swagger) and one in lodash. Gating on
+      #     `high` would have merged this workflow permanently red, and a
+      #     permanently red check is a check nobody reads.
+      #
+      # ═══ TIGHTEN THIS TO `high` ═══ once those seven are cleared - the fix is
+      # a dependency bump in apps/control-api and apps/dashboard, not a change
+      # here. See deployments/HANDOFF.md, "Dependency audit".
+      - name: Audit production dependencies (gate)
+        run: pnpm audit --prod --audit-level=critical
+
+      # ── The report ────────────────────────────────────────────────────────
+      # Everything, dev included, never blocking. This is what makes the
+      # narrowed gate above honest: the highs are visible on every run rather
+      # than silently excluded.
+      - name: Full audit (advisory, never blocks)
+        if: always()
+        continue-on-error: true
+        run: |
+          echo '### pnpm audit - full tree (advisory)' >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          pnpm audit 2>&1 | tail -40 >> "$GITHUB_STEP_SUMMARY" || true
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+
+      # ── Secret scanning ───────────────────────────────────────────────────
+      # The binary from the pinned release, not gitleaks-action: the action
+      # requires a GITLEAKS_LICENSE for organisation-owned repositories and
+      # fails closed without one, which would make this step a permanent red
+      # herring. The tarball has no such condition.
+      #
+      # Two passes, because they catch different things:
+      #   `detect`          - the git history, including a secret added and
+      #                       later deleted. It is still in the objects.
+      #   `detect --no-git` - the working tree, including files that are
+      #                       gitignored or not yet committed.
+      #
+      # This repo is designed so a hit here is a real finding: every credential
+      # is external (ADR-0006), 02-secret.template.yaml holds placeholders only,
+      # and the values in this workflow's `env:` are labelled CI-only.
+      - name: Install gitleaks
+        env:
+          GITLEAKS_VERSION: '8.30.1'
+        run: |
+          set -euo pipefail
+          curl -fsSL "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" \
+            | tar -xz -C /usr/local/bin gitleaks
+          gitleaks version
+      # .github/gitleaks.toml keeps every default rule and allowlists only the
+      # SHAPE of the repository's synthetic fixtures - `0123456789abcdef` filler
+      # keys, one literal base64 test token, and bare `VAR=` env names in docs.
+      # It deliberately does NOT exempt *_test.go or *.spec.ts by path: test
+      # files are one of the places a real key actually gets committed.
+      # Verified with a negative control (a realistic sk_live_ key planted in a
+      # _test.go still fails).
+      - name: Scan git history for secrets
+        run: gitleaks detect --source . --config .github/gitleaks.toml --no-banner --redact --verbose
+      - name: Scan working tree for secrets
+        run: gitleaks detect --source . --config .github/gitleaks.toml --no-git --no-banner --redact --verbose
 
   images:
     name: Container images
@@ -418,3 +512,38 @@ jobs:
 
           [ "$fail" -eq 0 ] || exit 1
           echo "OK - no bundled database, no bundled storage, no subcharts"
+
+      # The worker dials URLs a customer typed into a form. internal/egress/
+      # ssrf.go refuses private ranges and the metadata address, and it is ONE
+      # process making ONE decision - a DNS-rebinding race, a redirect path that
+      # skips the check, or a future http.Client built elsewhere all end with a
+      # socket to 169.254.169.254. The NetworkPolicies are the second layer, in
+      # the kernel. This step exists so that layer cannot be quietly deleted, or
+      # silently hollowed out by trimming an entry from blockedEgressCidrs.
+      #
+      # /tmp/rendered.yaml is the full-features render from the step above.
+      - name: Default-deny NetworkPolicies survive a render
+        run: |
+          set -euo pipefail
+          fail=0
+
+          grep -q 'kind: NetworkPolicy' /tmp/rendered.yaml || {
+            echo "::error::The rendered chart contains no NetworkPolicy. networkPolicy.enabled defaults to true - if that changed, the SSRF guard is a single point of failure again."; fail=1; }
+
+          grep -q 'default-deny' /tmp/rendered.yaml || {
+            echo "::error::No default-deny NetworkPolicy in the rendered chart. Without an empty podSelector denying both directions, every allow rule below it is decoration."; fail=1; }
+
+          # The metadata address and RFC1918 must be subtracted from the
+          # worker's 0.0.0.0/0 egress, in BOTH the chart and the raw manifests.
+          for cidr in '169.254.0.0/16' '10.0.0.0/8' '172.16.0.0/12' '192.168.0.0/16' '127.0.0.0/8'; do
+            grep -q -- "$cidr" /tmp/rendered.yaml || {
+              echo "::error::$cidr is no longer excluded from the worker's egress in the rendered chart. 169.254.169.254 (cloud instance metadata) lives in 169.254.0.0/16; the RFC1918 ranges are every internal service you own."; fail=1; }
+            grep -q -- "$cidr" deployments/kubernetes/50-networkpolicy.yaml || {
+              echo "::error::$cidr is no longer excluded from the worker's egress in deployments/kubernetes/50-networkpolicy.yaml."; fail=1; }
+          done
+
+          grep -q '50-networkpolicy.yaml' deployments/kubernetes/kustomization.yaml || {
+            echo "::error::50-networkpolicy.yaml is not in the kustomization, so \`kubectl apply -k\` no longer applies any NetworkPolicy."; fail=1; }
+
+          [ "$fail" -eq 0 ] || exit 1
+          echo "OK - default-deny is present and the private ranges are still excluded"

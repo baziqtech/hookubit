@@ -83,13 +83,22 @@ interface InvitationMetadata {
  * repository, and an `assertMemberCreationAllowed` next to the other two - are
  * written up in HANDOFF.md.
  *
- * ## Owner counting is transactional
+ * ## Owner counting is transactional AND serialisable
  *
  * `RoleChange.ownerCount`'s own docblock: "Count it inside the same transaction
  * as the update, or two concurrent demotions each see two owners and leave
  * zero." An organization with no owner cannot be recovered through the API, so
  * `changeRole` and `remove` both run through `TenantTransactionRunner`: the
  * count, the lattice check, the write and the audit row are one transaction.
+ *
+ * One transaction was not sufficient, and the fix is NOT in this class. Two
+ * concurrent demotions of DIFFERENT owner rows never contend for a row lock, so
+ * under READ COMMITTED both counted two owners and both committed - zero
+ * owners, reproduced. `TenantTransactionRunner` now runs at SERIALIZABLE and
+ * retries the abort, centrally, because every read-then-write invariant in this
+ * product has the same shape. See its docblock for why serialisable rather than
+ * a hand-placed row lock. Nothing here declares a lock, and nothing here should
+ * have to.
  *
  * ## Invitations never confirm an address
  *
@@ -125,16 +134,21 @@ export class MembersService {
    */
   async list(context: RequestContext, page: PageQueryDto): Promise<MemberListDto> {
     const scope = this.scopes.for(context);
+    // `findPage`, not `findMany`: an omitted `limit` used to mean an implicit
+    // 50-row truncation with nothing on the wire to say so, and `findMany` now
+    // refuses that read rather than serving an organization with 60 members a
+    // silently partial list. The page carries `hasMore`; `total` is what this
+    // DTO puts on the wire, so the count is still taken.
     const [members, total] = await Promise.all([
-      scope.members.findMany({ orderBy: { id: 'asc' }, take: page.limit, skip: page.offset }),
+      scope.members.findPage({ orderBy: { id: 'asc' }, take: page.limit, skip: page.offset }),
       scope.members.count(),
     ]);
-    const identities = await this.directory.byIds(members.map((member) => member.userId));
+    const identities = await this.directory.byIds(members.rows.map((member) => member.userId));
 
     return {
-      data: members.map((member) => toMemberDto(member, identities.get(member.userId))),
+      data: members.rows.map((member) => toMemberDto(member, identities.get(member.userId))),
       total,
-      limit: page.limit ?? members.length,
+      limit: page.limit ?? members.rows.length,
       offset: page.offset ?? 0,
     };
   }
@@ -190,33 +204,49 @@ export class MembersService {
       invitedByUserId: context.user.userId,
     };
 
-    // Audited BEFORE the mail: "who invited this person" must be answerable
-    // even if the transport was down, and it is the record the redemption below
-    // is checked against.
-    await this.audit.recordFor(context, {
-      action: 'member.invited',
-      resourceType: 'member',
-      resourceId: null,
-      metadata: { email, role: dto.role },
-    });
-
-    await this.safely('invitation', async () => {
-      const issued = await this.tokens.issue({
+    // ORDER MATTERS, and it is the opposite of what it was.
+    //
+    // The audit row used to be written first, with issuance and mail together
+    // inside `safely()`. A database failure in `tokens.issue` then produced an
+    // audit record of an invitation that was never issued, and a 202 - a log
+    // that says something happened which did not. The log has to record what
+    // actually happened, so nothing is written until the token exists.
+    //
+    // Issuance is still swallowed, and the mail separately: the uniform 202 is
+    // the point of this endpoint (see the docblock), and a 500 here for an
+    // unknown address against a 202 for a member is precisely the oracle it
+    // exists to close.
+    const issued = await this.safely('invitation', () =>
+      this.tokens.issue({
         type: 'invitation',
         email,
         // Not linked to a user row even when one exists: the token proves the
         // address, and `accept` re-checks it against the redeeming session.
         userId: null,
         metadata: metadata as unknown as Prisma.InputJsonValue,
+      }),
+    );
+
+    if (issued) {
+      // Unwrapped, exactly like the already-a-member branch above: an audit
+      // failure is a 500 on BOTH branches, so a broken database cannot be used
+      // to tell the two apart either.
+      await this.audit.recordFor(context, {
+        action: 'member.invited',
+        resourceType: 'member',
+        resourceId: null,
+        metadata: { email, role: dto.role },
       });
-      await this.mailer.sendInvitation({
-        email,
-        organizationName: context.organization.name,
-        invitedByEmail: context.user.email,
-        role: dto.role,
-        rawToken: issued.raw,
-      });
-    });
+      await this.safely('invitation mail', () =>
+        this.mailer.sendInvitation({
+          email,
+          organizationName: context.organization.name,
+          invitedByEmail: context.user.email,
+          role: dto.role,
+          rawToken: issued.raw,
+        }),
+      );
+    }
 
     return { status: 'accepted' };
   }
@@ -237,7 +267,7 @@ export class MembersService {
     memberId: string,
     dto: UpdateMemberRoleDto,
   ): Promise<MemberDto> {
-    const updated = await this.transactions.run(context, async (scope, tx) => {
+    const updated = await this.transactions.run(context, async (scope, audit) => {
       const target = await scope.members.requireById(memberId);
       const ownerCount = await scope.members.count({ role: 'owner' });
 
@@ -255,16 +285,12 @@ export class MembersService {
       if (target.role === dto.role) return target;
 
       const changed = await scope.members.updateById(memberId, { role: dto.role });
-      await this.audit.recordFor(
-        context,
-        {
-          action: 'member.role_changed',
-          resourceType: 'member',
-          resourceId: changed.id,
-          metadata: { user_id: changed.userId, from: target.role, to: changed.role },
-        },
-        tx,
-      );
+      await audit.record({
+        action: 'member.role_changed',
+        resourceType: 'member',
+        resourceId: changed.id,
+        metadata: { user_id: changed.userId, from: target.role, to: changed.role },
+      });
       return changed;
     });
 
@@ -283,7 +309,7 @@ export class MembersService {
    * The audit row naming the removed user survives regardless.
    */
   async remove(context: RequestContext, memberId: string): Promise<void> {
-    await this.transactions.run(context, async (scope, tx) => {
+    await this.transactions.run(context, async (scope, audit) => {
       const target = await scope.members.requireById(memberId);
       const ownerCount = await scope.members.count({ role: 'owner' });
 
@@ -296,16 +322,12 @@ export class MembersService {
       });
 
       await scope.members.deleteById(memberId);
-      await this.audit.recordFor(
-        context,
-        {
-          action: 'member.removed',
-          resourceType: 'member',
-          resourceId: target.id,
-          metadata: { user_id: target.userId, role: target.role },
-        },
-        tx,
-      );
+      await audit.record({
+        action: 'member.removed',
+        resourceType: 'member',
+        resourceId: target.id,
+        metadata: { user_id: target.userId, role: target.role },
+      });
     });
   }
 
@@ -468,13 +490,14 @@ export class MembersService {
    * with the organization id only - never the token, never the address, both of
    * which are exactly what an attacker reading logs would want.
    */
-  private async safely(what: string, run: () => Promise<void>): Promise<void> {
+  private async safely<T>(what: string, run: () => Promise<T>): Promise<T | null> {
     try {
-      await run();
+      return await run();
     } catch (err) {
       this.logger.error(
         `Failed to deliver a member ${what}: ${err instanceof Error ? err.message : 'unknown error'}`,
       );
+      return null;
     }
   }
 }

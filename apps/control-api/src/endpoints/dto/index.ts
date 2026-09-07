@@ -9,5 +9,5 @@ export {
   EndpointListDto,
   toEndpointDto,
 } from './endpoint-response.dto';
-export { ListEndpointsQueryDto } from './list-endpoints.query.dto';
+export { BooleanQuery, ListEndpointsQueryDto } from './list-endpoints.query.dto';
 export { DisableEndpointDto, UpdateEndpointDto } from './update-endpoint.dto';

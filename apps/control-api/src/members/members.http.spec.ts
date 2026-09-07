@@ -1,5 +1,6 @@
 import { CROSS_TENANT_MESSAGE } from '../authz';
 import { TokenService } from '../auth/token.service';
+import { THROTTLE_KEY, ThrottleOptions } from '../common/throttle.guard';
 import { TestHarness, createHarness } from '../organizations/testing/http';
 import { FakeWorld, IDS, memberId, seedWorld } from '../organizations/testing/world';
 import { InvitationInvite, InvitationMailer, INVITATION_MAILER } from './invitation-mailer.port';
@@ -136,6 +137,54 @@ describe('members over HTTP', () => {
   });
 
   // ---------------------------------------------------------------------------
+  // FIX 7 - the invite endpoint is an outbound-mail primitive
+  // ---------------------------------------------------------------------------
+
+  it('429s invitations past the limit', async () => {
+    // Unlimited, this was a mail cannon: an attacker-chosen organization name
+    // (200 chars), any address the caller names, from the platform's own
+    // sending domain.
+    const send = (): ReturnType<TestHarness['call']> =>
+      call('POST', members(IDS.orgA), {
+        as: IDS.ownerA,
+        body: { email: 'target@example.com', role: 'viewer' },
+      });
+
+    const statuses: number[] = [];
+    for (let n = 0; n < 21; n += 1) statuses.push((await send()).status);
+
+    expect(statuses.slice(0, 20)).toEqual(Array(20).fill(202));
+    expect(statuses[20]).toBe(429);
+    expect(mailer.invitations.length).toBeLessThanOrEqual(20);
+  });
+
+  it('limits per RECIPIENT, so one mailbox cannot be targeted from many organizations', async () => {
+    // The per-address bucket is the one that protects the victim; the caller
+    // here changes organization and role between sends and it makes no
+    // difference.
+    for (let n = 0; n < 20; n += 1) {
+      await call('POST', members(IDS.orgA), {
+        as: n % 2 === 0 ? IDS.ownerA : IDS.adminA,
+        body: { email: 'victim@example.com', role: n % 2 === 0 ? 'viewer' : 'developer' },
+      });
+    }
+    const over = await call('POST', members(IDS.orgB), {
+      as: IDS.ownerB,
+      body: { email: 'victim@example.com', role: 'viewer' },
+    });
+
+    expect(over.status).toBe(429);
+    expect(over.body.error?.code).toBe('rate_limited');
+  });
+
+  it('does not throttle the member list', async () => {
+    for (let n = 0; n < 25; n += 1) {
+      const res = await call('GET', members(IDS.orgA), { as: IDS.viewerA });
+      expect(res.status).toBe(200);
+    }
+  });
+
+  // ---------------------------------------------------------------------------
   // Role changes
   // ---------------------------------------------------------------------------
 
@@ -222,6 +271,22 @@ describe('members over HTTP', () => {
   // ---------------------------------------------------------------------------
 
   describe('POST /v1/invitations/accept', () => {
+    it('carries a throttle, counted rather than enforced per address', async () => {
+      // The one route here whose limit cannot be observed as a 429, and
+      // deliberately so: it consumes a 256-bit single-use token, so refusing on
+      // the per-address bucket would deny service to everyone finishing an
+      // invitation behind a proxy without preventing an attack (the posture
+      // `auth.verify` and `auth.reset` already take). The counter still exists,
+      // so the pressure is visible and a per-subject bucket can enforce on top.
+      const options = Reflect.getMetadata(
+        THROTTLE_KEY,
+        InvitationsController.prototype.accept,
+      ) as ThrottleOptions | undefined;
+
+      expect(options).toMatchObject({ name: 'invitations.accept', enforcePerIp: false });
+      expect(options?.limit).toBeGreaterThan(0);
+    });
+
     const invite = async (role = 'developer'): Promise<string> => {
       await call('POST', members(IDS.orgA), {
         as: IDS.ownerA,

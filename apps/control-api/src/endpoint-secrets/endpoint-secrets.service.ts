@@ -3,7 +3,6 @@ import { Endpoint, EndpointSecret } from '@prisma/client';
 import {
   AuditService,
   CROSS_TENANT_MESSAGE,
-  MAX_PAGE_SIZE,
   RequestContext,
   TenantScope,
   TenantScopeFactory,
@@ -11,8 +10,14 @@ import {
 import { CryptoService } from '../common/crypto.service';
 import { AppError } from '../common/errors';
 import { newId } from '../common/ids';
+// Direct file import rather than the barrel: this is the ONLY thing these
+// modules take from `src/organizations`, and naming the file keeps an unrelated
+// change to that module's index out of this module's build.
+import { TenantTransactionRunner } from '../organizations/tenant-transaction';
 import {
   EndpointSecretDto,
+  EndpointSecretListDto,
+  ListSecretsQueryDto,
   RotatedSecretDto,
   isEffectivelyActive,
   toEndpointSecretDto,
@@ -51,6 +56,47 @@ const SECRETS_TABLE = 'endpoint_secrets';
  * 4. **Revocation.** `revoke` refuses to deactivate the last live secret of an
  *    endpoint that is not deleted.
  *
+ * ## Why 3 and 4 were not true, and what makes them true
+ *
+ * Paths 3 and 4 used to be read-then-check-then-write with nothing re-checking
+ * at write time, and that made the fourth claim above FALSE under concurrency.
+ * Both interleavings were reproduced:
+ *
+ * - Two simultaneous `DELETE .../secrets/:id`, one for v1 and one for v2, each
+ *   snapshot both secrets, each compute the OTHER as their surviving secret,
+ *   each pass the check and each write. Live secrets: 0. Endpoint: still
+ *   `active`, still `enabled`, every delivery to it failing closed forever,
+ *   because `signing.Header` fails closed and no operator gets told.
+ * - A revoke landing between rotation's INSERT of v2 and its expiry of v1 sees
+ *   both live, deactivates v2 as the "superseded" one, and the rotation then
+ *   expires v1 on top of it. Reachable through the leak playbook this service
+ *   documents (`rotate` with `overlap_seconds: 0`).
+ *
+ * Note what BOTH have in common: the check reads a SET of rows and the write
+ * touches a DIFFERENT row in that set. There is no row two writers contend on,
+ * so atomicity alone closes nothing - at READ COMMITTED the pair still
+ * interleaves exactly as above.
+ *
+ * So `rotate` and `revoke` run their snapshot, their check and their write
+ * inside one `TenantTransactionRunner.run`, which opens every transaction at
+ * **SERIALIZABLE** and retries a serialisation failure. PostgreSQL's SSI sees
+ * the read/write dependency cycle those two transactions form, aborts one with
+ * `40001`, and the runner replays it - at which point its snapshot includes the
+ * committed write and the survivor check refuses correctly. That is the whole
+ * mechanism; `TENANT_TRANSACTION_ISOLATION` in
+ * `organizations/tenant-transaction.ts` argues at length why it is there rather
+ * than a per-caller `SELECT ... FOR UPDATE`.
+ *
+ * Because a serialisation failure REPLAYS the callback, everything inside `run`
+ * here is a read, a write or an audit record - nothing is sent, consumed or
+ * generated that a replay would duplicate. The secret plaintext is generated
+ * inside the callback and returned from it, so a replayed attempt returns the
+ * secret it actually inserted.
+ *
+ * `assertStillSigning` is the belt to that braces: after the write, inside the
+ * same transaction, the invariant is re-counted and a violation rolls the whole
+ * thing back rather than committing an endpoint nothing can sign for.
+ *
  * ## Why rotation overlaps rather than swaps
  *
  * `Header` emits one `v1=` per active secret and `Verify` accepts the delivery
@@ -77,19 +123,38 @@ export class EndpointSecretsService {
     private readonly scopes: TenantScopeFactory,
     private readonly crypto: CryptoService,
     private readonly audit: AuditService,
+    private readonly transactions: TenantTransactionRunner,
   ) {}
 
   /**
-   * Metadata for every secret on the endpoint, newest first. No plaintext, by
-   * construction: the only thing that can decrypt `secret_encrypted` is
+   * One page of secret metadata for this endpoint, newest first. No plaintext,
+   * by construction: the only thing that can decrypt `secret_encrypted` is
    * `rotate`, and it decrypts nothing - it encrypts a value it just generated.
+   *
+   * A page, with `has_more`, rather than a bare array: this is a display read
+   * and it is bounded like every other one. The reads that make DECISIONS -
+   * next version, survivor count, "does a live secret exist" - do not use this;
+   * they use `secretsFor`, which is exhaustive. See its docblock.
    */
-  async list(context: RequestContext, endpointId: string): Promise<EndpointSecretDto[]> {
+  async list(
+    context: RequestContext,
+    endpointId: string,
+    query: ListSecretsQueryDto = {},
+  ): Promise<EndpointSecretListDto> {
     const scope = this.scopes.for(context);
     await this.requireEndpoint(scope, endpointId);
     const now = new Date();
-    const secrets = await this.secretsFor(scope, endpointId);
-    return secrets.map((secret) => toEndpointSecretDto(secret, now));
+    const page = await scope.endpointSecrets.findPage({
+      where: { endpointId },
+      orderBy: { version: 'desc' },
+      take: query.limit,
+      skip: query.offset,
+    });
+    return {
+      data: page.rows.map((secret) => toEndpointSecretDto(secret, now)),
+      has_more: page.hasMore,
+      next_offset: page.nextSkip,
+    };
   }
 
   /**
@@ -100,79 +165,93 @@ export class EndpointSecretsService {
    *   1. INSERT the new secret, active, with no expiry.
    *   2. UPDATE the previously active secrets to expire at `now + overlap`.
    *
-   * There is no transaction around the pair - `ScopedRepository` cannot open one
-   * without the raw client, and injecting it is banned here. That is acceptable
-   * *only* in this order: a crash between the two leaves the endpoint with two
-   * live secrets and a stale overlap, which is a cosmetic problem a second
-   * rotation fixes. The reverse order would leave a window with zero live
-   * secrets and every delivery failing closed. When a transactional path exists,
-   * wrap the pair; do not reorder it.
+   * The pair is now inside one SERIALIZABLE transaction, which is what makes it
+   * serialise against a concurrent `revoke` (see the class docblock). The ORDER
+   * still matters and must not be reversed: a transaction that fails between
+   * the two statements rolls back to two live secrets, and even in a world
+   * without transactions the reverse order would open a window with zero.
    *
-   * Concurrency is handled by the database, not by a lock: `endpoint_secrets`
-   * has `@@unique([endpointId, version])`, so two simultaneous rotations cannot
-   * both claim the next version. The loser gets a `conflict` and retries.
+   * Two simultaneous rotations are additionally fenced by
+   * `@@unique([endpointId, version])`, so neither can claim a version the other
+   * took; the loser gets a `conflict` and retries.
    */
   async rotate(
     context: RequestContext,
     endpointId: string,
     overlapSeconds: number = DEFAULT_OVERLAP_SECONDS,
   ): Promise<RotatedSecretDto> {
-    const scope = this.scopes.for(context);
-    const endpoint = await this.requireEndpoint(scope, endpointId);
-    if (endpoint.status === 'deleted') {
-      throw new AppError(
-        'conflict',
-        'This endpoint is deleted. Rotating a secret for it would create a credential nothing can use.',
+    return this.transactions.run(context, async (scope, audit) => {
+      const endpoint = await this.requireEndpoint(scope, endpointId);
+      if (endpoint.status === 'deleted') {
+        throw new AppError(
+          'conflict',
+          'This endpoint is deleted. Rotating a secret for it would create a credential nothing can use.',
+        );
+      }
+
+      const now = new Date();
+      const existing = await this.secretsFor(scope, endpointId);
+      const liveBefore = existing.filter((secret) => isEffectivelyActive(secret, now));
+
+      // 1. The new secret first. Everything after this point can fail without
+      //    taking the endpoint below one live secret.
+      const created = await this.insertSecret(scope, endpointId, existing, now);
+
+      // 2. Now, and only now, put a clock on the old ones.
+      const expiresAt = new Date(now.getTime() + overlapSeconds * 1_000);
+      const extended = liveBefore.filter(
+        (secret) =>
+          secret.expiresAt === null || new Date(secret.expiresAt).getTime() > expiresAt.getTime(),
       );
-    }
+      if (extended.length > 0) {
+        await scope.endpointSecrets.updateMany(
+          { endpointId, id: { in: extended.map((secret) => secret.id) } },
+          { expiresAt, rotatedAt: now },
+        );
+      }
 
-    const now = new Date();
-    const existing = await this.secretsFor(scope, endpointId);
-    const liveBefore = existing.filter((secret) => isEffectivelyActive(secret, now));
+      // Housekeeping, deliberately after the invariant is already safe: secrets
+      // whose window closed before this rotation are flipped inactive so the
+      // signing header does not have to re-derive that on every delivery, and so
+      // the active set stays small however many times an endpoint is rotated.
+      await this.sweepExpired(scope, endpointId, existing, now);
 
-    // 1. The new secret first. Everything after this point can fail without
-    //    taking the endpoint below one live secret.
-    const created = await this.insertSecret(scope, endpointId, existing, now);
-
-    // 2. Now, and only now, put a clock on the old ones.
-    const expiresAt = new Date(now.getTime() + overlapSeconds * 1_000);
-    const overlapping = liveBefore.filter(
-      (secret) =>
-        secret.expiresAt === null || new Date(secret.expiresAt).getTime() > expiresAt.getTime(),
-    );
-    if (overlapping.length > 0) {
-      await scope.endpointSecrets.updateMany(
-        { endpointId, id: { in: overlapping.map((secret) => secret.id) } },
-        { expiresAt, rotatedAt: now },
+      const stillSigning = EndpointSecretsService.stillSigningAfter(
+        liveBefore,
+        new Set(extended.map((secret) => secret.id)),
+        expiresAt,
+        now,
       );
-    }
 
-    // Housekeeping, deliberately after the invariant is already safe: secrets
-    // whose window closed before this rotation are flipped inactive so the
-    // signing header does not have to re-derive that on every delivery, and so
-    // the active set stays small however many times an endpoint is rotated.
-    await this.sweepExpired(scope, endpointId, existing, now);
+      // The new secret is unexpired and active, so this cannot fail here - it
+      // is asserted anyway, because "cannot fail" is what path 4 also said.
+      await this.assertStillSigning(scope, endpoint, now);
 
-    await this.audit.recordFor(context, {
-      action: 'endpoint_secret.rotated',
-      resourceType: 'endpoint_secret',
-      resourceId: created.row.id,
-      metadata: {
-        endpoint_id: endpointId,
-        version: created.row.version,
-        overlap_seconds: overlapSeconds,
-        previous_versions: overlapping.map((secret) => secret.version),
-        previous_secrets_expire_at: overlapping.length > 0 ? expiresAt.toISOString() : null,
-      },
+      await audit.record({
+        action: 'endpoint_secret.rotated',
+        resourceType: 'endpoint_secret',
+        resourceId: created.row.id,
+        metadata: {
+          endpoint_id: endpointId,
+          version: created.row.version,
+          overlap_seconds: overlapSeconds,
+          previous_versions: stillSigning.versions,
+          // NOT `previous_secrets_expire_at`: AuditService redacts any key
+          // matching /secret/i that does not end in `_id`, so that name made
+          // the audit row lose the single fact it is consulted for - when the
+          // old secret stopped signing.
+          previous_expire_at: stillSigning.until?.toISOString() ?? null,
+        },
+      });
+
+      return {
+        ...toEndpointSecretDto(created.row, now),
+        // The one and only time this value crosses the wire.
+        secret: created.plaintext,
+        previous_secrets_expire_at: stillSigning.until?.toISOString() ?? null,
+        overlapping_versions: stillSigning.versions,
+      };
     });
-
-    return {
-      ...toEndpointSecretDto(created.row, now),
-      // The one and only time this value crosses the wire.
-      secret: created.plaintext,
-      previous_secrets_expire_at: overlapping.length > 0 ? expiresAt.toISOString() : null,
-      overlapping_versions: overlapping.map((secret) => secret.version),
-    };
   }
 
   /**
@@ -183,48 +262,62 @@ export class EndpointSecretsService {
    * caller is told to rotate instead, which produces the same end state (that
    * secret stops signing) without the outage in between: `rotate` with
    * `overlap_seconds: 0` is the "this secret has leaked" button.
+   *
+   * Snapshot, check and write are one SERIALIZABLE transaction, so the survivor
+   * this call counted is still a survivor when the write lands, and the
+   * invariant is re-asserted after the write before anything commits. See the
+   * class docblock for the two interleavings that made the check useless when
+   * it was none of those things.
    */
   async revoke(
     context: RequestContext,
     endpointId: string,
     secretId: string,
   ): Promise<EndpointSecretDto> {
-    const scope = this.scopes.for(context);
-    const endpoint = await this.requireEndpoint(scope, endpointId);
+    return this.transactions.run(context, async (scope, audit) => {
+      const endpoint = await this.requireEndpoint(scope, endpointId);
 
-    const now = new Date();
-    const secrets = await this.secretsFor(scope, endpointId);
-    const target = secrets.find((secret) => secret.id === secretId);
-    // Not "which endpoint does this secret belong to?" - `secretsFor` is already
-    // fenced to this endpoint inside this tenant, so a secret from anywhere else
-    // is simply absent here.
-    if (!target) throw new AppError('not_found', CROSS_TENANT_MESSAGE);
+      const now = new Date();
+      const secrets = await this.secretsFor(scope, endpointId);
+      const target = secrets.find((secret) => secret.id === secretId);
+      // Not "which endpoint does this secret belong to?" - `secretsFor` is
+      // already fenced to this endpoint inside this tenant, so a secret from
+      // anywhere else is simply absent here.
+      if (!target) throw new AppError('not_found', CROSS_TENANT_MESSAGE);
 
-    const survivors = secrets.filter(
-      (secret) => secret.id !== secretId && isEffectivelyActive(secret, now),
-    );
-    if (survivors.length === 0 && endpoint.status !== 'deleted') {
-      throw new AppError(
-        'conflict',
-        'This is the only secret currently signing for this endpoint. Removing it would make ' +
-          'every delivery fail unsigned. Rotate instead - use an overlap of 0 seconds if this ' +
-          'secret has leaked and must stop signing immediately.',
+      const survivors = secrets.filter(
+        (secret) => secret.id !== secretId && isEffectivelyActive(secret, now),
       );
-    }
+      if (survivors.length === 0 && endpoint.status !== 'deleted') {
+        throw new AppError(
+          'conflict',
+          'This is the only secret currently signing for this endpoint. Removing it would make ' +
+            'every delivery fail unsigned. Rotate instead - use an overlap of 0 seconds if this ' +
+            'secret has leaked and must stop signing immediately.',
+        );
+      }
 
-    await scope.endpointSecrets.updateMany(
-      { endpointId, id: secretId },
-      { active: false, expiresAt: now, rotatedAt: now },
-    );
+      await scope.endpointSecrets.updateMany(
+        { endpointId, id: secretId },
+        { active: false, expiresAt: now, rotatedAt: now },
+      );
 
-    await this.audit.recordFor(context, {
-      action: 'endpoint_secret.revoked',
-      resourceType: 'endpoint_secret',
-      resourceId: secretId,
-      metadata: { endpoint_id: endpointId, version: target.version },
+      // Re-counted AFTER the write, inside the transaction. The check above
+      // read a snapshot; this reads the state this transaction is about to
+      // commit. Under SERIALIZABLE one of two colliding revokes is already
+      // aborted before it gets here - this is what refuses if anything ever
+      // widens the isolation level or adds a path that skips the pre-check.
+      await this.assertStillSigning(scope, endpoint, now);
+
+      await audit.record({
+        action: 'endpoint_secret.revoked',
+        resourceType: 'endpoint_secret',
+        resourceId: secretId,
+        metadata: { endpoint_id: endpointId, version: target.version },
+      });
+
+      return toEndpointSecretDto({ ...target, active: false, expiresAt: now, rotatedAt: now }, now);
     });
-
-    return toEndpointSecretDto({ ...target, active: false, expiresAt: now, rotatedAt: now }, now);
   }
 
   /**
@@ -280,14 +373,91 @@ export class EndpointSecretsService {
     return endpoint;
   }
 
+  /**
+   * The invariant, re-asserted against the rows this transaction will commit.
+   *
+   * Throwing here rolls the whole transaction back, so a write that would have
+   * left a live endpoint with nothing to sign with never lands. It is a
+   * deliberate `internal_error`: reaching it means a pre-check that should have
+   * refused did not, and the caller is owed a loud failure rather than a
+   * plausible one.
+   *
+   * A deleted endpoint is exempt for the same reason `revoke` exempts it -
+   * nothing is delivered to it, so it has nothing to sign.
+   */
+  private async assertStillSigning(
+    scope: TenantScope,
+    endpoint: Endpoint,
+    now: Date,
+  ): Promise<void> {
+    if (endpoint.status === 'deleted') return;
+    const remaining = await this.secretsFor(scope, endpoint.id);
+    if (remaining.some((secret) => isEffectivelyActive(secret, now))) return;
+    throw new AppError(
+      'internal_error',
+      'Refusing to commit: this would have left an active endpoint with no signing secret, ' +
+        'and every delivery to it would fail closed. Nothing was changed.',
+    );
+  }
+
+  /**
+   * EVERY secret row for this endpoint, newest version first.
+   *
+   * Exhaustive, not a page, and that is a correctness requirement rather than
+   * thoroughness: the next version number, the survivor count `revoke` refuses
+   * on, and `hasLiveSecret` are all computed from this array. Read as a single
+   * capped page, each of those is wrong past `MAX_PAGE_SIZE` - the next version
+   * would collide with an existing row, and a survivor sitting on page two
+   * would be invisible to the check that exists to find it.
+   *
+   * `forEachPage` is the sanctioned way to say "I processed everything"; it
+   * pages by primary key, so nothing is skipped or repeated.
+   */
   private async secretsFor(scope: TenantScope, endpointId: string): Promise<EndpointSecret[]> {
-    const secrets = await scope.endpointSecrets.findMany({
-      where: { endpointId },
-      orderBy: { version: 'desc' },
-      take: MAX_PAGE_SIZE,
-    });
-    // Do not trust the page for ordering decisions; sort what came back.
-    return [...secrets].sort((a, b) => b.version - a.version);
+    const secrets: EndpointSecret[] = [];
+    await scope.endpointSecrets.forEachPage((rows) => {
+      secrets.push(...rows);
+    }, { where: { endpointId } });
+    // Paged by id ascending; the callers all want version order.
+    return secrets.sort((a, b) => b.version - a.version);
+  }
+
+  /**
+   * Which PRIOR versions are still signing once this rotation commits, and when
+   * the last of them stops.
+   *
+   * Not "the ones we just extended". A secret whose own expiry already precedes
+   * the new overlap end is correctly left alone - and is still live, still
+   * emitting a `v1=` component. Reporting only the extended set told a consumer
+   * rolling its secrets that nothing else was signing, which is the one thing
+   * that field is read to decide.
+   *
+   * `overlap_seconds: 0` moves the deadline to `now`, and a secret expiring at
+   * `now` is not signing (`isEffectivelyActive` wants strictly greater), so the
+   * leak button still reports an empty set - correctly.
+   */
+  private static stillSigningAfter(
+    liveBefore: readonly EndpointSecret[],
+    extendedIds: ReadonlySet<string>,
+    newExpiry: Date,
+    now: Date,
+  ): { versions: number[]; until: Date | null } {
+    const surviving = liveBefore
+      .map((secret) => ({
+        version: secret.version,
+        // Anything not extended kept its own expiry, and it cannot be null: a
+        // null expiry always qualifies for extension.
+        until: extendedIds.has(secret.id)
+          ? newExpiry
+          : new Date(secret.expiresAt as Date),
+      }))
+      .filter((secret) => secret.until.getTime() > now.getTime());
+
+    if (surviving.length === 0) return { versions: [], until: null };
+    return {
+      versions: surviving.map((secret) => secret.version).sort((a, b) => b - a),
+      until: new Date(Math.max(...surviving.map((secret) => secret.until.getTime()))),
+    };
   }
 
   /**

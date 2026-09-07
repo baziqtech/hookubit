@@ -1,5 +1,4 @@
 import { ConfigService } from '@nestjs/config';
-import { EndpointSecret } from '@prisma/client';
 import { randomBytes } from 'node:crypto';
 import {
   AuditService,
@@ -13,8 +12,11 @@ import {
 import { requestWith, seedWorld, sessionUser } from '../../authz/testing/fixtures';
 import { FakeTenantPrisma } from '../../authz/testing/tenant-prisma.fake';
 import { CryptoService } from '../../common/crypto.service';
-import { AppError } from '../../common/errors';
 import { EndpointsService } from '../../endpoints/endpoints.service';
+import {
+  TenantAudit,
+  TenantTransactionRunner,
+} from '../../organizations/tenant-transaction';
 import { EndpointSecretsService } from '../endpoint-secrets.service';
 
 /**
@@ -25,79 +27,91 @@ import { EndpointSecretsService } from '../endpoint-secrets.service';
  * these suites exercise the whole path, not a hand-made context that could be
  * wrong in the caller's favour.
  *
- * ---------------------------------------------------------------------------
- * ## `withCreatableSecrets` - READ THIS, IT IS TEMPORARY
- *
- * `ScopedRepository.create` refuses every `viaEndpoint` table, because those
- * rows have no tenant column to stamp:
- *
- *     Endpoint secret rows are scoped through a parent and cannot be created by
- *     a scoped repository; create them alongside their parent inside a
- *     transaction.
- *
- * Rotation is exactly that write - a new `endpoint_secrets` row for an existing
- * endpoint - and `PrismaService` is banned in these modules, correctly. The
- * accepted fix is a small change in `src/authz/tenant-scope.ts`, spelled out
- * verbatim in `apps/control-api/HANDOFF.md`; it is not applied here because
- * `src/authz` belongs to another owner.
- *
- * So this shim stands in for that change, and it implements EXACTLY what the
- * change does and nothing more:
- *
- *   1. require a `endpointId` in the payload, and
- *   2. resolve it through `scope.endpoints` - the sibling scoped repository -
- *      so a parent in another tenant is a 404 before any insert happens,
- *   3. then insert.
- *
- * That means the isolation tests below are not vacuous: creating a secret under
- * another tenant's endpoint fails here for the same reason it will fail in
- * production once the authz change lands. **Delete this function and the
- * the moment `scope.endpointSecrets.create` works.**
- * ---------------------------------------------------------------------------
+ * There is no longer a scope shim here. `withCreatableSecrets` stood in for the
+ * `PARENT_KEY` change in `src/authz/tenant-scope.ts`; that change has landed, so
+ * `scope.endpointSecrets.create` resolves the parent endpoint through its own
+ * scoped repository on its own and these suites run against the UNMODIFIED
+ * repository. The "sanity" block at the end of the secrets suite is what keeps
+ * that honest: it asserts the real repository still refuses a create under
+ * another tenant's endpoint.
  */
-function withCreatableSecrets(scope: TenantScope, db: FakeTenantPrisma): TenantScope {
-  const create = async (data: Record<string, unknown>): Promise<EndpointSecret> => {
-    const endpointId = data.endpointId;
-    if (typeof endpointId !== 'string' || endpointId.length === 0) {
-      throw new AppError('invalid_request', "Endpoint secret: 'endpointId' must be an id string.");
-    }
-    // The whole security argument, in one line: the parent is proved to be
-    // inside this tenant, through its own scoped repository, before the child
-    // row exists.
-    await scope.endpoints.requireById(endpointId);
-    return (await db.endpointSecret.create({ data })) as unknown as EndpointSecret;
-  };
 
-  const repository = new Proxy(scope.endpointSecrets, {
-    get(target, property) {
-      if (property === 'create') return create;
-      const value: unknown = Reflect.get(target, property, target);
-      return typeof value === 'function' ? value.bind(target) : value;
-    },
-  });
+/**
+ * `TenantTransactionRunner` over the fake, with the one property PostgreSQL
+ * gives the real one and an in-memory map does not: SERIALIZABLE.
+ *
+ * The real runner opens every transaction at
+ * `Prisma.TransactionIsolationLevel.Serializable` and replays it when SSI
+ * aborts it. That is what makes two concurrent revokes - each checking a SET of
+ * rows and writing a DIFFERENT row in it - come out as if they had run one
+ * after the other. `FakeTenantPrisma.$transaction` just calls the callback
+ * against shared state, so without this the concurrency test would be
+ * exercising the interleaving and not the fix.
+ *
+ * A serial schedule is the strongest thing SERIALIZABLE can be equivalent to,
+ * so running one transaction at a time is a faithful (conservative) stand-in:
+ * a callback that reads, checks and writes entirely inside `run` comes out
+ * correct here exactly as it does in production, and one that reads its
+ * snapshot OUTSIDE the transaction - the shape being fixed - still races.
+ *
+ * Two things it does NOT model, stated so no test leans on them: there is no
+ * rollback (the fake has no undo, so a callback that throws after a write
+ * leaves the write), and no attempt is ever aborted, so the runner's retry loop
+ * is not exercised here.
+ */
+export class SerializableTransactionRunner extends TenantTransactionRunner {
+  /** The tail of the serial schedule. */
+  private queue: Promise<unknown> = Promise.resolve();
 
-  return new Proxy(scope, {
-    get(target, property) {
-      if (property === 'endpointSecrets') return repository;
-      const value: unknown = Reflect.get(target, property, target);
-      return typeof value === 'function' ? value.bind(target) : value;
-    },
-  });
+  constructor(
+    private readonly fake: FakeTenantPrisma,
+    private readonly factory: TenantScopeFactory,
+    private readonly auditor: AuditService,
+  ) {
+    super(fake.asPrisma(), factory, auditor);
+  }
+
+  override async run<T>(
+    context: RequestContext,
+    fn: (scope: TenantScope, audit: TenantAudit) => Promise<T>,
+  ): Promise<T> {
+    // Whatever is already running finishes first, however it ends.
+    const attempt = this.queue.then(
+      () => this.commit(context, fn),
+      () => this.commit(context, fn),
+    );
+    // The queue only ever tracks completion; a rejection is the caller's, and
+    // swallowing it here keeps it from surfacing as an unhandled one.
+    this.queue = attempt.catch(() => undefined);
+    return attempt;
+  }
+
+  private async commit<T>(
+    context: RequestContext,
+    fn: (scope: TenantScope, audit: TenantAudit) => Promise<T>,
+  ): Promise<T> {
+    const tx = this.fake.asPrisma();
+    const audit: TenantAudit = {
+      record: async (entry): Promise<void> => {
+        await this.auditor.recordFor(context, entry, tx);
+      },
+    };
+    return fn(this.factory.for(context, tx), audit);
+  }
 }
 
 /** For the HTTP suite, which needs the factory as a Nest provider value. */
 export function testScopeFactory(db: FakeTenantPrisma): TenantScopeFactory {
-  return new PatchedScopeFactory(db);
+  return new TenantScopeFactory(db.asPrisma());
 }
 
-class PatchedScopeFactory extends TenantScopeFactory {
-  constructor(private readonly db: FakeTenantPrisma) {
-    super(db.asPrisma());
-  }
-
-  for(context: RequestContext): TenantScope {
-    return withCreatableSecrets(super.for(context), this.db);
-  }
+/** The transaction runner the HTTP suite must provide alongside it. */
+export function testTransactions(
+  db: FakeTenantPrisma,
+  scopes: TenantScopeFactory,
+  audit: AuditService,
+): TenantTransactionRunner {
+  return new SerializableTransactionRunner(db, scopes, audit);
 }
 
 export interface Harness {
@@ -106,6 +120,7 @@ export interface Harness {
   scopes: TenantScopeFactory;
   crypto: CryptoService;
   audit: AuditService;
+  transactions: TenantTransactionRunner;
   secrets: EndpointSecretsService;
   endpoints: EndpointsService;
 }
@@ -140,13 +155,14 @@ export async function harnessFor(
   const resolver = new TenantResolver(db.asPrisma());
   const context = await resolver.resolve(sessionUser(userId), requestWith(params, userId), spec);
 
-  const scopes = new PatchedScopeFactory(db);
+  const scopes = new TenantScopeFactory(db.asPrisma());
   const crypto = buildCrypto();
   const audit = new AuditService(db.asPrisma());
-  const secrets = new EndpointSecretsService(scopes, crypto, audit);
+  const transactions = new SerializableTransactionRunner(db, scopes, audit);
+  const secrets = new EndpointSecretsService(scopes, crypto, audit, transactions);
   const endpoints = new EndpointsService(scopes, audit, secrets);
 
-  return { db, context, scopes, crypto, audit, secrets, endpoints };
+  return { db, context, scopes, crypto, audit, transactions, secrets, endpoints };
 }
 
 /**

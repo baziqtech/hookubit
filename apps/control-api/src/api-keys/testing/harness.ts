@@ -1,5 +1,6 @@
 import { AddressInfo } from 'node:net';
 import { INestApplication, ValidationPipe } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import { Test } from '@nestjs/testing';
 import cookieParser from 'cookie-parser';
 import { SessionGuard } from '../../auth/session.guard';
@@ -14,6 +15,8 @@ import { IDS, seedWorld } from '../../authz/testing/fixtures';
 import { FakeTenantPrisma } from '../../authz/testing/tenant-prisma.fake';
 import { hashApiKey } from '../../common/api-key';
 import { AppExceptionFilter } from '../../common/errors';
+import { ThrottleGuard } from '../../common/throttle.guard';
+import { InMemoryThrottleStore, THROTTLE_STORE } from '../../common/throttle.store';
 import { ApiKeysController } from '../api-keys.controller';
 import { ApiKeysService } from '../api-keys.service';
 
@@ -45,6 +48,11 @@ export const KEY_IDS = {
 export interface HttpResult<T> {
   status: number;
   body: T & { error?: { code: string; message: string; details?: Record<string, unknown> } };
+}
+
+export interface HarnessOptions {
+  /** `MAX_API_KEYS_PER_PROJECT` for this app. */
+  maxKeys?: number;
 }
 
 export interface Harness {
@@ -132,7 +140,7 @@ function seedKeys(db: FakeTenantPrisma): void {
   });
 }
 
-export async function startApiKeysApp(): Promise<Harness> {
+export async function startApiKeysApp(options: HarnessOptions = {}): Promise<Harness> {
   const db = seedWorld();
   enforceApiKeySchema(db);
   seedKeys(db);
@@ -151,6 +159,18 @@ export async function startApiKeysApp(): Promise<Harness> {
       { provide: TenantResolver, useValue: new TenantResolver(prisma) },
       { provide: TenantScopeFactory, useValue: new TenantScopeFactory(prisma) },
       { provide: AuditService, useValue: new AuditService(prisma) },
+      ThrottleGuard,
+      // Fresh per app; see the projects harness for why a shared counter would
+      // leak a tripped bucket between tests.
+      { provide: THROTTLE_STORE, useValue: new InMemoryThrottleStore() },
+      {
+        provide: ConfigService,
+        useValue: new ConfigService(
+          options.maxKeys === undefined
+            ? {}
+            : { MAX_API_KEYS_PER_PROJECT: String(options.maxKeys) },
+        ),
+      },
     ],
   }).compile();
 

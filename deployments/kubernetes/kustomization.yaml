@@ -21,6 +21,13 @@ resources:
   - 33-worker.yaml
   - 40-pdb.yaml
   - 41-ingress.yaml
+  # Default-deny NetworkPolicies. INCLUDED ON PURPOSE - a security control that
+  # is opt-in is a security control nobody has. READ THE HEADER OF THAT FILE
+  # BEFORE APPLYING: it is a no-op unless your CNI enforces NetworkPolicy, and
+  # it will block the control plane from a database on a PUBLIC address (Neon,
+  # Upstash, a public RDS endpoint) until you add that range to
+  # `allow-datastore-egress`.
+  - 50-networkpolicy.yaml
 
 images:
   - name: ghcr.io/shaq/webhook-control-api

@@ -1,4 +1,5 @@
 import { Injectable } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import { ApiKey } from '@prisma/client';
 import {
   AuditService,
@@ -14,13 +15,16 @@ import {
 } from '../common/api-key';
 import { AppError } from '../common/errors';
 import { newId } from '../common/ids';
+import { API_KEYS_PER_PROJECT, maxApiKeysPerProject } from './api-key-limits';
 import {
   ApiKeyDto,
+  ApiKeyListDto,
   CreateApiKeyDto,
   CreatedApiKeyDto,
   ListApiKeysQueryDto,
   toApiKeyDto,
 } from './dto';
+import { withCrossTenantNotFound } from './not-found';
 
 /**
  * API keys: the server-to-server credential the Go ingest path authenticates
@@ -55,21 +59,32 @@ export class ApiKeysService {
   constructor(
     private readonly scopes: TenantScopeFactory,
     private readonly audit: AuditService,
+    private readonly config: ConfigService,
   ) {}
 
   /**
-   * Every key in the project, newest first, revoked and expired included and
-   * labelled. `toApiKeyDto` cannot leak the secret: `key_hash` is not a field
-   * on the response type.
+   * One page of keys, newest first, revoked and expired included and labelled,
+   * PLUS whether there are more. `toApiKeyDto` cannot leak the secret:
+   * `key_hash` is not a field on the response type.
+   *
+   * `findPage` rather than `findMany`: a credential inventory that silently
+   * stops at the default page is how "revoke everything" reports success over
+   * the first fifty keys. `findMany` now throws in that situation rather than
+   * lying, which would have turned this into a 500 on the fifty-first key.
    */
-  async list(context: RequestContext, query: ListApiKeysQueryDto): Promise<ApiKeyDto[]> {
-    const keys = await this.scopes.for(context).apiKeys.findMany({
+  async list(context: RequestContext, query: ListApiKeysQueryDto): Promise<ApiKeyListDto> {
+    const page = await this.scopes.for(context).apiKeys.findPage({
       orderBy: { createdAt: 'desc' },
       take: query.limit,
       skip: query.offset,
     });
     const now = new Date();
-    return keys.map((key) => toApiKeyDto(key, now));
+    return {
+      data: page.rows.map((key) => toApiKeyDto(key, now)),
+      count: page.rows.length,
+      has_more: page.hasMore,
+      next_offset: page.nextSkip,
+    };
   }
 
   async create(context: RequestContext, dto: CreateApiKeyDto): Promise<CreatedApiKeyDto> {
@@ -77,6 +92,7 @@ export class ApiKeysService {
     const name = dto.name.trim();
     const expiresAt = ApiKeysService.parseExpiry(dto.expires_at);
     const scopes = ApiKeysService.resolveScopes(context, dto.scopes);
+    await this.assertBelowCeiling(context);
 
     // The environment comes off the resolved project row, never off the body.
     const generated = generateApiKey(project.environment);
@@ -106,6 +122,17 @@ export class ApiKeysService {
         environment: key.environment,
         expires_at: expiresAt ? expiresAt.toISOString() : null,
         scopes,
+        // WHO minted it and WITH WHAT AUTHORITY. `api_keys` has no
+        // `created_by_user_id` column yet (HANDOFF.md carries the migration), so
+        // until it does this audit row is the only record tying a credential's
+        // scopes back to a human and to the role those scopes were copied from.
+        // The actor columns already carry the user id; the ROLE is not recorded
+        // anywhere else, and it is precisely what a later re-derivation
+        // (`key.scopes INTERSECT permissionsForRole(current role)`) has to
+        // compare against to notice that the issuer has since been demoted.
+        created_by_user_id: context.user.userId,
+        created_by_membership_id: context.membershipId,
+        created_by_role: context.role,
       },
     });
 
@@ -128,13 +155,13 @@ export class ApiKeysService {
    */
   async revoke(context: RequestContext, apiKeyId: string): Promise<ApiKeyDto> {
     const scope = this.scopes.for(context).apiKeys;
-    const existing = await scope.requireById(apiKeyId);
+    const existing = await withCrossTenantNotFound(scope.requireById(apiKeyId));
     if (existing.revokedAt !== null) return toApiKeyDto(existing);
 
     const revokedAt = new Date();
     let key: ApiKey;
     try {
-      key = await scope.updateById(apiKeyId, { revokedAt });
+      key = await withCrossTenantNotFound(scope.updateById(apiKeyId, { revokedAt }));
     } catch (err) {
       // A concurrent revoke is the only realistic way the row stops matching
       // between the read and the write. Report the outcome the caller wanted.
@@ -155,6 +182,38 @@ export class ApiKeysService {
       },
     });
     return toApiKeyDto(key);
+  }
+
+  /**
+   * The per-project ceiling on live credentials.
+   *
+   * REVOKED KEYS DO NOT COUNT; EXPIRED ONES DO. That asymmetry is deliberate.
+   *
+   * A revoked key is retired - the row is kept forever so its delivery history
+   * stays attributable - so counting it would make the ceiling a ratchet with no
+   * operation available that frees a slot. Revocation IS that operation.
+   *
+   * Expiry is not counted as retirement because `status` is derived from two
+   * timestamps at read time and is NOT a column (see `api-key-state.ts` and
+   * `ListApiKeysQueryDto`). Excluding expired keys would mean a `now()`
+   * comparison in SQL, which disagrees with the derivation by a request's worth
+   * of clock and would make the ceiling move on its own with nobody touching
+   * anything. An expired key is freed the same way a revoked one is: revoke it.
+   *
+   * Like the projects ceiling this is advisory under concurrency - two racing
+   * creates can both pass - and for the same reason: it exists to stop runaway
+   * automation, not to hold an exact invariant.
+   */
+  private async assertBelowCeiling(context: RequestContext): Promise<void> {
+    const ceiling = maxApiKeysPerProject(this.config);
+    const existing = await this.scopes.for(context).apiKeys.count({ revokedAt: null });
+    if (existing < ceiling) return;
+
+    throw new AppError(
+      'conflict',
+      `This project already holds ${existing} un-revoked API keys, which is its limit of ${ceiling}. Revoke a key you no longer need, or ask an operator to raise ${API_KEYS_PER_PROJECT.env}.`,
+      { limit: ceiling, current: existing },
+    );
   }
 
   private static parseExpiry(value?: string): Date | null {
@@ -183,6 +242,19 @@ export class ApiKeysService {
    * a self-escalation: a developer could mint a key carrying `members.write` and
    * `billing.write` and hand it to whoever they liked. The permission answers
    * "may you create keys"; this answers "carrying what".
+   *
+   * KNOWN LIMIT, and the reason `created_by_*` is in the audit metadata above:
+   * this is a SNAPSHOT of the issuer's authority at one instant, and nothing
+   * re-checks it afterwards. A developer who mints a key carrying
+   * `endpoints.write` and `events.replay`, and is then demoted to viewer or
+   * removed from the organization entirely, leaves behind a credential that
+   * still carries developer authority - because the key is bound to a project,
+   * not to a human, and `api_keys` has no `created_by_user_id` column to bind it
+   * to one. It is latent rather than live only because the ingest path does not
+   * consult `scopes` at all today (`internal/ingest/handler.go` authenticates on
+   * the key, its project and its environment); the first key-authenticated
+   * control route makes it real. HANDOFF.md carries the migration and the
+   * enforcement this needs, and closing it requires that schema change.
    */
   private static resolveScopes(context: RequestContext, requested?: string[]): Permission[] {
     if (!requested || requested.length === 0) return [];

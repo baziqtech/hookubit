@@ -291,3 +291,81 @@ migrations:
   resources:
     requests: { cpu: 100m, memory: 256Mi }
     limits: { cpu: '1', memory: 1Gi }
+
+# --- NetworkPolicies ---------------------------------------------------------
+# Default-deny ingress and egress, plus the narrowest holes the platform needs.
+#
+# WHY, and why this is ON by default: `internal/egress/ssrf.go` is one process
+# making one decision about URLs a customer typed into a form. It is good code,
+# and it is a single point of failure - a DNS-rebinding race, a redirect path
+# that skips the check, or a future http.Client built somewhere else all end
+# with a worker pod opening a socket to 10.x or to 169.254.169.254. These
+# policies are the second layer, in the kernel, where nothing in Go can bypass
+# them. A security control that is opt-in is a security control nobody has.
+#
+# ═══ TWO WAYS THIS BREAKS YOUR INSTALL - CHECK BOTH ═══
+#
+# 1. YOUR CNI MUST ENFORCE NetworkPolicy. Calico, Cilium, Antrea and Weave do.
+#    Stock EKS (amazon-vpc-cni with no policy agent), flannel, and a default
+#    kind/minikube ACCEPT these objects and silently ignore them - which is
+#    worse than nothing, because you will believe you are protected. Verify
+#    with a test pod, do not assume.
+#
+# 2. A DATABASE ON A PUBLIC ADDRESS IS NOT COVERED. datastoreCidrs is private
+#    address space. Neon, Upstash, Supabase, a public RDS endpoint - none of
+#    them are in it, and the control plane will fail readiness with a
+#    connection timeout. Add the provider's range to datastoreCidrs, or set
+#    enabled: false and say so in your runbook.
+networkPolicy:
+  enabled: true
+
+  # Namespace holding CoreDNS/kube-dns. Egress to :53 is allowed here and
+  # nowhere else. Without it, no hostname in the platform resolves.
+  dnsNamespace: kube-system
+
+  # Where the database and Redis live. Reachable ONLY on datastorePorts below,
+  # so an SSRF to http://10.0.0.5/ is dropped by the kernel: wrong port.
+  datastoreCidrs:
+    - 10.0.0.0/8
+    - 172.16.0.0/12
+    - 192.168.0.0/16
+    # RFC6598. EKS and GKE pod/service CIDRs frequently land here.
+    - 100.64.0.0/10
+  datastorePorts:
+    - 5432   # PostgreSQL direct
+    - 6432   # PgBouncer (ARCHITECTURE.md 36)
+    - 6379   # Redis
+
+  # Subtracted from the worker's 0.0.0.0/0 egress. This is the layer-3 mirror
+  # of ssrf.go's blocklist; every entry is a range a customer URL must never
+  # resolve to. Shortening this list widens the SSRF surface - do not, without
+  # writing down why.
+  blockedEgressCidrs:
+    - 0.0.0.0/8          # "this network"
+    - 10.0.0.0/8         # RFC1918
+    - 100.64.0.0/10      # RFC6598 CGNAT - EKS/GKE pod space
+    - 127.0.0.0/8        # loopback
+    - 169.254.0.0/16     # link-local: 169.254.169.254 lives here
+    - 172.16.0.0/12      # RFC1918
+    - 192.0.0.0/24       # IETF protocol assignments
+    - 192.168.0.0/16     # RFC1918
+    - 198.18.0.0/15      # benchmarking
+    - 224.0.0.0/4        # multicast
+    - 240.0.0.0/4        # reserved
+
+  # Empty means "from anywhere in the cluster, on the service ports only".
+  # Set these to the real namespaces and the rules become actual restrictions.
+  ingressControllerNamespace: ''   # e.g. ingress-nginx
+  monitoringNamespace: ''          # e.g. monitoring
+
+  # Raw NetworkPolicyEgressRule entries applied to every pod in the release.
+  # The escape hatch for anything the rules above do not cover: an SMTP relay,
+  # an OTLP collector in another namespace, IPv6 egress. Example:
+  #
+  # extraEgress:
+  #   - to:
+  #       - namespaceSelector:
+  #           matchLabels: { kubernetes.io/metadata.name: observability }
+  #     ports:
+  #       - { protocol: TCP, port: 4317 }
+  extraEgress: []

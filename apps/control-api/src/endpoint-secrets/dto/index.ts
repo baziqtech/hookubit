@@ -2,11 +2,30 @@ import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { EndpointSecret } from '@prisma/client';
 import { Type } from 'class-transformer';
 import { IsInt, IsOptional, Max, Min } from 'class-validator';
+import { MAX_PAGE_SIZE } from '../../authz';
 import {
   DEFAULT_OVERLAP_SECONDS,
   MAX_OVERLAP_SECONDS,
   MIN_OVERLAP_SECONDS,
 } from '../secret-generator';
+
+/** Paging for the metadata listing. Bounded by the same ceiling the repository clamps to. */
+export class ListSecretsQueryDto {
+  @ApiPropertyOptional({ minimum: 1, maximum: MAX_PAGE_SIZE })
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  @Max(MAX_PAGE_SIZE)
+  limit?: number;
+
+  @ApiPropertyOptional({ minimum: 0 })
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(0)
+  offset?: number;
+}
 
 export class RotateSecretDto {
   @ApiPropertyOptional({
@@ -63,16 +82,29 @@ export class RotatedSecretDto extends EndpointSecretDto {
   @ApiPropertyOptional({
     nullable: true,
     description:
-      'When the previously active secrets stop signing. Consumers must accept both until then.',
+      'The LAST moment any previously issued secret still signs - the maximum over every ' +
+      'version in `overlapping_versions`, not just the ones this rotation moved. Null when no ' +
+      'prior secret is signing any more (a rotation with `overlap_seconds: 0`, or the first ' +
+      'secret on an endpoint). Consumers must accept both old and new until this passes.',
   })
   previous_secrets_expire_at!: string | null;
 
-  @ApiProperty({ type: [String], description: 'Versions that keep signing during the overlap.' })
+  @ApiProperty({
+    type: [Number],
+    description:
+      'EVERY prior version that still signs after this rotation, newest first - including ' +
+      'versions whose own expiry this rotation did not move, because they are still emitting a ' +
+      '`v1=` component and a consumer rolling its secrets off this list must know about them.',
+  })
   overlapping_versions!: number[];
 }
 
 export class EndpointSecretListDto {
   @ApiProperty({ type: [EndpointSecretDto] }) data!: EndpointSecretDto[];
+  @ApiProperty({ description: 'More secrets match than this page carries.' })
+  has_more!: boolean;
+  @ApiPropertyOptional({ nullable: true, description: '`offset` for the next page, or null.' })
+  next_offset!: number | null;
 }
 
 function iso(value: Date | null | undefined): string | null {

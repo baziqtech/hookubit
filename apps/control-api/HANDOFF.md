@@ -1476,3 +1476,342 @@ absent from `AppError.message`.
 reviewer) fails with two deliberate probes showing a last-owner race in
 `MembersService`. Unrelated to `src/authz` — it fails identically with these
 changes reverted. Everything else passes: 681 of 683.
+
+---
+
+## Projects and API keys — review hardening (2026-09-07) — `src/projects`, `src/api-keys`
+
+Second pass over the two modules after two independent reviews. Nothing here was
+a live tenant-isolation defect; all five items are hardening or consistency.
+
+### FIX 1 — throttles and ceilings on the write routes
+
+Neither module limited anything, while every `AuthModule` route did. Both create
+routes were authenticated but unbounded in rate AND in total.
+
+- `POST /v1/organizations/:orgId/projects` — `@Throttle` 20/min per address.
+- `POST /v1/projects/:projectId/api-keys` — `@Throttle` 10/min.
+- `POST /v1/projects/:projectId/api-keys/:apiKeyId/revoke` — `@Throttle` 60/min,
+  deliberately loose. Revocation is what an operator does under pressure, often
+  from a script with retries; a tight limit there would cause the incident it
+  was added to contain. It is a **separate bucket** from create, so a tripped
+  create limit cannot stop a revoke.
+
+`ThrottleGuard` is mounted at CLASS level on both controllers, so it runs before
+the route-level `SessionGuard`/`TenantGuard` that `@Authorized` mounts — a flood
+is refused before it costs a session lookup and a tenant resolution. Only
+handlers carrying `@Throttle` are limited; the listings are not.
+
+The throttle numbers are compile-time constants (`projects/project-limits.ts`,
+`api-keys/api-key-limits.ts`) because `@Throttle` is decorator metadata,
+evaluated when the class is defined — which is **before** `ConfigModule` has read
+a `.env` file. An env-driven value there would silently always be the default.
+
+Ceilings, read through `ConfigService` at call time so they can be raised without
+a deploy:
+
+| Var | Default | Clamp | Counts |
+|---|---|---|---|
+| `MAX_PROJECTS_PER_ORGANIZATION` | 100 | 1–10 000 | projects with `status != deleted` |
+| `MAX_API_KEYS_PER_PROJECT` | 50 | 1–1 000 | keys with `revoked_at IS NULL` |
+
+Neither is in `config/env.schema.ts` — that file is owned elsewhere and zod
+strips unknown keys, but `ConfigService.get` falls back to `process.env`, so they
+work today. **Adding them to the schema is a good idea** and would move the
+clamping to boot time; the clamp in the limits module can stay as the belt.
+
+Two counting decisions, both deliberate and both tested:
+
+- **Deleted projects do not count.** A soft-deleted project keeps its slug and
+  its whole delivery ledger forever, so counting them would make the ceiling a
+  ratchet with no operation available to a tenant that frees a slot. `DELETE` is
+  that operation.
+- **Revoked keys do not count; expired keys do.** Same ratchet argument for
+  revocation. Expiry is excluded from the exemption because `status` is derived
+  from two timestamps at read time and is not a column — filtering it out would
+  need a `now()` comparison in SQL that disagrees with the derivation by a
+  request's worth of clock, and the ceiling would then move on its own with
+  nobody touching anything. Revoke an expired key to free its slot.
+
+**Both ceilings are advisory under concurrency.** Two racing creates can both
+read `existing = ceiling - 1` and both insert, so the true bound is
+`ceiling + concurrent writers`. Holding it exactly needs a serializable
+transaction or a counter column on the parent, and paying for either on every
+create to stop a tenant reaching 101 instead of 100 is the wrong trade. If a hard
+limit is ever needed, the cheap form is a `projects_count` / `api_keys_count`
+column on the parent row, incremented in the same transaction as the insert and
+guarded by a CHECK constraint.
+
+### FIX 2 — API-key scopes are a snapshot with no issuer. THIS NEEDS A MIGRATION.
+
+`ApiKeysService.resolveScopes` correctly refuses any scope the caller does not
+hold, which closes the self-escalation `api-keys.write` would otherwise be for a
+`developer`. What it does **not** do is bind the key to the human who minted it,
+and nothing re-checks the scopes after issuance.
+
+The scenario, once key-authenticated control routes exist: a developer mints a
+key carrying `endpoints.write` and `events.replay`, is then demoted to `viewer`
+or removed from the organization entirely, and the key retains full developer
+authority indefinitely. It is LOW today only because the ingest path does not
+consult `scopes` at all (`internal/ingest/handler.go` authenticates on the key,
+its project and its environment). The first key-authenticated control route makes
+it real.
+
+**What I did without a schema change.** `api_key.created` audit metadata now
+carries `created_by_user_id`, `created_by_membership_id` and `created_by_role`.
+The audit row's actor column already held the user id; the **role** was recorded
+nowhere, and it is exactly what a re-derivation has to compare the stored scopes
+against. This is also the backfill source for the migration below.
+
+**The exact migration required** (I do not own `prisma/schema.prisma`):
+
+```prisma
+model ApiKey {
+  // ...existing fields...
+  createdByUserId       String?  @map("created_by_user_id")
+  createdByMembershipId String?  @map("created_by_membership_id")
+
+  createdByUser       User?               @relation("ApiKeyCreatedBy", fields: [createdByUserId], references: [id], onDelete: SetNull)
+  createdByMembership OrganizationMember? @relation("ApiKeyCreatedByMembership", fields: [createdByMembershipId], references: [id], onDelete: SetNull)
+
+  @@index([createdByMembershipId])
+  @@index([createdByUserId])
+}
+```
+
+```sql
+-- api_keys: record who minted a key, so its scopes can be re-derived.
+ALTER TABLE "api_keys"
+  ADD COLUMN "created_by_user_id"       TEXT,
+  ADD COLUMN "created_by_membership_id" TEXT;
+
+ALTER TABLE "api_keys"
+  ADD CONSTRAINT "api_keys_created_by_user_id_fkey"
+    FOREIGN KEY ("created_by_user_id") REFERENCES "users"("id") ON DELETE SET NULL,
+  ADD CONSTRAINT "api_keys_created_by_membership_id_fkey"
+    FOREIGN KEY ("created_by_membership_id") REFERENCES "organization_members"("id") ON DELETE SET NULL;
+
+CREATE INDEX "api_keys_created_by_membership_id_idx" ON "api_keys" ("created_by_membership_id");
+CREATE INDEX "api_keys_created_by_user_id_idx"       ON "api_keys" ("created_by_user_id");
+```
+
+Both columns are NULLABLE and both FKs are `ON DELETE SET NULL`, deliberately:
+
+- Existing rows have no issuer and must not block the migration. Backfill from
+  `audit_logs` where you can — `action = 'api_key.created' AND resource_id =
+  api_keys.id`, taking `user_id` and `metadata->>'created_by_membership_id'` —
+  and leave the rest NULL.
+- `RESTRICT` would make a key un-mintable-by a user who can then never be
+  deleted, and `CASCADE` would delete the credential (and orphan its delivery
+  history) when a person leaves. Neither is right; `SET NULL` plus the rule below
+  is.
+- Both columns are needed. `created_by_user_id` survives the membership being
+  deleted and is what an operator wants in the UI; `created_by_membership_id` is
+  what the role lookup joins to, and its going NULL is itself the signal that the
+  issuer has left.
+
+**The enforcement, once the columns exist.** Two options; the second is stronger
+and I recommend it, but they compose.
+
+1. *Re-derive at authentication time.* Wherever a key authenticates a
+   control-plane request, compute
+   `effective = key.scopes INTERSECT permissionsForRole(currentRoleOf(created_by_membership_id))`
+   and authorize on `effective`, never on `key.scopes`. A NULL
+   `created_by_membership_id` (issuer removed) yields the empty set, so the key
+   keeps working for ingest — which does not read scopes — and can do nothing on
+   the control plane. Cache the role lookup per request, not across requests: the
+   whole point is that a demotion takes effect immediately.
+2. *Auto-revoke on membership removal.* In the same transaction that deletes an
+   `organization_members` row, stamp `revoked_at = now()` on every non-revoked
+   `api_keys` row whose `created_by_membership_id` is that membership, and write
+   one `api_key.revoked` audit entry per key with
+   `metadata.reason = 'issuer_membership_removed'`. This belongs in
+   `MembersService.remove` (the `src/members` owner, not me) and needs the
+   membership id, which is why the column is there rather than only the user id.
+   It changes the removal path from "authority silently persists" to "credentials
+   die with the person", which is the behaviour an auditor expects.
+
+Option 1 alone leaves live credentials in the wild that merely do nothing;
+option 2 alone leaves keys minted by someone who was demoted rather than removed.
+Do both.
+
+Whoever applies this should also add `created_by_user_id` to `ApiKeyDto` (it is
+safe to publish — it is a member of the caller's own organization) so the
+operator surface can answer "who minted this?" without reading `audit_logs`.
+
+### FIX 3 — both list endpoints now return a page, not a bare array
+
+`GET /v1/organizations/:orgId/projects` returns `ProjectListDto` and
+`GET /v1/projects/:projectId/api-keys` returns `ApiKeyListDto`, both
+`{ data, count, has_more, next_offset }`, built on `ScopedRepository.findPage`.
+`findMany` is no longer usable here anyway — it throws when a result overflows
+the default page and no `take` was given, which for the key listing would have
+been a 500 on the fifty-first key.
+
+`has_more` is the fix, not `count`: a caller receiving exactly `limit` rows could
+not previously tell a full page from a complete result, and the reason to
+enumerate a project's keys is usually "revoke everything that can authenticate as
+us". `next_offset` is null on the last page. The OpenAPI decorators are updated
+(`@ApiOkResponse({ type: ProjectListDto })`, `ApiKeyListDto`), so the generated
+dashboard client changes shape — **both list responses are breaking for any
+existing consumer**, which is fine today because nothing consumes them yet.
+
+### FIX 4 — one 404 vocabulary
+
+Both modules now answer every `not_found` with `CROSS_TENANT_MESSAGE`
+("Resource not found."), matching `endpoints` and `endpoint-secrets`. Neither
+vocabulary was an oracle — a per-resource message is only ever emitted for an id
+inside an already-resolved tenant, where absent and foreign produce the identical
+string — but two idioms in one API is a trap for the eight modules still to be
+written.
+
+Implemented as a three-line `withCrossTenantNotFound()` wrapper in each module
+(`src/projects/not-found.ts`, `src/api-keys/not-found.ts`) that rewrites ONLY
+`AppError`s with code `not_found`. Nothing useful is lost: the only thing the
+repository message carried was the resource type, which the route already states.
+The distinctions that matter inside the tenant — the slug conflict, the expiry in
+the past, the scope the caller does not hold, the ceiling — are different codes
+and are untouched.
+
+**The duplication is deliberate.** The right home for this is
+`ScopedRepository`'s own `notFound()`, or a helper in `src/common`; I own
+neither. If the authz owner wants it, the one-line version is to make
+`ScopedRepository.notFound()` return `new AppError('not_found',
+CROSS_TENANT_MESSAGE)` and delete both wrappers — but note that `src/members`
+deliberately emits "Member not found." and would need to be checked first.
+
+### FIX 5 — boolean query parameters: not applicable here
+
+`?flag=false` parsed with `@Type(() => Boolean)` is `Boolean('false') === true`.
+**Neither of my modules has a boolean query parameter.** `ListProjectsQueryDto`
+carries `status` (an enum), `limit` and `offset`; `ListApiKeysQueryDto` carries
+`limit` and `offset` only. Nothing to fix and nothing to pin. If one is ever
+added here, the idiom is
+`@Transform(({ value }) => value === true || value === 'true' || value === '1')`.
+
+### Verified
+
+`pnpm --filter @webhook/control-api lint && build && test` — all three pass,
+once the concurrent `src/organizations`, `src/members`, `src/endpoints` and
+`src/endpoint-secrets` work had landed. **33 suites, 724 tests, all passing.**
+
+New regression tests, one per fix:
+
+- Both ceilings — reached and refused with 409 and `details.limit`/`current`,
+  writing neither a row nor an audit entry; freed by `DELETE` (projects) and by
+  revoke (keys); clamped rather than obeyed when configured to 0; and applied per
+  project rather than per organization for keys.
+- All three throttles — 429 with `Retry-After` and
+  `details.retry_after_seconds`, create and revoke in separate buckets, the
+  listings unthrottled.
+- `has_more` at **exactly** the page boundary, asserted in both directions (a
+  full page that is the last one, and a full page that is not), plus a walk to
+  exhaustion through `next_offset` that returns every key once.
+- The 404 alignment across absent, foreign-but-real, and cross-tenant, asserting
+  both that the message IS `CROSS_TENANT_MESSAGE` and that it is not the old
+  per-resource string.
+- Issuer provenance in the `api_key.created` audit metadata.
+
+## Endpoints and endpoint-secrets — review hardening (2026-09-07) — `src/endpoints`, `src/endpoint-secrets`
+
+Seven findings from two independent reviews, plus the paginated-read migration.
+
+**1 (HIGH, execution-confirmed). Two concurrent revokes left an ACTIVE, ENABLED
+endpoint with ZERO live signing secrets.** `revoke` was read-then-check-then-write
+with no transaction: two `DELETE /v1/endpoints/:id/secrets/:secretId`, one for v1
+and one for v2, each snapshotted both secrets, each computed the OTHER as its
+survivor, and both wrote. `signing.Header` fails closed, so every delivery to that
+endpoint failed permanently and silently. A second interleave — a revoke landing
+between rotation's INSERT of v2 and its expiry of v1 — was reachable through the
+`overlap_seconds: 0` leak playbook this service documents.
+
+`rotate` and `revoke` now run snapshot → check → write inside one
+`TenantTransactionRunner.run`, and `assertStillSigning` re-counts the invariant
+after the write, inside the transaction, so a violation rolls back rather than
+commits.
+
+> **DEPENDENCY, and it changed under us mid-task.** The plan was an explicit
+> `SELECT ... FROM endpoint_secrets WHERE endpoint_id = $1 FOR UPDATE` in both
+> paths. While this was being written, `TenantTransactionRunner` was hardened to
+> open every transaction at **SERIALIZABLE** with a retry loop, and to stop
+> passing the raw `Prisma.TransactionClient` to the callback (it hands over a
+> `TenantAudit` instead). Raw SQL is therefore no longer reachable from these
+> modules, and it is no longer needed: that runner's own docblock argues
+> explicitly that SSI is the right closure for a read-a-set/write-a-row race and
+> that a per-caller `FOR UPDATE` is the property that just failed. These modules
+> are coded against that interface and **inherit their correctness from its
+> isolation level** — if `TENANT_TRANSACTION_ISOLATION` is ever relaxed, FIX 1
+> reopens here. `assertStillSigning` is what would catch it.
+>
+> `EndpointSecretsModule` now imports `OrganizationsModule` for the runner. That
+> import should become `AuthzModule` when the runner moves to
+> `TenantScopeFactory.transaction(context, fn)` as this file already plans.
+
+**2 (MEDIUM). A developer created an endpoint that went live with a signing
+secret nobody ever received.** `endpoints.write` is a developer grant;
+`endpoint-secrets.*` is owner/admin. The endpoint went `active`/`enabled` with
+an HMAC key that existed only as ciphertext — every delivery signed with a key
+the consumer did not hold, and the owner's later rotation changed it AGAIN: two
+verification outages instead of none. The endpoint now stays in the paused state
+it is already created in when the creator cannot be handed the secret, and the
+response carries `secret_pending: true`. `enable` — which already requires a live
+secret — is the step that goes live, after an owner has rotated. The permission
+split is unchanged; a developer still never sees a secret.
+
+**3 (LOW, execution-confirmed). `?include_deleted=false` parsed as TRUE.**
+`@Type(() => Boolean)` is `Boolean('false')`. Measured: `'false'`→true,
+`'0'`→true, `''`→false. Replaced with a `BooleanQuery()` decorator exported from
+`src/endpoints`; **the eight modules still to be written should import that
+rather than re-deriving the idiom.** Pinned by
+`dto/list-endpoints.query.dto.spec.ts` over `'true' | '1' | 'false' | '0' | '' |
+absent`.
+
+**4 (LOW). The rotation audit row recorded `previous_secrets_expire_at:
+"[redacted]"`.** `AuditService` redacts any key matching /secret/i not ending in
+`_id`, so the one fact that audit row is opened to answer was the one it lost.
+Renamed to `previous_expire_at`. `AuditService` is untouched. The same trap bit
+`endpoint.created` metadata during this work: `awaiting_secret_handover` is now
+`awaiting_key_handover`. **Any new metadata key containing "secret" is redacted —
+name around it.**
+
+**5 (LOW). `rotate` under-reported what is still signing.** Secrets whose
+existing expiry precedes the new overlap end are correctly not extended — and are
+still live, still emitting `v1=`. Reporting only the extended set told a consumer
+rolling off `overlapping_versions` that nothing else was signing.
+`overlapping_versions` is now every prior version still signing, newest first,
+and `previous_secrets_expire_at` is the max of their effective expiries.
+`overlap_seconds: 0` still correctly reports an empty set.
+
+**6. The rotation shim is gone.** `withCreatableSecrets` and
+`PatchedScopeFactory` are deleted; the authz `PARENT_KEY` change has landed, so
+`scope.endpointSecrets.create` resolves the parent endpoint through its own
+scoped repository. Both suites now run against the **unmodified** repository, and
+the "sanity" block at the end of the secrets suite keeps that honest.
+
+**7 (MEDIUM). No route carried a throttle.** `@Throttle` added to
+`POST /v1/projects/:projectId/endpoints` (60 / 5 min) and
+`POST /v1/endpoints/:endpointId/secrets/rotate` (30 / 5 min), with
+`@UseGuards(ThrottleGuard)` on both controllers. A rate limit bounds the speed,
+not the total, so `MAX_ENDPOINTS_PER_PROJECT = 500` is the ceiling; soft-deleted
+endpoints do not count, or a long-lived project eventually becomes uncreatable.
+
+**Paginated reads.** `EndpointsService.list` and `EndpointSecretsService.list`
+now use `findPage()` and return `{ data, has_more, next_offset }` — **a breaking
+response-shape change on both list routes.** Separately: `secretsFor` makes
+CORRECTNESS decisions (next version, survivor count, `hasLiveSecret`) and now
+uses `forEachPage()` to exhaustion. It was a single capped page, which is right
+for a realistic endpoint and wrong past `MAX_PAGE_SIZE` — a survivor on page two
+is invisible to the check that exists to find it.
+
+### What a reviewer should check next
+
+- `LockingTransactionRunner` is gone; `SerializableTransactionRunner` in
+  `endpoint-secrets/testing/harness.ts` models SERIALIZABLE as a serial schedule.
+  It does **not** model rollback and never aborts an attempt, so the real
+  runner's retry loop is unexercised by these suites.
+- The concurrency suite asserts the PROPERTY (never zero live secrets on a
+  non-deleted endpoint) under `Promise.allSettled`, not the mechanism. It was
+  confirmed to fail with the pre-fix shape restored, reproducing
+  `0 live secrets, status=active enabled=true`.
+- No integration test runs against real PostgreSQL (no Docker here), so SSI
+  aborting one of two colliding revokes is argued, not executed.

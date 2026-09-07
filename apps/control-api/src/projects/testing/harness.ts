@@ -1,5 +1,6 @@
 import { AddressInfo } from 'node:net';
 import { INestApplication, ValidationPipe } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import { Prisma } from '@prisma/client';
 import { Test } from '@nestjs/testing';
 import cookieParser from 'cookie-parser';
@@ -14,6 +15,8 @@ import {
 import { FakeTenantPrisma } from '../../authz/testing/tenant-prisma.fake';
 import { seedWorld } from '../../authz/testing/fixtures';
 import { AppExceptionFilter } from '../../common/errors';
+import { ThrottleGuard } from '../../common/throttle.guard';
+import { InMemoryThrottleStore, THROTTLE_STORE } from '../../common/throttle.store';
 import { ProjectsController } from '../projects.controller';
 import { ProjectsService } from '../projects.service';
 
@@ -42,6 +45,15 @@ class StubSessionService {
 export interface HttpResult<T> {
   status: number;
   body: T & { error?: { code: string; message: string; details?: Record<string, unknown> } };
+}
+
+export interface HarnessOptions {
+  /**
+   * `MAX_PROJECTS_PER_ORGANIZATION` for this app. Provided through a real
+   * `ConfigService` rather than by stubbing the limits function, so the parse,
+   * the clamp and the lookup are all exercised by the ceiling tests.
+   */
+  maxProjects?: number;
 }
 
 export interface Harness {
@@ -130,7 +142,7 @@ export function uniqueViolation(target: string[]): Prisma.PrismaClientKnownReque
   );
 }
 
-export async function startProjectsApp(): Promise<Harness> {
+export async function startProjectsApp(options: HarnessOptions = {}): Promise<Harness> {
   const db = seedWorld();
   enforceProjectSchema(db);
   const prisma = db.asPrisma();
@@ -145,6 +157,19 @@ export async function startProjectsApp(): Promise<Harness> {
       { provide: TenantResolver, useValue: new TenantResolver(prisma) },
       { provide: TenantScopeFactory, useValue: new TenantScopeFactory(prisma) },
       { provide: AuditService, useValue: new AuditService(prisma) },
+      ThrottleGuard,
+      // A FRESH store per app: the in-memory counter is keyed by client address
+      // and every test in this file calls from 127.0.0.1, so a shared store
+      // would leak a tripped bucket from one test into the next.
+      { provide: THROTTLE_STORE, useValue: new InMemoryThrottleStore() },
+      {
+        provide: ConfigService,
+        useValue: new ConfigService(
+          options.maxProjects === undefined
+            ? {}
+            : { MAX_PROJECTS_PER_ORGANIZATION: String(options.maxProjects) },
+        ),
+      },
     ],
   }).compile();
 

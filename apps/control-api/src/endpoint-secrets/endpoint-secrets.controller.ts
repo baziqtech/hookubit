@@ -1,4 +1,15 @@
-import { Body, Controller, Delete, Get, HttpCode, HttpStatus, Param, Post } from '@nestjs/common';
+import {
+  Body,
+  Controller,
+  Delete,
+  Get,
+  HttpCode,
+  HttpStatus,
+  Param,
+  Post,
+  Query,
+  UseGuards,
+} from '@nestjs/common';
 import {
   ApiConflictResponse,
   ApiCookieAuth,
@@ -9,9 +20,18 @@ import {
   ApiTags,
 } from '@nestjs/swagger';
 import { Authorized, RequestContext, ResolveTenantFrom, Tenant } from '../authz';
-import { EndpointSecretDto, RotateSecretDto, RotatedSecretDto } from './dto';
+import { Throttle, ThrottleGuard } from '../common/throttle.guard';
+import {
+  EndpointSecretDto,
+  EndpointSecretListDto,
+  ListSecretsQueryDto,
+  RotateSecretDto,
+  RotatedSecretDto,
+} from './dto';
 import { EndpointSecretsService } from './endpoint-secrets.service';
 import { DEFAULT_OVERLAP_SECONDS } from './secret-generator';
+
+const MINUTE = 60_000;
 
 /**
  * `/v1/endpoints/:endpointId/secrets` - addressed by endpoint, not nested under
@@ -37,6 +57,7 @@ import { DEFAULT_OVERLAP_SECONDS } from './secret-generator';
 })
 @Controller('endpoints/:endpointId/secrets')
 @ResolveTenantFrom('endpoint', 'endpointId')
+@UseGuards(ThrottleGuard)
 export class EndpointSecretsController {
   constructor(private readonly secrets: EndpointSecretsService) {}
 
@@ -49,17 +70,24 @@ export class EndpointSecretsController {
       'response type has no field it could occupy. A secret is shown exactly once, when it ' +
       'is created.',
   })
-  @ApiOkResponse({ type: [EndpointSecretDto] })
+  @ApiOkResponse({ type: EndpointSecretListDto })
   list(
     @Tenant() context: RequestContext,
     @Param('endpointId') endpointId: string,
-  ): Promise<EndpointSecretDto[]> {
-    return this.secrets.list(context, endpointId);
+    @Query() query: ListSecretsQueryDto,
+  ): Promise<EndpointSecretListDto> {
+    return this.secrets.list(context, endpointId, query);
   }
 
   @Post('rotate')
   @Authorized('endpoint-secrets.write')
   @HttpCode(HttpStatus.CREATED)
+  // Every rotation mints a credential, encrypts it and re-times every live
+  // secret on the endpoint, under a row lock the whole endpoint contends on.
+  // A loop over this route is both a write amplifier and a way to churn a
+  // consumer's secrets faster than they can redeploy - so it is charged per
+  // address, like every AuthModule write.
+  @Throttle({ name: 'endpoint-secrets.rotate', limit: 30, windowMs: 5 * MINUTE })
   @ApiOperation({
     summary: 'Issue a new signing secret, keeping the old one valid',
     description:

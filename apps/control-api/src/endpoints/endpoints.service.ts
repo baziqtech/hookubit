@@ -14,11 +14,13 @@ import {
   CreateEndpointDto,
   CreatedEndpointDto,
   EndpointDto,
+  EndpointListDto,
   ListEndpointsQueryDto,
   UpdateEndpointDto,
   toEndpointDto,
 } from './dto';
 import { normaliseCustomHeaders } from './endpoint-headers';
+import { MAX_ENDPOINTS_PER_PROJECT } from './endpoint-limits';
 import { normaliseEndpointUrl } from './endpoint-url';
 
 /**
@@ -79,20 +81,33 @@ export class EndpointsService {
     private readonly secrets: EndpointSecretsService,
   ) {}
 
-  async list(context: RequestContext, query: ListEndpointsQueryDto): Promise<EndpointDto[]> {
+  /**
+   * A PAGE of endpoints, and whether there are more.
+   *
+   * `findPage` rather than `findMany`: a bounded read that returns a bare array
+   * cannot tell its caller the bound was reached, so a UI - or a script looping
+   * to disable every endpoint in a project - covered the first page and
+   * reported success. `has_more`/`next_offset` are what make "I saw all of
+   * them" expressible on the wire.
+   */
+  async list(context: RequestContext, query: ListEndpointsQueryDto): Promise<EndpointListDto> {
     const where: Prisma.EndpointWhereInput = query.status
       ? { status: query.status }
       : query.include_deleted
         ? {}
         : { status: { not: 'deleted' } };
 
-    const endpoints = await this.scopes.for(context).endpoints.findMany({
+    const page = await this.scopes.for(context).endpoints.findPage({
       where,
       orderBy: { createdAt: 'desc' },
       take: query.limit,
       skip: query.offset,
     });
-    return endpoints.map(toEndpointDto);
+    return {
+      data: page.rows.map(toEndpointDto),
+      has_more: page.hasMore,
+      next_offset: page.nextSkip,
+    };
   }
 
   /**
@@ -117,19 +132,38 @@ export class EndpointsService {
    * active while it has no secret can never be dispatched to, so
    * `signing.Header` can never be asked to sign for it and fail closed.
    *
-   * The plaintext comes back only to a caller who may read signing secrets.
+   * ## Who may receive the plaintext decides whether it goes live
+   *
    * `endpoints.write` is held by `developer`; `endpoint-secrets.*` is owner and
    * admin only, deliberately, because whoever holds a signing secret can forge a
-   * webhook into the customer's own consumers. A developer therefore creates a
-   * working endpoint and an owner rotates once to obtain the credential.
+   * webhook into the customer's own consumers.
+   *
+   * This used to mean a developer got a live, enabled, subscribable endpoint
+   * whose HMAC key existed only as ciphertext. Every delivery was then signed
+   * with a key the consumer had never been given, so every one of them failed
+   * verification - and the fix, an owner rotating to obtain the secret, CHANGED
+   * the key again. Two verification outages where the honest answer is none.
+   *
+   * So when the creator cannot be handed the secret, the endpoint simply stays
+   * in the paused state it was already created in and the response says
+   * `secret_pending: true`. Nothing is delivered with an unusable key, and
+   * `enable` - which already refuses an endpoint with no live secret - is the
+   * step that takes it live once an owner has rotated and handed the consumer
+   * the plaintext. The permission split is untouched: the developer still never
+   * sees a secret.
    */
   async create(context: RequestContext, dto: CreateEndpointDto): Promise<CreatedEndpointDto> {
     const scope = this.scopes.for(context);
     await this.requireRetryPolicy(scope, dto.retry_policy_id);
+    await this.requireHeadroom(scope);
+
+    // Only a caller who may READ signing secrets can be handed this one, and
+    // that decides whether the endpoint goes live now or waits for a rotation.
+    const mayReceiveSecret = context.has('endpoint-secrets.write');
 
     const id = newId('endpoint');
     const now = new Date();
-    await scope.endpoints.create({
+    const created = await scope.endpoints.create({
       id,
       ...this.writableColumns(dto),
       name: dto.name,
@@ -165,20 +199,35 @@ export class EndpointsService {
       throw err;
     }
 
-    const live = await scope.endpoints.updateById(id, { status: 'active', enabled: true });
+    // Live only if the plaintext is going back with this response. Otherwise it
+    // stays exactly as created - paused, disabled, delivering nothing.
+    const live = mayReceiveSecret
+      ? await scope.endpoints.updateById(id, { status: 'active', enabled: true })
+      : created;
 
     await this.audit.recordFor(context, {
       action: 'endpoint.created',
       resourceType: 'endpoint',
       resourceId: id,
-      metadata: { url: live.url, name: live.name, secret_version: minted.version },
+      metadata: {
+        url: live.url,
+        name: live.name,
+        secret_version: minted.version,
+        status: live.status,
+        // Why it is paused, for whoever asks later why this endpoint never
+        // delivered anything. NOT named `awaiting_secret_handover`: AuditService
+        // redacts any key matching /secret/i that does not end in `_id`, and a
+        // redacted boolean is a fact lost for no reason.
+        awaiting_key_handover: !mayReceiveSecret,
+      },
     });
 
     return {
       ...toEndpointDto(live),
       // Withheld from a caller who may create endpoints but not read their
       // secrets. The secret exists either way; only this response varies.
-      secret: context.has('endpoint-secrets.write') ? minted.secret : null,
+      secret: mayReceiveSecret ? minted.secret : null,
+      secret_pending: !mayReceiveSecret,
       secret_version: minted.version,
     };
   }
@@ -335,6 +384,25 @@ export class EndpointsService {
     if (retryPolicyId === undefined || retryPolicyId === null) return;
     const policy = await scope.retryPolicies.findById(retryPolicyId);
     if (!policy) throw new AppError('not_found', CROSS_TENANT_MESSAGE);
+  }
+
+  /**
+   * Refuse a create that would take the project past its endpoint ceiling.
+   *
+   * `count` through the scope, so it counts THIS project's rows and no one
+   * else's. Deleted endpoints are excluded - they are kept forever for the
+   * delivery ledger, and counting them would make a long-lived project
+   * permanently uncreatable. See `MAX_ENDPOINTS_PER_PROJECT` for why a ceiling
+   * exists at all.
+   */
+  private async requireHeadroom(scope: TenantScope): Promise<void> {
+    const live = await scope.endpoints.count({ status: { not: 'deleted' } });
+    if (live < MAX_ENDPOINTS_PER_PROJECT) return;
+    throw new AppError(
+      'conflict',
+      `This project already has ${MAX_ENDPOINTS_PER_PROJECT} endpoints, which is the maximum. ` +
+        'Delete one you no longer deliver to, or talk to us about a higher limit.',
+    );
   }
 
   private static assertNotDeleted(endpoint: Endpoint): void {

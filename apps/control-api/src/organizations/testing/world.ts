@@ -55,6 +55,8 @@ export class FakeWorld {
   private readonly inner = new FakeTenantPrisma();
   private readonly tokens = new Map<string, UserToken>();
   private depth = 0;
+  /** The serial order serialisable transactions are queued into. */
+  private serial: Promise<unknown> = Promise.resolve();
 
   /** One entry per top-level `$transaction`, holding the statements it ran. */
   readonly transactions: RecordedStatement[][] = [];
@@ -167,8 +169,41 @@ export class FakeWorld {
    * Rolls back on failure and records what ran inside. Re-entrant, because
    * `ScopedRepository.updateById` opens its own transaction when handed a
    * client that has `$transaction` - only the outermost one is a boundary.
+   *
+   * `isolationLevel: 'Serializable'` is HONOURED, and that is what makes the
+   * concurrency tests mean anything. The fake runs on one event loop, so two
+   * transactions started together interleave at every `await` - which is a
+   * faithful model of READ COMMITTED and is exactly how "both count two owners,
+   * both demote, zero owners left" reproduces here. A serialisable transaction
+   * is queued behind the ones before it instead: a serial order is the
+   * definition of the isolation level, and under it the second demotion reads
+   * the first one's committed write and is refused by the lattice.
+   *
+   * It does NOT model an SSI abort (40001) - the retry path is unit-tested
+   * against a stub in `tenant-transaction.spec.ts`. Here the property under
+   * test is the invariant, not the mechanism.
    */
-  async $transaction<T>(fn: (tx: FakeWorld) => Promise<T>): Promise<T> {
+  async $transaction<T>(
+    fn: (tx: FakeWorld) => Promise<T>,
+    options?: { isolationLevel?: string },
+  ): Promise<T> {
+    if (this.depth === 0 && options?.isolationLevel === 'Serializable') {
+      const run = this.serial.then(
+        () => this.execute(fn),
+        () => this.execute(fn),
+      );
+      // The queue must never reject, or every transaction behind a failed one
+      // would be skipped.
+      this.serial = run.then(
+        () => undefined,
+        () => undefined,
+      );
+      return run;
+    }
+    return this.execute(fn);
+  }
+
+  private async execute<T>(fn: (tx: FakeWorld) => Promise<T>): Promise<T> {
     const outermost = this.depth === 0;
     const snapshot = outermost ? this.snapshot() : null;
     const from = this.inner.queries.length;

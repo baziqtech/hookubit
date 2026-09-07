@@ -9,9 +9,17 @@ import { SessionGuard } from '../auth/session.guard';
 import { SESSION_COOKIE, SessionService, SessionUser } from '../auth/session.service';
 import { CryptoService } from '../common/crypto.service';
 import { AppExceptionFilter } from '../common/errors';
+import { ThrottleGuard } from '../common/throttle.guard';
+import { InMemoryThrottleStore, THROTTLE_STORE } from '../common/throttle.store';
 import { EndpointSecretsController } from '../endpoint-secrets/endpoint-secrets.controller';
 import { EndpointSecretsService } from '../endpoint-secrets/endpoint-secrets.service';
-import { backfillTimestamps, buildCrypto, testScopeFactory } from '../endpoint-secrets/testing/harness';
+import {
+  backfillTimestamps,
+  buildCrypto,
+  testScopeFactory,
+  testTransactions,
+} from '../endpoint-secrets/testing/harness';
+import { TenantTransactionRunner } from '../organizations/tenant-transaction';
 import { EndpointsController } from './endpoints.controller';
 import { EndpointsService } from './endpoints.service';
 
@@ -65,15 +73,25 @@ describe('endpoints and secrets over HTTP', () => {
   beforeAll(async () => {
     db = backfillTimestamps(seedWorld());
     const crypto = buildCrypto();
+    const scopes = testScopeFactory(db);
+    const audit = new AuditService(db.asPrisma());
 
     const moduleRef = await Test.createTestingModule({
       controllers: [EndpointsController, EndpointSecretsController],
       providers: [
         { provide: SessionService, useClass: StubSessionService },
         { provide: TenantResolver, useValue: new TenantResolver(db.asPrisma()) },
-        { provide: TenantScopeFactory, useValue: testScopeFactory(db) },
-        { provide: AuditService, useValue: new AuditService(db.asPrisma()) },
+        { provide: TenantScopeFactory, useValue: scopes },
+        { provide: AuditService, useValue: audit },
+        {
+          provide: TenantTransactionRunner,
+          useValue: testTransactions(db, scopes, audit),
+        },
         { provide: CryptoService, useValue: crypto },
+        // The throttle limits here are far above what this suite issues, so the
+        // guard is proved to be MOUNTED without any test depending on a 429.
+        { provide: THROTTLE_STORE, useValue: new InMemoryThrottleStore() },
+        ThrottleGuard,
         SessionGuard,
         TenantGuard,
         EndpointsService,
@@ -159,6 +177,8 @@ describe('endpoints and secrets over HTTP', () => {
       });
       expect(created.status).toBe(201);
       expect(created.body.secret).toBeNull();
+      // Paused, not live: nobody can be handed the key it would sign with.
+      expect(created.body).toMatchObject({ secret_pending: true, status: 'paused' });
 
       const secrets = await call('GET', `/v1/endpoints/${String(created.body.id)}/secrets`, {
         as: IDS.developerA,
@@ -192,7 +212,12 @@ describe('endpoints and secrets over HTTP', () => {
       expect(listed.status).toBe(200);
       expect(JSON.stringify(listed.body)).not.toContain(secret);
       // Both still signing: this is the overlap window on the wire.
-      expect((listed.body as unknown as Array<{ active: boolean }>).filter((s) => s.active)).toHaveLength(2);
+      const page = listed.body as unknown as {
+        data: Array<{ active: boolean }>;
+        has_more: boolean;
+      };
+      expect(page.data.filter((entry) => entry.active)).toHaveLength(2);
+      expect(page.has_more).toBe(false);
     });
   });
 

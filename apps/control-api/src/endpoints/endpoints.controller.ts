@@ -9,6 +9,7 @@ import {
   Patch,
   Post,
   Query,
+  UseGuards,
 } from '@nestjs/common';
 import {
   ApiConflictResponse,
@@ -21,15 +22,19 @@ import {
   ApiTags,
 } from '@nestjs/swagger';
 import { Authorized, RequestContext, Tenant } from '../authz';
+import { Throttle, ThrottleGuard } from '../common/throttle.guard';
 import {
   CreateEndpointDto,
   CreatedEndpointDto,
   DisableEndpointDto,
   EndpointDto,
+  EndpointListDto,
   ListEndpointsQueryDto,
   UpdateEndpointDto,
 } from './dto';
 import { EndpointsService } from './endpoints.service';
+
+const MINUTE = 60_000;
 
 /**
  * Thin: parse, delegate, return. Every decision is in `EndpointsService`.
@@ -49,6 +54,7 @@ import { EndpointsService } from './endpoints.service';
 })
 @ApiForbiddenResponse({ description: 'You are in this tenant but your role does not allow it.' })
 @Controller('projects/:projectId/endpoints')
+@UseGuards(ThrottleGuard)
 export class EndpointsController {
   constructor(private readonly endpoints: EndpointsService) {}
 
@@ -58,17 +64,23 @@ export class EndpointsController {
     summary: 'List the endpoints in a project',
     description: 'Soft-deleted endpoints are hidden unless asked for; they are never erased.',
   })
-  @ApiOkResponse({ type: [EndpointDto] })
+  @ApiOkResponse({ type: EndpointListDto })
   list(
     @Tenant() context: RequestContext,
     @Query() query: ListEndpointsQueryDto,
-  ): Promise<EndpointDto[]> {
+  ): Promise<EndpointListDto> {
     return this.endpoints.list(context, query);
   }
 
   @Post()
   @Authorized('endpoints.write')
   @HttpCode(HttpStatus.CREATED)
+  // A create is an insert plus a minted, encrypted signing secret plus a
+  // per-endpoint slice of the data plane's concurrency and rate-limit
+  // bookkeeping. `MAX_ENDPOINTS_PER_PROJECT` bounds how many can exist; this
+  // bounds how fast a loop can get there, and keeps the argon2-adjacent crypto
+  // work off a single caller's spray.
+  @Throttle({ name: 'endpoints.create', limit: 60, windowMs: 5 * MINUTE })
   @ApiOperation({
     summary: 'Create an endpoint and its first signing secret',
     description:

@@ -1,5 +1,7 @@
 import { createHmac } from 'node:crypto';
-import { CROSS_TENANT_MESSAGE, RequestContext } from '../authz';
+import { CROSS_TENANT_MESSAGE, MAX_PAGE_SIZE, RequestContext } from '../authz';
+// Not re-exported from the barrel; this is the redaction marker itself.
+import { REDACTED } from '../authz/audit.service';
 import { IDS } from '../authz/testing/fixtures';
 import { AppError, ErrorCode } from '../common/errors';
 import { CreateEndpointDto } from '../endpoints/dto';
@@ -207,7 +209,7 @@ describe('the zero-active-secrets invariant', () => {
 
   it('refuses to revoke the last secret still signing', async () => {
     const { harness, endpointId } = await withEndpoint();
-    const [only] = await harness.secrets.list(harness.context, endpointId);
+    const [only] = (await harness.secrets.list(harness.context, endpointId)).data;
 
     const error = await expectError(
       harness.secrets.revoke(harness.context, endpointId, only.id),
@@ -220,7 +222,7 @@ describe('the zero-active-secrets invariant', () => {
   it('allows revoking a superseded secret during the overlap window', async () => {
     const { harness, endpointId } = await withEndpoint();
     const rotated = await harness.secrets.rotate(harness.context, endpointId);
-    const version1 = (await harness.secrets.list(harness.context, endpointId)).find(
+    const version1 = (await harness.secrets.list(harness.context, endpointId)).data.find(
       (secret) => secret.version === 1,
     );
 
@@ -250,7 +252,7 @@ describe('the plaintext appears exactly once', () => {
     expect(rotated.secret).toMatch(/^whsec_/);
 
     // Read paths.
-    const listed = await harness.secrets.list(harness.context, endpointId);
+    const listed = (await harness.secrets.list(harness.context, endpointId)).data;
     expect(JSON.stringify(listed)).not.toContain(rotated.secret);
     for (const secret of listed) {
       expect(Object.keys(secret)).not.toContain('secret');
@@ -326,7 +328,7 @@ describe('tenant isolation and permissions', () => {
       ...BODY,
       url: 'https://other.example.com/hook',
     });
-    const [otherSecret] = await harness.secrets.list(harness.context, other.id);
+    const [otherSecret] = (await harness.secrets.list(harness.context, other.id)).data;
 
     await expectError(
       harness.secrets.revoke(harness.context, endpointId, otherSecret.id),
@@ -383,10 +385,9 @@ describe('secret metadata', () => {
     await harness.secrets.rotate(harness.context, endpointId, 1);
 
     const past = new Date(Date.now() + 5_000);
-    const listed = (await harness.secrets.list(harness.context, endpointId)).map((secret) => ({
-      version: secret.version,
-      active: secret.active,
-    }));
+    const listed = (await harness.secrets.list(harness.context, endpointId)).data.map(
+      (secret) => ({ version: secret.version, active: secret.active }),
+    );
     // `list` uses "now", so both are still live at this instant...
     expect(listed).toEqual([
       { version: 2, active: true },
@@ -407,8 +408,9 @@ describe('secret metadata', () => {
     await harness.secrets.rotate(harness.context, endpointId);
 
     const listed = await harness.secrets.list(harness.context, endpointId);
-    expect(listed.map((secret) => secret.version)).toEqual([3, 2, 1]);
-    expect(listed.every((secret) => secret.endpoint_id === endpointId)).toBe(true);
+    expect(listed.data.map((secret) => secret.version)).toEqual([3, 2, 1]);
+    expect(listed.data.every((secret) => secret.endpoint_id === endpointId)).toBe(true);
+    expect(listed).toMatchObject({ has_more: false, next_offset: null });
   });
 });
 
@@ -430,5 +432,124 @@ describe('sanity: the harness really enforces the parent check on create', () =>
       }),
     ).rejects.toMatchObject({ code: 'not_found' });
     expect(harness.db.rows('endpointSecret').get('eps_evil')).toBeUndefined();
+  });
+});
+
+/**
+ * FIX 4. `AuditService` redacts any metadata key matching /secret/i that does
+ * not end in `_id`. `previous_secrets_expire_at` contains "secrets" and ends in
+ * `_at`, so the audit row for a rotation lost the single fact it is ever opened
+ * to answer: when did the old secret stop signing? The key is now
+ * `previous_expire_at`. The redaction policy itself is correct and untouched.
+ */
+describe('the rotation audit row keeps the one fact it is read for', () => {
+  it('records when the previous secrets stop signing, unredacted', async () => {
+    const { harness, endpointId } = await withEndpoint();
+
+    const rotated = await harness.secrets.rotate(harness.context, endpointId, 3_600);
+
+    const entry = harness.db.all('auditLog').find((row) => row.action === 'endpoint_secret.rotated');
+    const metadata = entry?.metadata as Record<string, unknown>;
+
+    expect(metadata.previous_expire_at).toBe(rotated.previous_secrets_expire_at);
+    expect(metadata.previous_expire_at).not.toBe(REDACTED);
+    expect(String(metadata.previous_expire_at)).toMatch(/^\d{4}-\d{2}-\d{2}T/);
+    expect(metadata.previous_versions).toEqual([1]);
+    // The policy still bites where it should: nothing named like a secret,
+    // and no plaintext, anywhere in the row.
+    expect(JSON.stringify(entry)).not.toContain(rotated.secret);
+    expect(Object.keys(metadata)).not.toContain('previous_secrets_expire_at');
+  });
+});
+
+/**
+ * FIX 5. A secret whose own expiry already precedes the new overlap end is
+ * correctly NOT extended - and it is still live, still emitting a `v1=`
+ * component. Reporting only the extended set told a consumer rolling its
+ * secrets off `overlapping_versions` that nothing else was signing.
+ */
+describe('rotation reports every prior version that is still signing', () => {
+  it('includes versions this rotation did not extend, and the latest expiry of all of them', async () => {
+    const { harness, endpointId } = await withEndpoint();
+
+    // v1 gets a SHORT window...
+    await harness.secrets.rotate(harness.context, endpointId, 60);
+    // ...then v2 is superseded with a much longer one. v1's own expiry already
+    // precedes the new overlap end, so it is left alone - and still signs.
+    const third = await harness.secrets.rotate(harness.context, endpointId, 7_200);
+
+    expect(third.overlapping_versions).toEqual([2, 1]);
+
+    const live = liveSecrets(harness, endpointId);
+    expect(live).toHaveLength(3);
+    // Everything reported as still signing really is, and the reported deadline
+    // is the LAST of them - which is what a consumer schedules its rollover on.
+    const until = new Date(String(third.previous_secrets_expire_at)).getTime();
+    expect(until).toBeGreaterThan(Date.now() + 7_000 * 1_000);
+    expect(liveSecrets(harness, endpointId, new Date(until + 1_000))).toEqual([third.secret]);
+  });
+
+  it('reports nothing still signing when the overlap is zero', async () => {
+    const { harness, endpointId } = await withEndpoint();
+
+    const rotated = await harness.secrets.rotate(harness.context, endpointId, 0);
+
+    expect(rotated.overlapping_versions).toEqual([]);
+    expect(rotated.previous_secrets_expire_at).toBeNull();
+    expect(liveSecrets(harness, endpointId, new Date(Date.now() + 1_000))).toEqual([
+      rotated.secret,
+    ]);
+  });
+});
+
+/**
+ * The reads that make DECISIONS are exhaustive, not one capped page.
+ *
+ * `secretsFor` feeds the next version number, the survivor count `revoke`
+ * refuses on, and `hasLiveSecret`. Read as a single `take: MAX_PAGE_SIZE` page
+ * it was correct for a realistic endpoint and wrong past 200 rows - and "wrong"
+ * here means an endpoint that IS signable being reported as not, and a survivor
+ * on page two being invisible to the check that exists to find it.
+ */
+describe('decisions are made over every secret, not the first page', () => {
+  /** Ids sort before any ULID (`01M...`), so these fill the first pages. */
+  function bulkSecrets(harness: Harness, endpointId: string, count: number): void {
+    for (let i = 0; i < count; i += 1) {
+      harness.db.insert('endpointSecret', {
+        id: `eps_0000000000000000000${String(i).padStart(3, '0')}`,
+        endpointId,
+        secretEncrypted: 'v1.k1.a.b.c',
+        version: 1_000 + i,
+        active: false,
+        expiresAt: new Date('2020-01-01T00:00:00.000Z'),
+        createdAt: new Date('2020-01-01T00:00:00.000Z'),
+      });
+    }
+  }
+
+  it('finds a live secret sitting past MAX_PAGE_SIZE rows of dead ones', async () => {
+    const { harness, endpointId } = await withEndpoint();
+    await harness.endpoints.disable(harness.context, endpointId);
+    bulkSecrets(harness, endpointId, MAX_PAGE_SIZE + 50);
+
+    // The only live secret is the one minted with the endpoint, and every
+    // bulk row sorts ahead of it. A single capped page never reaches it.
+    await expect(harness.secrets.hasLiveSecret(harness.context, endpointId)).resolves.toBe(true);
+    // Which is what `enable` asks before resuming deliveries.
+    await expect(harness.endpoints.enable(harness.context, endpointId)).resolves.toMatchObject({
+      status: 'active',
+    });
+  });
+
+  it('counts a survivor past the first page when refusing a revoke', async () => {
+    const { harness, endpointId } = await withEndpoint();
+    const rotated = await harness.secrets.rotate(harness.context, endpointId, 7_200);
+    bulkSecrets(harness, endpointId, MAX_PAGE_SIZE + 50);
+
+    // v1 is still inside its overlap window, so revoking the NEW secret is
+    // allowed - but only if the read that counts survivors got that far.
+    const revoked = await harness.secrets.revoke(harness.context, endpointId, rotated.id);
+    expect(revoked.active).toBe(false);
+    expect(liveSecrets(harness, endpointId)).toHaveLength(1);
   });
 });

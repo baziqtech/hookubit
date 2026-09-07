@@ -1,4 +1,4 @@
-import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
+import { ApiProperty } from '@nestjs/swagger';
 import { Environment, Project, ProjectStatus } from '@prisma/client';
 
 /**
@@ -47,14 +47,41 @@ export class ProjectDto {
   updated_at!: string;
 }
 
+/**
+ * A page of projects, and the one fact a bare array cannot carry.
+ *
+ * The list route used to return `ProjectDto[]`. A caller that received exactly
+ * `limit` rows could not tell a full page from a complete result, so "disable
+ * every project in this organization" quietly covered the first page and
+ * reported success - the same defect `ScopedRepository.findMany` now throws
+ * over. `has_more` is the answer; `next_offset` is the offset that returns the
+ * rest, and is null on the last page.
+ */
 export class ProjectListDto {
   @ApiProperty({ type: [ProjectDto] })
   data!: ProjectDto[];
 
-  @ApiPropertyOptional({
-    description: 'Rows returned by this page. Compare against `limit` to detect the last page.',
+  @ApiProperty({
+    description: 'Rows in `data`. Never compare this against `limit` to detect the last page - read `has_more`.',
+    example: 50,
   })
   count!: number;
+
+  @ApiProperty({
+    description:
+      'True when more projects match this filter than the page carries. The bound was reached; ' +
+      'fetch `next_offset` to continue.',
+    example: false,
+  })
+  has_more!: boolean;
+
+  @ApiProperty({
+    type: Number,
+    nullable: true,
+    description: 'Pass as `offset` to fetch the next page. Null when this page was the last one.',
+    example: null,
+  })
+  next_offset!: number | null;
 }
 
 export function toProjectDto(project: Project): ProjectDto {

@@ -108,3 +108,37 @@ export function toApiKeyDto(key: ApiKey, now: Date = new Date()): ApiKeyDto {
     created_at: key.createdAt.toISOString(),
   };
 }
+
+/**
+ * A page of keys, and whether the bound was reached.
+ *
+ * A bare array here was actively dangerous rather than merely incomplete: the
+ * reason to enumerate a project's keys is usually "revoke everything that can
+ * authenticate as us", and a caller that received exactly `limit` rows could not
+ * tell a full page from the whole inventory. `has_more` is what makes "I have
+ * seen every credential" expressible.
+ */
+export class ApiKeyListDto {
+  @ApiProperty({ type: [ApiKeyDto] })
+  data!: ApiKeyDto[];
+
+  @ApiProperty({
+    description: 'Keys in `data`. Never compare this against `limit` to detect the last page.',
+    example: 50,
+  })
+  count!: number;
+
+  @ApiProperty({
+    description: 'True when more keys exist in this project than the page carries.',
+    example: false,
+  })
+  has_more!: boolean;
+
+  @ApiProperty({
+    type: Number,
+    nullable: true,
+    description: 'Pass as `offset` to fetch the next page. Null when this page was the last one.',
+    example: null,
+  })
+  next_offset!: number | null;
+}

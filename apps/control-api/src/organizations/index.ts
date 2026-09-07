@@ -1,6 +1,12 @@
 export { OrganizationsModule } from './organizations.module';
 export { OrganizationsService } from './organizations.service';
-export { TenantTransactionRunner } from './tenant-transaction';
+export {
+  MAX_TRANSACTION_ATTEMPTS,
+  TENANT_TRANSACTION_ISOLATION,
+  TenantTransactionRunner,
+  isSerializationFailure,
+  type TenantAudit,
+} from './tenant-transaction';
 export { UserDirectory, type UserIdentity } from './user-directory';
 export {
   Principal,

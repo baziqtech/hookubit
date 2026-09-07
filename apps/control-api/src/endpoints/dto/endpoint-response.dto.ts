@@ -40,9 +40,20 @@ export class CreatedEndpointDto extends EndpointDto {
       'The version 1 signing secret, in plaintext, returned HERE AND NOWHERE ELSE. ' +
       'Present only when the caller also holds `endpoint-secrets.write` (owner or admin): ' +
       'a developer may create endpoints but may not read signing secrets, so for them this ' +
-      'is null and an owner must call POST /v1/endpoints/{id}/secrets/rotate to obtain one.',
+      'is null, the endpoint stays paused, and `secret_pending` says so.',
   })
   secret!: string | null;
+
+  @ApiProperty({
+    description:
+      'True when the endpoint was created with a signing secret this caller may not receive, ' +
+      'so it is PAUSED and not delivering. An owner or admin must rotate ' +
+      '(POST /v1/endpoints/{id}/secrets/rotate), hand the consumer the plaintext, then enable ' +
+      'it. Going live here instead would sign every delivery with a key nobody holds: the ' +
+      'consumer would reject all of them, and the rotation that fixed it would change the ' +
+      'secret AGAIN - two verification outages instead of none.',
+  })
+  secret_pending!: boolean;
 
   @ApiProperty({ description: 'Version of the secret that was minted with this endpoint.' })
   secret_version!: number;
@@ -50,6 +61,10 @@ export class CreatedEndpointDto extends EndpointDto {
 
 export class EndpointListDto {
   @ApiProperty({ type: [EndpointDto] }) data!: EndpointDto[];
+  @ApiProperty({ description: 'More endpoints match than this page carries.' })
+  has_more!: boolean;
+  @ApiPropertyOptional({ nullable: true, description: '`offset` for the next page, or null.' })
+  next_offset!: number | null;
 }
 
 function iso(value: Date | null | undefined): string | null {

@@ -25,3 +25,21 @@ export const ENDPOINT_LIMITS = {
 
 export const MAX_ENDPOINT_NAME_LENGTH = 200;
 export const MAX_ENDPOINT_DESCRIPTION_LENGTH = 1_000;
+
+/**
+ * How many live endpoints one project may hold.
+ *
+ * Endpoint creation is a write that costs more than its row: each one mints and
+ * encrypts a signing secret, and each one is a destination the data plane holds
+ * per-endpoint concurrency and rate-limit state for (ARCHITECTURE.md, "the hard
+ * part" #1 and #3). Without a ceiling, one `endpoints.write` holder - a
+ * developer, the weakest role that has it - can enumerate a project into tens of
+ * thousands of endpoints and take the whole data plane's per-endpoint bookkeeping
+ * with it. The rate limit on the route bounds the SPEED of that; this bounds the
+ * TOTAL, which is the part that does not decay.
+ *
+ * Soft-deleted endpoints do not count: the rows are kept forever so the delivery
+ * ledger stays readable, and counting them would eventually make a long-lived
+ * project uncreatable.
+ */
+export const MAX_ENDPOINTS_PER_PROJECT = 500;
