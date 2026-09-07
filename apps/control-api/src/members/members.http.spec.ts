@@ -63,7 +63,10 @@ describe('members over HTTP', () => {
   it('lists members for any role in the organization', async () => {
     const res = await call('GET', members(IDS.orgA), { as: IDS.viewerA });
     expect(res.status).toBe(200);
-    expect((res.body as { total: number }).total).toBe(4);
+    const body = res.body as { data: unknown[]; has_more: boolean; next_offset: number | null };
+    expect(body.data).toHaveLength(4);
+    expect(body.has_more).toBe(false);
+    expect(body.next_offset).toBeNull();
   });
 
   it('404s the member list of an organization the caller is not in', async () => {

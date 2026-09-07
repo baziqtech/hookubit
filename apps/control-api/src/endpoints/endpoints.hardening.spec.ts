@@ -123,8 +123,19 @@ describe('the per-project endpoint ceiling', () => {
       });
     }
 
+    // `limit_exceeded`, not `conflict`: this module's `conflict` already means
+    // "the endpoint is deleted", and the details are the machine-readable half.
     await expect(harness.endpoints.create(harness.context, BODY)).rejects.toMatchObject({
-      code: 'conflict',
+      code: 'limit_exceeded',
+      details: {
+        limit: MAX_ENDPOINTS_PER_PROJECT,
+        // The fixture's own `ep_a1` lives in this project too, so the live count
+        // is one past the ceiling. `current` is the real count, not the ceiling
+        // restated - a client showing "500 of 500" when the answer is 501 is
+        // exactly the kind of derived number this field exists to replace.
+        current: MAX_ENDPOINTS_PER_PROJECT + 1,
+        resource: 'endpoints',
+      },
     });
     const error = await harness.endpoints
       .create(harness.context, BODY)

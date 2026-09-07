@@ -69,9 +69,10 @@ export class ProjectsController {
   @ApiOperation({
     summary: 'List the projects in an organization',
     description:
-      'Newest first. Soft-deleted projects are hidden unless `status=deleted`. Paged: read ' +
-      '`has_more` rather than comparing `count` against `limit`, and pass `next_offset` back as ' +
-      '`offset` to continue.',
+      'Newest first. Soft-deleted projects are hidden unless `status=deleted`. Paged with the ' +
+      'canonical envelope `{ data, has_more, next_offset }` - BREAKING: `count` was removed. ' +
+      'Read `has_more`, never a row count compared against `limit`, and pass `next_offset` ' +
+      'back as `offset` to continue; it is null on the last page.',
   })
   @ApiOkResponse({ type: ProjectListDto })
   list(
@@ -94,8 +95,10 @@ export class ProjectsController {
   @ApiCreatedResponse({ type: ProjectDto })
   @ApiConflictResponse({
     description:
-      'Either the slug is already taken in this organization, or the organization is at its ' +
-      'project ceiling (`details.limit` / `details.current`).',
+      'Two different 409s, told apart by `error.code`, never by the message. ' +
+      '`limit_exceeded` - the organization is at its project ceiling; `details` carries ' +
+      '`{ limit, current, resource }`. `conflict` - the slug is already taken in this ' +
+      'organization.',
   })
   create(
     @Tenant() context: RequestContext,

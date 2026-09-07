@@ -56,16 +56,15 @@ export class ProjectDto {
  * reported success - the same defect `ScopedRepository.findMany` now throws
  * over. `has_more` is the answer; `next_offset` is the offset that returns the
  * rest, and is null on the last page.
+ *
+ * Exactly three keys. `count` used to sit alongside them and was removed: it
+ * was `data.length` restated, it invited precisely the `count === limit`
+ * last-page test `has_more` exists to replace, and it made this envelope a
+ * third shape in an API that should have one.
  */
 export class ProjectListDto {
   @ApiProperty({ type: [ProjectDto] })
   data!: ProjectDto[];
-
-  @ApiProperty({
-    description: 'Rows in `data`. Never compare this against `limit` to detect the last page - read `has_more`.',
-    example: 50,
-  })
-  count!: number;
 
   @ApiProperty({
     description:

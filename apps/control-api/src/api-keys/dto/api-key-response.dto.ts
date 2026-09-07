@@ -117,16 +117,15 @@ export function toApiKeyDto(key: ApiKey, now: Date = new Date()): ApiKeyDto {
  * authenticate as us", and a caller that received exactly `limit` rows could not
  * tell a full page from the whole inventory. `has_more` is what makes "I have
  * seen every credential" expressible.
+ *
+ * `{ data, has_more, next_offset }`, the same three keys every list in this API
+ * returns. `count` was dropped: it was `data.length` under another name, and a
+ * caller comparing it against `limit` to find the last page is the bug
+ * `has_more` exists to remove.
  */
 export class ApiKeyListDto {
   @ApiProperty({ type: [ApiKeyDto] })
   data!: ApiKeyDto[];
-
-  @ApiProperty({
-    description: 'Keys in `data`. Never compare this against `limit` to detect the last page.',
-    example: 50,
-  })
-  count!: number;
 
   @ApiProperty({
     description: 'True when more keys exist in this project than the page carries.',

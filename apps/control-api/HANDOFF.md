@@ -2385,3 +2385,367 @@ second loop. Do not paste constraint names into the existing one.
   appear in `pg_indexes` (the CI job does exactly this), and that the claim
   queries actually choose them — `EXPLAIN` the FIFO claim and look for
   `deliveries_ready_fifo_idx` with no Sort node above it.
+
+## Audit log + the list-envelope standardisation (2026-09-07) — `src/audit`, six existing modules
+
+### REGISTER THIS MODULE — one line, for whoever owns `app.module.ts`
+
+`src/audit` is written, tested and NOT registered; nobody may edit
+`app.module.ts` right now. Add the import and the entry:
+
+```ts
+import { AuditModule } from './audit/audit.module';
+// ...
+    RateLimitsModule,
+    AuditModule,          // <- add this
+```
+
+It imports nothing (`TenantScopeFactory` comes from the global `AuthzModule`),
+so ordering does not matter. Until it is registered, `/v1/organizations/:orgId/
+audit-logs` is not served, though its suites run.
+
+### FOR THE FRONTEND — BREAKING WIRE CHANGE on six list routes
+
+The backend was shipping **three different list envelopes** for the same idea.
+All six are now the canonical one, which the three newest modules already used:
+
+```
+{ data: T[], has_more: boolean, next_offset: number | null }
+```
+
+| route | was | now |
+| --- | --- | --- |
+| `GET /organizations` | `{ data, total, limit, offset }` | canonical |
+| `GET /organizations/:orgId/members` | `{ data, total, limit, offset }` | canonical |
+| `GET /organizations/:orgId/projects` | `{ data, count, has_more, next_offset }` | canonical |
+| `GET /projects/:projectId/api-keys` | `{ data, count, has_more, next_offset }` | canonical |
+| `GET /projects/:projectId/endpoints` | canonical | unchanged |
+| `GET /endpoints/:endpointId/secrets` | canonical | unchanged |
+
+**Removed: `total`, `count`, `limit`, `offset`.** Regenerate the client; the
+`@nestjs/swagger` decorators were updated with the code, so the OpenAPI document
+carries the change.
+
+- **`total` is not coming back.** It cost a second `COUNT` on every request and
+  is taken at a different instant from the rows, so `offset + data.length <
+  total` claims there is more when a row was deleted between the two reads and
+  the reverse when one was inserted. `has_more` comes off the probe row
+  `ScopedRepository.findPage` takes and discards, so it is a fact about *this*
+  page. That is also the whole reason `findMany` now throws rather than
+  truncating silently.
+- **`count` was `data.length` restated**, and it invited the `count === limit`
+  last-page test `has_more` exists to replace.
+- **`next_offset` is `null` — never absent, never `0` — on the last page**, so
+  the client branches on one thing. `organizations` and `members` had no
+  `has_more` at all, which was the worst of the three.
+
+### FOR THE FRONTEND — resource ceilings now answer `limit_exceeded`
+
+A ceiling used to be `conflict`, indistinguishable from a duplicate slug or a
+unique-constraint violation, and only two of the four attached details. All four
+now raise `limit_exceeded` (still HTTP 409) with
+`details: { limit, current, resource }`:
+
+| ceiling | `details.resource` |
+| --- | --- |
+| organizations per user (`POST /organizations`) | `organizations` |
+| projects per organization | `projects` |
+| API keys per project | `api_keys` |
+| endpoints per project | `endpoints` |
+
+**Genuine uniqueness conflicts stay `conflict`** and carry `{ field, value }`
+instead — a taken organization or project slug, a deleted endpoint, a lost
+rotation race. Match on `error.code`; never on the message.
+`projects.http.spec.ts` has the two side by side on the same route, same status,
+told apart only by the code.
+
+### The audit module
+
+`GET /v1/organizations/:orgId/audit-logs` and
+`GET /v1/organizations/:orgId/audit-logs/:auditLogId`. **Read-only, and that is
+enforced rather than asserted.**
+
+- **Permission is `audit.read` (owner/admin).** Deliberately not `members.read`,
+  which viewer and billing also hold: these rows carry other members' actions,
+  IP addresses and user agents.
+- **Filters:** `user_id`, `action`, `resource_type`, `resource_id`,
+  `created_after`, `created_before`, plus `limit`/`offset`. Index support is
+  documented per filter on `ListAuditLogsQueryDto`: the date range and `action`
+  are covered by the two indexes on the table; **`user_id`, `resource_type` and
+  `resource_id` are SCANS** within the organization and date window. Both routes
+  are `@Throttle`d for that reason. An inverted date range is a 400, not an
+  empty page — "nothing happened" is the one answer an audit log must never give
+  by accident.
+- **No metadata filter, on purpose.** `AuditService` redacts by key name at write
+  time; a predicate over stored metadata would let a caller test candidate values
+  against rows whose value reads `[redacted]` and recover by search what the
+  redaction removed. Nothing on the read path re-derives or re-fetches a redacted
+  value either.
+- **Nothing here can create, alter or remove a row.** Two GET handlers and no
+  other verb; `audit.no-mutations.spec.ts` asserts the decorator metadata, the
+  service's prototype surface and the absence of any mutating repository call in
+  the source, and the HTTP suite proves POST/PUT/PATCH/DELETE are not routed even
+  for an owner. **A correction is a new row.**
+
+### Left for someone else
+
+- **`next_offset` is still `@ApiPropertyOptional` on five modules** —
+  `webhook-subscriptions`, `retry-policies`, `rate-limits`, `events`,
+  `deliveries`. That generates a client field which may be *absent* as well as
+  null: two things to branch on where the contract has one. Fixed on the six
+  modules in scope here; the other five belong to other authors. The table in
+  `src/audit/list-envelope.contract.spec.ts` (`REQUIRED_NEXT_OFFSET`) lists which
+  modules are checked — add each as it is fixed, and do not weaken the assertion.
+- **`audit_logs` has no index for `user_id`, `resource_type` or `resource_id`.**
+  The route documents them as scans rather than smuggling a `schema.prisma`
+  change into this change. If the operator UI leans on "everything that happened
+  to this endpoint", `(organization_id, resource_type, resource_id, created_at
+  DESC)` is the index to add.
+- **The audit list orders by `created_at DESC` only.** Rows written in the same
+  millisecond have no defined order between them, so a row can move across an
+  offset boundary — the same caveat every offset-paged list in this API carries.
+- **No boolean query parameter exists on the audit routes**, so `BooleanQuery()`
+  is not used there. Every filter is a string, an id or a timestamp; inventing a
+  boolean to exercise the idiom would have been a worse API.
+
+### Verified
+
+`lint`, `build` and `test` all pass over the whole tree — **1239 tests, 54
+suites**, of which 99 in 4 new suites here:
+
+- `audit/audit-logs.service.spec.ts` — cross-tenant isolation on the unfiltered
+  read, on every filtered read and by id (with the same message an absent id
+  gets); each filter; the date range asserted on the **emitted WHERE** rather
+  than only on returned rows, because `FakeTenantPrisma` compares range operands
+  as strings and a row-count assertion could pass over a predicate PostgreSQL
+  reads differently; the envelope at the page boundary and on the last page;
+  metadata served verbatim with its redaction intact and copied rather than
+  aliased; and no mutating operation issued on any code path.
+- `audit/audit.http.spec.ts` — real Nest, real guards, real pipe and filter:
+  401/403/404 wiring, owner and admin in, **viewer, developer and billing out**,
+  the canonical envelope, and POST/PUT/PATCH/DELETE unrouted for an owner.
+- `audit/audit.no-mutations.spec.ts` — the append-only property read off the
+  decorator metadata and the source, not off a docblock.
+- `audit/list-envelope.contract.spec.ts` — table-driven over **all ten** list
+  DTOs, asserting the `@nestjs/swagger` metadata (which is what the dashboard
+  client is generated from, not the TypeScript type), plus a sweep of the whole
+  source tree so a module landing later cannot introduce a fourth envelope
+  unnoticed. It lives in `src/audit` because this change is what standardised the
+  envelope; move it if a better home appears, but do not delete it.
+
+## Events and deliveries, including replay (2026-09-07) — `src/events`, `src/deliveries`
+
+The two modules that answer the question the product exists for. ARCHITECTURE.md
+34 and CLAUDE.md are blunt about it: *the reason people pay for a webhook
+platform is not the retry loop, it is answering "what happened to this event?"
+at 2am — if a human needs psql to answer that, the product is not finished.*
+Every decision below was measured against that sentence.
+
+### FOR WHOEVER OWNS `app.module.ts` — the two lines
+
+```ts
+import { DeliveriesModule } from './deliveries/deliveries.module';
+import { EventsModule } from './events/events.module';
+```
+
+and in `imports`, after `EndpointsModule` (order only matters for readability):
+
+```ts
+    DeliveriesModule,
+    EventsModule,
+```
+
+`EventsModule` imports `DeliveriesModule`, and `DeliveriesModule` imports
+`OrganizationsModule` for `TenantTransactionRunner`. Nothing else is needed;
+neither module has config of its own.
+
+### Routes
+
+```
+GET    /v1/projects/:projectId/events                       events.read
+GET    /v1/projects/:projectId/events/:eventId              events.read
+GET    /v1/projects/:projectId/events/:eventId/deliveries   events.read + deliveries.read
+POST   /v1/projects/:projectId/events/:eventId/replay       events.replay + deliveries.replay
+GET    /v1/projects/:projectId/deliveries                   deliveries.read
+GET    /v1/projects/:projectId/deliveries/:deliveryId       deliveries.read
+GET    /v1/projects/:projectId/deliveries/:id/attempts      deliveries.read
+POST   /v1/projects/:projectId/deliveries/:id/replay        deliveries.replay
+```
+
+Every route is `@Authorized(...)` + `@Tenant()`, every read goes through
+`TenantScopeFactory`/`ScopedRepository`, every list returns
+`{ data, has_more, next_offset }` from `findPage()`, and both replay routes carry
+a `@Throttle` (events 10/5min, deliveries 30/5min — the event route is tighter
+because one request there can create up to `MAX_REPLAY_FAN_OUT` real HTTP calls
+rather than one). `PrismaService` is not imported anywhere in either module.
+
+### Replay — the invariant, and the index that carries half of it
+
+`DeliveryReplayService` is the ONE implementation, shared by both routes. A
+replay is an INSERT and only an INSERT: `replay_of_delivery_id` names the row
+being replayed, `replayed_by` names the actor, `attempt_count` restarts at 0 with
+the ORIGINAL's `max_attempts`, and `status = 'pending'` with
+`next_attempt_at = now()` — which is exactly what the fan-out router writes and
+what `queue/postgres.go`'s ready predicate claims, so **the insert is the
+enqueue**. No UPDATE and no DELETE is issued against `deliveries` or
+`delivery_attempts` on any path.
+
+Setting `replay_of_delivery_id` is load-bearing, not decoration:
+`deliveries_event_endpoint_original_key` is partial (`WHERE
+replay_of_delivery_id IS NULL`) precisely so replays are exempt, so an insert
+that forgot it would collide with the ORIGINAL row — and the natural "fix" for
+that collision is an upsert, i.e. the history-destroying write section 34
+forbids. Both shapes are demonstrated failing in
+`deliveries.concurrency.spec.ts`.
+
+Four more decisions worth arguing with:
+
+- **Replay-to-all reads the existing delivery rows, never a fresh subscription
+  match.** Subscriptions are mutable; re-matching a three-week-old event against
+  today's subscriptions delivers it to endpoints that were never targeted and
+  skips ones that were. Selection is `WHERE event_id = ? AND
+  replay_of_delivery_id IS NULL`, which also makes replaying twice re-send to the
+  same set rather than compounding over the rows the first call created.
+- **Replaying to an endpoint the event never reached is REFUSED** (409), not
+  silently created: there is no attempt budget to inherit and no subscription
+  that matched. That is a new delivery, not a replay. A cross-tenant
+  `endpoint_id` in the body gets the shared 404 instead, checked first, so the
+  409 can never be used as an oracle over another customer's endpoint ids.
+- **A deleted, disabled or paused endpoint is refused with its current status in
+  `details`.** The worker would abandon such a delivery with `endpoint_deleted` /
+  `endpoint_disabled`, so accepting it would turn a 201 into a second failure.
+  All-or-nothing across a fan-out: one dead endpoint refuses the whole request.
+- **`subscription_id` is carried over only if that subscription still exists.**
+  `webhook_subscriptions` rows are hard-deletable while the ledger is not, and
+  `ScopedRepository` proves every declared FK before writing — blindly copying
+  the id would fail a months-old replay with a 404 about a resource the operator
+  never mentioned. `replay_of_delivery_id` is the provenance that cannot vanish.
+
+`MAX_REPLAY_FAN_OUT = 50` bounds one request, for egress and because each insert
+is five statements (four FK proofs) inside a SERIALIZABLE transaction. Over the
+cap is `limit_exceeded` with `{ limit, current, resource }`, and `current` is a
+real COUNT so an operator can plan the split.
+
+### `payload_raw` vs `payload` is on the wire, not in a comment
+
+`GET /events/:id` returns `payload.body` — the AUTHORITATIVE raw bytes, decoded —
+plus `payload.normalised_json`, the jsonb copy, plus a `notice` saying in a
+sentence that the second is not what was delivered. Presenting jsonb as "the
+payload" would send someone debugging a signature failure into the wrong system.
+
+- UTF-8 when the buffer round-trips, base64 otherwise — checked by re-encoding,
+  because `toString('utf8')` silently produces U+FFFD for a binary body, which
+  looks like data and hashes to nothing.
+- An offloaded payload (`payload_raw IS NULL`, `payload_location` set) returns
+  `source: 'object_storage'`, `body: null` and the location, **not** an empty
+  body that reads as "this event had no payload". The control plane has no
+  object-storage client and no `S3_*` config exists yet; if one is added, this is
+  the single place to fetch through.
+- Listings never inline a payload. `payload_size` and `payload_inline` are there
+  instead.
+
+### Index support, stated per filter
+
+Every filter is either index-supported or documented as a scan, in the DTO
+description that ends up in the OpenAPI doc:
+
+| filter | index |
+|---|---|
+| events: `event_type`, `created_after/before` | `events_project_id_event_type_created_at_idx`, `events_project_id_created_at_idx` |
+| events: `status` | **scan** — four values, `processed` for nearly every row |
+| events: `idempotency_key` | **scan** — `ILIKE '%x%'` cannot use a b-tree; minimum 3 chars |
+| deliveries: `status`, `failing_now`, dates | `deliveries_project_id_status_created_at_idx` |
+| deliveries: `endpoint_id` | `deliveries_endpoint_id_created_at_idx` |
+| deliveries: `event_id` | `deliveries_event_id_idx` |
+| deliveries: `event_type` | **scan** — a join to `events` on a column deliveries does not carry |
+
+`failing_now` is `status IN (retrying, failed, exhausted)`; passing it together
+with `status` is a 400 rather than a silently resolved contradiction. Date ranges
+are `[after, before)` so adjacent windows tile without a boundary row appearing
+twice.
+
+### Credential redaction on two read paths
+
+`deliveries.read` and `events.read` are viewer permissions;
+`endpoint-secrets.read` and `api-keys.read` are not. So:
+
+- `delivery_attempts.request_headers` — an endpoint's `custom_headers` are in
+  there, which is where a customer puts their consumer's bearer token. Values for
+  `authorization`, `proxy-authorization`, `cookie`, `x-api-key`, `api-key`,
+  `x-auth-token` become `[redacted]`; the KEY stays, so "did we send it?" is
+  still answerable. The signature header is deliberately NOT redacted — it is an
+  HMAC over the payload, not the key, and it is what a consumer compares against.
+- `events.headers` — the ingest call's own `Authorization` carries the project's
+  live API key. Same list, same treatment.
+
+### FOR THE DATA-PLANE AGENT — two things to know
+
+1. **Replays arrive as ordinary `pending` rows** with `next_attempt_at = now()`,
+   `attempt_count = 0`, `locked_by/locked_until` NULL, and the ORIGINAL's
+   `max_attempts` and `ordering_key`. Nothing special is needed to pick them up.
+   `replay_of_delivery_id` is metadata for the operator surface; the worker can
+   ignore it.
+2. **Nothing in the control plane writes delivery state.** There is no cancel, no
+   "retry now" and no status write in either module, deliberately: a
+   control-plane UPDATE racing a worker's lease is a corruption this API is not
+   going to introduce.
+
+### Verified
+
+`pnpm --filter @webhook/control-api lint`, `build` and `test` all pass with
+everything in the tree — **1321 tests, 57 suites**, of which 130 in 5 new suites
+here:
+
+- `events/event-payload.spec.ts` — the raw/jsonb distinction at the level where
+  it is decided, including a round-trip of every byte value 0–255 through one of
+  the two encodings.
+- `events/events.service.spec.ts` — filters, the case-insensitive idempotency
+  search still fenced by the tenant, page-boundary exactness, the three payload
+  situations, and the replay rules: **historical endpoints not a re-match**
+  (subscriptions are mutated between the fan-out and the replay, in both
+  directions), originals-only so replaying twice does not compound, the fan-out
+  cap with a real count, and all-or-nothing when one endpoint is deleted.
+- `deliveries/deliveries.service.spec.ts` — isolation across four shapes
+  (another org, another project, the deliberately corrupt fixture row, absent)
+  on all three id-addressed routes with ONE message, attempt ordering across the
+  9→10 boundary, inline truncation plus paged exhaustion, header redaction, and
+  replay leaving the original **byte-identical**.
+- `deliveries/deliveries.concurrency.spec.ts` — the properties
+  (`assertOriginalsIntact`, `assertReplaysAreMarked`, `assertOneOriginalPerPair`)
+  under `Promise.allSettled`, **plus both pre-fix shapes run against the same
+  checks**: an insert with no `replay_of_delivery_id` is rejected by the modelled
+  partial unique index, and the read-modify-write "replay" that reuses the
+  original row makes `assertOriginalsIntact` throw. If either stops failing, the
+  suites above are vacuous.
+- `deliveries/ledger.http.spec.ts` — both controllers on a real port with real
+  guards: `assertRoutesAreGuarded`, the viewer/developer/billing split,
+  `?failing_now=false` meaning FALSE (`BooleanQuery`, not `@Type(() => Boolean)`),
+  the three-key envelope on all four list routes, `@Throttle` present on both
+  replays and absent on every read, and a real 429 with `Retry-After`.
+
+### What a reviewer should check next
+
+- `FakeTenantPrisma` compares with `String(a) < String(b)`, which is wrong for
+  `DateTime` (April before January) and for `Int` (`'10' < '9'`), and cannot do
+  `contains` or the `deliveries -> events` join at all. Rather than weakening the
+  production queries to fit it, `deliveries/testing/rich-fake.ts` replaces the
+  three delegates this module reads with type-aware ones over the SAME storage,
+  and adds the partial unique index. It is a fixture, not a Prisma emulator —
+  the `ILIKE`/`gte` semantics it models are argued against the documentation,
+  not executed against PostgreSQL, because no database is reachable here.
+- No integration test runs against real PostgreSQL, so "SERIALIZABLE aborts one
+  of two colliding replays" is argued, not executed;
+  `SerializableTransactionRunner` models it as a serial schedule and never
+  aborts, so the runner's retry loop is unexercised here too.
+- `MAX_REPLAY_FAN_OUT` (50) and `MAX_INLINE_ATTEMPTS` (100) are compile-time
+  constants, not `ConfigService`-driven. Worth aligning with
+  `MAX_PROJECTS_PER_ORGANIZATION` if an operator ever needs to raise one without
+  a deploy.
+- `ScopedRepository.notFound()` still says `${resourceName} not found.`, so this
+  is the **fifth** module to hand-roll `crossTenantNotFound()` rather than use
+  `requireById`. Changing `notFound()` to the constant would let the next one
+  stop.
+- The `origin` filter (`original` / `replay`) uses `replay_of_delivery_id IS
+  NULL` / `IS NOT NULL`, which has no index. It is a refinement of an already
+  narrowed set today; if a "replays only" dashboard becomes a real screen it
+  wants a partial index.

@@ -62,7 +62,10 @@ export class EndpointsController {
   @Authorized('endpoints.read')
   @ApiOperation({
     summary: 'List the endpoints in a project',
-    description: 'Soft-deleted endpoints are hidden unless asked for; they are never erased.',
+    description:
+      'Soft-deleted endpoints are hidden unless asked for; they are never erased. Paged with ' +
+      'the canonical envelope `{ data, has_more, next_offset }`; `next_offset` is null on the ' +
+      'last page.',
   })
   @ApiOkResponse({ type: EndpointListDto })
   list(
@@ -91,6 +94,13 @@ export class EndpointsController {
       '`endpoint-secrets.write` (owner or admin).',
   })
   @ApiOkResponse({ type: CreatedEndpointDto })
+  @ApiConflictResponse({
+    description:
+      '`limit_exceeded` - the project is at its endpoint ceiling; `details` carries ' +
+      '`{ limit, current, resource }`. Every other 409 on this controller is a plain ' +
+      '`conflict` (the endpoint is deleted, or has no active signing secret). Match on ' +
+      '`error.code`, never on the message.',
+  })
   create(
     @Tenant() context: RequestContext,
     @Body() dto: CreateEndpointDto,

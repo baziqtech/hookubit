@@ -37,18 +37,31 @@ export class MemberDto {
   created_at!: string;
 }
 
+/**
+ * The canonical list envelope - `{ data, has_more, next_offset }` - and nothing
+ * else. See `OrganizationListDto` for why `total`, `limit` and `offset` are
+ * gone: a `total` is a second COUNT per request, taken at a different instant
+ * from the rows, that a client paging on `has_more` never needed.
+ */
 export class MemberListDto {
   @ApiProperty({ type: [MemberDto] })
   data!: MemberDto[];
 
-  @ApiProperty()
-  total!: number;
+  @ApiProperty({
+    description: 'True when more members exist in this organization than the page carries.',
+    example: false,
+  })
+  has_more!: boolean;
 
-  @ApiProperty()
-  limit!: number;
-
-  @ApiProperty()
-  offset!: number;
+  @ApiProperty({
+    type: Number,
+    nullable: true,
+    description:
+      'Pass back as `offset` to fetch the next page. NULL - never absent, never 0 - on the ' +
+      'last page.',
+    example: null,
+  })
+  next_offset!: number | null;
 }
 
 export function toMemberDto(

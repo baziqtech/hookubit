@@ -137,19 +137,19 @@ export class MembersService {
     // `findPage`, not `findMany`: an omitted `limit` used to mean an implicit
     // 50-row truncation with nothing on the wire to say so, and `findMany` now
     // refuses that read rather than serving an organization with 60 members a
-    // silently partial list. The page carries `hasMore`; `total` is what this
-    // DTO puts on the wire, so the count is still taken.
-    const [members, total] = await Promise.all([
-      scope.members.findPage({ orderBy: { id: 'asc' }, take: page.limit, skip: page.offset }),
-      scope.members.count(),
-    ]);
+    // silently partial list. The page carries `hasMore`, which is what goes on
+    // the wire; the separate COUNT that fed `total` is gone with it.
+    const members = await scope.members.findPage({
+      orderBy: { id: 'asc' },
+      take: page.limit,
+      skip: page.offset,
+    });
     const identities = await this.directory.byIds(members.rows.map((member) => member.userId));
 
     return {
       data: members.rows.map((member) => toMemberDto(member, identities.get(member.userId))),
-      total,
-      limit: page.limit ?? members.rows.length,
-      offset: page.offset ?? 0,
+      has_more: members.hasMore,
+      next_offset: members.nextSkip,
     };
   }
 

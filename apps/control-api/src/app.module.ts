@@ -2,13 +2,16 @@ import { Module } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
 import { LoggerModule } from 'nestjs-pino';
 import { AuthModule } from './auth/auth.module';
+import { AuditModule } from './audit/audit.module';
 import { AuthzModule } from './authz/authz.module';
 import { ApiKeysModule } from './api-keys/api-keys.module';
 import { CommonModule } from './common/common.module';
 import { resolveRequestId } from './common/request-id';
 import { validateEnv } from './config/env.schema';
 import { EndpointSecretsModule } from './endpoint-secrets/endpoint-secrets.module';
+import { DeliveriesModule } from './deliveries/deliveries.module';
 import { EndpointsModule } from './endpoints/endpoints.module';
+import { EventsModule } from './events/events.module';
 import { HealthModule } from './health/health.module';
 import { PrismaModule } from './infrastructure/prisma/prisma.module';
 import { MembersModule } from './members/members.module';
@@ -74,8 +77,14 @@ import { WebhookSubscriptionsModule } from './webhook-subscriptions/webhook-subs
     WebhookSubscriptionsModule,
     RetryPoliciesModule,
     RateLimitsModule,
-    // Still to come: events, deliveries, audit, admin. The first two depend on
-    // the data plane's router and worker, which are being built now.
+    // The operator surface. ARCHITECTURE.md is blunt that this is what people
+    // pay for: answering "what happened to this event?" without reaching for
+    // psql. It reads the rows the Go router and worker write.
+    EventsModule,
+    DeliveriesModule,
+    AuditModule,
+    // Still to come: admin (platform staff, above organization owner - it needs
+    // an authorization concept the tenant matrix deliberately does not have).
   ],
 })
 export class AppModule {}

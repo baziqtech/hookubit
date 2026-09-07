@@ -72,7 +72,11 @@ export class OrganizationsController {
     summary: 'List the organizations the caller belongs to',
     description:
       'Scoped to the session user. Soft-deleted organizations are omitted, because every ' +
-      'route under them already answers 404.',
+      'route under them already answers 404. Paged with the canonical envelope ' +
+      '`{ data, has_more, next_offset }` - BREAKING: `total`, `limit` and `offset` were ' +
+      'removed. A `total` cost a second COUNT per request and, taken at a different instant ' +
+      'from the rows, could not be used to derive the last page reliably; `has_more` states ' +
+      'it. `next_offset` is null - never absent, never 0 - on the last page.',
   })
   @ApiOkResponse({ type: OrganizationListDto })
   async list(
@@ -99,7 +103,11 @@ export class OrganizationsController {
   })
   @ApiCreatedResponse({ type: OrganizationDto })
   @ApiConflictResponse({
-    description: 'The requested slug is already taken, or the per-account limit is reached.',
+    description:
+      'Two different 409s, told apart by `error.code`, never by the message. ' +
+      '`limit_exceeded` - the per-account organization cap is reached; `details` carries ' +
+      '`{ limit, current, resource }`. `conflict` - the explicitly requested slug is already ' +
+      'taken.',
   })
   async create(
     @Principal() principal: UserPrincipal,

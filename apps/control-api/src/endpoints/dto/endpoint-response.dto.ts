@@ -59,11 +59,25 @@ export class CreatedEndpointDto extends EndpointDto {
   secret_version!: number;
 }
 
+/**
+ * The canonical list envelope - `{ data, has_more, next_offset }` - and the
+ * only one this API returns.
+ *
+ * `next_offset` is a REQUIRED, nullable number. It was declared with
+ * `@ApiPropertyOptional`, which generated a client field that could be absent;
+ * it never is, and null is the entire signal for "this was the last page".
+ */
 export class EndpointListDto {
   @ApiProperty({ type: [EndpointDto] }) data!: EndpointDto[];
-  @ApiProperty({ description: 'More endpoints match than this page carries.' })
+  @ApiProperty({ description: 'More endpoints match than this page carries.', example: false })
   has_more!: boolean;
-  @ApiPropertyOptional({ nullable: true, description: '`offset` for the next page, or null.' })
+  @ApiProperty({
+    type: Number,
+    nullable: true,
+    description:
+      'Pass back as `offset` for the next page. NULL - never absent, never 0 - on the last one.',
+    example: null,
+  })
   next_offset!: number | null;
 }
 

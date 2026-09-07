@@ -36,18 +36,42 @@ export class OrganizationDto {
   updated_at!: string;
 }
 
+/**
+ * The one list envelope this API has: `{ data, has_more, next_offset }`.
+ *
+ * This route used to answer `{ data, total, limit, offset }` and was the worst
+ * of the three shapes the backend shipped, because it had no `has_more` at all.
+ * A client cannot reliably derive one from `total`: the count and the page are
+ * two reads, so a membership created between them makes `offset + data.length <
+ * total` say "more" when there is none, or the reverse. `has_more` comes from
+ * the same bounded read as the rows - the probe row `findPage` takes and
+ * discards - so it is a fact about THIS page rather than an inference across
+ * two.
+ *
+ * `total` is gone rather than renamed. It cost a second COUNT on every request
+ * and bought a client paging on `has_more` nothing.
+ */
 export class OrganizationListDto {
   @ApiProperty({ type: [OrganizationDto] })
   data!: OrganizationDto[];
 
-  @ApiProperty({ description: 'Total organizations the caller belongs to.' })
-  total!: number;
+  @ApiProperty({
+    description:
+      'True when more organizations match than this page carries. Read this, never a row ' +
+      'count compared against `limit`, to decide whether you have seen them all.',
+    example: false,
+  })
+  has_more!: boolean;
 
-  @ApiProperty()
-  limit!: number;
-
-  @ApiProperty()
-  offset!: number;
+  @ApiProperty({
+    type: Number,
+    nullable: true,
+    description:
+      'Pass back as `offset` to fetch the next page. NULL - never absent, never 0 - when ' +
+      'this page was the last one, so a client branches on one thing.',
+    example: null,
+  })
+  next_offset!: number | null;
 }
 
 export function toOrganizationDto(

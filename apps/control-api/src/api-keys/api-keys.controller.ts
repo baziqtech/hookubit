@@ -80,9 +80,10 @@ export class ApiKeysController {
     summary: 'List the API keys in a project',
     description:
       'Newest first. Revoked and expired keys are included and labelled by `status`; the ' +
-      'secret is never returned here, only `key_prefix`. Paged: read `has_more` before ' +
-      'concluding you have seen every credential in the project, and pass `next_offset` back ' +
-      'as `offset` to continue.',
+      'secret is never returned here, only `key_prefix`. Paged with the canonical envelope ' +
+      '`{ data, has_more, next_offset }` - BREAKING: `count` was removed. Read `has_more` ' +
+      'before concluding you have seen every credential in the project, and pass ' +
+      '`next_offset` back as `offset` to continue; it is null on the last page.',
   })
   @ApiOkResponse({ type: ApiKeyListDto })
   list(
@@ -107,8 +108,9 @@ export class ApiKeysController {
   @ApiCreatedResponse({ type: CreatedApiKeyDto })
   @ApiConflictResponse({
     description:
-      'The project is at its API-key ceiling (`details.limit` / `details.current`). Revoke a ' +
-      'key to free a slot.',
+      '`limit_exceeded` - the project is at its API-key ceiling; `details` carries ' +
+      '`{ limit, current, resource }`. Revoke a key to free a slot. Match on `error.code`, ' +
+      'never on the message.',
   })
   create(@Tenant() context: RequestContext, @Body() dto: CreateApiKeyDto): Promise<CreatedApiKeyDto> {
     return this.apiKeys.create(context, dto);

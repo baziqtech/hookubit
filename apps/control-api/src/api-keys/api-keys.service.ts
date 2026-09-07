@@ -81,7 +81,6 @@ export class ApiKeysService {
     const now = new Date();
     return {
       data: page.rows.map((key) => toApiKeyDto(key, now)),
-      count: page.rows.length,
       has_more: page.hasMore,
       next_offset: page.nextSkip,
     };
@@ -209,10 +208,12 @@ export class ApiKeysService {
     const existing = await this.scopes.for(context).apiKeys.count({ revokedAt: null });
     if (existing < ceiling) return;
 
+    // `limit_exceeded`, not `conflict`. The details were already here; the code
+    // was not, so a ceiling and a uniqueness collision arrived as the same 409.
     throw new AppError(
-      'conflict',
+      'limit_exceeded',
       `This project already holds ${existing} un-revoked API keys, which is its limit of ${ceiling}. Revoke a key you no longer need, or ask an operator to raise ${API_KEYS_PER_PROJECT.env}.`,
-      { limit: ceiling, current: existing },
+      { limit: ceiling, current: existing, resource: 'api_keys' },
     );
   }
 

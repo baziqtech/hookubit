@@ -58,7 +58,8 @@ describe('OrganizationsService', () => {
       const result = await service.list(principalFor(IDS.ownerA), {});
 
       expect(result.data.map((row) => row.id)).toEqual([IDS.orgA]);
-      expect(result.total).toBe(1);
+      expect(result.has_more).toBe(false);
+      expect(result.next_offset).toBeNull();
       // The point of the assertion: org B was sitting in the same table.
       expect(db.all('organization').map((row) => row.id)).toContain(IDS.orgB);
     });
@@ -71,7 +72,8 @@ describe('OrganizationsService', () => {
     it('returns nothing at all for a user with no memberships', async () => {
       const result = await service.list(principalFor(IDS.outsider), {});
       expect(result.data).toEqual([]);
-      expect(result.total).toBe(0);
+      expect(result.has_more).toBe(false);
+      expect(result.next_offset).toBeNull();
     });
 
     it('omits soft-deleted organizations even though the membership row survives', async () => {
@@ -231,9 +233,19 @@ describe('OrganizationsService', () => {
         await service.create(principalFor(IDS.outsider), { name: `Org ${i}` });
       }
       // outsider owns none from the seed, so the cap is reached exactly here.
-      expect(await code(service.create(principalFor(IDS.outsider), { name: 'One too many' }))).toBe(
-        'conflict',
-      );
+      // `limit_exceeded`, not `conflict`: a taken slug on this same route raises
+      // a genuine `conflict`, and a client must be able to tell them apart on
+      // `error.code` rather than on the wording of a sentence.
+      const refused = await service
+        .create(principalFor(IDS.outsider), { name: 'One too many' })
+        .catch((err: AppError) => err);
+      expect(refused).toBeInstanceOf(AppError);
+      expect((refused as AppError).code).toBe('limit_exceeded');
+      expect((refused as AppError).details).toEqual({
+        limit: MAX_ORGANIZATIONS_PER_USER,
+        current: MAX_ORGANIZATIONS_PER_USER,
+        resource: 'organizations',
+      });
     });
 
     it('counts only organizations the caller OWNS, not ones they were invited to', async () => {

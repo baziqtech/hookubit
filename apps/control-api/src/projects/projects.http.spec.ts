@@ -388,7 +388,6 @@ describe('projects over HTTP', () => {
 
     expect(first.status).toBe(200);
     expect(first.body.data).toHaveLength(1);
-    expect(first.body.count).toBe(1);
     expect(first.body.has_more).toBe(true);
     expect(first.body.next_offset).toBe(1);
 
@@ -405,7 +404,7 @@ describe('projects over HTTP', () => {
   it('is honest at exactly the page boundary: a full page that is also the last one', async () => {
     // THE case a bare array could not express. Three live projects, limit=3: the
     // page is completely full, and there is nothing after it. A client that
-    // inferred "count === limit means there is more" would loop forever; one
+    // inferred "data.length === limit means there is more" would loop forever; one
     // that inferred the opposite from a short page would be right by luck.
     const exact = await h.call<ProjectListDto>('GET', `${projectsOf(IDS.orgA)}?limit=3`, {
       as: IDS.ownerA,
@@ -413,7 +412,6 @@ describe('projects over HTTP', () => {
 
     expect(exact.status).toBe(200);
     expect(exact.body.data).toHaveLength(3);
-    expect(exact.body.count).toBe(3);
     expect(exact.body.has_more).toBe(false);
     expect(exact.body.next_offset).toBeNull();
 
@@ -453,11 +451,61 @@ describe('projects over HTTP', () => {
         });
 
         expect(res.status).toBe(409);
-        expect(res.body.error?.code).toBe('conflict');
-        expect(res.body.error?.details).toMatchObject({ limit: 3, current: 3 });
+        expect(res.body.error?.code).toBe('limit_exceeded');
+        expect(res.body.error?.details).toEqual({ limit: 3, current: 3, resource: 'projects' });
         expect(capped.db.all('project').some((row) => row.slug === 'one-too-many')).toBe(false);
         // Refused before the write, so nothing was audited either.
         expect(capped.db.all('auditLog')).toHaveLength(0);
+      } finally {
+        await capped.close();
+      }
+    });
+
+    it('tells a ceiling and a duplicate apart by CODE, on the same route, same status', async () => {
+      // The pair, side by side, because this is the distinction the dashboard
+      // was previously reduced to making by matching on message text. Both are
+      // 409; only `error.code` separates them, and only `limit_exceeded` carries
+      // structured `details`.
+      // Org A is seeded with three live projects; a ceiling of five leaves room
+      // for the collision to be a collision rather than a ceiling.
+      const capped = await startProjectsApp({ maxProjects: 5 });
+      try {
+        const first = await capped.call('POST', projectsOf(IDS.orgA), {
+          as: IDS.ownerA,
+          body: { name: 'Clash', slug: 'clash' },
+        });
+        expect(first.status).toBe(201);
+
+        const duplicate = await capped.call('POST', projectsOf(IDS.orgA), {
+          as: IDS.ownerA,
+          body: { name: 'Clash again', slug: 'clash' },
+        });
+        expect(duplicate.status).toBe(409);
+        expect(duplicate.body.error?.code).toBe('conflict');
+
+        // Now fill the last slot, so the next create is a CEILING rather than a
+        // collision - a different answer to the same verb on the same route.
+        const filled = await capped.call('POST', projectsOf(IDS.orgA), {
+          as: IDS.ownerA,
+          body: { name: 'Fifth', slug: 'fifth' },
+        });
+        expect(filled.status).toBe(201);
+
+        const ceiling = await capped.call('POST', projectsOf(IDS.orgA), {
+          as: IDS.ownerA,
+          body: { name: 'Sixth', slug: 'sixth' },
+        });
+        expect(ceiling.status).toBe(409);
+        expect(ceiling.body.error?.code).toBe('limit_exceeded');
+        expect(ceiling.body.error?.details).toEqual({
+          limit: 5,
+          current: 5,
+          resource: 'projects',
+        });
+        // The uniqueness conflict names the offending field instead. It carries
+        // no `limit`/`current`/`resource`: a client keying off `details.limit`
+        // must never find one where there is no ceiling.
+        expect(duplicate.body.error?.details).toEqual({ field: 'slug', value: 'clash' });
       } finally {
         await capped.close();
       }

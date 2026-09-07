@@ -398,10 +398,15 @@ export class EndpointsService {
   private async requireHeadroom(scope: TenantScope): Promise<void> {
     const live = await scope.endpoints.count({ status: { not: 'deleted' } });
     if (live < MAX_ENDPOINTS_PER_PROJECT) return;
+    // `limit_exceeded`, not `conflict`, and with structured details. `conflict`
+    // on this module already means "this endpoint is deleted"; a client that had
+    // to tell a ceiling from that by reading the sentence breaks the day someone
+    // rewords one. The message is for a human, the details are the contract.
     throw new AppError(
-      'conflict',
+      'limit_exceeded',
       `This project already has ${MAX_ENDPOINTS_PER_PROJECT} endpoints, which is the maximum. ` +
         'Delete one you no longer deliver to, or talk to us about a higher limit.',
+      { limit: MAX_ENDPOINTS_PER_PROJECT, current: live, resource: 'endpoints' },
     );
   }
 

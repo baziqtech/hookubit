@@ -79,7 +79,6 @@ export class ProjectsService {
     });
     return {
       data: page.rows.map(toProjectDto),
-      count: page.rows.length,
       has_more: page.hasMore,
       next_offset: page.nextSkip,
     };
@@ -214,10 +213,13 @@ export class ProjectsService {
       .projects.count({ status: { not: ProjectStatus.deleted } });
     if (existing < ceiling) return;
 
+    // `limit_exceeded`, not `conflict`: a duplicate slug on this same route is a
+    // genuine `conflict`, and until this code existed the two were one 409 that
+    // a client could only tell apart by matching on the message text.
     throw new AppError(
-      'conflict',
+      'limit_exceeded',
       `This organization already has ${existing} projects, which is its limit of ${ceiling}. Delete a project you no longer need, or ask an operator to raise ${PROJECTS_PER_ORGANIZATION.env}.`,
-      { limit: ceiling, current: existing },
+      { limit: ceiling, current: existing, resource: 'projects' },
     );
   }
 

@@ -66,7 +66,13 @@ export class MembersController {
 
   @Get()
   @Authorized('members.read')
-  @ApiOperation({ summary: 'List the members of an organization' })
+  @ApiOperation({
+    summary: 'List the members of an organization',
+    description:
+      'Paged with the canonical envelope `{ data, has_more, next_offset }` - BREAKING: ' +
+      '`total`, `limit` and `offset` were removed. Read `has_more`; `next_offset` is null - ' +
+      'never absent, never 0 - on the last page.',
+  })
   @ApiParam({ name: 'orgId', example: 'org_01J...' })
   @ApiOkResponse({ type: MemberListDto })
   @ApiNotFoundResponse({ description: 'Absent, or the caller is not a member. Same answer.' })

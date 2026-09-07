@@ -87,20 +87,19 @@ export class OrganizationsService {
     const scope = this.users.for(principal);
     // A `Page`, not a bare array: `listMemberships` is bounded whether or not
     // the caller named a limit, and the page carries `hasMore` so a truncated
-    // read is a fact rather than a silence. `total` is what this DTO puts on
-    // the wire, so the count is still taken.
-    const [memberships, total] = await Promise.all([
-      scope.listMemberships({ take: page.limit, skip: page.offset }),
-      scope.countMemberships(),
-    ]);
+    // read is a fact rather than a silence.
+    //
+    // The second read - `countMemberships` - is gone with `total`. It was a
+    // COUNT on every request, taken at a different instant from the rows, whose
+    // only use was letting a client infer what `hasMore` already states exactly.
+    const memberships = await scope.listMemberships({ take: page.limit, skip: page.offset });
 
     return {
       data: memberships.rows.map((membership) =>
         toOrganizationDto(membership.organization, membership.role),
       ),
-      total,
-      limit: page.limit ?? memberships.rows.length,
-      offset: page.offset ?? 0,
+      has_more: memberships.hasMore,
+      next_offset: memberships.nextSkip,
     };
   }
 
@@ -131,9 +130,14 @@ export class OrganizationsService {
     // much worse trade.
     const owned = await scope.countOwnedOrganizations();
     if (owned >= MAX_ORGANIZATIONS_PER_USER) {
+      // `limit_exceeded`, not `conflict`. Two lines below, a taken slug raises a
+      // genuine `conflict`; before this code existed a client had to tell a
+      // ceiling from a collision by reading the sentence, which breaks the first
+      // time someone rewords it. The details are the contract.
       throw new AppError(
-        'conflict',
+        'limit_exceeded',
         `You already own ${MAX_ORGANIZATIONS_PER_USER} organizations, which is the limit. Delete one, or ask to have the limit raised.`,
+        { limit: MAX_ORGANIZATIONS_PER_USER, current: owned, resource: 'organizations' },
       );
     }
 

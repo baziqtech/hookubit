@@ -425,7 +425,6 @@ describe('api keys over HTTP', () => {
 
       expect(exact.status).toBe(200);
       expect(exact.body.data).toHaveLength(3);
-      expect(exact.body.count).toBe(3);
       expect(exact.body.has_more).toBe(false);
       expect(exact.body.next_offset).toBeNull();
 
@@ -472,8 +471,8 @@ describe('api keys over HTTP', () => {
         });
 
         expect(res.status).toBe(409);
-        expect(res.body.error?.code).toBe('conflict');
-        expect(res.body.error?.details).toMatchObject({ limit: 2, current: 2 });
+        expect(res.body.error?.code).toBe('limit_exceeded');
+        expect(res.body.error?.details).toEqual({ limit: 2, current: 2, resource: 'api_keys' });
         expect(capped.db.all('apiKey')).toHaveLength(before);
         expect(capped.db.all('auditLog')).toHaveLength(0);
       } finally {
