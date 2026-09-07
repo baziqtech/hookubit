@@ -19,6 +19,22 @@ export const ERROR_CODES = {
   email_not_verified: HttpStatus.FORBIDDEN,
   not_found: HttpStatus.NOT_FOUND,
   conflict: HttpStatus.CONFLICT,
+  /**
+   * A per-tenant RESOURCE CEILING was reached (projects per organization, keys
+   * or endpoints or subscriptions per project, ...). Still 409, because the
+   * request was well-formed and the caller may retry after freeing a slot -
+   * but a distinct CODE, because `conflict` already means "a duplicate slug",
+   * "this endpoint is deleted" and "another writer got there first", and a
+   * client that must tell those apart was reduced to matching on the
+   * human-readable message. That breaks silently the first time someone
+   * rewords a sentence.
+   *
+   * Every `limit_exceeded` MUST carry structured details:
+   * `{ limit, current, resource }` - the ceiling, what the tenant holds now,
+   * and which resource it is. The message is for a human; the details are the
+   * contract.
+   */
+  limit_exceeded: HttpStatus.CONFLICT,
   idempotency_key_reused: HttpStatus.CONFLICT,
   payload_too_large: HttpStatus.PAYLOAD_TOO_LARGE,
   rate_limited: HttpStatus.TOO_MANY_REQUESTS,

@@ -3,6 +3,7 @@ import { Badge } from '../components';
 import { useOrganizations } from '../features/organizations/api';
 import { useProjects } from '../features/projects/api';
 import { cn } from '../lib/cn';
+import type { Paged } from '../lib/pagination';
 import { Menu, MenuLabel } from './Menu';
 
 /** Shared row styling so both switchers and the user menu look like one system. */
@@ -14,7 +15,8 @@ function itemClass(active: boolean): string {
 }
 
 export function OrganizationSwitcher({ orgId }: { orgId: string }) {
-  const { data: organizations, isPending } = useOrganizations();
+  const { data: page, isPending } = useOrganizations();
+  const organizations = page?.rows;
   const current = organizations?.find((organization) => organization.id === orgId);
 
   return (
@@ -47,9 +49,15 @@ export function OrganizationSwitcher({ orgId }: { orgId: string }) {
               className={itemClass(organization.id === orgId)}
             >
               <span className="truncate">{organization.name}</span>
-              <Badge className="ml-auto capitalize">{organization.plan}</Badge>
+              <Badge
+                tone={organization.status === 'active' ? 'neutral' : 'danger'}
+                className="ml-auto capitalize"
+              >
+                {organization.status}
+              </Badge>
             </Link>
           ))}
+          <TruncationNote page={page} noun="organizations" />
         </>
       )}
     </Menu>
@@ -57,7 +65,8 @@ export function OrganizationSwitcher({ orgId }: { orgId: string }) {
 }
 
 export function ProjectSwitcher({ orgId, projectId }: { orgId: string; projectId?: string }) {
-  const { data: projects, isPending } = useProjects(orgId);
+  const { data: page, isPending } = useProjects(orgId);
+  const projects = page?.rows;
   const navigate = useNavigate();
   const current = projects?.find((project) => project.id === projectId);
 
@@ -70,9 +79,10 @@ export function ProjectSwitcher({ orgId, projectId }: { orgId: string; projectId
           <span className="truncate text-ink">
             {isPending ? 'Loading…' : (current?.name ?? 'Select project')}
           </span>
+          {/* `environment` is `test | live` — there is no "production". */}
           {current && (
-            <Badge tone={current.environment === 'production' ? 'ok' : 'neutral'}>
-              {current.environment === 'production' ? 'prod' : current.environment.slice(0, 4)}
+            <Badge tone={current.environment === 'live' ? 'ok' : 'neutral'}>
+              {current.environment}
             </Badge>
           )}
         </span>
@@ -99,15 +109,33 @@ export function ProjectSwitcher({ orgId, projectId }: { orgId: string; projectId
             >
               <span className="truncate">{project.name}</span>
               <Badge
-                tone={project.environment === 'production' ? 'ok' : 'neutral'}
+                tone={project.environment === 'live' ? 'ok' : 'neutral'}
                 className="ml-auto"
               >
                 {project.environment}
               </Badge>
             </button>
           ))}
+          <TruncationNote page={page} noun="projects" />
         </>
       )}
     </Menu>
+  );
+}
+
+/**
+ * A switcher shows one page, and the server may hold more.
+ *
+ * Silently listing the first page as if it were everything is the exact defect
+ * `has_more` exists to expose — someone would conclude a project had been
+ * deleted because it was not in the menu. So when there are more, say so and
+ * point at the full list.
+ */
+function TruncationNote({ page, noun }: { page?: Paged<unknown>; noun: string }) {
+  if (!page?.hasMore) return null;
+  return (
+    <p className="border-t border-line px-2 py-1.5 text-2xs text-ink-subtle">
+      Showing the first {page.rows.length} {noun}. More exist than fit in this menu.
+    </p>
   );
 }

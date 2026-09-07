@@ -1,7 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { api, queryString } from '../../lib/api';
 import { queryKeys } from '../../lib/query-keys';
-import type { Delivery, EventDetail, Page, WebhookEvent } from '../../types/api';
+import type { Delivery, EventDetail, CursorPage, WebhookEvent } from '../../types/api';
 
 export interface EventFilters {
   event_type?: string;
@@ -13,7 +13,7 @@ export function useEvents(projectId: string, filters: EventFilters) {
   return useQuery({
     queryKey: queryKeys.events(projectId, filters as Record<string, string>),
     queryFn: () =>
-      api.get<Page<WebhookEvent>>(`/v1/projects/${projectId}/events${queryString({ ...filters })}`),
+      api.get<CursorPage<WebhookEvent>>(`/v1/projects/${projectId}/events${queryString({ ...filters })}`),
     enabled: Boolean(projectId),
   });
 }

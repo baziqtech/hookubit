@@ -1,7 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { api, queryString } from '../../lib/api';
 import { queryKeys } from '../../lib/query-keys';
-import type { Delivery, DeliveryAttempt, DeliveryDetail, Page } from '../../types/api';
+import type { Delivery, DeliveryAttempt, DeliveryDetail, CursorPage } from '../../types/api';
 
 export interface DeliveryFilters {
   status?: string;
@@ -13,7 +13,7 @@ export function useDeliveries(projectId: string, filters: DeliveryFilters) {
   return useQuery({
     queryKey: queryKeys.deliveries(projectId, filters as Record<string, string>),
     queryFn: () =>
-      api.get<Page<Delivery>>(`/v1/projects/${projectId}/deliveries${queryString({ ...filters })}`),
+      api.get<CursorPage<Delivery>>(`/v1/projects/${projectId}/deliveries${queryString({ ...filters })}`),
     enabled: Boolean(projectId),
   });
 }

@@ -18,6 +18,13 @@ import type { ApiErrorCode } from '../types/api';
 export interface ApiError {
   code: ApiErrorCode | string;
   message: string;
+  /**
+   * Structured context the error envelope carries. This is where the throttle
+   * guard puts `retry_after_seconds` and where a resource ceiling puts
+   * `limit`/`current` — the two facts that let the UI tell "slow down" apart
+   * from "you have hit a limit". See `src/lib/api-errors.ts`.
+   */
+  details?: Record<string, unknown>;
   request_id?: string;
 }
 

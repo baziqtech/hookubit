@@ -16,6 +16,7 @@ import type {
   DeliveryAttempt,
   DeliveryStatus,
   Endpoint,
+  EndpointSecret,
   EventDetail,
   Member,
   Organization,
@@ -70,96 +71,135 @@ export const organizations: Organization[] = [
     id: 'org_01JQSHAQ',
     name: 'ShaQ Express',
     slug: 'shaq-express',
-    plan: 'growth',
+    status: 'active',
     role: 'owner',
     created_at: minutesAgo(60 * 24 * 120),
+    updated_at: minutesAgo(60 * 24 * 3),
   },
   {
     id: 'org_01JQKWIK',
     name: 'Kwik Logistics',
     slug: 'kwik-logistics',
-    plan: 'starter',
+    status: 'active',
     role: 'admin',
     created_at: minutesAgo(60 * 24 * 30),
+    updated_at: minutesAgo(60 * 24 * 30),
   },
 ];
 
+/**
+ * Identity is FLAT and nullable, matching `MemberDto`. `mem_05` deliberately has
+ * a null email: that is a membership whose user row is gone, which the API
+ * returns rather than hides so an operator can see the integrity problem.
+ *
+ * There are no "invited" rows, because an invitation creates no member row —
+ * the invitee redeems a token at POST /v1/invitations/accept.
+ */
 export const members: Record<string, Member[]> = {
   'org_01JQSHAQ': [
     {
       id: 'mem_01',
-      user: { id: user.id, email: user.email, name: user.name },
+      user_id: user.id,
+      email: user.email,
+      name: user.name,
       role: 'owner',
-      status: 'active',
-      joined_at: minutesAgo(60 * 24 * 120),
+      disabled: false,
+      created_at: minutesAgo(60 * 24 * 120),
     },
     {
       id: 'mem_02',
-      user: { id: 'usr_02', email: 'ama@shaqexpress.com', name: 'Ama Boateng' },
+      user_id: 'usr_02',
+      email: 'ama@shaqexpress.com',
+      name: 'Ama Boateng',
       role: 'admin',
-      status: 'active',
-      joined_at: minutesAgo(60 * 24 * 64),
+      disabled: false,
+      created_at: minutesAgo(60 * 24 * 64),
     },
     {
       id: 'mem_03',
-      user: { id: 'usr_03', email: 'finance@shaqexpress.com', name: 'Finance Systems' },
+      user_id: 'usr_03',
+      email: 'finance@shaqexpress.com',
+      name: 'Finance Systems',
       role: 'viewer',
-      status: 'active',
-      joined_at: minutesAgo(60 * 24 * 20),
+      disabled: false,
+      created_at: minutesAgo(60 * 24 * 20),
     },
     {
       id: 'mem_04',
-      user: { id: 'usr_04', email: 'kofi@shaqexpress.com', name: 'Kofi Mensah' },
+      user_id: 'usr_04',
+      email: 'kofi@shaqexpress.com',
+      name: 'Kofi Mensah',
       role: 'developer',
-      status: 'invited',
-      joined_at: null,
+      disabled: true,
+      created_at: minutesAgo(60 * 24 * 14),
+    },
+    {
+      id: 'mem_05',
+      user_id: 'usr_05_deleted',
+      email: null,
+      name: null,
+      role: 'developer',
+      disabled: false,
+      created_at: minutesAgo(60 * 24 * 55),
     },
   ],
   'org_01JQKWIK': [
     {
-      id: 'mem_05',
-      user: { id: user.id, email: user.email, name: user.name },
+      id: 'mem_06',
+      user_id: user.id,
+      email: user.email,
+      name: user.name,
       role: 'admin',
-      status: 'active',
-      joined_at: minutesAgo(60 * 24 * 30),
+      disabled: false,
+      created_at: minutesAgo(60 * 24 * 30),
     },
   ],
 };
 
-/* ── Projects ─────────────────────────────────────────────────────────────── */
-
+/**
+ * `environment` is `test | live` — there is no `production`, `staging` or
+ * `development` on the wire. `status` carries the soft delete.
+ */
 export const projects: Project[] = [
   {
     id: 'proj_01JQPAYPROD',
     organization_id: 'org_01JQSHAQ',
     name: 'Payments',
     slug: 'payments',
-    environment: 'production',
+    environment: 'live',
+    status: 'active',
     created_at: minutesAgo(60 * 24 * 118),
+    updated_at: minutesAgo(60 * 24 * 2),
   },
   {
     id: 'proj_01JQPAYSTG',
     organization_id: 'org_01JQSHAQ',
     name: 'Payments Staging',
     slug: 'payments-staging',
-    environment: 'staging',
+    environment: 'test',
+    status: 'active',
     created_at: minutesAgo(60 * 24 * 118),
+    updated_at: minutesAgo(60 * 24 * 118),
   },
   {
     id: 'proj_01JQRIDER',
     organization_id: 'org_01JQSHAQ',
     name: 'Rider Dispatch',
     slug: 'rider-dispatch',
-    environment: 'production',
+    environment: 'live',
+    status: 'active',
     created_at: minutesAgo(60 * 24 * 41),
+    updated_at: minutesAgo(60 * 24 * 41),
   },
   {
     id: 'proj_01JQKWIKMAIN',
     organization_id: 'org_01JQKWIK',
     name: 'Fulfilment',
     slug: 'fulfilment',
-    environment: 'production',
+    environment: 'live',
+    status: 'active',
     created_at: minutesAgo(60 * 24 * 29),
+    updated_at: minutesAgo(60 * 24 * 29),
   },
 ];
 
@@ -167,62 +207,239 @@ const PROD = projects[0].id;
 
 /* ── Endpoints ────────────────────────────────────────────────────────────── */
 
-export const endpoints: Endpoint[] = [
+/**
+ * `EndpointDto`, field for field. There is no `circuit_state`, no
+ * `rate_limit_per_second` and no `success_rate_24h` on the wire — the breaker
+ * reports through `status`/`disabled_reason`/`disabled_at`, and the token
+ * bucket is `rate_limit` per `rate_limit_window_seconds`.
+ *
+ * Filler rows take the list past one page on purpose: a list screen that has
+ * never been rendered with `has_more: true` is a list screen that silently
+ * truncates.
+ */
+const namedEndpoints: Endpoint[] = [
   {
     id: 'ep_01JQFINANCE',
     project_id: PROD,
     name: 'finance-api',
     url: 'https://finance.shaqexpress.internal/v1/webhooks/payments',
+    description: 'Settlement postings into the finance ledger.',
     status: 'active',
-    circuit_state: 'closed',
+    enabled: true,
     disabled_reason: null,
-    rate_limit_per_second: 50,
+    disabled_at: null,
     timeout_ms: 10_000,
-    success_rate_24h: 0.9993,
+    max_concurrency: 32,
+    rate_limit: 50,
+    rate_limit_window_seconds: 1,
+    retry_policy_id: null,
+    custom_headers: { 'x-shaq-source': 'webhooks' },
     created_at: minutesAgo(60 * 24 * 118),
+    updated_at: minutesAgo(60 * 24 * 4),
   },
   {
     id: 'ep_01JQLEDGER',
     project_id: PROD,
     name: 'ledger-service',
     url: 'https://ledger.shaqexpress.internal/hooks/settlement',
+    description: null,
     status: 'active',
-    circuit_state: 'half_open',
+    enabled: true,
     disabled_reason: null,
-    rate_limit_per_second: 25,
+    disabled_at: null,
     timeout_ms: 15_000,
-    success_rate_24h: 0.9412,
+    max_concurrency: 16,
+    rate_limit: 25,
+    rate_limit_window_seconds: 1,
+    retry_policy_id: null,
+    custom_headers: null,
     created_at: minutesAgo(60 * 24 * 90),
+    updated_at: minutesAgo(60 * 24 * 90),
   },
   {
     id: 'ep_01JQPARTNER',
     project_id: PROD,
-    // The problem endpoint: 30s timeouts, breaker open, auto-disabled.
+    // The problem endpoint: 30s timeouts, auto-disabled by the breaker.
     name: 'partner-reconciliation',
     url: 'https://api.partner-bank.example.com/inbound/shaq',
+    description: 'Partner bank reconciliation feed.',
     status: 'disabled',
-    circuit_state: 'open',
+    enabled: true,
     disabled_reason:
-      'Circuit breaker opened after 20 consecutive failures (connect timeout). Auto-disabled 2026-09-06T11:42:00Z.',
-    rate_limit_per_second: 5,
+      'Circuit breaker opened after 20 consecutive failures (connect timeout).',
+    disabled_at: minutesAgo(158),
     timeout_ms: 30_000,
-    success_rate_24h: 0.1174,
+    max_concurrency: 4,
+    rate_limit: 5,
+    rate_limit_window_seconds: 1,
+    retry_policy_id: null,
+    custom_headers: null,
     created_at: minutesAgo(60 * 24 * 60),
+    updated_at: minutesAgo(158),
   },
   {
     id: 'ep_01JQANALYTICS',
     project_id: PROD,
     name: 'analytics-sink',
     url: 'https://ingest.analytics.shaqexpress.internal/webhooks',
+    description: null,
     status: 'paused',
-    circuit_state: 'closed',
+    enabled: false,
     disabled_reason: 'Paused by najib@shaqexpress.com during warehouse migration.',
-    rate_limit_per_second: null,
+    disabled_at: minutesAgo(60 * 30),
     timeout_ms: 5_000,
-    success_rate_24h: 1,
+    max_concurrency: 16,
+    rate_limit: null,
+    rate_limit_window_seconds: 1,
+    retry_policy_id: null,
+    custom_headers: null,
     created_at: minutesAgo(60 * 24 * 12),
+    updated_at: minutesAgo(60 * 30),
+  },
+  {
+    id: 'ep_01JQPENDING',
+    project_id: PROD,
+    // Created by a developer, who may not receive a signing secret. It is
+    // PAUSED and has no live secret: it will not deliver until an owner or
+    // admin rotates one and enables it.
+    name: 'warehouse-sync',
+    url: 'https://warehouse.shaqexpress.internal/hooks/inventory',
+    description: null,
+    status: 'paused',
+    enabled: false,
+    disabled_reason:
+      'Awaiting a signing secret. Created by a developer, who may not receive one.',
+    disabled_at: minutesAgo(90),
+    timeout_ms: 30_000,
+    max_concurrency: 16,
+    rate_limit: null,
+    rate_limit_window_seconds: 1,
+    retry_policy_id: null,
+    custom_headers: null,
+    created_at: minutesAgo(90),
+    updated_at: minutesAgo(90),
+  },
+  {
+    id: 'ep_01JQREMOVED',
+    project_id: PROD,
+    // Soft-deleted. Hidden unless `?include_deleted=true`; kept forever so the
+    // delivery ledger stays readable.
+    name: 'old-recon-endpoint',
+    url: 'https://legacy.partner.example.com/hooks',
+    description: null,
+    status: 'deleted',
+    enabled: false,
+    disabled_reason: 'Deleted by najib@shaqexpress.com.',
+    disabled_at: minutesAgo(60 * 24 * 6),
+    timeout_ms: 30_000,
+    max_concurrency: 16,
+    rate_limit: null,
+    rate_limit_window_seconds: 1,
+    retry_policy_id: null,
+    custom_headers: null,
+    created_at: minutesAgo(60 * 24 * 200),
+    updated_at: minutesAgo(60 * 24 * 6),
   },
 ];
+
+/** Enough rows that the default page size is genuinely exceeded. */
+const fillerEndpoints: Endpoint[] = Array.from({ length: 56 }, (_, index) => ({
+  id: `ep_01JQFILL${index.toString().padStart(3, '0')}`,
+  project_id: PROD,
+  name: `merchant-${(index + 1).toString().padStart(3, '0')}-callback`,
+  url: `https://merchant-${index + 1}.partners.example.com/shaq/webhooks`,
+  description: null,
+  status: 'active' as const,
+  enabled: true,
+  disabled_reason: null,
+  disabled_at: null,
+  timeout_ms: 30_000,
+  max_concurrency: 16,
+  rate_limit: null,
+  rate_limit_window_seconds: 1,
+  retry_policy_id: null,
+  custom_headers: null,
+  created_at: minutesAgo(60 * 24 * (5 + index)),
+  updated_at: minutesAgo(60 * 24 * (5 + index)),
+}));
+
+export const endpoints: Endpoint[] = [...namedEndpoints, ...fillerEndpoints];
+
+/**
+ * Secret METADATA per endpoint. No plaintext lives here and there is no field
+ * it could occupy — a plaintext secret exists only in a create or rotate
+ * response, once.
+ *
+ * `ep_01JQPENDING` is absent from this map on purpose: that is the endpoint
+ * with no live secret, which is why it is paused.
+ */
+export const endpointSecrets: Record<string, EndpointSecret[]> = {
+  ep_01JQFINANCE: [
+    {
+      id: 'sec_01JQFIN2',
+      endpoint_id: 'ep_01JQFINANCE',
+      version: 2,
+      active: true,
+      expires_at: null,
+      rotated_at: null,
+      created_at: minutesAgo(60 * 20),
+    },
+    {
+      id: 'sec_01JQFIN1',
+      endpoint_id: 'ep_01JQFINANCE',
+      version: 1,
+      // Still signing: the overlap window has not closed, so deliveries carry
+      // both v1 components and consumers can be rolled without dropping one.
+      active: true,
+      expires_at: minutesAhead(60 * 4),
+      rotated_at: minutesAgo(60 * 20),
+      created_at: minutesAgo(60 * 24 * 118),
+    },
+  ],
+  ep_01JQLEDGER: [
+    {
+      id: 'sec_01JQLED1',
+      endpoint_id: 'ep_01JQLEDGER',
+      version: 1,
+      active: true,
+      expires_at: null,
+      rotated_at: null,
+      created_at: minutesAgo(60 * 24 * 90),
+    },
+  ],
+  ep_01JQPARTNER: [
+    {
+      id: 'sec_01JQPTR1',
+      endpoint_id: 'ep_01JQPARTNER',
+      version: 1,
+      active: true,
+      expires_at: null,
+      rotated_at: null,
+      created_at: minutesAgo(60 * 24 * 60),
+    },
+  ],
+  ep_01JQANALYTICS: [
+    {
+      id: 'sec_01JQANL2',
+      endpoint_id: 'ep_01JQANALYTICS',
+      version: 2,
+      active: true,
+      expires_at: null,
+      rotated_at: null,
+      created_at: minutesAgo(60 * 24 * 12),
+    },
+    {
+      id: 'sec_01JQANL1',
+      endpoint_id: 'ep_01JQANALYTICS',
+      version: 1,
+      // Expired: `active` reads false even though nothing has swept the column.
+      active: false,
+      expires_at: minutesAgo(60 * 24 * 11),
+      rotated_at: minutesAgo(60 * 24 * 12),
+      created_at: minutesAgo(60 * 24 * 40),
+    },
+  ],
+};
 
 export const subscriptions: Subscription[] = [
   {
@@ -271,33 +488,63 @@ export const subscriptions: Subscription[] = [
   },
 ];
 
+/**
+ * `ApiKeyDto`. `masked_key` does not exist — the wire field is `key_prefix`,
+ * the first 12 characters. `status` is derived from the two timestamps at read
+ * time, revoked outranking expired, exactly as the ingest path derives it.
+ */
 export const apiKeys: ApiKey[] = [
   {
     id: 'key_01JQLIVE',
     project_id: PROD,
     name: 'payment-gateway (production)',
-    masked_key: 'wk_live_…a91f',
+    key_prefix: 'wk_live_a91f',
+    environment: 'live',
+    status: 'active',
+    scopes: [],
+    expires_at: null,
     last_used_at: minutesAgo(1),
-    created_at: minutesAgo(60 * 24 * 118),
     revoked_at: null,
+    created_at: minutesAgo(60 * 24 * 118),
   },
   {
     id: 'key_01JQBACKFILL',
     project_id: PROD,
     name: 'backfill-runner',
-    masked_key: 'wk_live_…33c2',
+    key_prefix: 'wk_live_33c2',
+    environment: 'live',
+    status: 'active',
+    scopes: ['endpoints.read'],
+    expires_at: minutesAhead(60 * 24 * 20),
     last_used_at: minutesAgo(60 * 26),
-    created_at: minutesAgo(60 * 24 * 9),
     revoked_at: null,
+    created_at: minutesAgo(60 * 24 * 9),
+  },
+  {
+    id: 'key_01JQEXPIRED',
+    project_id: PROD,
+    name: 'seasonal-importer',
+    key_prefix: 'wk_live_c0de',
+    environment: 'live',
+    status: 'expired',
+    scopes: [],
+    expires_at: minutesAgo(60 * 24 * 3),
+    last_used_at: minutesAgo(60 * 24 * 4),
+    revoked_at: null,
+    created_at: minutesAgo(60 * 24 * 70),
   },
   {
     id: 'key_01JQOLD',
     project_id: PROD,
     name: 'legacy-gateway (rotated out)',
-    masked_key: 'wk_live_…7b40',
+    key_prefix: 'wk_live_7b40',
+    environment: 'live',
+    status: 'revoked',
+    scopes: [],
+    expires_at: null,
     last_used_at: minutesAgo(60 * 24 * 31),
-    created_at: minutesAgo(60 * 24 * 110),
     revoked_at: minutesAgo(60 * 24 * 30),
+    created_at: minutesAgo(60 * 24 * 110),
   },
 ];
 

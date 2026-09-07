@@ -75,14 +75,19 @@ export function OverviewPage() {
         >
           <Async
             query={endpoints}
-            isEmpty={(data) => data.length === 0}
+            isEmpty={(page) => page.rows.length === 0}
             empty={<EmptyState title="No endpoints" description="Add one to start delivering." />}
           >
-            {(data) => (
+            {(page) => (
               <Table
                 caption="Endpoint health"
                 columns={endpointColumns}
-                rows={[...data].sort((a, b) => a.success_rate_24h - b.success_rate_24h)}
+                /*
+                 * There is no `success_rate_24h` on the wire to sort by, so the
+                 * ones that need attention are surfaced by state instead:
+                 * auto-disabled first, then paused, then healthy.
+                 */
+                rows={[...page.rows].sort((a, b) => attention(a) - attention(b))}
                 rowKey={(row) => row.id}
               />
             )}
@@ -149,29 +154,26 @@ const endpointColumns: Column<Endpoint>[] = [
         >
           {row.status}
         </Badge>
-        {row.circuit_state !== 'closed' && (
-          <Badge tone={row.circuit_state === 'open' ? 'danger' : 'warn'}>
-            breaker {row.circuit_state.replace('_', ' ')}
-          </Badge>
-        )}
+        {row.enabled && row.status === 'disabled' && <Badge tone="danger">auto-disabled</Badge>}
       </span>
     ),
   },
   {
-    key: 'success',
-    header: '24h',
+    key: 'reason',
+    header: 'Why',
     align: 'right',
     render: (row) => (
-      <span
-        className={
-          row.success_rate_24h < 0.9 ? 'text-danger' : row.success_rate_24h < 0.99 ? 'text-warn' : ''
-        }
-      >
-        {formatPercent(row.success_rate_24h, 2)}
-      </span>
+      <span className="text-2xs text-ink-subtle">{row.disabled_reason ?? '—'}</span>
     ),
   },
 ];
+
+/** Sort weight: the endpoints an operator has to act on come first. */
+function attention(endpoint: Endpoint): number {
+  if (endpoint.status === 'disabled') return 0;
+  if (endpoint.status === 'paused') return 1;
+  return 2;
+}
 
 function failureColumns(orgId: string, projectId: string): Column<Delivery>[] {
   return [

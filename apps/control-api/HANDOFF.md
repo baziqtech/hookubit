@@ -1815,3 +1815,422 @@ is invisible to the check that exists to find it.
   `0 live secrets, status=active enabled=true`.
 - No integration test runs against real PostgreSQL (no Docker here), so SSI
   aborting one of two colliding revokes is argued, not executed.
+
+---
+
+## webhook-subscriptions (2026-09-07)
+
+New module at `src/webhook-subscriptions/`, mounted at
+`/v1/projects/:projectId/subscriptions`. List / get / create / update /
+enable / disable / delete, all `@Authorized('subscriptions.read' | '.write')`
++ `@Tenant()`, all data access through `TenantScopeFactory`. `PrismaService` is
+not imported anywhere in the module.
+
+### FOR WHOEVER WIRES app.module.ts — the two lines
+
+```ts
+import { WebhookSubscriptionsModule } from './webhook-subscriptions/webhook-subscriptions.module';
+// ...in @Module({ imports: [...] }), after EndpointSecretsModule:
+    WebhookSubscriptionsModule,
+```
+
+It imports `OrganizationsModule` for `TenantTransactionRunner` only — the same
+temporary address `EndpointSecretsModule` uses, and the same import that should
+become `AuthzModule` when the runner moves onto `TenantScopeFactory`.
+
+### Two contract corrections landed here first
+
+- **List envelope is `{ data, has_more, next_offset }`** and nothing else. No
+  `count`, no `total`, no `limit`/`offset` echo. `next_offset` is `null` — never
+  absent, never `0` — on the last page.
+- **`limit_exceeded` was added to `ERROR_CODES`** in `src/common/errors.ts`
+  (409, like `conflict`). Every resource ceiling must now use it and must attach
+  `details: { limit, current, resource }`. `conflict` in this module means only
+  "that endpoint is deleted". **The four existing ceilings (projects, api-keys,
+  endpoints, and whatever rate-limits/retry-policies add) still return `conflict`
+  and need realigning.**
+
+### Decisions worth arguing with, if you disagree
+
+**DELETE IS A HARD DELETE.** `webhook_subscriptions` has no status column and
+nothing has an FK to it — `deliveries.subscription_id` is a bare nullable TEXT
+column with no `@relation` in `schema.prisma`. A soft delete could therefore
+only mean `enabled = false`, which is already what PAUSE means, so a "deleted"
+subscription would sit in the list forever, count against the ceiling, and be
+one click from resurrection. The ledger loses nothing that matters: a delivery
+row keeps its own `endpoint_id` (RESTRICT, kept forever) and `event_id`, so
+"did finance ever receive this?" is unaffected — only "which routing rule
+matched" goes, and `remove()` writes the whole rule (endpoint, event types,
+payload filter, enabled) into `audit_logs` on the way out.
+
+> **For the operator-UI and data-plane agents: `deliveries.subscription_id` can
+> dangle.** Render it as "the subscription that matched has since been deleted".
+> Never a broken link, never a lookup that throws.
+
+**EMPTY `event_types` IS REFUSED, at write time, with a 400.** `Match()` fails
+closed on `[]` (matches nothing) while the column default is `["*"]` (matches
+everything), so a caller saving `[]` either meant "everything" and would
+silently receive nothing, or meant "nothing", which `enabled: false` already
+says legibly and reversibly. Both readings are defensible, which is exactly why
+guessing is not — coercing to `["*"]` would be Convoy's bug re-created by our
+own hand. The 400 names both alternatives. `["*"]` alongside any other pattern
+is refused for the same reason: the row would read as filtered and receive
+everything.
+
+### For the data-plane agent — event-type patterns
+
+`src/webhook-subscriptions/event-type-pattern.ts` contains
+`matchesEventType()`, a line-for-line mirror of `MatchesEventType` in
+`internal/router/match.go`, and `event-type-pattern.spec.ts` pins the whole
+table (`payment.*` matches `payment.settled` and `payment.card.captured`, and
+does NOT match `payments.settled` or the bare `payment`). **If you change
+`match.go`, change the mirror in the same commit** or the validator starts lying
+about the thing it exists to guarantee.
+
+The control plane is deliberately STRICTER than the matcher, never looser. Two
+patterns are legal Go and refused at write time: `.*` (empty prefix — matches
+only types starting with a literal dot) and anything with a `*` outside the two
+sanctioned shapes (`pay*` falls through to exact equality in Go, so it would be
+stored as a subscription that never fires, silently). Everything the API accepts
+is matched by the router exactly as written.
+
+### For the data-plane agent — `payload_filter` SEMANTICS, validated but NOT YET EXECUTED
+
+Nothing evaluates `payload_filter` today; a subscription carrying one currently
+behaves as if it were null. The shape is nailed down NOW so you are not writing
+the evaluator against rows someone already guessed at. `payload-filter.ts` is
+the full spec; the contract in short:
+
+A filter is a JSON object; keys are LOGICAL operators or FIELD PATHS, implicitly
+ANDed. Field paths are dot-separated `[A-Za-z0-9_-]+` segments resolved against
+the parsed payload. A condition is either a JSON scalar (shorthand for `$eq`) or
+an object of comparison operators, also ANDed.
+
+- comparison: `$eq` `$ne` (scalar), `$gt` `$gte` `$lt` `$lte` (number),
+  `$in` `$nin` (non-empty array of scalars), `$exists` (boolean)
+- logical: `$and` `$or` (non-empty arrays of filters), `$not` (one filter)
+
+Implement exactly these seven rules:
+
+1. **Strict JSON typing, no coercion.** `"1000" != 1000`; `1 != true`.
+2. **Absent is not null.** Only `{"$exists": false}` matches an absent path.
+   `{"$eq": null}` matches a path present and holding JSON `null`. Every other
+   operator is FALSE against an absent path — **including `$ne` and `$nin`**, or
+   a filter tightens into a leak the moment a producer drops a field.
+3. **Type mismatch is false, not an error.** `{"$gte": 10}` against a string is
+   false; the delivery must not fail over it.
+4. **Ordering is numeric only.** No implicit string or date ordering.
+5. **Arrays and objects are not comparable.** A path holding one satisfies only
+   `$exists`. There is no `$contains` and no implicit "matches any element" —
+   both are real features and both need their own operator, added deliberately.
+6. **`{}` is not a filter.** It is refused at write time (it would match every
+   payload). Absence of a filter is SQL NULL, written as `Prisma.DbNull`.
+7. **FAIL CLOSED.** A stored filter you cannot parse or evaluate means NO
+   delivery for that subscription, plus a loud operator-visible error. Never
+   treat it as "no filter". Everything above is designed to make that state
+   unreachable; rule 7 is what happens when it is reached anyway.
+
+Bounds enforced at write time, so you may assume them: 4096 bytes serialised,
+depth 5, 64 conditions, 8 path segments, 200-char paths, 50 `$in` values,
+20 `$and`/`$or` branches, 500-char string operands.
+
+### Config
+
+`MAX_SUBSCRIPTIONS_PER_PROJECT` (default 500, clamped to [1, 10000], warns and
+falls back rather than refusing to boot). Subscriptions are the fan-out
+multiplier — one event becomes one `deliveries` row per matching subscription —
+so the ceiling is enforced INSIDE the create's SERIALIZABLE transaction, not
+advisorily beside it like the endpoint and API-key ceilings.
+`webhook-subscriptions.concurrency.spec.ts` asserts that property under
+`Promise.allSettled` **and keeps the pre-fix shape (count outside the
+transaction) in a second block to prove the property test actually
+discriminates** — without it the suite would pass against a service that never
+opened a transaction at all.
+
+### Verified
+
+`lint` (this module, clean), `build`, and the full `test` run: **994 tests, 44
+suites, all passing**, of which 155 in 5 new suites here. The repo-wide `lint`
+currently fails on `src/retry-policies/retry-policy-rules.spec.ts:221`
+(`no-loss-of-precision`) — another agent's file, untouched by this work.
+
+Still no live database, so as everywhere else in this file, nothing here has run
+against real PostgreSQL. Two things a real run should confirm: that Prisma
+accepts `payloadFilter: Prisma.DbNull` on `WebhookSubscriptionCreateManyInput`
+through `ScopedRepository.create` (the fake models the write and the read-back,
+not Prisma's own input coercion), and that the SERIALIZABLE ceiling really
+aborts one of two concurrent creates with `40001` rather than serialising them
+by luck.
+
+---
+
+## Retry policies and rate limits (2026-09-07) — `src/retry-policies`, `src/rate-limits`
+
+Two modules. Nothing outside those two directories was edited: no schema, no
+`app.module.ts`, no `src/authz`, no `src/common`, no migration files.
+
+### Module registration — for whoever owns `app.module.ts`
+
+```ts
+import { RateLimitsModule } from './rate-limits/rate-limits.module';
+import { RetryPoliciesModule } from './retry-policies/retry-policies.module';
+```
+
+and, in `imports`, after `EndpointSecretsModule`:
+
+```ts
+    RetryPoliciesModule,
+    RateLimitsModule,
+```
+
+Both import `OrganizationsModule` for one export — `TenantTransactionRunner` —
+and nothing else. Neither imports `PrismaModule` and neither mentions
+`PrismaService`; no `.eslintrc.json` allowlist entry was needed or added.
+
+### Routes
+
+```
+GET    /v1/projects/:projectId/retry-policies                  policies.read
+POST   /v1/projects/:projectId/retry-policies                  policies.write
+GET    /v1/projects/:projectId/retry-policies/:policyId        policies.read
+PATCH  /v1/projects/:projectId/retry-policies/:policyId        policies.write
+POST   /v1/projects/:projectId/retry-policies/:policyId/default  policies.write
+DELETE /v1/projects/:projectId/retry-policies/:policyId        policies.write
+
+GET    /v1/projects/:projectId/rate-limits                     policies.read
+POST   /v1/projects/:projectId/rate-limits                     policies.write
+GET    /v1/projects/:projectId/rate-limits/:policyId           policies.read
+PATCH  /v1/projects/:projectId/rate-limits/:policyId           policies.write
+DELETE /v1/projects/:projectId/rate-limits/:policyId           policies.write
+```
+
+List envelope on both: **`{ data, has_more, next_offset }`** — no `count`, no
+`total`, `next_offset` null (not absent, not 0) on the last page. Ceilings return
+the dedicated `limit_exceeded` code with `details: { limit, current, resource }`;
+a duplicate on the rate-limit unique index returns `conflict`. Those are
+different things and the dashboard must not have to match on a message to tell
+them apart.
+
+### The rules chosen — default policy and deletion
+
+**Exactly one default per project, whenever the project has any policy at all.**
+
+- The FIRST policy created in a project is promoted whether or not it asked. A
+  project with policies and no default is a state nothing downstream resolves.
+- `is_default` has exactly ONE writer path (`setDefault`, plus `create`'s
+  promotion), and it is deliberately absent from `UpdateRetryPolicyDto`. A PATCH
+  that just sets the field is precisely the shape that skips the clear;
+  `forbidNonWhitelisted` turns an attempt into a 400 rather than a silent no-op.
+- Every write that touches the column runs inside `TenantTransactionRunner`
+  (SERIALIZABLE + bounded retry). The clear is `updateMany(isDefault: true AND
+  NOT id, → false)` — over the SET, not over the row that was read — so a stale
+  snapshot cannot leave a second default behind. `setDefault` is idempotent and
+  repairs a project that somehow acquired two.
+
+**Deletion of a retry policy:**
+
+1. **Refused (409 `conflict`) while any LIVE endpoint references it.**
+   `endpoints.retry_policy_id` is an optional relation with no explicit
+   referential action — i.e. `ON DELETE SET NULL` — so deleting the policy would
+   silently move those endpoints onto `retry.DefaultPolicy()` (8 attempts, 5s
+   base, 24h budget) with nothing anywhere saying so. The error carries
+   `details.endpoints`.
+2. **Soft-deleted endpoints do not block it**, but they are unlinked
+   EXPLICITLY inside the same transaction and the count is recorded as
+   `unlinked_deleted_endpoints` in the audit row. They cannot be PATCHed
+   (`EndpointsService` refuses to modify a deleted endpoint), so counting them
+   would make the policy permanently undeletable; letting the FK null them would
+   be the same silent rewrite by a quieter route.
+3. **The project default cannot be deleted without a successor** while other
+   policies remain: `?replacement_id=` is required and is promoted in the SAME
+   transaction, so no reader ever sees a project with policies and no default.
+   `replacement_id` is resolved through the same scoped repository, so another
+   tenant's policy is a 404. Passing it when it is not needed is a 400.
+4. **Deleting the LAST policy is allowed.** The project falls back to
+   `retry.DefaultPolicy()`, which is a defined state.
+
+Retry policies are HARD deleted (unlike endpoints): nothing in the delivery
+ledger references one, so there is no history to preserve.
+
+### MIGRATION REQUEST — CHECK constraints and one partial unique index
+
+I cannot edit `prisma/schema.prisma` or add a migration. Everything below is
+enforced by the control plane today; the database currently accepts all of it.
+The control plane is not the only writer forever (the CLI, a backfill, the next
+service), and the data plane CLAMPS rather than refuses, so a bad row does not
+fail loudly — it silently stops behaving the way it reads.
+
+```sql
+-- retry_policies: every one of these is a value retry.Delay/Exhausted cannot
+-- consume sanely. max_delay_ms = 0 is the one with a scar: the clamp in
+-- retry.Delay used to be gated on MaxDelay > 0, so the exponential term
+-- overflowed int64 nanoseconds and time.Duration(d) became math.MinInt64 -
+-- next_attempt_at permanently in the past, and a dead endpoint polled every
+-- 250ms. Go clamps defensively now; this is the refusal.
+ALTER TABLE retry_policies
+  ADD CONSTRAINT retry_policies_strategy_check
+    CHECK (strategy IN ('exponential', 'linear', 'constant')),
+  ADD CONSTRAINT retry_policies_max_attempts_check
+    CHECK (max_attempts BETWEEN 1 AND 50),
+  ADD CONSTRAINT retry_policies_initial_delay_check
+    CHECK (initial_delay_ms BETWEEN 1 AND 86400000),
+  ADD CONSTRAINT retry_policies_max_delay_check
+    CHECK (max_delay_ms BETWEEN 1 AND 86400000),
+  ADD CONSTRAINT retry_policies_delay_order_check
+    CHECK (initial_delay_ms <= max_delay_ms),
+  ADD CONSTRAINT retry_policies_multiplier_check
+    CHECK (multiplier >= 1 AND multiplier <= 100),
+  -- retry.Delay substitutes 2 for any multiplier <= 1 on the exponential
+  -- branch, so a stored 1 there is a row that does not describe what happens.
+  ADD CONSTRAINT retry_policies_exponential_multiplier_check
+    CHECK (strategy <> 'exponential' OR multiplier > 1),
+  ADD CONSTRAINT retry_policies_jitter_check
+    CHECK (jitter_ratio >= 0 AND jitter_ratio <= 1),
+  -- 7 days, not 30: the column is int4 and 30 days is 2_592_000_000, past
+  -- 2_147_483_647.
+  ADD CONSTRAINT retry_policies_max_retry_duration_check
+    CHECK (max_retry_duration_ms BETWEEN 1000 AND 604800000);
+
+-- "At most one default per project", which the control plane holds in a
+-- SERIALIZABLE transaction and the schema holds not at all. A partial unique
+-- index is not expressible in schema.prisma - same situation as the NULLS NOT
+-- DISTINCT indexes in 20260906010000, and it must be preserved verbatim if the
+-- migration is ever regenerated.
+CREATE UNIQUE INDEX retry_policies_one_default_per_project
+  ON retry_policies (project_id)
+  WHERE is_default;
+
+-- rate_limit_policies: limit = 0 disables delivery/ingestion entirely for
+-- whatever the policy covers, window_seconds = 0 is a division by zero in the
+-- refill rate, and burst < limit means the configured limit can never be
+-- reached because the bucket cannot hold one window's worth of tokens.
+ALTER TABLE rate_limit_policies
+  ADD CONSTRAINT rate_limit_policies_limit_check
+    CHECK ("limit" BETWEEN 1 AND 10000000),
+  ADD CONSTRAINT rate_limit_policies_window_check
+    CHECK (window_seconds BETWEEN 1 AND 86400),
+  ADD CONSTRAINT rate_limit_policies_burst_check
+    CHECK (burst IS NULL OR (burst >= "limit" AND burst <= 10000000));
+```
+
+Note the partial index would make `setDefault` depend on statement ORDER inside
+its transaction (clear before set, which is what it already does). Adding it
+does not remove the need for the transaction — a unique index cannot express
+"at least one row", so the zero-default direction is still the service's job.
+
+### FOR THE DATA-PLANE TEAM — nothing reads `rate_limit_policies` yet
+
+`internal/ingest/handler.go` wires `ingest.AllowAll{}`, and the delivery workers
+have no policy lookup at all. Every row written through these routes is
+currently INERT. That is worse than an empty table: an operator reads the list,
+believes a ceiling is in force, and stops looking for why a partner is being
+flooded. Please either implement the resolution below or say so in the UI.
+
+**Resolution order.** Two separate rules, and conflating them is the trap:
+
+- **Within one scope, the most specific row wins.** A row whose `resource_id`
+  matches the resource beats the `resource_id IS NULL` row for that scope
+  ("every resource in this scope"). Never both.
+- **Across scopes, EVERY applicable bucket is charged, and any one may refuse.**
+  They are nested budgets, not fallbacks — an endpoint limit of 100/s inside a
+  project limit of 500/s means both, and the most restrictive bites first.
+
+Outbound delivery, per attempt:
+
+```
+1. endpoints.rate_limit / endpoints.rate_limit_window_seconds   (the columns on
+   the endpoint row itself - most specific, and already populated today)
+2. rate_limit_policies WHERE scope='endpoint' AND resource_id=<endpoint id>
+   else                 scope='endpoint' AND resource_id IS NULL
+3. rate_limit_policies WHERE scope='project' AND resource_id IN (<project id>, NULL)
+4. rate_limit_policies WHERE scope='organization' AND resource_id IN (<org id>, NULL)
+```
+
+Ingest, per accepted event — this maps onto `ingest.Scope`
+(`OrganizationID`/`ProjectID`/`APIKeyID`) as it already stands:
+
+```
+1. rate_limit_policies WHERE scope='ingest' AND resource_id=<api key id>
+   else                 scope='ingest' AND resource_id IS NULL
+2. rate_limit_policies WHERE scope='project'      AND resource_id IN (<project id>, NULL)
+3. rate_limit_policies WHERE scope='organization' AND resource_id IN (<org id>, NULL)
+```
+
+`burst` is the bucket CAPACITY and `limit / window_seconds` the refill rate;
+`burst IS NULL` means "capacity equals limit". The control plane guarantees
+`limit >= 1`, `window_seconds >= 1` and `burst >= limit`, so no consumer needs a
+divide-by-zero guard — but please keep failing OPEN on a limiter fault, as
+`limiter.go` already documents.
+
+`scope='ingest'` with a non-null `resource_id` names an **API key**, chosen
+because `ingest.Scope` already carries `APIKeyID`: it is the per-credential
+ceiling that stops one integration's runaway retry loop eating the project's
+whole ingest budget.
+
+### Two notes for the authz owner
+
+- **`rate_limit_policies.resource_id` is a POLYMORPHIC foreign key** — its target
+  table depends on `scope` — so it cannot go in `ScopedRepository`'s
+  `foreignKeys` map, which is column → one repository. It is resolved explicitly
+  in `src/rate-limits/rate-limit-resource.ts`, through the scoped repository for
+  whatever the scope names (`endpoints`, `apiKeys`, `projects`, `organization`),
+  on every create and on every update that touches `scope` or `resource_id`. If
+  the map ever grows a "resolver function" form, this is its first caller.
+- **`ScopedRepository.notFound()` still says `${resourceName} not found.`**
+  These modules therefore never call `requireById` on a caller-supplied id; they
+  use `findById` and raise `CROSS_TENANT_MESSAGE` themselves, exactly as
+  endpoints and endpoint-secrets do. Third module in a row working around the
+  same thing — changing `notFound()` to the constant would let the next one just
+  use `requireById`.
+
+### Verified
+
+`pnpm --filter @webhook/control-api lint`, `build` and `test` all pass with
+everything in the tree — **1091 tests, 48 suites**, of which 170 in 7 new suites
+here:
+
+- `retry-policies/retry-policy-rules.spec.ts` — bounds, cross-field coherence,
+  and a property run over ~48 accepted policies against a PORT of `retry.Delay`'s
+  own arithmetic (not a restatement of the bounds, which would pass by
+  construction): no accepted policy yields a negative, NaN or unbounded delay at
+  any attempt inside its budget. Includes an executable demonstration that the
+  refused `max_delay_ms = 0` policy really does exceed int64 nanoseconds at
+  attempt 40.
+- `retry-policies/retry-policies.service.spec.ts` — isolation, merged-settings
+  validation, default promotion, all four deletion rules, ceiling, paging.
+- `retry-policies/retry-policies.concurrency.spec.ts` — the default invariant
+  under `Promise.allSettled`, **including the pre-fix shape run against the same
+  property check**: `setDefaultUnsafe` (read the default, clear that row, set the
+  new one, no transaction) reproducibly leaves TWO defaults and
+  `assertExactlyOneDefault` throws on it. If that test ever passes, the property
+  check has stopped detecting the bug and everything above it is vacuous.
+- `rate-limits/rate-limit-rules.spec.ts`, `rate-limits.service.spec.ts` —
+  cross-tenant `resource_id` at all four scopes, validation, uniqueness
+  including the `resource_id IS NULL` row, and P2002 handling **by index**: a
+  violation is matched on `meta.target` in all three shapes Prisma reports it in
+  (column list, camelCase, constraint name) and mapped to a real 409, while a
+  foreign index, a P2002 with no target, a P2003 and an ordinary Error are all
+  rethrown UNCHANGED rather than laundered into a friendly conflict.
+- `rate-limits/rate-limits.concurrency.spec.ts` — the same pre-fix/post-fix pair
+  for the check-then-insert.
+- `retry-policies/policies.http.spec.ts` — both controllers on a real port with
+  real guards, the real `ValidationPipe` and the real exception filter:
+  401/403/404 wiring, the `policies.read`/`policies.write` split across viewer,
+  developer and billing, the list envelope asserted to be exactly three keys,
+  `@Throttle` present on every write route and absent on the reads, and a real
+  429 with `Retry-After`.
+
+### What a reviewer should check next
+
+- No integration test runs against real PostgreSQL (no Docker here), so the
+  claims that SSI aborts one of two colliding transactions, and that the NULLS
+  NOT DISTINCT index catches the create that the in-transaction check races
+  past, are ARGUED, not executed. `SerializableTransactionRunner` models
+  SERIALIZABLE as a serial schedule and never aborts an attempt, so the runner's
+  retry loop is unexercised here too.
+- `FakeTenantPrisma` has no unique indexes, so the rate-limit uniqueness suites
+  exercise the in-transaction check; the P2002 path is exercised by injecting a
+  real `PrismaClientKnownRequestError` into the delegate.
+- The per-project ceilings (50 retry policies, 300 rate limits) are compile-time
+  constants, not `ConfigService`-driven like `MAX_PROJECTS_PER_ORGANIZATION`.
+  Worth aligning if an operator ever needs to raise one without a deploy.

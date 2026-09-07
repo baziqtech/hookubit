@@ -7,7 +7,26 @@
  * arrives — see the transport switch in `lib/api.ts`, which is the single file
  * that has to change.
  */
-import type { ApiErrorBody, Delivery, EventDetail, Page, WebhookEvent } from '../../types/api';
+import type {
+  ApiErrorBody,
+  ApiKey,
+  CountedOffsetPage,
+  CreatedApiKey,
+  CreatedEndpoint,
+  CursorPage,
+  Delivery,
+  Endpoint,
+  EndpointSecret,
+  EventDetail,
+  Member,
+  OffsetPage,
+  Organization,
+  Project,
+  RotatedSecret,
+  TotalPage,
+  WebhookEvent,
+} from '../../types/api';
+import { DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE } from '../../types/api';
 import * as db from './data';
 
 interface Handler {
@@ -33,12 +52,25 @@ class MockHttpError extends Error {
 let requestSeq = 0;
 const requestId = () => `req_01JQMOCK${(requestSeq += 1).toString().padStart(4, '0')}`;
 
-function fail(status: number, code: ApiErrorBody['error']['code'], message: string): never {
-  throw new MockHttpError(status, { error: { code, message, request_id: requestId() } });
+function fail(
+  status: number,
+  code: ApiErrorBody['error']['code'],
+  message: string,
+  details?: Record<string, unknown>,
+): never {
+  throw new MockHttpError(status, {
+    error: { code, message, details, request_id: requestId() },
+  });
 }
 
-/** Cursor pagination over a stable array; the cursor is just an offset, opaque to callers. */
-function paginate<T>(items: T[], query: URLSearchParams): Page<T> {
+/**
+ * Cursor pagination — MOCK-ONLY ROUTES.
+ *
+ * No control-plane module returns this shape. It is kept for events,
+ * deliveries and audit logs, which have no module yet; everything that does
+ * have one uses the offset envelopes below.
+ */
+function cursorPage<T>(items: T[], query: URLSearchParams): CursorPage<T> {
   const limit = Math.min(Number(query.get('limit') ?? 25) || 25, 100);
   const offset = Number(query.get('cursor') ?? 0) || 0;
   const slice = items.slice(offset, offset + limit);
@@ -48,6 +80,124 @@ function paginate<T>(items: T[], query: URLSearchParams): Page<T> {
     has_more: next < items.length,
     next_cursor: next < items.length ? String(next) : null,
   };
+}
+
+/**
+ * `limit`/`offset` as the control API validates them.
+ *
+ * A `limit` above `MAX_PAGE_SIZE` is a 400, not a silent clamp: a caller that
+ * asks for 5000 and receives 200 rows with no explanation believes it has
+ * everything. `ScopedRepository` still clamps underneath as a safety net, but
+ * the API answers the question honestly first.
+ */
+function readPaging(query: URLSearchParams): { limit: number; offset: number } {
+  const rawLimit = query.get('limit');
+  const rawOffset = query.get('offset');
+  const limit = rawLimit === null ? DEFAULT_PAGE_SIZE : Number(rawLimit);
+  const offset = rawOffset === null ? 0 : Number(rawOffset);
+
+  if (!Number.isInteger(limit) || limit < 1 || limit > MAX_PAGE_SIZE) {
+    fail(400, 'invalid_request', `"limit" must be an integer between 1 and ${MAX_PAGE_SIZE}.`);
+  }
+  if (!Number.isInteger(offset) || offset < 0) {
+    fail(400, 'invalid_request', '"offset" must be an integer of at least 0.');
+  }
+  return { limit, offset };
+}
+
+/** `EndpointListDto` / `EndpointSecretListDto` — no `count`. */
+function offsetEnvelope<T>(items: T[], query: URLSearchParams): OffsetPage<T> {
+  const { limit, offset } = readPaging(query);
+  const slice = items.slice(offset, offset + limit);
+  const next = offset + slice.length;
+  const hasMore = next < items.length;
+  return { data: slice, has_more: hasMore, next_offset: hasMore ? next : null };
+}
+
+/** `ProjectListDto` / `ApiKeyListDto` — `count` is the rows in THIS page. */
+function countedEnvelope<T>(items: T[], query: URLSearchParams): CountedOffsetPage<T> {
+  const page = offsetEnvelope(items, query);
+  return { ...page, count: page.data.length };
+}
+
+/** `OrganizationListDto` / `MemberListDto` — a real total, no `has_more`. */
+function totalEnvelope<T>(items: T[], query: URLSearchParams): TotalPage<T> {
+  const { limit, offset } = readPaging(query);
+  return {
+    data: items.slice(offset, offset + limit),
+    total: items.length,
+    limit,
+    offset,
+  };
+}
+
+/**
+ * `?flag=false` must mean false.
+ *
+ * The control API's `BooleanQuery` compares the string instead of coercing it,
+ * because `Boolean('false')` is `true` — which had `?include_deleted=false`
+ * turning soft-deleted rows ON, with a 200. `true`/`1` are true, anything else
+ * present is false, and an absent parameter stays undefined so the server's own
+ * default applies. The mock mirrors it exactly, or it stops being a contract.
+ */
+function booleanQuery(query: URLSearchParams, name: string): boolean | undefined {
+  const raw = query.get(name);
+  if (raw === null || raw === '') return undefined;
+  return raw === 'true' || raw === '1';
+}
+
+/* ── Write limits ─────────────────────────────────────────────────────────── */
+
+/**
+ * Throttles and ceilings, kept distinct because the remedies are.
+ *
+ * A 429 is transient and carries `retry_after_seconds`. A ceiling is a 409 —
+ * the control API has NO distinct code for one — and waiting does not clear it.
+ * Both paths have to be reachable in the mock, or the UI that tells them apart
+ * is never exercised before it meets a real user.
+ */
+const THROTTLE_LIMITS: Record<string, number> = {
+  'projects.create': 20,
+  'api-keys.create': 10,
+  'endpoints.create': 60,
+  'organizations.create': 10,
+  'members.invite': 20,
+  'endpoint-secrets.rotate': 30,
+};
+
+const throttleCounts = new Map<string, number>();
+
+/** Test seam: the counters are process-wide, so a suite must be able to reset them. */
+export function resetMockLimits(): void {
+  throttleCounts.clear();
+}
+
+function charge(bucket: string): void {
+  const limit = THROTTLE_LIMITS[bucket] ?? 60;
+  const used = (throttleCounts.get(bucket) ?? 0) + 1;
+  throttleCounts.set(bucket, used);
+  if (used > limit) {
+    fail(429, 'rate_limited', 'Too many attempts. Try again shortly.', {
+      retry_after_seconds: 42,
+    });
+  }
+}
+
+/**
+ * A resource ceiling, reported the way the real API reports one: 409 `conflict`
+ * with prose. `details` is attached only where the real service attaches it —
+ * projects and API keys do, endpoints and organizations do NOT — because the
+ * dashboard's classifier has to cope with both and pretending otherwise would
+ * hide the gap the backend still needs to close.
+ */
+function assertBelowCeiling(
+  current: number,
+  limit: number,
+  message: string,
+  withDetails: boolean,
+): void {
+  if (current < limit) return;
+  fail(409, 'conflict', message, withDetails ? { limit, current } : undefined);
 }
 
 function requireBody<T extends Record<string, unknown>>(body: unknown, fields: string[]): T {
@@ -165,8 +315,38 @@ const handlers: Handler[] = [
     },
   },
 
-  /* Organizations */
-  { method: 'GET', pattern: '/v1/organizations', handle: () => ({ data: db.organizations }) },
+  /* Organizations — TotalPage envelope: { data, total, limit, offset }. */
+  {
+    method: 'GET',
+    pattern: '/v1/organizations',
+    handle: ({ query }) => totalEnvelope<Organization>(db.organizations, query),
+  },
+  {
+    method: 'POST',
+    pattern: '/v1/organizations',
+    handle: ({ body }) => {
+      requireBody(body, ['name']);
+      charge('organizations.create');
+      /*
+       * Per-USER ceiling. The real limit is MAX_ORGANIZATIONS_PER_USER = 10;
+       * the mock uses the fixture count so the ceiling branch is actually
+       * REACHABLE. A limit the mock can never hit is a UI path that first runs
+       * in production — and this is the one ceiling that carries no `details`,
+       * so it is the one the dashboard's message-matching fallback depends on.
+       *
+       * The real service attaches prose only, never { limit, current }, so
+       * neither does the mock. See HANDOFF.md.
+       */
+      const MOCK_ORGANIZATION_CEILING = db.organizations.length;
+      assertBelowCeiling(
+        db.organizations.length,
+        MOCK_ORGANIZATION_CEILING,
+        `You already own ${MOCK_ORGANIZATION_CEILING} organizations, which is the limit. Delete one, or ask to have the limit raised.`,
+        false,
+      );
+      fail(500, 'internal_error', 'The mock does not persist new organizations.');
+    },
+  },
   {
     method: 'GET',
     pattern: '/v1/organizations/:orgId',
@@ -177,26 +357,60 @@ const handlers: Handler[] = [
   {
     method: 'GET',
     pattern: '/v1/organizations/:orgId/members',
-    handle: ({ params }) => ({ data: db.members[params.orgId] ?? [] }),
+    handle: ({ params, query }) =>
+      totalEnvelope<Member>(db.members[params.orgId] ?? [], query),
+  },
+  {
+    method: 'POST',
+    pattern: '/v1/organizations/:orgId/members',
+    handle: ({ body }) => {
+      requireBody(body, ['email', 'role']);
+      charge('members.invite');
+      // Always 202 — whether the address is already a member, already has an
+      // account, or is unknown. Anything else lets a member enumerate the
+      // platform. No member row is created; the invitee redeems a token.
+      return { status: 'accepted' };
+    },
   },
   {
     method: 'GET',
     pattern: '/v1/organizations/:orgId/audit-logs',
-    handle: ({ query }) => paginate(db.auditLogs, query),
+    handle: ({ query }) => cursorPage(db.auditLogs, query),
   },
   { method: 'GET', pattern: '/v1/organizations/:orgId/usage', handle: () => db.usage },
 
-  /* Projects */
+  /* Projects — CountedOffsetPage, and nested under the organization. */
   {
     method: 'GET',
-    pattern: '/v1/projects',
-    handle: ({ query }) => {
-      const orgId = query.get('organization_id');
-      return {
-        data: orgId
-          ? db.projects.filter((project) => project.organization_id === orgId)
-          : db.projects,
-      };
+    pattern: '/v1/organizations/:orgId/projects',
+    handle: ({ params, query }) => {
+      const status = query.get('status');
+      const rows = db.projects.filter((project) => {
+        if (project.organization_id !== params.orgId) return false;
+        // Defaults to everything except `deleted`; pass `status=deleted`
+        // explicitly to find out why a create 409'd on a slug.
+        if (status) return project.status === status;
+        return project.status !== 'deleted';
+      });
+      return countedEnvelope<Project>(rows, query);
+    },
+  },
+  {
+    method: 'POST',
+    pattern: '/v1/organizations/:orgId/projects',
+    handle: ({ params, body }) => {
+      const input = requireBody<{ name: string }>(body, ['name']);
+      charge('projects.create');
+      const existing = db.projects.filter(
+        (project) => project.organization_id === params.orgId && project.status !== 'deleted',
+      ).length;
+      assertBelowCeiling(
+        existing,
+        100,
+        `This organization already has ${existing} projects, which is its limit of 100. Delete a project you no longer need, or ask an operator to raise MAX_PROJECTS_PER_ORGANIZATION.`,
+        true,
+      );
+      fail(500, 'internal_error', `The mock does not persist new projects ("${input.name}").`);
     },
   },
   {
@@ -206,23 +420,187 @@ const handlers: Handler[] = [
       db.projects.find((project) => project.id === params.projectId) ??
       fail(404, 'not_found', `Project ${params.projectId} was not found`),
   },
-  { method: 'GET', pattern: '/v1/projects/:projectId/endpoints', handle: () => ({ data: db.endpoints }) },
+
+  /* Endpoints — OffsetPage, no `count`. */
+  {
+    method: 'GET',
+    pattern: '/v1/projects/:projectId/endpoints',
+    handle: ({ query }) => {
+      const status = query.get('status');
+      // `include_deleted` is compared as a string, never coerced.
+      const includeDeleted = booleanQuery(query, 'include_deleted') ?? false;
+      const rows = db.endpoints.filter((endpoint) => {
+        if (!includeDeleted && endpoint.status === 'deleted') return false;
+        if (status && endpoint.status !== status) return false;
+        return true;
+      });
+      return offsetEnvelope<Endpoint>(rows, query);
+    },
+  },
+  {
+    method: 'POST',
+    pattern: '/v1/projects/:projectId/endpoints',
+    handle: ({ params, body }) => {
+      const input = requireBody<{ name: string; url: string }>(body, ['name', 'url']);
+      charge('endpoints.create');
+      const live = db.endpoints.filter((endpoint) => endpoint.status !== 'deleted').length;
+      // No details on the wire for this one — prose only, like the real service.
+      assertBelowCeiling(
+        live,
+        500,
+        'This project already has 500 endpoints, which is the maximum. Delete one you no longer deliver to, or talk to us about a higher limit.',
+        false,
+      );
+
+      /*
+       * The permission split that decides whether this endpoint works.
+       *
+       * A caller WITHOUT `endpoint-secrets.write` (a developer) may create an
+       * endpoint but may not receive its signing secret. So the secret is null,
+       * `secret_pending` is true and the endpoint is PAUSED — it is NOT
+       * delivering. Going live instead would sign every delivery with a key
+       * nobody holds.
+       *
+       * The mock keys this off a header-free convention so both branches are
+       * reachable: a name containing "developer" simulates the weaker role.
+       */
+      const canReadSecrets = !input.name.toLowerCase().includes('developer');
+      const now = new Date().toISOString();
+      const created: CreatedEndpoint = {
+        id: `ep_01JQNEW${Math.floor(Math.random() * 1e6).toString(36).toUpperCase()}`,
+        project_id: params.projectId,
+        name: input.name,
+        url: input.url,
+        description: null,
+        status: canReadSecrets ? 'active' : 'paused',
+        enabled: canReadSecrets,
+        disabled_reason: canReadSecrets
+          ? null
+          : 'Awaiting a signing secret. Created by a caller without endpoint-secrets.write.',
+        disabled_at: canReadSecrets ? null : now,
+        timeout_ms: 30_000,
+        max_concurrency: 16,
+        rate_limit: null,
+        rate_limit_window_seconds: 1,
+        retry_policy_id: null,
+        custom_headers: null,
+        created_at: now,
+        updated_at: now,
+        secret: canReadSecrets ? `whsec_${'m0ck'.repeat(8)}` : null,
+        secret_pending: !canReadSecrets,
+        secret_version: 1,
+      };
+      return created;
+    },
+  },
+
+  /* Endpoint secrets — OffsetPage of METADATA. No plaintext on any read. */
+  {
+    method: 'GET',
+    pattern: '/v1/endpoints/:endpointId/secrets',
+    handle: ({ params, query }) =>
+      offsetEnvelope<EndpointSecret>(db.endpointSecrets[params.endpointId] ?? [], query),
+  },
+  {
+    method: 'POST',
+    pattern: '/v1/endpoints/:endpointId/secrets/rotate',
+    handle: ({ params, body }) => {
+      charge('endpoint-secrets.rotate');
+      const existing = db.endpointSecrets[params.endpointId] ?? [];
+      const overlapSeconds =
+        typeof (body as { overlap_seconds?: number } | null)?.overlap_seconds === 'number'
+          ? (body as { overlap_seconds: number }).overlap_seconds
+          : 86_400;
+      const version = Math.max(0, ...existing.map((secret) => secret.version)) + 1;
+      const now = new Date();
+      // Every prior version that still signs — including ones this rotation did
+      // not move, because they are still emitting a v1= component.
+      const overlapping = existing.filter((secret) => secret.active).map((secret) => secret.version);
+      const rotated: RotatedSecret = {
+        id: `sec_01JQNEW${version}`,
+        endpoint_id: params.endpointId,
+        version,
+        active: true,
+        expires_at: null,
+        rotated_at: null,
+        created_at: now.toISOString(),
+        secret: `whsec_${'r0t4t3d'.repeat(4)}`,
+        previous_secrets_expire_at:
+          overlapping.length === 0 || overlapSeconds === 0
+            ? null
+            : new Date(now.getTime() + overlapSeconds * 1000).toISOString(),
+        overlapping_versions: overlapping.sort((a, b) => b - a),
+      };
+      return rotated;
+    },
+  },
+
+  /* API keys — CountedOffsetPage. */
+  {
+    method: 'GET',
+    pattern: '/v1/projects/:projectId/api-keys',
+    handle: ({ query }) => countedEnvelope<ApiKey>(db.apiKeys, query),
+  },
+  {
+    method: 'POST',
+    pattern: '/v1/projects/:projectId/api-keys',
+    handle: ({ params, body }) => {
+      const input = requireBody<{ name: string }>(body, ['name']);
+      charge('api-keys.create');
+      const live = db.apiKeys.filter((key) => key.revoked_at === null).length;
+      assertBelowCeiling(
+        live,
+        50,
+        `This project already holds ${live} un-revoked API keys, which is its limit of 50. Revoke a key you no longer need, or ask an operator to raise MAX_API_KEYS_PER_PROJECT.`,
+        true,
+      );
+      const now = new Date().toISOString();
+      // The plaintext, returned exactly once. Only the SHA-256 hash is stored,
+      // so nothing can reproduce it later — not this API, not psql.
+      const created: CreatedApiKey = {
+        id: `key_01JQNEW${Math.floor(Math.random() * 1e6).toString(36).toUpperCase()}`,
+        project_id: params.projectId,
+        name: input.name,
+        key_prefix: 'wk_live_9f2c',
+        environment: 'live',
+        status: 'active',
+        scopes: [],
+        expires_at: null,
+        last_used_at: null,
+        revoked_at: null,
+        created_at: now,
+        key: 'wk_live_9f2cM0ckPl4int3xtK3yV4lu3Chars32',
+      };
+      return created;
+    },
+  },
+  {
+    method: 'POST',
+    pattern: '/v1/projects/:projectId/api-keys/:apiKeyId/revoke',
+    handle: ({ params }) => {
+      charge('api-keys.revoke');
+      const key = db.apiKeys.find((candidate) => candidate.id === params.apiKeyId);
+      if (!key) fail(404, 'not_found', `API key ${params.apiKeyId} was not found`);
+      return { ...key, status: 'revoked', revoked_at: new Date().toISOString() };
+    },
+  },
+
+  /* Subscriptions — SPECULATIVE: no control-plane module exists yet. */
   {
     method: 'GET',
     pattern: '/v1/projects/:projectId/subscriptions',
     handle: () => ({ data: db.subscriptions }),
   },
-  { method: 'GET', pattern: '/v1/projects/:projectId/api-keys', handle: () => ({ data: db.apiKeys }) },
   { method: 'GET', pattern: '/v1/projects/:projectId/analytics', handle: () => db.analytics },
   {
     method: 'GET',
     pattern: '/v1/projects/:projectId/events',
-    handle: ({ query }) => paginate(filterEvents(query).map(withoutPayload), query),
+    handle: ({ query }) => cursorPage(filterEvents(query).map(withoutPayload), query),
   },
   {
     method: 'GET',
     pattern: '/v1/projects/:projectId/deliveries',
-    handle: ({ query }) => paginate(filterDeliveries(query), query),
+    handle: ({ query }) => cursorPage(filterDeliveries(query), query),
   },
 
   /* Endpoints */

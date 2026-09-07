@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import type { Delivery, EventDetail, Page, Session, WebhookEvent } from '../../types/api';
+import type { CursorPage, Delivery, EventDetail, Session, WebhookEvent } from '../../types/api';
 import * as db from './data';
 import { MockHttpError, mockRequest } from './server';
 
@@ -17,7 +17,7 @@ describe('mock control API', () => {
   });
 
   it('paginates events with an opaque cursor', async () => {
-    const first = await mockRequest<Page<WebhookEvent>>(
+    const first = await mockRequest<CursorPage<WebhookEvent>>(
       'GET',
       `/v1/projects/${db.projects[0].id}/events?limit=10`,
     );
@@ -25,7 +25,7 @@ describe('mock control API', () => {
     expect(first.has_more).toBe(true);
     expect(first.next_cursor).not.toBeNull();
 
-    const second = await mockRequest<Page<WebhookEvent>>(
+    const second = await mockRequest<CursorPage<WebhookEvent>>(
       'GET',
       `/v1/projects/${db.projects[0].id}/events?limit=10&cursor=${first.next_cursor}`,
     );
@@ -33,7 +33,7 @@ describe('mock control API', () => {
   });
 
   it('omits the payload from list rows and includes it on the detail route', async () => {
-    const page = await mockRequest<Page<WebhookEvent>>(
+    const page = await mockRequest<CursorPage<WebhookEvent>>(
       'GET',
       `/v1/projects/${db.projects[0].id}/events?limit=1`,
     );

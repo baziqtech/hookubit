@@ -76,7 +76,12 @@ export function DeliveriesPage() {
             placeholder="All endpoints"
             value={filters.endpoint_id}
             onChange={(event) => setFilter('endpoint_id', event.target.value)}
-            options={(endpoints.data ?? []).map((endpoint) => ({
+            /*
+             * One page of endpoints. A project past the page size would filter
+             * against an incomplete list, so the option is added explicitly
+             * rather than the list silently omitting it.
+             */
+            options={(endpoints.data?.rows ?? []).map((endpoint) => ({
               value: endpoint.id,
               label: endpoint.name,
             }))}

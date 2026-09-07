@@ -14,6 +14,9 @@ import { PrismaModule } from './infrastructure/prisma/prisma.module';
 import { MembersModule } from './members/members.module';
 import { OrganizationsModule } from './organizations/organizations.module';
 import { ProjectsModule } from './projects/projects.module';
+import { RateLimitsModule } from './rate-limits/rate-limits.module';
+import { RetryPoliciesModule } from './retry-policies/retry-policies.module';
+import { WebhookSubscriptionsModule } from './webhook-subscriptions/webhook-subscriptions.module';
 
 @Module({
   imports: [
@@ -68,8 +71,11 @@ import { ProjectsModule } from './projects/projects.module';
     ApiKeysModule,
     EndpointsModule,
     EndpointSecretsModule,
-    // Still to come: webhook-subscriptions, retry-policies, rate-limits,
-    // events, deliveries, audit, admin.
+    WebhookSubscriptionsModule,
+    RetryPoliciesModule,
+    RateLimitsModule,
+    // Still to come: events, deliveries, audit, admin. The first two depend on
+    // the data plane's router and worker, which are being built now.
   ],
 })
 export class AppModule {}

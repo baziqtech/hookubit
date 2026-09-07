@@ -30,9 +30,9 @@ export function OrganizationLanding() {
 
   return (
     <Async query={projects}>
-      {(data) =>
-        data.length > 0 ? (
-          <Navigate to={`/orgs/${orgId}/projects/${data[0].id}/overview`} replace />
+      {(page) =>
+        page.rows.length > 0 ? (
+          <Navigate to={`/orgs/${orgId}/projects/${page.rows[0].id}/overview`} replace />
         ) : (
           <EmptyState
             title="No projects yet"
