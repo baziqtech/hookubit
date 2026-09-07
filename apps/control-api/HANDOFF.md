@@ -2234,3 +2234,154 @@ here:
 - The per-project ceilings (50 retry policies, 300 rate limits) are compile-time
   constants, not `ConfigService`-driven like `MAX_PROJECTS_PER_ORGANIZATION`.
   Worth aligning if an operator ever needs to raise one without a deploy.
+
+---
+
+## Migration `20260907000000_handoff_schema_requests` — the consolidated schema requests
+
+One migration, hand-written, consolidating every schema/index/constraint request
+found in `apps/control-api/HANDOFF.md`, `services/data-plane/HANDOFF.md` and
+`deployments/HANDOFF.md`. Files touched: `prisma/schema.prisma`,
+`prisma/migrations/20260907000000_handoff_schema_requests/migration.sql`,
+`deployments/ci/expected-schema-drift.txt`. Nothing under `src/`.
+
+### To apply
+
+```bash
+pnpm --filter @webhook/control-api prisma:generate
+DATABASE_URL=... DIRECT_DATABASE_URL=... \
+  pnpm --filter @webhook/control-api prisma:deploy
+```
+
+`prisma:deploy` applies `20260906000000_init`, then `20260906010000_review_fixes`,
+then this one. **Never `prisma migrate dev`** — see
+`deployments/ci/expected-schema-drift.txt`.
+
+### Satisfied
+
+| Request | From | Where it lives |
+|---|---|---|
+| `api_keys.created_by_user_id` / `created_by_membership_id`, both nullable, both FK `ON DELETE SET NULL`, both indexed | control-api FIX 2 | schema.prisma (`ApiKey`, `User`, `OrganizationMember`) + migration §1, with a backfill from `audit_logs` |
+| Nine CHECK constraints on `retry_policies` (strategy, max_attempts, initial_delay_ms, max_delay_ms, delay ordering, multiplier, exponential multiplier > 1, jitter_ratio, max_retry_duration_ms) | control-api MIGRATION REQUEST | migration §2 — hand-written; Prisma cannot express CHECK |
+| Partial unique index `retry_policies_one_default_per_project` (`WHERE is_default`) | control-api MIGRATION REQUEST | migration §2 |
+| Three CHECK constraints on `rate_limit_policies` (limit, window_seconds, burst) | control-api MIGRATION REQUEST | migration §3 |
+| `deliveries_ready_idx`, predicate **including `processing`** | data-plane item 6 | migration §4, exactly the requested column list, plus `NULLS FIRST` |
+| `event_outbox_ready_idx` (`available_at, created_at` WHERE status IN pending/processing) | data-plane §4 item 1 | migration §5 |
+| `events.ordering_key` | data-plane item 3 | **already shipped** in `20260906010000_review_fixes`; ingest can move off `headers->>'ordering_key'` now |
+| `idempotency_keys` / `api_keys.key_hash` indexes | data-plane items 1, 2 | recorded as "no change needed"; nothing was optimised away |
+
+**Added beyond the requests: `deliveries_ready_fifo_idx`.** The requested
+`deliveries_ready_idx` leads with `(organization_id, project_id)`, which serves
+`CLAIM_STRATEGY=tenant_fair`'s LATERAL and the tenant-snapshot CTE. It cannot
+serve `CLAIM_STRATEGY=fifo` — **the strategy that ships as the default** — whose
+claim orders globally by `(next_attempt_at, created_at)` with no tenant
+predicate. Two different leading columns, two indexes; both are partial over the
+same ready set, so both are bounded by the backlog rather than the table.
+
+Both carry `NULLS FIRST` on `next_attempt_at`, which the requests did not ask
+for. The claim orders `next_attempt_at NULLS FIRST` and `next_attempt_at` is
+still nullable; a default (`ASC NULLS LAST`) index cannot satisfy that ordering
+and the planner would sort the whole ready set. It becomes a no-op the day the
+column goes NOT NULL.
+
+### Deliberately NOT done
+
+1. **`deliveries.next_attempt_at` NOT NULL** (ADR-0007, data-plane item 7).
+   **It would break the data plane on the first terminal delivery.**
+   `internal/worker/store.go` `advanceSQL` writes
+   `next_attempt_at = CASE WHEN $5::bool THEN now() + $6::interval ELSE NULL END`
+   on every transition, so every succeed / exhaust / cancel sets it to NULL, and
+   `internal/worker/store_integration_test.go` asserts terminal rows have a NULL
+   `next_attempt_at` ("*is terminal but next_attempt_at = %v, so the claim query
+   would pick it up again*"). The router does always set it on INSERT — that half
+   of the claim is true — but the terminal writer is the blocker. **Order of
+   operations: change `advanceSQL` to stop nulling it (a terminal row is excluded
+   by `status`, not by a NULL timestamp), ship that, then a follow-up migration
+   does `UPDATE deliveries SET next_attempt_at = created_at WHERE next_attempt_at
+   IS NULL; ALTER TABLE deliveries ALTER COLUMN next_attempt_at SET NOT NULL;`.**
+   Only then can `readyPredicate` drop its `IS NULL` half and both indexes drop
+   `NULLS FIRST`.
+2. **`idempotency_keys.expires_at` → `@db.Timestamptz`** (data-plane, "recorded,
+   not fixed"). The data plane itself says it is not worth a schema change on its
+   own, the drift is zero in the distroless image, and `ALTER COLUMN ... TYPE
+   timestamptz` rewrites the table. Fold it into the next change that touches
+   that table, or fix it in Go with `time.Now().UTC()` — either alone is enough.
+3. **Retention sweeps** for `idempotency_keys` and `event_outbox`, and the
+   orphaned-payload reconciliation. Jobs, not schema; the indexes they need
+   (`idempotency_keys.expires_at`, `event_outbox.processed_at` via
+   `event_outbox_ready_idx`'s siblings) already exist.
+4. **A `projects_count` / `api_keys_count` counter column.** Hypothetical in the
+   source HANDOFF ("if a hard limit is ever needed"), not requested.
+5. **The `api_keys` enforcement itself** — scope re-derivation at authentication,
+   and auto-revoke in `MembersService.remove`. The columns exist now; the
+   behaviour is `src/`-owned and was explicitly out of scope here.
+   `ApiKeyDto` should also gain `created_by_user_id`.
+
+### Safety on a non-empty database
+
+No database exists yet, but the file is written as if one did.
+
+- New columns are **nullable with no default** → no table rewrite.
+- The `audit_logs` backfill runs **before** the foreign keys exist, and is
+  followed by two `NOT EXISTS` sweeps that null out any recovered id whose
+  `users` / `organization_members` row is gone. The audit trail is not a foreign
+  key and outlives what it names; a dangling id would abort `ADD CONSTRAINT` and
+  take the whole deploy with it.
+- Every CHECK is added `NOT VALID` and `VALIDATE`d in a separate statement, so
+  the ACCESS EXCLUSIVE lock covers only the catalog write and the row scan runs
+  under SHARE UPDATE EXCLUSIVE.
+- **Every CHECK and unique index is preceded by an idempotent repair pass** that
+  clamps out-of-range rows first and `RAISE NOTICE`s what it changed. Chosen over
+  "fail on a bad row" because one legacy row would otherwise abort the deploy,
+  and over silent `NOT VALID`-forever because that enforces nothing on the rows
+  that already exist. Each repair is a no-op on an empty table. Notable choices:
+  an out-of-range or NaN `multiplier` becomes `2` (what `retry.Delay` already
+  substitutes), an unusable `burst` becomes NULL (which already means "capacity
+  equals limit"), and the **oldest** default retry policy in each project is the
+  one kept.
+- Indexes are `CREATE INDEX IF NOT EXISTS`, **not `CONCURRENTLY`**: Prisma wraps
+  a migration file in a transaction and `CONCURRENTLY` cannot run inside one. On
+  a large populated `deliveries` table, build them by hand with `CONCURRENTLY`
+  first (the definitions in the migration are exact) and this migration then
+  skips them.
+
+### PostgreSQL floor
+
+Unchanged at **15+**. Nothing added here needs it — partial indexes and CHECK
+constraints are ancient — but the `server_version_num` guard from
+`20260906010000_review_fixes` is repeated at the top of this file so it is
+self-describing if it is ever applied alone.
+
+### CI drift fixture
+
+`deployments/ci/expected-schema-drift.txt` gains four index names:
+`retry_policies_one_default_per_project`, `deliveries_ready_idx`,
+`deliveries_ready_fifo_idx`, `event_outbox_ready_idx`. All four are partial;
+Prisma has no partial-index syntax, so all four are drift by construction.
+
+**The twelve CHECK constraints are deliberately NOT in the fixture.** Prisma's
+datamodel has no concept of a CHECK constraint so `migrate diff` does not report
+them — and the fixture's second consumer (`.github/workflows/ci.yml`, "Hand-written
+indexes survive a real migrate deploy") looks every line up in `pg_indexes`, where
+a constraint name will never appear. If a future Prisma release starts emitting
+`DROP CONSTRAINT` for them, that file needs a **second** list and the job a
+second loop. Do not paste constraint names into the existing one.
+
+### Verified, and not
+
+- `pnpm --filter @webhook/control-api prisma:generate` — **passes** (client v5.22.0).
+- `npx prisma validate` — **passes**.
+- `pnpm --filter @webhook/control-api build` — **passes**.
+- `src/infrastructure/prisma/schema.spec.ts` — 21 tests, **pass** (it asserts the
+  `review_fixes` SQL text; nothing there was touched).
+- **The SQL has NOT been executed.** No database is reachable: Docker is down and
+  the local PostgreSQL is 14 with a broken icu4c link, below the 15 floor. The
+  migration was read statement by statement against the real column and enum
+  definitions in `20260906000000_init` and `schema.prisma`, and the claim SQL it
+  is indexing was read out of `internal/queue/postgres.go` and
+  `internal/router/store.go` rather than from the ADR. **Someone must run
+  `prisma migrate deploy` against a real PostgreSQL 15+ before this is trusted**,
+  and confirm the two things a dry read cannot: that the four partial indexes
+  appear in `pg_indexes` (the CI job does exactly this), and that the claim
+  queries actually choose them — `EXPLAIN` the FIFO claim and look for
+  `deliveries_ready_fifo_idx` with no Sort node above it.

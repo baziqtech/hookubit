@@ -63,6 +63,10 @@ model User {
   auditLogs   AuditLog[]
   tokens      UserToken[]
   sessions    Session[]
+  /// API keys this user minted. onDelete: SetNull on the key side - deleting a
+  /// person must not delete the credentials they issued (that would orphan the
+  /// delivery history hanging off them), and must not be blocked by them.
+  apiKeysIssued ApiKey[] @relation("ApiKeyCreatedBy")
 
   @@map("users")
 }
@@ -137,6 +141,9 @@ model OrganizationMember {
 
   organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
   user         User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  /// API keys minted while holding THIS membership. The link going NULL is the
+  /// signal that the issuer has left the organization.
+  apiKeysIssued ApiKey[] @relation("ApiKeyCreatedByMembership")
 
   @@unique([organizationId, userId])
   @@index([userId])
@@ -196,9 +203,33 @@ model ApiKey {
   createdAt  DateTime    @default(now()) @map("created_at")
   updatedAt  DateTime    @updatedAt @map("updated_at")
 
+  /// WHO MINTED THIS KEY. `scopes` is a snapshot of the issuer's authority at
+  /// mint time and nothing re-checks it afterwards, so without these columns a
+  /// developer who mints a key carrying `endpoints.write` and is then demoted
+  /// to viewer - or removed outright - leaves a credential with full developer
+  /// authority and no record of whose authority it was.
+  ///
+  /// Both are NULLABLE and both foreign keys are ON DELETE SET NULL. Restrict
+  /// would make an issuer undeletable; Cascade would destroy the credential
+  /// (and orphan its delivery history) when a person leaves. Neither is right.
+  /// Pre-existing rows have no issuer and must not block the migration.
+  createdByUserId       String? @map("created_by_user_id")
+  /// The role lookup joins to THIS one. Its going NULL is itself the signal
+  /// that the issuer has left; a NULL issuer must intersect to the empty scope
+  /// set, never to the stored scopes.
+  createdByMembershipId String? @map("created_by_membership_id")
+
   project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  createdByUser       User?               @relation("ApiKeyCreatedBy", fields: [createdByUserId], references: [id], onDelete: SetNull)
+  createdByMembership OrganizationMember? @relation("ApiKeyCreatedByMembership", fields: [createdByMembershipId], references: [id], onDelete: SetNull)
 
   @@index([projectId])
+  /// Both indexes exist for the revocation sweep, not for reads: removing a
+  /// membership must find every key that membership minted without scanning
+  /// api_keys, and PostgreSQL's own ON DELETE SET NULL enforcement does the
+  /// same lookup on every user/member delete.
+  @@index([createdByUserId])
+  @@index([createdByMembershipId])
   @@map("api_keys")
 }
 
@@ -340,6 +371,14 @@ model RetryPolicy {
   endpoints Endpoint[]
 
   @@index([projectId])
+  /// NOTE: nine CHECK constraints and the partial unique index
+  /// `retry_policies_one_default_per_project` (WHERE is_default) are created by
+  /// hand in 20260907000000_handoff_schema_requests. Prisma can express
+  /// neither, so they are invisible here and to `migrate diff`.
+  /// The scar: `max_delay_ms = 0` overflowed int64 nanoseconds in retry.Delay
+  /// and produced a NEGATIVE backoff, so next_attempt_at sat permanently in the
+  /// past and a dead endpoint was re-polled every 250ms. The control plane
+  /// refuses those values; the database accepted them from every other writer.
   @@map("retry_policies")
 }
 
@@ -370,6 +409,11 @@ model RateLimitPolicy {
   /// NULLS DISTINCT by default, so the generated constraint enforced nothing on
   /// exactly the rows that mattered. Kept here so Prisma still types the
   /// compound `where` for upserts.
+  /// NOTE: three CHECK constraints (limit, window_seconds, burst) are created
+  /// by hand in 20260907000000_handoff_schema_requests. limit = 0 disables the
+  /// covered traffic entirely, window_seconds = 0 is a division by zero in the
+  /// refill rate, and burst < limit means the configured limit can never be
+  /// reached. Prisma cannot express CHECK constraints.
   @@unique([projectId, scope, resourceId])
   @@map("rate_limit_policies")
 }
@@ -472,6 +516,13 @@ model EventOutbox {
   event Event @relation(fields: [eventId], references: [id], onDelete: Cascade)
 
   @@index([status, availableAt])
+  /// NOTE: `event_outbox_ready_idx` - (available_at, created_at) WHERE status IN
+  /// ('pending', 'processing') - is created by hand in
+  /// 20260907000000_handoff_schema_requests. It covers the router's
+  /// FOR UPDATE SKIP LOCKED claim ordering AND the MIN(available_at) lag gauge,
+  /// neither of which the index above serves without a sort or a full scan.
+  /// `processing` is in the predicate deliberately: a leased row IS processing,
+  /// and a crashed router's rows must be reclaimable cheaply.
   @@map("event_outbox")
 }
 
@@ -543,6 +594,17 @@ model Delivery {
   @@index([eventId])
   @@index([endpointId, createdAt(sort: Desc)])
   @@index([projectId, status, createdAt(sort: Desc)])
+  /// NOTE: `deliveries_ready_idx` and `deliveries_ready_fifo_idx` - partial
+  /// indexes over the claim's ready set - are created by hand in
+  /// 20260907000000_handoff_schema_requests. Prisma has no partial-index
+  /// syntax. `processing` is in both predicates deliberately: a leased row IS
+  /// processing, and internal/queue's claim reclaims expired leases, so
+  /// excluding it would put an abandoned delivery outside the index and make a
+  /// dead worker's rows recoverable only by a sequential scan.
+  ///
+  /// `next_attempt_at` stays NULLABLE. internal/worker's advanceSQL writes NULL
+  /// on every TERMINAL transition; NOT NULL would fail every succeed/exhaust/
+  /// cancel write. See apps/control-api/HANDOFF.md.
   @@map("deliveries")
 }
 

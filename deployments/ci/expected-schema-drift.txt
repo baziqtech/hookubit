@@ -38,3 +38,45 @@ rate_limit_policies_project_id_scope_resource_id_key
 # NULLS NOT DISTINCT, same reason: the org-wide usage row (project_id IS NULL)
 # duplicated instead of accumulating.
 usage_records_organization_id_project_id_metric_period_star_key
+
+# ---------------------------------------------------------------------------
+# Added by 20260907000000_handoff_schema_requests. All four are PARTIAL indexes
+# (they carry a WHERE clause); Prisma has no partial-index syntax, so all four
+# are drift by construction, forever.
+#
+# NOTE FOR WHOEVER MAINTAINS THE CI JOB: that migration also adds twelve CHECK
+# constraints (nine on retry_policies, three on rate_limit_policies). They are
+# deliberately NOT listed here. Prisma's datamodel has no concept of a CHECK
+# constraint, so `migrate diff` does not report them - and the second CI step
+# looks every line in this file up in pg_indexes, where a constraint name will
+# never appear. If a future Prisma release starts emitting DROP CONSTRAINT for
+# them, this file needs a SECOND list and the job needs a second loop; do not
+# paste constraint names into this one.
+# ---------------------------------------------------------------------------
+
+# Partial unique index (WHERE is_default). "At most one default retry policy per
+# project" was held only inside a SERIALIZABLE transaction in the service. A
+# second default is not a visible error - it is a project where which retry
+# policy an endpoint gets depends on row order.
+retry_policies_one_default_per_project
+
+# Partial index over the delivery ready set, tenant-fair claim
+# (WHERE status IN ('pending','scheduled','queued','retrying','processing')).
+# 'processing' is in the predicate ON PURPOSE: a leased row IS 'processing', and
+# the claim reclaims expired leases. Narrow the predicate and a dead worker's
+# deliveries fall outside the index - stuck in 'processing' forever, never
+# retried, never exhausted, findable only by sequential scan.
+deliveries_ready_idx
+
+# Same ready set, leading with (next_attempt_at, created_at) instead of the
+# tenant pair, because CLAIM_STRATEGY=fifo - the SHIPPING DEFAULT - orders
+# globally and cannot use an index that leads with organization_id/project_id.
+deliveries_ready_fifo_idx
+
+# Partial index over the outbox ready set (WHERE status IN ('pending',
+# 'processing')). Covers both the router's ORDER BY (available_at, created_at)
+# claim and its MIN(available_at) lag gauge; the Prisma-managed
+# (status, available_at) index covers neither without a sort or a full scan.
+# An outbox row that is never claimed is an event that returned 202 and will
+# never be delivered.
+event_outbox_ready_idx
