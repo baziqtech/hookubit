@@ -271,3 +271,500 @@ lease from an endpoint timeout.
   ingest role logs a warning at startup when the bucket is unset.
 - `idempotency_keys` TTL is a constant (`DefaultIdempotencyTTL`, 24h), not
   configuration. Promote it to an env var if a customer needs a longer window.
+
+---
+
+# Event router (`internal/router`) — wiring, requests, and what is left
+
+Owned by the router branch. Everything below is actionable outside
+`internal/router` and needs someone else to apply it.
+
+## 1. Wire `runRouter` (owned by `cmd/webhookd/roles.go`)
+
+`runRouter` currently ticks and sets `metrics.OutboxLag` to a hard-coded zero.
+Replace the whole body with:
+
+```go
+func runRouter(ctx context.Context, cfg *config.Config, pool *pgxpool.Pool, log *slog.Logger) error {
+	r, err := router.New(router.Options{
+		Store:       router.NewPostgresStore(pool),
+		RouterID:    instanceID, // MUST be unique per process - it is the lease owner
+		Logger:      log,
+		BatchSize:   cfg.OutboxBatchSize,
+		Concurrency: cfg.RouterConcurrency,       // see 2 below; router.DefaultConcurrency (4) until it exists
+		Lease:       cfg.RouterLease,             // see 2 below; router.DefaultLease (60s) until it exists
+		MaxSubscriptionsPerEvent: cfg.MaxSubscriptionsPerEvent, // see 2; default 2000
+		MaxOutboxAttempts:        cfg.MaxOutboxAttempts,        // see 2; default 5
+	})
+	if err != nil {
+		return err
+	}
+	return r.Run(ctx, cfg.OutboxPollInterval)
+}
+```
+
+Two things that are not optional:
+
+- **`RouterID` must be unique per process.** It is the value written to
+  `event_outbox.locked_by`, and every write the router makes is guarded on
+  still owning that value. Two processes sharing an id can retire each other's
+  rows. `runAll` already threads an `instanceID` through to `runWorker`; pass
+  the same one here (or `instanceID + "-router"`). `router.New` refuses an empty
+  id rather than defaulting to something plausible.
+- **`Concurrency` consumes pooled connections.** Each in-flight fan-out holds
+  one connection for the length of its transaction. Keep
+  `RouterConcurrency + WorkerConcurrency` comfortably below
+  `DATABASE_MAX_CONNECTIONS`, or a busy router starves the delivery loop of
+  connections and the failure looks like slow deliveries, not a config error.
+
+`runAll` needs no change beyond that — the role already exists in its map.
+
+There is also `RunOnce(ctx) (int, error)` if you want eager draining: keep
+calling it while it returns `BatchSize` instead of waiting a tick per batch.
+`Run` deliberately does not do this, so a backlog cannot monopolise the process.
+
+## 2. Configuration (owned by `internal/config/config.go`)
+
+`OutboxBatchSize` and `OutboxPollInterval` already exist and are used. Four
+knobs have package defaults today and should become environment variables:
+
+| Env var | Default | What it bounds |
+| --- | --- | --- |
+| `ROUTER_CONCURRENCY` | 4 | Events fanned out at once. One pooled connection each. |
+| `ROUTER_LEASE_SECONDS` | 60 | How long a claimed outbox row is unavailable after a router dies. Must exceed the worst-case fan-out transaction, not the poll interval. |
+| `MAX_SUBSCRIPTIONS_PER_EVENT` | 2000 | Subscriptions examined **and** deliveries created for one event. |
+| `MAX_OUTBOX_ATTEMPTS` | 5 | The poison bound. Claims before a row is parked. |
+
+Suggested validation, in the same style as the existing rules:
+
+- `ROUTER_CONCURRENCY` must be positive.
+- `ROUTER_CONCURRENCY + WORKER_CONCURRENCY <= DATABASE_MAX_CONNECTIONS - 2`
+  (headroom for probes and the claim itself). This one has teeth: without it the
+  first busy day looks like a delivery-latency incident.
+- `ROUTER_LEASE_SECONDS` must be greater than `DATABASE_STATEMENT_TIMEOUT_MS`,
+  or a transaction can outlive its own lease and lose the row mid-flight.
+
+## 3. Metrics (owned by `internal/metrics`)
+
+Six instruments are declared in `internal/router/metrics.go` rather than in
+`internal/metrics`, purely to keep the router and worker branches off the same
+file while both were being written. They register against the same default
+registry, so `/metrics` is already correct. **Please move them into
+`internal/metrics` verbatim once both branches land** — the split is an artefact
+of the merge, not a design:
+
+`router_outbox_claimed_total`, `router_events_routed_total{outcome}`,
+`router_fan_out_size`, `router_subscriptions_skipped_total{reason}`,
+`router_outbox_parked_total{reason}`, `router_route_duration_seconds`.
+
+The existing `deliveries_created_total` and `outbox_pending_age_seconds` are
+driven by the router as specified; nothing about them changed.
+
+**The two to alert on.** `router_outbox_parked_total` at any non-zero rate is an
+event that will never be delivered without a human replaying it.
+`router_subscriptions_skipped_total{reason="fan_out_cap_exceeded"}` means
+endpoints were silently left out of a fan-out.
+
+## 4. Schema and index requests (owned by `apps/control-api/prisma`)
+
+1. **`event_outbox` wants a partial claim index.** The claim orders by
+   `(available_at, created_at)` over a two-status ready set;
+   `event_outbox_status_available_at_idx` covers the status/available_at
+   predicate but the whole index is scanned for the `MIN(available_at)` lag
+   query and the ordering tiebreak is not covered. Requested:
+
+   ```sql
+   CREATE INDEX CONCURRENTLY event_outbox_ready_idx
+       ON event_outbox (available_at, created_at)
+    WHERE status IN ('pending', 'processing');
+   ```
+
+   Note the predicate includes `processing`, for the same reason ADR-0007's
+   `deliveries_ready_idx` must (item 6 above): a leased row is `processing`, and
+   a crashed router's rows have to be reclaimable *cheaply*, not just possible
+   to reclaim.
+
+2. **`deliveries_event_endpoint_original_key` must not be "cleaned up".**
+   `prisma migrate diff` reports the partial unique index as drift because
+   schema.prisma cannot express a partial index. It is the ON CONFLICT arbiter
+   for the entire fan-out. Regenerating the migration without it does not
+   produce an error — it produces duplicate deliveries after any router restart.
+   The migration file already says so; repeating it here because that is the
+   file someone will "fix".
+
+3. **`events.ordering_key` exists but ingest does not write it.** The router
+   reads `COALESCE(events.ordering_key, events.headers->>'ordering_key')`, so
+   both work today. When `internal/ingest` moves to the column (item 3 in the
+   schema-requests section above), the COALESCE can be dropped — it is one line
+   in `loadEventSQL`.
+
+4. **`event_outbox` needs a retention sweep.** Rows retire to `processed` (or
+   `failed`, when parked) with `processed_at` set, and nothing deletes them.
+   `DELETE FROM event_outbox WHERE status = 'processed' AND processed_at < now() - interval '7 days'`
+   is the shape. `failed` rows should NOT be swept automatically; they are the
+   parking bay and an operator has to see them.
+
+## 5. Operator surface that does not exist yet (owned by the control API)
+
+Parking a poisoned outbox row is only half a recovery story. There is currently
+no way to un-park one. The control plane needs an endpoint that sets a `failed`
+outbox row back to `pending` with `attempts = 0`; re-running it is safe by
+construction (see below). Until that exists, recovery is a manual `UPDATE`, and
+"a human needs psql to answer that" is the thing this product is supposed to
+avoid.
+
+## 6. Decisions taken, so they can be argued with
+
+- **A `paused` endpoint is skipped, not buffered.** Deliveries are created only
+  for `status = 'active' AND enabled = true`. Buffering into a paused endpoint
+  would materialise rows every worker poll claims and immediately puts back —
+  the dead-tuple churn the worker stub's comment already warns about — and would
+  make queue depth meaningless. The cost: an event published while an endpoint
+  is paused is never delivered to it, and recovering it needs a replay. This is
+  a product decision. If buffering is wanted, the change is one line in
+  `gate()`, plus a worker that understands "queued but not runnable".
+- **Subscriptions are loaded unfiltered and gated in Go.** The query could
+  filter on enabled/status and return fewer rows. It deliberately does not,
+  because "no subscription matched this event type" and "every subscription in
+  this project is disabled" are different answers to the same 2am question, and
+  `router_subscriptions_skipped_total{reason}` can only distinguish them if the
+  rejected rows are seen. Bounded by `MAX_SUBSCRIPTIONS_PER_EVENT`.
+- **Two subscriptions on one endpoint produce ONE delivery.** The uniqueness
+  arbiter is `(event_id, endpoint_id)`, not subscription id. The plan
+  deduplicates explicitly (lowest subscription id wins, so the oldest
+  subscription is recorded) rather than letting `ON CONFLICT DO NOTHING` swallow
+  the second row, so the created count means what it says.
+- **The fan-out cap truncates rather than fails.** Over the cap, the oldest
+  subscriptions are served and the rest are dropped with an `ERROR` log naming
+  the project and the remedy. Partial delivery beats none; silence would be the
+  bug.
+
+## 7. Failure cases, and what each one does
+
+| Scenario | Behaviour |
+| --- | --- |
+| Crash before commit | Nothing written. The lease lapses; the row is reclaimable because `processing` is in the claim's status set. |
+| Crash after inserting deliveries, before retiring the outbox row | **Cannot happen**: the inserts, the event transition and the outbox retirement are one transaction. The equivalent — the row being replayed later — inserts nothing, arbitrated by the partial unique index. |
+| Lease stolen mid-transaction | `markOutboxProcessedSQL` is guarded on `locked_by`; zero rows affected rolls the whole transaction back, deliveries included. Verified in `TestPostgresRouteRollsBackEverythingWhenTheLeaseIsLost`. |
+| Subscription → soft-deleted or disabled endpoint | Skipped, counted under `endpoint_not_active` / `endpoint_disabled`. |
+| Endpoint whose project or organisation is soft-deleted | Skipped, counted under `project_not_active` / `organization_not_active`. The event is still marked `processed` and the outbox row still leaves the queue. |
+| Subscription pointing across a tenant boundary | Skipped as `tenant_mismatch`, checked before every other gate. The tenant columns come from the endpoint's own project/organisation, never from the event. |
+| Outbox row whose event was deleted | Parked with reason `event_missing`. Unreachable through the FK (it cascades), handled because a retention job that bypasses it would otherwise wedge the queue. |
+| Poisoned row | `attempts` is incremented by the **committed claim**, not on the failure path, so a row that kills the process still counts. Over `MAX_OUTBOX_ATTEMPTS` it is parked as `failed` with a recorded reason and never claimed again. |
+| Transient database failure mid-fan-out | Row released back to `pending` with an exponential backoff (1s → 60s) and `last_error` recorded. |
+| Zero matching subscriptions | Normal. Event `processed`, outbox row `processed`, logged at INFO with the skip breakdown, `router_events_routed_total{outcome="no_subscriptions"}`. |
+
+## 8. Tests, and what was not run
+
+`go vet`, `go build`, `go test -race`, `gofmt` are clean for
+`./internal/router/...`. `go vet ./...` currently fails in `internal/worker`
+(`undefined: HealthStore`), which is the concurrently-developed worker branch,
+not this one.
+
+The DB-dependent tests in `internal/router/store_postgres_test.go` are written
+and compile but **have not been executed**: no migrated database was reachable
+from this environment (`DATABASE_URL` unset; the local 5432 is a different
+instance). Run them with:
+
+```
+cd services/data-plane
+DATABASE_URL=postgresql://webhook:webhook@localhost:5432/webhook_platform go test -race -count=1 ./internal/router/
+```
+
+They assert the properties that cannot be unit-tested: that a re-run inserts
+nothing, that a lost lease rolls back the deliveries too, that the partial
+unique index rejects a second original row but permits a replay row, that an
+expired lease is reclaimable and a live one is not, and that a parked row never
+returns to the ready set.
+
+Two SQL details in `insertDeliveriesSQL` are the most likely place a first run
+against a real database will complain, and both are deliberate: the explicit
+`'pending'::"DeliveryStatus"` cast (an `INSERT ... SELECT` resolves unknown
+literals to `text` before it sees the target column, and there is no assignment
+cast from text to an enum), and the `WHERE replay_of_delivery_id IS NULL`
+repeated in the conflict target (PostgreSQL only infers a partial index when the
+statement restates its predicate).
+
+---
+
+# Delivery worker (`internal/worker`) — wiring, crypto interop, and what is left
+
+The stage that actually sends webhooks. It claims a lease, loads the endpoint
+and the event's raw bytes, checks the breaker and the rate limit, signs with
+every active secret, delivers through `internal/egress`, appends a
+`delivery_attempts` row and advances the delivery state machine — all under the
+lease, and all in one transaction at the end.
+
+## 1. Wire `runWorker` (owned by `cmd/webhookd/roles.go`)
+
+Replace the Phase 3 stub body with this. It is the whole wiring; nothing else in
+`cmd/` changes.
+
+```go
+func runWorker(ctx context.Context, cfg *config.Config, pool *pgxpool.Pool, log *slog.Logger, workerID string) error {
+	guard, err := egress.NewGuard(cfg.EgressAllowPrivateNetworks, cfg.EgressPrivateAllowlist)
+	if err != nil {
+		return fmt.Errorf("build egress guard: %w", err)
+	}
+	client := egress.NewClient(guard, egress.Limits{
+		DNSTimeout:            cfg.EgressDNSTimeout,
+		ConnectTimeout:        cfg.EgressConnectTimeout,
+		TLSHandshakeTimeout:   cfg.EgressTLSTimeout,
+		ResponseHeaderTimeout: cfg.EgressResponseHeaderTimeout,
+		TotalTimeout:          cfg.EgressTotalTimeout,
+		MaxResponseBytes:      cfg.EgressMaxResponseBytes,
+		MaxRedirects:          cfg.EgressMaxRedirects,
+		IdleConnsPerHost:      4,
+	})
+
+	// Same three env vars the control plane reads. See section 2 - these are
+	// NOT yet fields on config.Config.
+	keyring, err := worker.ParseKeyring(
+		os.Getenv("ENCRYPTION_KEY"),
+		os.Getenv("ENCRYPTION_KEY_ID"),
+		os.Getenv("ENCRYPTION_KEYS_RETIRED"),
+	)
+	if err != nil {
+		return fmt.Errorf("build encryption keyring: %w", err)
+	}
+
+	store := worker.NewPostgresStore(pool)
+	w, err := worker.New(worker.Options{
+		Queue:        newQueue(cfg, pool, log),
+		Store:        store,
+		Health:       store,
+		Client:       client,
+		Keyring:      keyring,
+		WorkerID:     workerID,
+		Concurrency:  cfg.WorkerConcurrency,
+		ClaimBatch:   cfg.WorkerClaimBatch,
+		PollInterval: cfg.WorkerPollInterval,
+		Lease:        cfg.DeliveryLease,
+		DBTimeout:    cfg.IngestDBTimeout, // see section 2: it wants its own knob
+		Logger:       log,
+		Limits: worker.GateLimits{
+			Global:   cfg.MaxConcurrencyGlobal,
+			Org:      cfg.MaxConcurrencyPerOrg,
+			Project:  cfg.MaxConcurrencyProject,
+			Endpoint: cfg.MaxConcurrencyEndpoint,
+		},
+	})
+	if err != nil {
+		return err
+	}
+	return w.Run(ctx)
+}
+```
+
+Notes on the wiring:
+
+- **The worker owns its `LeaseKeeper` now.** Delete the one `runWorker`
+  currently constructs; `worker.New` builds it (or accepts one via
+  `Options.Keeper`) and runs it on a context that outlives `ctx`, so leases keep
+  being renewed *during* the shutdown drain. Two keepers renewing the same
+  worker id would be harmless but pointless.
+- `Options.Limiter` defaults to an in-process token bucket. When the Redis
+  limiter exists, pass it here; it must fail open (section 4).
+- `Options.Breaker` is a `BreakerConfig`; the zero value takes
+  `DefaultBreakerConfig()` (degraded at 3 consecutive failures, open at 5, 30s
+  cooldown doubling to a 10m cap, one successful probe closes it).
+- Imports to add in `roles.go`: `os`, `fmt`, `internal/egress`,
+  `internal/worker`.
+
+## 2. Configuration requests (owned by `internal/config/config.go`)
+
+None of these block the wiring above; all of them make it tidier.
+
+| Env var | Why |
+|---|---|
+| `ENCRYPTION_KEY`, `ENCRYPTION_KEY_ID`, `ENCRYPTION_KEYS_RETIRED` | The worker reads them from `os.Getenv` today. They belong on `Config`, and `Load()` should call `worker.ParseKeyring` so a bad key is a startup failure with every other config problem, not a per-delivery signing error at 3am. **`ENCRYPTION_KEY` should be `require()`d for the worker role**: without it every delivery fails closed. Only `ENCRYPTION_KEY` is in `.env.example`; the other two default to `k1` and empty, matching `crypto.service.ts`. |
+| `WORKER_DB_TIMEOUT_MS` | The worker currently borrows `IngestDBTimeout`. They are different hot paths with different shapes. |
+| `BREAKER_*` (`OPEN_THRESHOLD`, `DEGRADED_THRESHOLD`, `BASE_COOLDOWN_MS`, `MAX_COOLDOWN_MS`, `HALF_OPEN_SUCCESSES`) | Hard-coded defaults today. They are the numbers an operator will want to change first, per ARCHITECTURE.md 26's "rate-limit values should be configurable" applied to the breaker. |
+| `WORKER_MAX_STORED_RESPONSE_BYTES` | Defaults to 8 KiB. The egress client already caps what is *read* (64 KiB); this caps what is kept forever in `delivery_attempts.response_body`. |
+
+`config.Load` should also reject `MAX_CONCURRENCY_PER_ENDPOINT > WORKER_CONCURRENCY`
+for the same reason it already rejects endpoint > project: a per-endpoint
+ceiling above the pool size is not a ceiling.
+
+## 3. Cross-language crypto interop — STATUS: VERIFIED against real TS output
+
+This was called out as the most likely thing to be silently wrong, so here is
+exactly what was done and exactly what it proves.
+
+**The fixture is generated by the control plane's own compiled `CryptoService`**
+(`apps/control-api/dist/common/crypto.service.js` — the file NestJS actually
+loads), not reconstructed from reading the TypeScript. The generator is
+`internal/worker/testdata/generate_crypto_fixture.js`; the captured envelopes
+are `internal/worker/testdata/crypto_interop.json`; `crypto_interop_test.go`
+decrypts them with the Go implementation and asserts the plaintexts.
+
+It covers three vectors: one under the primary key id, one under a *retired* key
+id (so keyring lookup is exercised, not just the happy key), and one for a
+second endpoint. `TestDecryptsTypeScriptEnvelopes` passes.
+
+Pinned in both directions:
+
+- AAD is `` `${table}:${id}:${owner}` `` UTF-8, asserted byte for byte, and
+  asserted negatively: a ciphertext moved to another `endpoint_secrets.id` and
+  a row re-pointed at another `endpoint_id` both fail to authenticate.
+- The four-part legacy envelope is rejected. The control plane deleted that
+  branch because it decrypted with the row binding switched off; if anyone
+  reinstates it there, this test fails here.
+- An unknown key id names the kid and never the key material.
+- Node writes base64url unpadded; the Go decoder accepts padded and unpadded,
+  and standard or URL-safe alphabets for the key itself, matching Node's
+  permissive `Buffer.from`.
+
+**Regenerate the fixture after any change to `crypto.service.ts`:**
+
+```sh
+cd apps/control-api && pnpm build
+node services/data-plane/internal/worker/testdata/generate_crypto_fixture.js \
+  > services/data-plane/internal/worker/testdata/crypto_interop.json
+```
+
+**The one gap:** the fixture was produced from `dist/`, which was already built
+in this checkout. It matches `src/common/crypto.service.ts` as it stands
+(verified by reading both), but nobody has yet decrypted a secret that the
+*running* control API wrote into a *real* `endpoint_secrets` row. That is the
+last mile, and it is one command once a database exists:
+
+```sh
+# create an endpoint via the control API, then:
+DATABASE_URL=... ENCRYPTION_KEY=<the same key the control API runs with> \
+  go test ./internal/worker/ -run TestStoreLoad -v
+```
+followed by an end-to-end delivery, whose success proves the decrypt. Until
+that has been done once, treat "the control API and the worker share a key
+correctly" as verified in the algorithm and unverified in the deployment.
+
+## 4. Deliberate seams and their honest limits
+
+- **`RateLimiter` is per PROCESS.** `TokenBucket` gives one endpoint `limit`
+  tokens per window *per worker*, so eight workers mean up to eight times the
+  configured rate at the endpoint. The interface exists so the Redis token
+  bucket (ARCHITECTURE.md 25) is a substitution; until then the endpoint rate
+  limit stops one worker hammering an endpoint flat out, which is most of the
+  value, but it is not the fleet-wide limit the control API's UI implies. Say
+  so in the UI or land Redis.
+- **Concurrency ceilings are per process too**, for the same reason and with the
+  same arithmetic. The per-endpoint ceiling that must hold across the fleet is
+  the rate limit.
+- **`endpoint_health` is authoritative and un-cached.** Every attempt does one
+  extra PK lookup for `Allow` and one upsert for `RecordOutcome`. Redis may
+  front the *read* later; the probe admission must stay a conditional UPDATE in
+  PostgreSQL, because it is the mutual exclusion that stops a thousand workers
+  probing a recovering endpoint at once.
+- **Large payloads are not deliverable.** If `events.payload_raw` is NULL and
+  `payload_location` is set, the worker has no object-storage client and fails
+  the attempt with `payload_unavailable` — retryable, so it drains once an S3
+  client is wired, and bounded by `max_retry_duration` so it does not sit
+  forever. Wiring a read-side `PayloadStore` is the fix; the seam is
+  `ErrNoPayload` in `errors.go`.
+
+## 5. Decisions taken, so they can be argued with
+
+- **`deliveries.max_attempts` beats the endpoint's current retry policy.** The
+  router freezes a budget onto the delivery; editing a retry policy mid-flight
+  must not extend or truncate deliveries already in progress. Everything else in
+  the policy (delays, multiplier, jitter, duration cap) is read live.
+- **A 4xx does not open the circuit breaker.** The breaker is about
+  availability. A 400 means the endpoint is up and dislikes one payload;
+  opening on it would remove delivery pressure from a healthy endpoint.
+  Breaker failures are exactly the retryable set: transport errors, timeouts,
+  408, 429, 5xx. An SSRF rejection counts for neither — that is our policy, not
+  their health.
+- **A disabled/paused/deleted endpoint `cancelled`s the delivery, it does not
+  retry.** The retry budget is for endpoints that might come back; an operator
+  toggling `enabled` is not a transient fault. This keeps `failed` meaning "the
+  endpoint rejected it".
+- **A deferral writes the reason into `deliveries.last_error`.** That column is
+  the only free-text field the operator UI has, and "why is this delivery not
+  moving" is the question it exists to answer. The alternative is a row sitting
+  in `scheduled` with no explanation anywhere a human looks. A *succeeded*
+  delivery clears it rather than writing "delivered" into a column called
+  `last_error`.
+- **One undecryptable secret does not stop the delivery.** If an endpoint has
+  two active secrets and one fails to decrypt, the worker logs it at ERROR with
+  the secret id and signs with the other. Failing the whole delivery would hand
+  anyone with database write access a denial of service on the endpoint —
+  re-point one secret row and the endpoint goes dark. Zero usable secrets still
+  fails closed.
+- **`Webhook-Signature` is stored unredacted in `delivery_attempts`**, while
+  `Authorization`, `Cookie` and anything containing `secret`/`token`/`api-key`
+  are replaced with `[redacted]`. The signature is derived from the secret but
+  does not reveal it, and it is the first thing anyone debugging "verification
+  fails" needs. Customer credentials in `custom_headers` are the real hazard and
+  they never reach the ledger.
+
+## 6. Crash safety (ARCHITECTURE.md 57, cases 3-5, 17)
+
+Three mechanisms, in the order they fire:
+
+1. Every attempt runs under `LeaseKeeper.Track`. A lost lease cancels it with
+   cause `queue.ErrLeaseLost`, and the worker then writes **nothing** — checked
+   immediately after the HTTP call returns and again before it is made.
+2. The final write is one transaction whose `UPDATE ... WHERE locked_by = $me`
+   is the guard. Zero rows matched means the lease lapsed while the request was
+   in flight: the transaction rolls back and the `delivery_attempts` row goes
+   with it. Without that guard two workers append an attempt and race over the
+   terminal status, and whichever commits last decides whether the customer's
+   delivery "succeeded".
+3. Bookkeeping runs on `context.WithoutCancel`. A SIGTERM landing between the
+   HTTP response and the write does not lose the attempt record.
+
+What is deliberately NOT prevented: a worker killed between the response and the
+write leaves the row leased, the lease lapses, another worker delivers again.
+That is at-least-once, it is the documented contract, and the duplicate is
+detectable because both deliveries carry the same `Webhook-Delivery-Id`.
+
+## 7. Tests, and what was not run
+
+`go vet ./... && go build ./... && go test -race -count=1 ./... && gofmt -l .`
+all pass.
+
+Covered: the state machine as a table (every status class, both exhaustion
+budgets, blocked/permanent/timeout classification, "every transition has a
+reason"); retry scheduling growth and jitter; breaker transitions as a pure
+function and exactly-one-probe under 20 concurrent workers; header construction
+including that no custom header can override or append to `Webhook-Signature`,
+that CRLF/NUL values are dropped and that a re-serialised payload does **not**
+verify; the crypto interop vectors; and the delivery path against `httptest`
+servers for 2xx, 4xx, 429, 5xx, timeout, a body that hangs, an oversized
+response, and a redirect to `169.254.169.254`. Plus: lease lost mid-attempt
+writes nothing, an open breaker and a rate limit defer without burning an
+attempt, one slow endpoint does not consume the pool, the claim is sized to free
+slots, and shutdown drains rather than kills.
+
+**Not run: everything gated on `DATABASE_URL`.** `store_integration_test.go` and
+`breaker_integration_test.go` skip cleanly and have never executed — the only
+PostgreSQL on this machine is 14, and the schema requires 15+. They are the only
+check on column and enum drift against Prisma, and on the breaker SQL agreeing
+with `NextHealth`, so **run them first** against the real database:
+
+```sh
+cd services/data-plane && DATABASE_URL=... go test -race -count=1 ./internal/worker/ -v
+```
+
+The likeliest failures there, in order: an enum cast (`$n::text::"DeliveryStatus"`,
+`"AttemptStatus"`, `"EndpointHealthState"`) that pgx encodes differently than
+expected; `make_interval(secs => ...)` argument typing in the breaker cooldown;
+and `TIMESTAMP(3)` versus `time.Time` location on `delivery_attempts.started_at`
+— every other time value is computed by the server precisely to avoid that.
+
+## 8. Still missing from the delivery stage
+
+- **Ordered delivery.** `ordering_key` is loaded and ignored. Per-key
+  serialisation alongside retries is genuinely hard (ADR-0004) and nothing in
+  this package pretends otherwise.
+- **`queue_depth` is never set.** The scheduler is the natural owner of that
+  gauge; the worker sees only what it claimed.
+- **No OpenTelemetry spans.** ARCHITECTURE.md 44 wants a trace from ingest
+  through egress; the worker emits metrics and structured logs only.
+- **`meta_events`** — the platform's own events about delivery outcomes, which
+  Convoy has and this does not.
+- **Per-endpoint egress clients.** `endpoints.timeout_ms` is applied as a
+  context deadline, so it can only ever *shorten* an attempt; the process still
+  shares one transport built from `EGRESS_TOTAL_TIMEOUT_MS`, so the per-phase
+  timeouts (DNS, connect, TLS, response header) are global. `HTTPDoer` is an
+  interface so a per-endpoint client is a substitution rather than a rewrite.

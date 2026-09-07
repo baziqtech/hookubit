@@ -8,10 +8,16 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"fmt"
+
 	"github.com/shaq/webhook-platform/services/data-plane/internal/config"
+	"github.com/shaq/webhook-platform/services/data-plane/internal/egress"
+	"github.com/shaq/webhook-platform/services/data-plane/internal/ids"
 	"github.com/shaq/webhook-platform/services/data-plane/internal/ingest"
-	"github.com/shaq/webhook-platform/services/data-plane/internal/metrics"
 	"github.com/shaq/webhook-platform/services/data-plane/internal/queue"
+	"github.com/shaq/webhook-platform/services/data-plane/internal/retry"
+	"github.com/shaq/webhook-platform/services/data-plane/internal/router"
+	"github.com/shaq/webhook-platform/services/data-plane/internal/worker"
 )
 
 // slogLogger is an alias kept so main.go reads cleanly.
@@ -54,15 +60,40 @@ func runIngest(ctx context.Context, cfg *config.Config, pool *pgxpool.Pool, log 
 	return ingest.Serve(ctx, cfg.IngestPort, handler, log)
 }
 
-func runRouter(ctx context.Context, cfg *config.Config, _ *pgxpool.Pool, log *slog.Logger) error {
-	// PHASE 3: claim event_outbox rows with FOR UPDATE SKIP LOCKED, match the
-	// event against enabled subscriptions (internal/router.Match), and insert
-	// one delivery row per match inside a single transaction with the outbox
-	// row's completion. Re-running a partially applied batch must be safe, so
-	// delivery insertion is keyed on (event_id, endpoint_id).
-	return tick(ctx, cfg.OutboxPollInterval, func(context.Context) {
-		metrics.OutboxLag.Set(0)
-	}, log)
+func runRouter(ctx context.Context, cfg *config.Config, pool *pgxpool.Pool, log *slog.Logger) error {
+	r, err := router.New(router.Options{
+		Store:                    router.NewPostgresStore(pool),
+		RouterID:                 ids.New(ids.Worker),
+		Logger:                   log,
+		BatchSize:                cfg.RouterBatchSize,
+		Concurrency:              cfg.RouterConcurrency,
+		Lease:                    cfg.RouterLease,
+		MaxSubscriptionsPerEvent: cfg.RouterMaxSubscriptionsPerEvent,
+		MaxOutboxAttempts:        cfg.RouterMaxOutboxAttempts,
+		LagInterval:              10 * time.Second,
+		RetryBackoff:             retry.DefaultPolicy(),
+	})
+	if err != nil {
+		return fmt.Errorf("build router: %w", err)
+	}
+	log.Info("router started", "batch", cfg.RouterBatchSize, "concurrency", cfg.RouterConcurrency)
+	return r.Run(ctx, cfg.OutboxPollInterval)
+}
+
+// newQueue resolves CLAIM_STRATEGY once, in one place, so the scheduler and the
+// worker cannot disagree about which claim query is in force. ADR-0007 ships
+// the tenant-fair lateral behind this flag and defaults to fifo until
+// queue_head_of_line_delay_seconds shows a tenant actually being starved.
+func newQueue(cfg *config.Config, pool *pgxpool.Pool, log *slog.Logger) *queue.PostgresQueue {
+	strategy, err := queue.ParseStrategy(cfg.ClaimStrategy)
+	if err != nil {
+		// config.Load already validated this; a miss here means the two
+		// disagree, which is worth saying out loud rather than silently
+		// falling back.
+		log.Error("invalid claim strategy, falling back to fifo", "error", err, "value", cfg.ClaimStrategy)
+		strategy = queue.StrategyFIFO
+	}
+	return queue.NewPostgresQueue(pool, strategy)
 }
 
 func runScheduler(ctx context.Context, cfg *config.Config, pool *pgxpool.Pool, log *slog.Logger) error {
@@ -87,65 +118,61 @@ func runScheduler(ctx context.Context, cfg *config.Config, pool *pgxpool.Pool, l
 }
 
 func runWorker(ctx context.Context, cfg *config.Config, pool *pgxpool.Pool, log *slog.Logger, workerID string) error {
-	q := newQueue(cfg, pool, log)
-
-	// The lease keeper is the half of the delivery loop that is already
-	// correct, and it is wired here rather than in Phase 3 because it is what
-	// makes a lost lease safe. Every attempt Phase 3 adds must run under the
-	// context returned by keeper.Track: when a renewal comes back reporting
-	// that this worker no longer owns a delivery, that context is cancelled
-	// with cause queue.ErrLeaseLost, the in-flight HTTP request aborts, and NO
-	// delivery_attempts row and NO status transition may be written for it.
-	// The row belongs to whichever worker reclaimed it; writing anyway is how
-	// one webhook is delivered twice and its terminal status decided by a race.
-	keeper := queue.NewLeaseKeeper(q, workerID, cfg.DeliveryLease, log)
-	go func() {
-		if err := keeper.Run(ctx); err != nil && ctx.Err() == nil {
-			log.Error("lease keeper stopped", "error", err)
-		}
-	}()
-
-	// PHASE 3: for each claimed lease - load the endpoint config and active
-	// secrets, check the circuit breaker and rate limit, sign the exact payload
-	// bytes (signing.Header returns an error when an endpoint has no active
-	// secret; that delivery must fail, never go out unsigned), deliver through
-	// internal/egress under keeper.Track's context, write a delivery_attempts
-	// row, then advance the delivery state machine. Concurrency is bounded by
-	// cfg.WorkerConcurrency and by the per-org/project/endpoint ceilings; a
-	// slow endpoint must never consume the pool (ARCHITECTURE.md 24).
-	//
-	// Until that lands this loop deliberately does NOT claim. A stub that
-	// claims a batch and immediately releases it without advancing
-	// next_attempt_at re-claims the same rows on the very next tick: at a 250ms
-	// poll and a 100-row batch that is ~800 UPDATEs/sec of dead tuples against
-	// an idle database, autovacuum churn on the hottest table in the system,
-	// and an operator UI in which every delivery looks like it was touched a
-	// moment ago. Doing nothing is strictly better than doing that.
-	log.Info("worker started (delivery loop is a phase 3 stub; not claiming)",
-		"worker_id", workerID,
-		"concurrency", cfg.WorkerConcurrency,
-		"claim_strategy", q.Strategy())
-	<-ctx.Done()
-	return ctx.Err()
-}
-
-// newQueue builds the delivery queue with the configured claim strategy.
-//
-// CLAIM_STRATEGY defaults to "fifo", which deliberately inverts the default
-// stated in ADR-0007. The tenant-fair path is fully implemented and one env var
-// away, but nothing has been measured yet, its prerequisite index and NOT NULL
-// migration have not been applied, and ARCHITECTURE.md's own rule is to prefer
-// the simplest production-grade option. It gets promoted to the default when
-// queue_head_of_line_delay_seconds shows starvation, not before. See HANDOFF.md.
-func newQueue(cfg *config.Config, pool *pgxpool.Pool, log *slog.Logger) *queue.PostgresQueue {
-	strategy, err := queue.ParseStrategy(cfg.ClaimStrategy)
+	// The keyring must be built before any work is claimed. A worker that
+	// cannot decrypt signing secrets would claim deliveries and fail every one
+	// of them at signing time - which presents as a consumer problem.
+	ring, err := worker.ParseKeyring(cfg.EncryptionKey, cfg.EncryptionKeyID, cfg.EncryptionKeysRetired)
 	if err != nil {
-		// config.Load already rejected this; belt and braces so a future caller
-		// that skips validation still gets the safe strategy rather than none.
-		log.Error("invalid claim strategy; falling back to fifo", "error", err)
-		strategy = queue.StrategyFIFO
+		return fmt.Errorf("build decryption keyring: %w", err)
 	}
-	return queue.NewPostgresQueue(pool, strategy)
+
+	guard, err := egress.NewGuard(cfg.EgressAllowPrivateNetworks, cfg.EgressPrivateAllowlist)
+	if err != nil {
+		return fmt.Errorf("build egress guard: %w", err)
+	}
+	client := egress.NewClient(guard, egress.Limits{
+		DNSTimeout:            cfg.EgressDNSTimeout,
+		ConnectTimeout:        cfg.EgressConnectTimeout,
+		TLSHandshakeTimeout:   cfg.EgressTLSTimeout,
+		ResponseHeaderTimeout: cfg.EgressResponseHeaderTimeout,
+		TotalTimeout:          cfg.EgressTotalTimeout,
+		MaxResponseBytes:      cfg.EgressMaxResponseBytes,
+		MaxRedirects:          cfg.EgressMaxRedirects,
+		IdleConnsPerHost:      4,
+	})
+
+	w, err := worker.New(worker.Options{
+		Queue:   newQueue(cfg, pool, log),
+		Store:   worker.NewPostgresStore(pool),
+		Health:  worker.NewPostgresStore(pool),
+		Client:  client,
+		Keyring: ring,
+		Limits: worker.GateLimits{
+			Global:   cfg.MaxConcurrencyGlobal,
+			Org:      cfg.MaxConcurrencyPerOrg,
+			Project:  cfg.MaxConcurrencyProject,
+			Endpoint: cfg.MaxConcurrencyEndpoint,
+		},
+		Breaker: worker.BreakerConfig{
+			OpenThreshold:     cfg.BreakerFailureThreshold,
+			DegradedThreshold: cfg.BreakerDegradedThreshold,
+			HalfOpenSuccesses: cfg.BreakerHalfOpenSuccesses,
+			BaseCooldown:      cfg.BreakerBaseCooldown,
+		},
+		WorkerID:               workerID,
+		Concurrency:            cfg.WorkerConcurrency,
+		ClaimBatch:             cfg.WorkerClaimBatch,
+		PollInterval:           cfg.WorkerPollInterval,
+		Lease:                  cfg.DeliveryLease,
+		DBTimeout:              cfg.IngestDBTimeout,
+		MaxStoredResponseBytes: cfg.MaxStoredResponseBytes,
+		Logger:                 log,
+	})
+	if err != nil {
+		return fmt.Errorf("build worker: %w", err)
+	}
+	log.Info("worker started", "worker_id", workerID, "concurrency", cfg.WorkerConcurrency)
+	return w.Run(ctx)
 }
 
 func runAll(ctx context.Context, cfg *config.Config, pool *pgxpool.Pool, log *slog.Logger, instanceID string) error {

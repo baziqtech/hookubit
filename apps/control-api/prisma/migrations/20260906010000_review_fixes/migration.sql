@@ -11,6 +11,21 @@
 -- postgres:16.
 -- ---------------------------------------------------------------------------
 
+-- Fail fast and legibly on an unsupported server. Without this the migration
+-- runs until the first NULLS NOT DISTINCT statement and then aborts partway,
+-- leaving a failed row in _prisma_migrations that needs a manual
+-- `prisma migrate resolve` before anything can deploy again.
+DO $$
+BEGIN
+  IF current_setting('server_version_num')::int < 150000 THEN
+    RAISE EXCEPTION
+      'webhook-platform requires PostgreSQL 15 or newer (NULLS NOT DISTINCT); this server reports %',
+      current_setting('server_version');
+  END IF;
+END
+$$;
+
+
 -- ===========================================================================
 -- FIX 1 - fan-out idempotency arbiter
 --

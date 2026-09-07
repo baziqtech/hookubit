@@ -40,6 +40,9 @@ nothing.
 
 See [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md#getting-started).
 
+**Requires PostgreSQL 15 or newer** — the schema uses `NULLS NOT DISTINCT`
+unique indexes. The migration refuses to run on anything older.
+
 ```bash
 cp .env.example .env    # fill the three secrets
 pnpm install

@@ -75,6 +75,24 @@ type Config struct {
 	OutboxPollInterval time.Duration
 	OutboxBatchSize    int
 
+	// Endpoint signing secrets are encrypted by the NestJS control plane and
+	// decrypted here. Same key, same envelope, same AAD - see internal/worker.
+	EncryptionKey         string
+	EncryptionKeyID       string
+	EncryptionKeysRetired string
+
+	RouterBatchSize                int
+	RouterConcurrency              int
+	RouterLease                    time.Duration
+	RouterMaxSubscriptionsPerEvent int
+	RouterMaxOutboxAttempts        int
+
+	BreakerFailureThreshold  int
+	BreakerDegradedThreshold int
+	BreakerHalfOpenSuccesses int
+	BreakerBaseCooldown      time.Duration
+	MaxStoredResponseBytes   int
+
 	// ClaimStrategy selects how the worker picks its batch: "fifo" (default)
 	// or "tenant_fair" (ADR-0007). See the note on the default in
 	// queue.NewPostgresQueue and in HANDOFF.md.
@@ -142,6 +160,22 @@ func Load() (*Config, error) {
 		DeliveryLease:      time.Duration(envInt("DELIVERY_LEASE_SECONDS", 120)) * time.Second,
 		OutboxPollInterval: envDuration("OUTBOX_POLL_INTERVAL_MS", 250*time.Millisecond),
 		OutboxBatchSize:    envInt("OUTBOX_BATCH_SIZE", 200),
+
+		EncryptionKey:         os.Getenv("ENCRYPTION_KEY"),
+		EncryptionKeyID:       env("ENCRYPTION_KEY_ID", "k1"),
+		EncryptionKeysRetired: os.Getenv("ENCRYPTION_KEYS_RETIRED"),
+
+		RouterBatchSize:                envInt("ROUTER_BATCH_SIZE", 100),
+		RouterConcurrency:              envInt("ROUTER_CONCURRENCY", 8),
+		RouterLease:                    time.Duration(envInt("ROUTER_LEASE_SECONDS", 60)) * time.Second,
+		RouterMaxSubscriptionsPerEvent: envInt("ROUTER_MAX_SUBSCRIPTIONS_PER_EVENT", 1000),
+		RouterMaxOutboxAttempts:        envInt("ROUTER_MAX_OUTBOX_ATTEMPTS", 10),
+
+		BreakerFailureThreshold:  envInt("BREAKER_FAILURE_THRESHOLD", 5),
+		BreakerDegradedThreshold: envInt("BREAKER_DEGRADED_THRESHOLD", 3),
+		BreakerHalfOpenSuccesses: envInt("BREAKER_HALF_OPEN_SUCCESSES", 2),
+		BreakerBaseCooldown:      envDuration("BREAKER_BASE_COOLDOWN_MS", 30*time.Second),
+		MaxStoredResponseBytes:   envInt("MAX_STORED_RESPONSE_BYTES", 64<<10),
 
 		// Default "fifo" deliberately, inverting ADR-0007's stated default.
 		// Nothing has been measured, the prerequisite index and NOT NULL

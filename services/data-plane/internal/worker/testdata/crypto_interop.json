@@ -1,0 +1,36 @@
+{
+  "primary_key_b64": "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=",
+  "retired_key_b64": "ZmVkY2JhOTg3NjU0MzIxMGZlZGNiYTk4NzY1NDMyMTA=",
+  "vectors": [
+    {
+      "kid": "k1",
+      "context": {
+        "table": "endpoint_secrets",
+        "id": "eps_01J9ZQKX5T7WQ2N4M8B6C3D1EF",
+        "owner": "ep_01J9ZQKX5T7WQ2N4M8B6C3D1AB"
+      },
+      "plaintext": "whsec_9f2c0a7e5b1d4c3f8a6e2b0d7c9f1a3e",
+      "envelope": "v1.k1.4bMTnY2Rlnh3qYRV.vgtuFj_ZJSfN7ioF94pkug.7nI6dtd5pv06DgmrTSm6ln9NXesNWPKnWA72h0HbHzaFjSfhk4o"
+    },
+    {
+      "kid": "k0",
+      "context": {
+        "table": "endpoint_secrets",
+        "id": "eps_01J9ZQKX5T7WQ2N4M8B6C3D1GH",
+        "owner": "ep_01J9ZQKX5T7WQ2N4M8B6C3D1AB"
+      },
+      "plaintext": "whsec_0011223344556677889900aabbccddeeff",
+      "envelope": "v1.k0.14Cf26wSrfaclX9z.chUcU1A8N0R0BJU7ryBKmQ.8ajIETYs1EBs51a2M1_C1xw01WKljEJc2bMWUkbpZngkeckWgW1M0g"
+    },
+    {
+      "kid": "k1",
+      "context": {
+        "table": "endpoint_secrets",
+        "id": "eps_01J9ZQKX5T7WQ2N4M8B6C3D1IJ",
+        "owner": "ep_01J9ZQKX5T7WQ2N4M8B6C3D1CD"
+      },
+      "plaintext": "whsec_aabbccddeeff00112233445566778899",
+      "envelope": "v1.k1.UC5ZDhbDSgoVL5J3.ggyFWUDvNcG1vyU6MbkgCA.59TS7tq1I5cKCbawZS5Omy82KZnk-ChuUZV_O7pjb6dGs2BUmE0"
+    }
+  ]
+}
