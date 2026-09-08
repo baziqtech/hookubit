@@ -56,6 +56,21 @@ export function useCreateEndpoint(projectId: string) {
   });
 }
 
+/**
+ * One endpoint. Used by the delivery detail page to cross-check the endpoint's
+ * own health against the delivery's status — a delivery can report "retrying"
+ * while the endpoint it targets has been auto-disabled by the circuit breaker,
+ * in which case no retry is actually going to run and the operator must be
+ * told so rather than left waiting.
+ */
+export function useEndpoint(endpointId: string) {
+  return useQuery({
+    queryKey: queryKeys.endpoint(endpointId),
+    queryFn: () => api.get<Endpoint>(`/v1/endpoints/${endpointId}`),
+    enabled: Boolean(endpointId),
+  });
+}
+
 /** Secret METADATA. No read path can return a plaintext secret. */
 export function useEndpointSecrets(endpointId: string, offset = 0) {
   return useQuery({

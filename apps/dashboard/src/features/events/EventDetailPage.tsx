@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
 import {
   Async,
+  Badge,
   Button,
   CodeBlock,
   DeliveryStatusBadge,
@@ -16,7 +17,7 @@ import {
 } from '../../components';
 import { describeDelivery } from '../../lib/delivery-status';
 import { formatBytes, formatRelativeTime, formatTimestamp, truncateId } from '../../lib/format';
-import type { Delivery } from '../../types/api';
+import type { Delivery, DeliveryCounts } from '../../types/api';
 import { useEvent, useEventDeliveries, useReplayEvent } from './api';
 
 export function EventDetailPage() {
@@ -55,14 +56,29 @@ export function EventDetailPage() {
               }
             />
 
-            <dl className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+            <FanOutSummary counts={data.delivery_counts} />
+
+            <dl className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
               <Meta label="Payload size" value={formatBytes(data.payload_size_bytes)} />
-              <Meta label="Idempotency key" value={data.idempotency_key ?? '—'} mono />
-              <Meta label="Ordering key" value={data.ordering_key ?? '—'} mono />
               <Meta
-                label="Fan-out"
-                value={`${data.delivery_counts.total} deliveries`}
-                hint={`${data.delivery_counts.succeeded} succeeded · ${data.delivery_counts.exhausted} exhausted`}
+                label="Idempotency key"
+                value={data.idempotency_key ?? 'None sent'}
+                hint={
+                  data.idempotency_key
+                    ? 'Re-publishing with this key returns this event instead of creating another.'
+                    : 'Without one, a publisher that retries creates a second event.'
+                }
+                mono={Boolean(data.idempotency_key)}
+              />
+              <Meta
+                label="Ordering key"
+                value={data.ordering_key ?? 'None'}
+                hint={
+                  data.ordering_key
+                    ? 'Stored, but per-key serialisation is not enforced yet.'
+                    : 'Deliveries for this event are unordered.'
+                }
+                mono={Boolean(data.ordering_key)}
               />
             </dl>
 
@@ -138,6 +154,67 @@ export function EventDetailPage() {
         )}
       </Async>
     </div>
+  );
+}
+
+
+/**
+ * Fan-out, stated as the sentence it is.
+ *
+ * The tile this replaces read "1 deliveries" — a grammar bug, but the real
+ * problem was that a bare count does not explain WHY there is more than one
+ * row. One publish becomes one delivery per matching subscription, and someone
+ * meeting that for the first time needs it said out loud rather than inferred
+ * from a number.
+ */
+function FanOutSummary({ counts }: { counts: DeliveryCounts }) {
+  const noun = counts.total === 1 ? 'delivery' : 'deliveries';
+  const outstanding = counts.exhausted + counts.failed;
+
+  return (
+    <section
+      aria-label="Fan-out"
+      className="rounded-lg border border-line bg-panel px-4 py-3"
+    >
+      <p className="text-sm text-ink">
+        Published once, fanned out to{' '}
+        <strong className="font-semibold">
+          {counts.total} {noun}
+        </strong>{' '}
+        — one per matching subscription.
+      </p>
+      <p className="mt-1 text-xs leading-relaxed text-ink-muted">
+        Each has an independent retry chain, so one endpoint failing does not hold up the others,
+        and replaying one does not re-send to the rest.
+      </p>
+
+      <div className="mt-2.5 flex flex-wrap items-center gap-1.5">
+        <Badge tone={counts.succeeded > 0 ? 'ok' : 'neutral'} dot>
+          {counts.succeeded} succeeded
+        </Badge>
+        {counts.pending > 0 && (
+          <Badge tone="warn" dot>
+            {counts.pending} still going
+          </Badge>
+        )}
+        {counts.failed > 0 && (
+          <Badge tone="danger" dot>
+            {counts.failed} failing
+          </Badge>
+        )}
+        {counts.exhausted > 0 && (
+          <Badge tone="danger" dot>
+            {counts.exhausted} exhausted
+          </Badge>
+        )}
+      </div>
+
+      {outstanding > 0 && (
+        <p className="mt-2 text-2xs text-ink-subtle">
+          Open a delivery below to see its attempts and why it stopped.
+        </p>
+      )}
+    </section>
   );
 }
 

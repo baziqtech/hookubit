@@ -196,3 +196,163 @@ export function worstStatus(statuses: DeliveryStatus[]): DeliveryStatus | null {
   }
   return null;
 }
+
+/* ── Diagnosis ────────────────────────────────────────────────────────────── */
+
+/**
+ * Why an attempt failed, at the level of detail that changes what you do next.
+ *
+ * The distinction that matters most is `transport` versus the HTTP kinds. A
+ * transport failure — DNS, TLS, connect timeout — carries NO STATUS CODE AT
+ * ALL, because there was never a response. A UI that renders "HTTP null" or
+ * quietly shows an empty cell for those is useless in exactly the incident
+ * where it is needed, and the mock fixtures include DNS and TLS failures
+ * specifically so this path cannot go untested.
+ */
+export type FailureKind = 'none' | 'transport' | 'http_retryable' | 'http_permanent';
+
+export function classifyFailure(code: number | null, error: string | null): FailureKind {
+  if (code === null) return error ? 'transport' : 'none';
+  if (code >= 200 && code < 300) return 'none';
+  return isRetryableStatusCode(code) ? 'http_retryable' : 'http_permanent';
+}
+
+/** A short, plain-English name for the failure — the column heading version. */
+export function failureKindLabel(kind: FailureKind): string {
+  switch (kind) {
+    case 'transport':
+      return 'No HTTP response';
+    case 'http_retryable':
+      return 'Temporary HTTP failure';
+    case 'http_permanent':
+      return 'Permanent HTTP failure';
+    case 'none':
+      return 'No failure';
+  }
+}
+
+/**
+ * What the failure means, in a sentence an operator can act on.
+ *
+ * The transport case names the three usual culprits, because "i/o timeout"
+ * alone does not tell someone whose problem it is — and in practice it is
+ * nearly always the consumer's DNS, firewall or certificate rather than ours.
+ */
+export function explainFailure(kind: FailureKind, code: number | null): string {
+  switch (kind) {
+    case 'transport':
+      return 'The request never reached an HTTP server, so there is no status code — the name did not resolve, the connection was refused or timed out, or the TLS handshake failed. Check DNS, firewall rules and the certificate on the receiving host.';
+    case 'http_retryable':
+      return `The endpoint answered ${code}. Codes 408, 429 and 5xx are treated as temporary, so this delivery is retried with exponential backoff.`;
+    case 'http_permanent':
+      return `The endpoint answered ${code}. Every 4xx other than 408 and 429 is treated as permanent — retrying would produce the same answer — so the chain stops here. A 401 or 403 usually means signature verification is failing on the consumer.`;
+    case 'none':
+      return 'The endpoint accepted the delivery.';
+  }
+}
+
+/** One plain-English sentence per delivery state, for the glossary. */
+export const DELIVERY_STATUS_SENTENCE: Record<DeliveryStatus, string> = {
+  pending: 'Created, but not yet handed to the queue.',
+  scheduled: 'Waiting for a specific time before its next attempt — usually a retry backoff.',
+  queued: 'Waiting for a free worker. No request has been made yet.',
+  processing: 'A request is in flight to the endpoint right now.',
+  succeeded: 'The endpoint answered 2xx. Nothing further will happen.',
+  failed: 'The latest attempt failed and more attempts remain. It will be retried.',
+  retrying: 'A previous attempt failed and the next one is already scheduled.',
+  exhausted: 'Every attempt was used and none succeeded. Nothing further will happen without a replay.',
+  cancelled: 'Stopped before it finished — the endpoint was deleted, or an operator cancelled it.',
+};
+
+export interface DeliveryDiagnosis {
+  /** The one-line answer, for the top of the page. */
+  headline: string;
+  kind: FailureKind;
+  /** What the failure means and who is likely to own it. */
+  explanation: string;
+  /** What happens next, stated definitively. */
+  next: string;
+  tone: StatusTone;
+}
+
+/**
+ * "What happened to this delivery, and what happens now?" as one value.
+ *
+ * This is the question the operator surface exists to answer, so it is derived
+ * once, here, rather than assembled out of conditionals in JSX where the
+ * exhausted case and the permanent-4xx case would inevitably drift apart.
+ */
+export function diagnoseDelivery(
+  delivery: Pick<
+    Delivery,
+    'status' | 'attempt_count' | 'max_attempts' | 'last_status_code' | 'last_error' | 'terminal'
+  >,
+): DeliveryDiagnosis {
+  const kind = classifyFailure(delivery.last_status_code, delivery.last_error);
+  const meta = deliveryStatusMeta(delivery.status);
+  const explanation = explainFailure(kind, delivery.last_status_code);
+
+  switch (delivery.status) {
+    case 'succeeded':
+      return {
+        headline: `Delivered after ${plural(delivery.attempt_count, 'attempt')}.`,
+        kind: 'none',
+        explanation: 'The endpoint answered 2xx.',
+        next: 'Nothing further. This delivery is complete.',
+        tone: 'ok',
+      };
+    case 'exhausted':
+      return {
+        headline: `Gave up after all ${delivery.max_attempts} attempts.`,
+        kind,
+        explanation,
+        next: 'No further attempt will be made. Replay it once the endpoint is fixed — only this endpoint is retried, not the others on the same event.',
+        tone: 'danger',
+      };
+    case 'cancelled':
+      return {
+        headline: 'Cancelled before it completed.',
+        kind,
+        explanation:
+          'The chain was stopped deliberately — the endpoint was deleted or disabled, or an operator cancelled it.',
+        next: 'No further attempt will be made. Replay it if it should still be delivered.',
+        tone: 'neutral',
+      };
+    case 'retrying':
+    case 'scheduled':
+      return {
+        headline: `Attempt ${delivery.attempt_count} failed. ${plural(attemptsRemaining(delivery), 'attempt')} left.`,
+        kind,
+        explanation,
+        next: 'Another attempt is scheduled. If every remaining attempt fails, the delivery becomes exhausted and stops.',
+        tone: 'warn',
+      };
+    case 'failed':
+      return {
+        headline: `Attempt ${delivery.attempt_count} failed.`,
+        kind,
+        explanation,
+        next:
+          kind === 'http_permanent'
+            ? 'This response is not retried. The chain will not continue on its own.'
+            : 'A retry is expected shortly.',
+        tone: 'danger',
+      };
+    case 'processing':
+      return {
+        headline: 'A request is in flight right now.',
+        kind: 'none',
+        explanation: 'The endpoint has been called and has not answered yet.',
+        next: `The result lands as attempt ${delivery.attempt_count} of ${delivery.max_attempts}.`,
+        tone: meta.tone,
+      };
+    default:
+      return {
+        headline: describeDelivery(delivery),
+        kind: 'none',
+        explanation: 'No attempt has been made yet.',
+        next: 'The first attempt happens as soon as a worker picks it up.',
+        tone: meta.tone,
+      };
+  }
+}

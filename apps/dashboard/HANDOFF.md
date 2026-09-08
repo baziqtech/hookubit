@@ -247,3 +247,167 @@ resets the module graph and stubs `VITE_API_TRANSPORT` per case, because
 `usingMockApi` is evaluated once at import time. If interaction coverage becomes
 necessary, add `jsdom` + `@testing-library/react` and a `test.environment` block
 in `vite.config.ts` — the existing tests keep working either way.
+
+---
+
+# First-run experience, the product tour, and what the backend still owes them
+
+This pass added a guided setup path, an orientation tour, a real Analytics
+page, and a rewritten delivery-detail screen. Everything below is either a
+decision worth not re-litigating or a concrete ask on the control API.
+
+## The single most important backend ask: `onboarding_completed_at`
+
+**The product tour's "has this person seen it?" flag is in `localStorage`, and
+that is a stand-in, not the design.**
+
+`src/features/onboarding/tour-storage.ts` writes `hookubit.tour.v1` with a value
+of `completed` or `skipped`. Every access is wrapped in try/catch, because
+`localStorage` does not merely return empty in a private window or with site
+data blocked — **the accessor itself throws**, and an unguarded read there would
+take down the whole app shell. A throw and a cleared store both read as "never
+seen", which is the safe direction: the tour is skippable and re-openable, so
+showing it once more costs a keystroke, while wrongly suppressing it leaves a
+new user with no orientation at all.
+
+What it costs today:
+
+- The same person gets the tour again on a second device or browser.
+- Clearing site data replays it.
+- Support cannot see whether a user was ever onboarded.
+
+**What is wanted on the control API**, on the user record, exposed on
+`GET /v1/auth/session` inside `user`:
+
+```jsonc
+{
+  "user": {
+    "id": "usr_…",
+    // ISO-8601 when the user finished OR skipped the tour; null if neither.
+    "onboarding_completed_at": "2026-09-08T14:20:00.000Z"
+  }
+}
+```
+
+plus a write route:
+
+```
+POST /v1/auth/onboarding-completed   →  204, idempotent
+```
+
+One nullable timestamp, not a boolean and not a JSON blob of per-step progress.
+A boolean cannot answer "when", which is what you want when someone asks why a
+cohort churned; per-step progress is state the tour would then have to
+reconcile against the server mid-session for no benefit. Skipping and finishing
+deliberately collapse to the same field — the product question is "has this
+person been oriented", and someone who skipped has decided they have.
+
+Until that exists, `readTourRecord()` is the only reader and
+`writeTourRecord()` the only writer, so the swap is those two functions plus a
+mutation. Nothing else in the app touches the key.
+
+## Why the tour is non-modal, and why it has no focus trap
+
+`src/features/onboarding/ProductTour.tsx` is `role="dialog"` **without**
+`aria-modal`, with no backdrop and no focus trap. That is deliberate on both
+UX and accessibility grounds, and it should not be "fixed" into a normal modal:
+
+- A tour that dims the page and swallows clicks teaches a new user that the
+  product gets in the way. The app behind it stays fully interactive, so someone
+  reading the fan-out step can click into Deliveries and look at a real one.
+- **Trapping focus in a non-modal dialog is precisely the keyboard trap WCAG
+  2.1.2 forbids.** Focus still moves in on open and returns to the invoking
+  control on close, which is the part users actually need; it is simply not
+  fenced in between.
+- Step changes are announced through a `role="status" aria-atomic` region rather
+  than by moving focus, so a screen-reader user hears the new step without being
+  yanked out of wherever they were reading.
+- It is mounted in `AppLayout`, not on a route, so it survives navigation.
+- `Skip tour` is a labelled control in the header on **every** step, and Escape
+  closes from anywhere. Both record `skipped`.
+
+The tour and the setup checklist are **different things and must stay that
+way**: the tour answers "what is this product", is static prose, and ends by
+handing off to the checklist; the checklist answers "what do I do next" and is
+derived entirely from live queries. Someone who skips the tour still lands on
+the checklist and can finish unaided.
+
+## Setup state is derived, never stored
+
+`useSetupState()` in `src/features/onboarding/api.ts` composes the queries the
+product already runs — organizations, project, API keys, endpoints,
+subscriptions, events — and feeds `deriveSetupSteps()` in `setup.ts`.
+
+**Please do not add `GET /v1/projects/:id/setup-state`.** It would be a second
+source of truth for "does this project have a live endpoint" and would drift
+from the list that answers the same question one click away. The cost is five
+parallel requests on the overview, all cached under the keys those screens
+already use, so navigating onward is served from cache.
+
+The rule the derivation exists to enforce, and the one a naive checklist gets
+wrong: **a resource can exist and still not deliver.** An endpoint created by a
+developer comes back paused with no signing secret; a subscription can be
+disabled. Those are `attention` (amber), never `done` (green) — ticking them
+green is how someone spends an afternoon wondering why nothing arrives.
+`setup.test.ts` pins that they cannot converge.
+
+## The `curl` needs the INGEST base URL, which is not this app's origin
+
+The get-started page renders a ready-to-run publish request with the operator's
+real project id. Ingest is a **separate service** from the control API this
+dashboard talks to — Go on `:8080` versus NestJS on `:3000` (docs/API.md) — so
+it is not behind the dev proxy and it is not `window.location.origin`.
+
+`ingestBaseUrl()` reads `VITE_INGEST_BASE_URL` and falls back to
+`http://localhost:8080`. **The deployment side needs to pass that build arg**,
+alongside the `VITE_API_TRANSPORT=http` ask already recorded above. A wrong base
+URL produces connection-refused, which is annoying but honest; deriving it from
+the dashboard's origin would produce a request that 404s against the *control*
+API, which looks like it reached something and is far more confusing.
+
+## Mock changes that bring it closer to the real contract
+
+Two changes to `src/lib/mock/`, both of which make the mock **more** faithful:
+
+1. **Project scoping.** `GET /v1/projects/:id/{endpoints,api-keys,subscriptions,
+   events,deliveries,analytics}` previously ignored `:id` entirely and returned
+   the same rows for every project. That is not what a tenant-scoped API does,
+   and it made the first-run experience impossible to see — a brand-new project
+   appeared to already have 64 events. They now filter on `project_id`, and
+   `analyticsFor()` returns zeroes for a project with no traffic rather than
+   borrowing the busy project's numbers. `proj_01JQPAYSTG` is now genuinely
+   empty and is the fixture to open when working on onboarding.
+2. **`NOW` is anchored at module load** instead of being hard-coded to
+   2026-09-06. The fixed date made fixtures reproducible across days but meant
+   every relative timestamp drifted further into the past — the delivery detail
+   page rendered a *scheduled future retry* as "2 days ago", which is exactly
+   the fact that screen exists to state correctly. Anchoring at import keeps the
+   property that mattered (stable for the life of a page) and the seeded RNG is
+   untouched, so which endpoint is broken and which chains are exhausted is
+   still identical every run.
+
+## Still needed from the control API (additions to the list above)
+
+7. **`onboarding_completed_at`** on the user, plus
+   `POST /v1/auth/onboarding-completed`. Detailed above. Highest value of these.
+8. **`VITE_INGEST_BASE_URL`** passed as a build arg by the deployments side.
+9. **Endpoint enable/pause/disable routes.** The delivery detail page can now
+   tell an operator that the circuit breaker has disabled the endpoint their
+   delivery is queued against — which is the single most valuable fact on that
+   page — but there is no route to act on it. `PATCH /v1/endpoints/:id` with
+   `{ enabled }`, or explicit `:enable` / `:pause` actions, would close the loop
+   from "here is the problem" to "here is the fix".
+10. **`PATCH /v1/projects/:id` and `PATCH /v1/organizations/:id`.** The settings
+    pages now render the real read-only record and say plainly that nothing is
+    editable and why, naming the missing route. They become real settings pages
+    the day these land.
+11. **A billing surface, or a decision not to have one.** `BillingPage` is the
+    only genuinely empty screen left. There is no route, no shape, not even a
+    mock, so it renders an honest empty state pointing at Usage rather than a
+    fabricated invoice table.
+12. **Analytics, events, deliveries and subscriptions modules.** `AnalyticsPage`
+    is now built against the mock's `GET /v1/projects/:id/analytics`, since a
+    working shape existed and a dead route was the worse option. It is still
+    SPECULATIVE and the page says so on itself. When the real module lands,
+    expect an offset envelope rather than the cursor page the mock returns, and
+    these screens will need the same treatment the other five got.

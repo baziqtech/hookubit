@@ -10,11 +10,12 @@ import { DeliveryDetailPage } from '../features/deliveries/DeliveryDetailPage';
 import { EndpointsPage } from '../features/endpoints/EndpointsPage';
 import { EventDetailPage } from '../features/events/EventDetailPage';
 import { EventsPage } from '../features/events/EventsPage';
+import { GetStartedPage } from '../features/onboarding/GetStartedPage';
 import { OverviewPage } from '../features/overview/OverviewPage';
+import { AnalyticsPage } from '../features/analytics/AnalyticsPage';
 import {
   BillingPage,
   OrganizationSettingsPage,
-  ProjectAnalyticsPage,
   ProjectSettingsPage,
 } from '../features/settings/placeholders';
 import { SubscriptionsPage } from '../features/subscriptions/SubscriptionsPage';
@@ -63,6 +64,7 @@ export const router = createBrowserRouter([
             path: '/orgs/:orgId/projects/:projectId',
             children: [
               { index: true, element: <Navigate to="overview" replace /> },
+              { path: 'get-started', element: <GetStartedPage /> },
               { path: 'overview', element: <OverviewPage /> },
               { path: 'events', element: <EventsPage /> },
               { path: 'events/:eventId', element: <EventDetailPage /> },
@@ -71,7 +73,7 @@ export const router = createBrowserRouter([
               { path: 'endpoints', element: <EndpointsPage /> },
               { path: 'subscriptions', element: <SubscriptionsPage /> },
               { path: 'api-keys', element: <ApiKeysPage /> },
-              { path: 'analytics', element: <ProjectAnalyticsPage /> },
+              { path: 'analytics', element: <AnalyticsPage /> },
               { path: 'settings', element: <ProjectSettingsPage /> },
             ],
           },

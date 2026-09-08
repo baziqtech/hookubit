@@ -218,12 +218,17 @@ function deliveriesForEvent(eventId: string): Delivery[] {
   return db.deliveries.filter((delivery) => delivery.event_id === eventId);
 }
 
-function filterDeliveries(query: URLSearchParams): Delivery[] {
+function filterDeliveries(projectId: string, query: URLSearchParams): Delivery[] {
   const status = query.get('status');
   const endpointId = query.get('endpoint_id');
   const search = query.get('search')?.toLowerCase();
 
   return db.deliveries.filter((delivery) => {
+    // Tenant scoping is the whole point of a project. Without it every project
+    // in the switcher serves the same rows, and a brand-new project looks like
+    // it already has 64 events — which is exactly the state the first-run
+    // experience has to be designed against.
+    if (delivery.project_id !== projectId) return false;
     if (status && delivery.status !== status) return false;
     if (endpointId && delivery.endpoint_id !== endpointId) return false;
     if (
@@ -238,12 +243,13 @@ function filterDeliveries(query: URLSearchParams): Delivery[] {
   });
 }
 
-function filterEvents(query: URLSearchParams): EventDetail[] {
+function filterEvents(projectId: string, query: URLSearchParams): EventDetail[] {
   const eventType = query.get('event_type');
   const status = query.get('status');
   const search = query.get('search')?.toLowerCase();
 
   return db.events.filter((event) => {
+    if (event.project_id !== projectId) return false;
     if (eventType && event.event_type !== eventType) return false;
     if (status && event.status !== status) return false;
     if (search && !`${event.id} ${event.event_type}`.toLowerCase().includes(search)) return false;
@@ -425,11 +431,12 @@ const handlers: Handler[] = [
   {
     method: 'GET',
     pattern: '/v1/projects/:projectId/endpoints',
-    handle: ({ query }) => {
+    handle: ({ params, query }) => {
       const status = query.get('status');
       // `include_deleted` is compared as a string, never coerced.
       const includeDeleted = booleanQuery(query, 'include_deleted') ?? false;
       const rows = db.endpoints.filter((endpoint) => {
+        if (endpoint.project_id !== params.projectId) return false;
         if (!includeDeleted && endpoint.status === 'deleted') return false;
         if (status && endpoint.status !== status) return false;
         return true;
@@ -443,7 +450,9 @@ const handlers: Handler[] = [
     handle: ({ params, body }) => {
       const input = requireBody<{ name: string; url: string }>(body, ['name', 'url']);
       charge('endpoints.create');
-      const live = db.endpoints.filter((endpoint) => endpoint.status !== 'deleted').length;
+      const live = db.endpoints.filter(
+        (endpoint) => endpoint.project_id === params.projectId && endpoint.status !== 'deleted',
+      ).length;
       // No details on the wire for this one — prose only, like the real service.
       assertBelowCeiling(
         live,
@@ -539,7 +548,11 @@ const handlers: Handler[] = [
   {
     method: 'GET',
     pattern: '/v1/projects/:projectId/api-keys',
-    handle: ({ query }) => countedEnvelope<ApiKey>(db.apiKeys, query),
+    handle: ({ params, query }) =>
+      countedEnvelope<ApiKey>(
+        db.apiKeys.filter((key) => key.project_id === params.projectId),
+        query,
+      ),
   },
   {
     method: 'POST',
@@ -547,7 +560,9 @@ const handlers: Handler[] = [
     handle: ({ params, body }) => {
       const input = requireBody<{ name: string }>(body, ['name']);
       charge('api-keys.create');
-      const live = db.apiKeys.filter((key) => key.revoked_at === null).length;
+      const live = db.apiKeys.filter(
+        (key) => key.project_id === params.projectId && key.revoked_at === null,
+      ).length;
       assertBelowCeiling(
         live,
         50,
@@ -589,18 +604,27 @@ const handlers: Handler[] = [
   {
     method: 'GET',
     pattern: '/v1/projects/:projectId/subscriptions',
-    handle: () => ({ data: db.subscriptions }),
+    handle: ({ params }) => ({
+      data: db.subscriptions.filter(
+        (subscription) => subscription.project_id === params.projectId,
+      ),
+    }),
   },
-  { method: 'GET', pattern: '/v1/projects/:projectId/analytics', handle: () => db.analytics },
+  {
+    method: 'GET',
+    pattern: '/v1/projects/:projectId/analytics',
+    handle: ({ params }) => db.analyticsFor(params.projectId),
+  },
   {
     method: 'GET',
     pattern: '/v1/projects/:projectId/events',
-    handle: ({ query }) => cursorPage(filterEvents(query).map(withoutPayload), query),
+    handle: ({ params, query }) =>
+      cursorPage(filterEvents(params.projectId, query).map(withoutPayload), query),
   },
   {
     method: 'GET',
     pattern: '/v1/projects/:projectId/deliveries',
-    handle: ({ query }) => cursorPage(filterDeliveries(query), query),
+    handle: ({ params, query }) => cursorPage(filterDeliveries(params.projectId, query), query),
   },
 
   /* Endpoints */

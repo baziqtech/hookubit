@@ -44,8 +44,22 @@ const random = rng(20260906);
 const pick = <T,>(items: T[]): T => items[Math.floor(random() * items.length)];
 const between = (min: number, max: number) => min + Math.floor(random() * (max - min + 1));
 
-/** Fixed "now" so relative timestamps do not drift between renders. */
-export const NOW = new Date('2026-09-06T14:20:00.000Z');
+/**
+ * "Now", anchored ONCE at module load.
+ *
+ * It used to be a hard-coded 2026-09-06. That made the fixtures reproducible
+ * across days, but it also meant every relative timestamp in the product drifted
+ * further into the past the longer the file sat unedited — the delivery detail
+ * page ended up rendering a scheduled FUTURE retry as "2 days ago", which is the
+ * exact fact that screen exists to state correctly.
+ *
+ * Anchoring at import time keeps the property that actually mattered (stable for
+ * the whole life of a page, so a screenshot is internally consistent and nothing
+ * reflows between renders) while letting "next attempt in 14 minutes" read as
+ * what it is. The seeded RNG is untouched, so the shape of the data — which
+ * endpoint is broken, which chains are exhausted — is still identical every run.
+ */
+export const NOW = new Date();
 const minutesAgo = (m: number) => new Date(NOW.getTime() - m * 60_000).toISOString();
 const minutesAhead = (m: number) => new Date(NOW.getTime() + m * 60_000).toISOString();
 
@@ -810,9 +824,38 @@ export const analytics: ProjectAnalytics = (() => {
   };
 })();
 
+const periodStart = new Date(Date.UTC(NOW.getUTCFullYear(), NOW.getUTCMonth(), 1));
+const periodEnd = new Date(Date.UTC(NOW.getUTCFullYear(), NOW.getUTCMonth() + 1, 0, 23, 59, 59));
+
+/**
+ * Analytics for one project.
+ *
+ * A project with no deliveries reports zeroes rather than borrowing the busy
+ * project's numbers. That matters more than it sounds: the overview for a
+ * brand-new project is the screen the first-run experience has to render, and
+ * a fabricated 95% success rate on a project that has never received an event
+ * hides the very state the guided setup exists to resolve.
+ */
+export function analyticsFor(projectId: string): ProjectAnalytics {
+  if (projectId === PROD) return analytics;
+  return {
+    window: '24h',
+    points: Array.from({ length: 24 }, (_, hour) => ({
+      bucket: minutesAgo((23 - hour) * 60),
+      succeeded: 0,
+      failed: 0,
+      retrying: 0,
+      p95_latency_ms: 0,
+    })),
+    totals: { total: 0, succeeded: 0, failed: 0, pending: 0, exhausted: 0 },
+    p95_latency_ms: 0,
+    success_rate: 0,
+  };
+}
+
 export const usage: UsageSummary = {
-  period_start: '2026-09-01T00:00:00.000Z',
-  period_end: '2026-09-30T23:59:59.000Z',
+  period_start: periodStart.toISOString(),
+  period_end: periodEnd.toISOString(),
   events_ingested: 1_284_930,
   deliveries_attempted: 3_402_118,
   included_events: 1_000_000,

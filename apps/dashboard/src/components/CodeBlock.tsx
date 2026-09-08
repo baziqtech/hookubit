@@ -11,6 +11,12 @@ export interface CodeBlockProps {
   showLineNumbers?: boolean;
   className?: string;
   label?: string;
+  /**
+   * Show the byte count. On by default — a payload's size is load-bearing when
+   * you are deciding whether it was truncated. Off for snippets the operator is
+   * meant to copy and run, where it is only noise.
+   */
+  showSize?: boolean;
 }
 
 /**
@@ -27,6 +33,7 @@ export function CodeBlock({
   showLineNumbers = false,
   className,
   label,
+  showSize = true,
 }: CodeBlockProps) {
   const [copied, setCopied] = useState(false);
 
@@ -62,7 +69,9 @@ export function CodeBlock({
           {label ?? language}
         </span>
         <span className="flex items-center gap-2">
-          <span className="text-2xs tabular text-ink-subtle">{formatBytes(bytes)}</span>
+          {showSize && (
+            <span className="text-2xs tabular text-ink-subtle">{formatBytes(bytes)}</span>
+          )}
           <button
             type="button"
             onClick={copy}

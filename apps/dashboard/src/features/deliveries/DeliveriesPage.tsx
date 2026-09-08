@@ -7,6 +7,7 @@ import {
   PageHeader,
   Panel,
   Select,
+  StatusLegend,
   Table,
   type Column,
 } from '../../components';
@@ -51,8 +52,15 @@ export function DeliveriesPage() {
     <div className="flex flex-col gap-4">
       <PageHeader
         title="Deliveries"
-        description="One row per event per endpoint, each with its own retry chain."
+        description="One row per event per endpoint. An event you published once appears here once per matching subscription, and each row retries independently."
       />
+
+      {/*
+        The glossary lives next to the filter that uses these words, not in a
+        docs site. `exhausted` and `cancelled` both mean "stopped" and mean very
+        different things, and the badge alone never says which.
+      */}
+      <StatusLegend highlight={filters.status as DeliveryStatus | ''} />
 
       <Panel flush>
         <div className="flex flex-wrap items-end gap-2 border-b border-line px-3 py-2.5">

@@ -29,6 +29,8 @@ export const queryKeys = {
   endpoints: (projectId: string, offset = 0, includeDeleted?: boolean) =>
     ['project', projectId, 'endpoints', { offset, includeDeleted: includeDeleted ?? false }] as const,
 
+  endpoint: (endpointId: string) => ['endpoint', endpointId] as const,
+
   endpointSecretsRoot: (endpointId: string) => ['endpoint', endpointId, 'secrets'] as const,
   endpointSecrets: (endpointId: string, offset = 0) =>
     ['endpoint', endpointId, 'secrets', { offset }] as const,
