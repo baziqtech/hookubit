@@ -187,3 +187,50 @@ func TestHealthOfAnEndpointThatHasNeverFailed(t *testing.T) {
 		t.Fatalf("state = %s with no endpoint_health row, want healthy", h.State)
 	}
 }
+
+// TestBreakerClosesAfterRepeatedProbeSuccesses pins a bug found by running the
+// platform, not by a unit test.
+//
+// claimProbeSQL used to zero consecutive_successes on EVERY probe claim, not
+// just on the open -> half_open transition. The counter therefore cycled
+// 0 -> 1 -> 0 -> 1 and could never reach HalfOpenSuccesses, so a fully
+// recovered endpoint stayed half_open forever - admitting one delivery per
+// probe cycle and never closing. Observed live as six consecutive successful
+// deliveries with the counter stuck at 1.
+func TestBreakerClosesAfterRepeatedProbeSuccesses(t *testing.T) {
+	pool := requirePool(t)
+	f := seedWorkerFixture(t, pool)
+	store := NewPostgresStore(pool)
+	ctx := context.Background()
+	cfg := BreakerConfig{DegradedThreshold: 3, OpenThreshold: 5, HalfOpenSuccesses: 2,
+		BaseCooldown: time.Millisecond, MaxCooldown: time.Millisecond, HalfOpenTTL: time.Minute}
+
+	mustExec(t, pool, `INSERT INTO endpoint_health
+	                     (endpoint_id, state, consecutive_failures, consecutive_successes, opened_at, probe_after, updated_at)
+	                   VALUES ($1,'open',5,0,now(),now() - interval '1 second',now())
+	                   ON CONFLICT (endpoint_id) DO UPDATE SET
+	                     state='open', consecutive_failures=5, consecutive_successes=0,
+	                     probe_after=now() - interval '1 second'`, f.endpointID)
+
+	for attempt := 1; attempt <= 2; attempt++ {
+		claimed, err := store.ClaimProbe(ctx, f.endpointID, time.Minute)
+		if err != nil {
+			t.Fatalf("claim probe %d: %v", attempt, err)
+		}
+		if !claimed {
+			t.Fatalf("probe %d was not admitted; a half_open endpoint with a due probe must admit one", attempt)
+		}
+		if _, _, err := store.RecordOutcome(ctx, f.endpointID, true, cfg, 0); err != nil {
+			t.Fatalf("record success %d: %v", attempt, err)
+		}
+	}
+
+	h, err := store.Health(ctx, f.endpointID)
+	if err != nil {
+		t.Fatalf("health: %v", err)
+	}
+	if h.State != HealthHealthy {
+		t.Fatalf("state = %s after %d probe successes, want healthy; the endpoint recovered and the breaker never closed",
+			h.State, cfg.HalfOpenSuccesses)
+	}
+}

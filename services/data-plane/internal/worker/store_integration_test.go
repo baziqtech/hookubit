@@ -491,3 +491,42 @@ func TestAttemptsAreAppendOnly(t *testing.T) {
 		t.Fatal("the transition committed even though its attempt row did not; the two must be one transaction")
 	}
 }
+
+// TestStoreLoadFallsBackToTheProjectDefaultRetryPolicy pins a bug found by
+// running the platform, not by a unit test.
+//
+// The router resolves max_attempts as endpoint policy -> project default ->
+// built-in. Load used to join only on e.retry_policy_id, so an endpoint with no
+// policy of its own skipped the project default and fell through to the
+// built-in. The operator got max_attempts from their policy and backoff from
+// somewhere else: observed live as 5s/10s/20s gaps under a policy specifying 1s
+// capped at 5s.
+func TestStoreLoadFallsBackToTheProjectDefaultRetryPolicy(t *testing.T) {
+	pool := requirePool(t)
+	f := seedWorkerFixture(t, pool)
+	store := NewPostgresStore(pool)
+	ctx := context.Background()
+
+	// The fixture's endpoint points at its own policy. Detach it and make the
+	// fixture policy the project default instead.
+	mustExec(t, pool, `UPDATE endpoints SET retry_policy_id = NULL WHERE id = $1`, f.endpointID)
+	mustExec(t, pool, `UPDATE retry_policies SET is_default = true WHERE id = $1`, f.policyID)
+
+	job, err := store.Load(ctx, f.insertDelivery(t, "wrk_1"))
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if job.Policy.InitialDelay != time.Second {
+		t.Fatalf("initial delay = %s, want 1s from the project default; the built-in is 5s, so this is the bug",
+			job.Policy.InitialDelay)
+	}
+	if job.Policy.MaxAttempts != 6 {
+		t.Fatalf("max attempts = %d, want 6 from the project default", job.Policy.MaxAttempts)
+	}
+
+	// An endpoint with its own policy must still prefer it over the default.
+	mustExec(t, pool, `UPDATE endpoints SET retry_policy_id = $2 WHERE id = $1`, f.endpointID, f.policyID)
+	if _, err := store.Load(ctx, f.insertDelivery(t, "wrk_1")); err != nil {
+		t.Fatalf("load with endpoint policy: %v", err)
+	}
+}

@@ -183,7 +183,22 @@ SELECT d.event_id, d.organization_id, d.project_id,
 FROM deliveries d
 JOIN endpoints e ON e.id = d.endpoint_id
 JOIN events ev   ON ev.id = d.event_id
-LEFT JOIN retry_policies rp ON rp.id = e.retry_policy_id
+-- Resolve the retry policy the SAME way the router resolves max_attempts:
+-- the endpoint's own policy if it has one, otherwise the project default,
+-- otherwise the built-in (rp is NULL and the caller falls back).
+--
+-- Joining only on e.retry_policy_id skipped the project default entirely, so an
+-- operator who set a default policy got its max_attempts honoured by the router
+-- and its backoff ignored here - half a policy, silently. Observed in a live
+-- run as 5s/10s/20s gaps under a policy that specified 1s capped at 5s.
+LEFT JOIN LATERAL (
+    SELECT p.*
+    FROM retry_policies p
+    WHERE p.id = e.retry_policy_id
+       OR (e.retry_policy_id IS NULL AND p.project_id = d.project_id AND p.is_default)
+    ORDER BY (p.id = e.retry_policy_id) DESC
+    LIMIT 1
+) rp ON true
 WHERE d.id = $1
 `
 
@@ -483,7 +498,13 @@ func (s *PostgresStore) Health(ctx context.Context, endpointID string) (Health, 
 const claimProbeSQL = `
 UPDATE endpoint_health
 SET state                 = 'half_open',
-    consecutive_successes = 0,
+    -- Reset the success run ONLY on the open -> half_open transition. Resetting
+    -- it on every probe claim makes HalfOpenSuccesses unreachable: the probe
+    -- zeroes the counter, the delivery succeeds and sets it to 1, the next probe
+    -- zeroes it again. A fully recovered endpoint then sits in half_open
+    -- forever, admitting one delivery per probe cycle and never closing.
+    -- Observed live: six consecutive successful deliveries, counter never past 1.
+    consecutive_successes = CASE WHEN state = 'open' THEN 0 ELSE consecutive_successes END,
     probe_after           = now() + $2::interval,
     updated_at            = now()
 WHERE endpoint_id = $1
