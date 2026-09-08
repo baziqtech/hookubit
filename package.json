@@ -2,7 +2,9 @@
   "name": "webhook-platform",
   "private": true,
   "packageManager": "pnpm@9.12.3",
-  "engines": { "node": ">=20" },
+  "engines": {
+    "node": ">=20"
+  },
   "scripts": {
     "dev:infra": "docker compose -f deployments/compose/docker-compose.dev.yml up -d",
     "dev:infra:down": "docker compose -f deployments/compose/docker-compose.dev.yml down",
@@ -17,6 +19,9 @@
     "lint": "pnpm -r lint",
     "go:build": "cd services/data-plane && go build ./...",
     "go:test": "cd services/data-plane && go test ./...",
-    "go:vet": "cd services/data-plane && go vet ./..."
+    "go:vet": "cd services/data-plane && go vet ./...",
+    "test:db:migrate": "cd apps/control-api && DATABASE_URL='postgresql://postgres:root@localhost:5432/hookubit_test?schema=public' DIRECT_DATABASE_URL='postgresql://postgres:root@localhost:5432/hookubit_test?schema=public' npx prisma migrate deploy",
+    "go:test:db": "cd services/data-plane && DATABASE_URL='postgresql://postgres:root@localhost:5432/hookubit_test?sslmode=disable' go test -count=1 ./...",
+    "go:test:race": "cd services/data-plane && DATABASE_URL='postgresql://postgres:root@localhost:5432/hookubit_test?sslmode=disable' go test -race -count=1 ./..."
   }
 }

@@ -7,6 +7,7 @@ package db
 import (
 	"context"
 	"fmt"
+	"net/url"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -21,8 +22,63 @@ import (
 // would otherwise hold a pooled connection for as long as PostgreSQL is willing
 // to wait. Callers still pass a context deadline; this catches the paths that
 // forget to. Zero disables it.
+
+// prismaOnlyParams are query parameters Prisma understands and libpq does not.
+// Both planes are specified to read the SAME DATABASE_URL (ARCHITECTURE.md 36),
+// and Prisma's documented connection string carries `schema`, so a URL that is
+// correct for the control plane reaches pgx carrying a parameter PostgreSQL
+// rejects outright:
+//
+//	FATAL: unrecognized configuration parameter "schema" (SQLSTATE 42704)
+//
+// Stripping them here means one URL works for both, which is what an operator
+// is told to expect. `schema` is translated rather than dropped, because it
+// carries real intent: it becomes search_path, which PostgreSQL does understand.
+var prismaOnlyParams = map[string]string{
+	"schema":           "search_path",
+	"connection_limit": "",
+	"pool_timeout":     "",
+	"pgbouncer":        "",
+	"socket_timeout":   "",
+	"sslidentity":      "",
+	"sslpassword":      "",
+}
+
+// normaliseDSN rewrites a Prisma-flavoured connection string into one pgx can
+// use. It is deliberately conservative: anything it does not recognise is left
+// exactly as the operator wrote it.
+func normaliseDSN(raw string) (string, error) {
+	u, err := url.Parse(raw)
+	if err != nil {
+		// Not a URL - probably key=value DSN form, which pgx also accepts.
+		return raw, nil
+	}
+	q := u.Query()
+	changed := false
+	for key, replacement := range prismaOnlyParams {
+		v := q.Get(key)
+		if v == "" && !q.Has(key) {
+			continue
+		}
+		q.Del(key)
+		changed = true
+		if replacement != "" && v != "" {
+			q.Set(replacement, v)
+		}
+	}
+	if !changed {
+		return raw, nil
+	}
+	u.RawQuery = q.Encode()
+	return u.String(), nil
+}
+
 func Open(ctx context.Context, url string, maxConns int32, statementTimeout time.Duration) (*pgxpool.Pool, error) {
-	cfg, err := pgxpool.ParseConfig(url)
+	dsn, err := normaliseDSN(url)
+	if err != nil {
+		return nil, fmt.Errorf("normalise DATABASE_URL: %w", err)
+	}
+	cfg, err := pgxpool.ParseConfig(dsn)
 	if err != nil {
 		return nil, fmt.Errorf("parse DATABASE_URL: %w", err)
 	}

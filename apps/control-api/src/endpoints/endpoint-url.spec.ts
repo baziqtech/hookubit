@@ -107,3 +107,48 @@ describe('rejectEndpointUrl - refused', () => {
     expect(rejectEndpointUrl('   ')).toBe('a URL is required');
   });
 });
+
+describe('egress policy', () => {
+  const closed = { allowPrivateNetworks: false, privateAllowlist: [] as string[] };
+
+  it('blocks private and loopback targets by default', () => {
+    for (const url of ['http://localhost:8081/hook', 'http://127.0.0.1/x', 'http://10.0.0.5/x']) {
+      expect(rejectEndpointUrl(url, closed)).not.toBeNull();
+    }
+  });
+
+  it('permits a target inside an allowlisted CIDR, matching the Go guard', () => {
+    const policy = { allowPrivateNetworks: false, privateAllowlist: ['10.20.0.0/16'] };
+    expect(rejectEndpointUrl('http://10.20.5.5/hook', policy)).toBeNull();
+    // Allowlisting one subnet must not open the rest of RFC1918.
+    expect(rejectEndpointUrl('http://10.99.5.5/hook', policy)).not.toBeNull();
+  });
+
+  it('permits loopback when private networks are allowed, so local development works', () => {
+    const open = { allowPrivateNetworks: true, privateAllowlist: [] as string[] };
+    expect(rejectEndpointUrl('http://localhost:8081/hook', open)).toBeNull();
+    expect(rejectEndpointUrl('http://127.0.0.1:8081/hook', open)).toBeNull();
+  });
+
+  it('NEVER permits cloud metadata, whatever the policy says', () => {
+    // This is the ordering bug that was found and fixed in the Go guard. An
+    // operator allowlisting 169.254.0.0/16 for an internal service must not
+    // thereby hand every tenant a route to instance credentials.
+    for (const policy of [
+      { allowPrivateNetworks: true, privateAllowlist: [] as string[] },
+      { allowPrivateNetworks: false, privateAllowlist: ['169.254.0.0/16'] },
+    ]) {
+      expect(rejectEndpointUrl('http://169.254.169.254/latest/meta-data/', policy)).not.toBeNull();
+      expect(rejectEndpointUrl('http://100.100.100.200/', policy)).not.toBeNull();
+    }
+  });
+
+  it('refuses a default route as an allowlist entry', () => {
+    const policy = { allowPrivateNetworks: false, privateAllowlist: ['0.0.0.0/0'] };
+    expect(rejectEndpointUrl('http://10.0.0.5/hook', policy)).not.toBeNull();
+  });
+
+  it('still permits public targets', () => {
+    expect(rejectEndpointUrl('https://api.example.com/hooks', closed)).toBeNull();
+  });
+});

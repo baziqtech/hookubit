@@ -218,7 +218,67 @@ function classifyLiteral(host: string): string | null {
  * guard still runs, and a hostname that resolves into private space is refused
  * there. See the file docblock.
  */
-export function rejectEndpointUrl(raw: unknown): string | null {
+
+/**
+ * Egress policy, read from the SAME two variables the Go guard reads.
+ *
+ * Without this the two halves disagree in a way that makes a documented feature
+ * unusable: an operator who sets EGRESS_PRIVATE_ALLOWLIST=10.0.0.0/8 to deliver
+ * to consumers on their own network - which the deployment docs recommend as the
+ * production-safe alternative to allowing all private traffic - could not CREATE
+ * such an endpoint, because this validator refused it unconditionally. It also
+ * made local development impossible: nobody could point an endpoint at their own
+ * machine to see a delivery arrive.
+ *
+ * The Go guard at dial time remains the authority. This is the usability mirror,
+ * and a mirror that disagrees with the thing it reflects is worse than no mirror.
+ */
+export interface EgressPolicy {
+  allowPrivateNetworks: boolean;
+  privateAllowlist: readonly string[];
+}
+
+export function egressPolicyFromEnv(env: NodeJS.ProcessEnv = process.env): EgressPolicy {
+  return {
+    allowPrivateNetworks: env.EGRESS_ALLOW_PRIVATE_NETWORKS === 'true',
+    privateAllowlist: (env.EGRESS_PRIVATE_ALLOWLIST ?? '')
+      .split(',')
+      .map((entry) => entry.trim())
+      .filter((entry) => entry.length > 0),
+  };
+}
+
+/** Whether an IPv4 literal falls inside a CIDR from the allowlist. */
+function withinCidr(bytes: readonly number[], cidr: string): boolean {
+  const [network, prefixText] = cidr.split('/');
+  const prefix = Number(prefixText);
+  if (!Number.isInteger(prefix) || prefix < 0 || prefix > 32) return false;
+  // A default route is not an allowlist; the Go guard rejects it outright and
+  // so does this.
+  if (prefix === 0) return false;
+  const net = ipv4Bytes(network);
+  if (!net || bytes.length !== 4) return false;
+  const mask = prefix === 0 ? 0 : (0xffffffff << (32 - prefix)) >>> 0;
+  const toInt = (b: readonly number[]) => ((b[0] << 24) | (b[1] << 16) | (b[2] << 8) | b[3]) >>> 0;
+  return (toInt(bytes) & mask) === (toInt(net) & mask);
+}
+
+function permittedByPolicy(host: string, policy: EgressPolicy): boolean {
+  const v4 = ipv4Bytes(host);
+  // Metadata addresses are refused unconditionally, allowlist or not. This is
+  // the ordering bug that was found and fixed in the Go guard; reintroducing it
+  // here would let an operator who allowlists 169.254.0.0/16 hand every tenant
+  // a route to instance credentials.
+  if (v4 && metadataReason(v4)) return false;
+  if (policy.allowPrivateNetworks) return true;
+  if (!v4) return false;
+  return policy.privateAllowlist.some((cidr) => withinCidr(v4, cidr));
+}
+
+export function rejectEndpointUrl(
+  raw: unknown,
+  policy: EgressPolicy = egressPolicyFromEnv(),
+): string | null {
   if (typeof raw !== 'string' || raw.trim().length === 0) return 'a URL is required';
   const text = raw.trim();
   if (text.length > MAX_URL_LENGTH) return `URL is longer than ${MAX_URL_LENGTH} characters`;
@@ -246,9 +306,13 @@ export function rejectEndpointUrl(raw: unknown): string | null {
   // `URL` strips brackets from an IPv6 host only in `host`, not `hostname`.
   const host = url.hostname.replace(/^\[|\]$/g, '');
   if (!host) return 'URL has no host';
-  if (isLocalhostName(host)) return 'loopback address';
-
-  return classifyLiteral(host);
+  const rejection = isLocalhostName(host) ? 'loopback address' : classifyLiteral(host);
+  if (rejection === null) return null;
+  // The address is non-public. Permit it only if policy says so - and resolve
+  // localhost to 127.0.0.1 first, so `http://localhost:8081` is judged by the
+  // same rule as the literal a developer would otherwise have to type.
+  const literal = isLocalhostName(host) ? '127.0.0.1' : host;
+  return permittedByPolicy(literal, policy) ? null : rejection;
 }
 
 /** The URL as it will be stored: trimmed, otherwise byte-for-byte the input. */
