@@ -59,7 +59,7 @@ export function AppLayout() {
 function Breadcrumbs({ orgId, projectId }: { orgId: string; projectId?: string }) {
   const { pathname } = useLocation();
   const organizations = useOrganizations();
-  const project = useProject(projectId ?? '');
+  const project = useProject(orgId, projectId ?? '');
 
   const organization = organizations.data?.rows.find((row) => row.id === orgId);
   const section = currentSectionLabel(pathname, orgId, projectId);

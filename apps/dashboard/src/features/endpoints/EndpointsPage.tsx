@@ -19,14 +19,21 @@ import {
 import { formatDuration, formatRelativeTime } from '../../lib/format';
 import { DEFAULT_PAGE_SIZE, type CreatedEndpoint, type Endpoint } from '../../types/api';
 import { useCreateEndpoint, useEndpoints } from './api';
+import { EndpointActions } from './EndpointActions';
+import { EndpointEditDialog } from './EndpointEditDialog';
 
 export function EndpointsPage() {
   const { projectId = '' } = useParams();
   const [offset, setOffset] = useState(0);
   const [includeDeleted, setIncludeDeleted] = useState(false);
   const [creating, setCreating] = useState(false);
+  // One dialog for the whole table, driven by which row was clicked. A dialog
+  // per row would put sixty `<dialog>` elements — and sixty copies of the same
+  // element id — in the document.
+  const [editing, setEditing] = useState<Endpoint | null>(null);
 
   const endpoints = useEndpoints(projectId, { offset, includeDeleted });
+  const columns = buildColumns(projectId, setEditing);
 
   return (
     <div className="flex flex-col gap-4">
@@ -98,6 +105,14 @@ export function EndpointsPage() {
         open={creating}
         onClose={() => setCreating(false)}
       />
+
+      {editing && (
+        <EndpointEditDialog
+          endpoint={editing}
+          projectId={projectId}
+          onClose={() => setEditing(null)}
+        />
+      )}
     </div>
   );
 }
@@ -250,62 +265,90 @@ export function EndpointCreatedNotice({ endpoint }: { endpoint: CreatedEndpoint 
  * `success_rate_24h` on the wire: the breaker reports through `status` plus
  * `disabled_reason`/`disabled_at`, and the token bucket is `rate_limit` per
  * `rate_limit_window_seconds` rather than a per-second scalar.
+ *
+ * Built per render rather than declared once at module scope, because the
+ * actions need the project id — every write route is nested under it — and the
+ * edit dialog is owned by the page.
  */
-const columns: Column<Endpoint>[] = [
-  {
-    key: 'name',
-    header: 'Endpoint',
-    render: (row) => (
-      <span className="flex flex-col">
-        <span className="text-xs font-medium text-ink">{row.name}</span>
-        <span className="font-mono text-2xs text-ink-subtle">{row.url}</span>
-        {row.disabled_reason && (
-          <span className="mt-0.5 text-2xs text-danger">{row.disabled_reason}</span>
-        )}
-      </span>
-    ),
-  },
-  {
-    key: 'status',
-    header: 'Status',
-    render: (row) => (
-      <span className="flex flex-wrap gap-1">
-        <Badge tone={statusTone(row.status)} dot>
-          {row.status}
-        </Badge>
-        {/*
-         * Operator intent versus what the breaker did. `enabled: true` with a
-         * `disabled` status means the operator wants this endpoint delivering
-         * and the platform stopped it — a distinction an operator at 2am needs.
-         */}
-        {row.enabled && row.status === 'disabled' && <Badge tone="danger">auto-disabled</Badge>}
-        {!row.enabled && row.status !== 'deleted' && <Badge tone="neutral">operator paused</Badge>}
-      </span>
-    ),
-  },
-  {
-    key: 'limits',
-    header: 'Limits',
-    secondary: true,
-    render: (row) => (
-      <span className="text-2xs text-ink-muted">
-        {row.rate_limit === null
-          ? 'unlimited'
-          : `${row.rate_limit}/${row.rate_limit_window_seconds}s`}{' '}
-        · {formatDuration(row.timeout_ms)} timeout · {row.max_concurrency} concurrent
-      </span>
-    ),
-  },
-  {
-    key: 'created',
-    header: 'Created',
-    align: 'right',
-    secondary: true,
-    render: (row) => (
-      <span className="text-2xs text-ink-subtle">{formatRelativeTime(row.created_at)}</span>
-    ),
-  },
-];
+function buildColumns(
+  projectId: string,
+  onEdit: (endpoint: Endpoint) => void,
+): Column<Endpoint>[] {
+  return [
+    {
+      key: 'name',
+      header: 'Endpoint',
+      render: (row) => (
+        <span className="flex flex-col">
+          <span className="text-xs font-medium text-ink">{row.name}</span>
+          <span className="font-mono text-2xs text-ink-subtle">{row.url}</span>
+          {row.disabled_reason && (
+            <span className="mt-0.5 text-2xs text-danger">{row.disabled_reason}</span>
+          )}
+        </span>
+      ),
+    },
+    {
+      key: 'status',
+      header: 'Status',
+      render: (row) => (
+        <span className="flex flex-wrap gap-1">
+          <Badge tone={statusTone(row.status)} dot>
+            {row.status}
+          </Badge>
+          {/*
+           * Operator intent versus what the breaker did. `enabled: true` with a
+           * `disabled` status means the operator wants this endpoint delivering
+           * and the platform stopped it — a distinction an operator at 2am needs.
+           */}
+          {row.enabled && row.status === 'disabled' && <Badge tone="danger">auto-disabled</Badge>}
+          {!row.enabled && row.status !== 'deleted' && <Badge tone="neutral">operator paused</Badge>}
+        </span>
+      ),
+    },
+    {
+      key: 'limits',
+      header: 'Limits',
+      secondary: true,
+      render: (row) => (
+        <span className="text-2xs text-ink-muted">
+          {row.rate_limit === null
+            ? 'unlimited'
+            : `${row.rate_limit}/${row.rate_limit_window_seconds}s`}{' '}
+          · {formatDuration(row.timeout_ms)} timeout · {row.max_concurrency} concurrent
+        </span>
+      ),
+    },
+    {
+      key: 'created',
+      header: 'Created',
+      align: 'right',
+      secondary: true,
+      render: (row) => (
+        <span className="text-2xs text-ink-subtle">{formatRelativeTime(row.created_at)}</span>
+      ),
+    },
+    {
+      key: 'actions',
+      header: <span className="sr-only">Actions</span>,
+      align: 'right',
+      render: (row) =>
+        // A deleted endpoint is kept forever so the ledger stays readable, and
+        // every write against it answers 409. No controls, rather than controls
+        // that are guaranteed to fail.
+        row.status === 'deleted' ? (
+          <span className="text-2xs text-ink-subtle">kept for the ledger</span>
+        ) : (
+          <span className="flex flex-wrap items-center justify-end gap-2">
+            <EndpointActions endpoint={row} projectId={projectId} />
+            <Button size="sm" onClick={() => onEdit(row)}>
+              Edit
+            </Button>
+          </span>
+        ),
+    },
+  ];
+}
 
 function statusTone(status: Endpoint['status']): 'ok' | 'neutral' | 'danger' {
   if (status === 'active') return 'ok';

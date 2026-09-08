@@ -13,7 +13,7 @@ import type {
   TotalPage,
 } from '../../types/api';
 import * as db from './data';
-import { MockHttpError, mockRequest, resetMockLimits } from './server';
+import { MockHttpError, mockRequest, resetMockState } from './server';
 
 /**
  * The mock IS the contract until `generate:api` runs against a live OpenAPI
@@ -27,7 +27,10 @@ import { MockHttpError, mockRequest, resetMockLimits } from './server';
 const ORG = 'org_01JQSHAQ';
 const PROJECT = 'proj_01JQPAYPROD';
 
-beforeEach(() => resetMockLimits());
+// Writes persist in the mock now (PATCH, enable and disable mutate the
+// fixtures in place, or an invalidated query would refetch the old row), so
+// each test starts from the fixtures as loaded.
+beforeEach(() => resetMockState());
 
 describe('list envelopes', () => {
   it('projects return { data, count, has_more, next_offset } — ProjectListDto', async () => {
@@ -246,15 +249,47 @@ describe('write limits are reachable and distinguishable', () => {
     }
   });
 
-  it('reports a resource ceiling as a 409 conflict — there is no distinct code', async () => {
+  it('reports a resource ceiling as 409 limit_exceeded with { limit, current, resource }', async () => {
     // Organizations: the ceiling is per user and the mock is already at it.
     try {
       await mockRequest('POST', '/v1/organizations', { name: 'Eleventh' });
       throw new Error('expected the ceiling to refuse this create');
     } catch (error) {
       expect(error).toBeInstanceOf(MockHttpError);
-      // A ceiling and a duplicate slug are BOTH 409 `conflict`. That collision
-      // is why the dashboard classifies rather than switches on the code.
+      const body = (error as MockHttpError).body;
+      // Still 409 — the request was well formed — but its OWN code. `conflict`
+      // on the same status already means "that slug is taken", and a client
+      // that had to tell the two apart by reading the sentence broke the first
+      // time someone reworded one. The details are the contract.
+      expect((error as MockHttpError).status).toBe(409);
+      expect(body.error.code).toBe('limit_exceeded');
+      expect(body.error.details).toMatchObject({ resource: 'organizations' });
+      expect(body.error.details?.limit).toBeTypeOf('number');
+      expect(body.error.details?.current).toBeTypeOf('number');
+    }
+  });
+
+  it('never reports an ordinary conflict as a ceiling', async () => {
+    // A slug collision is a 409 too, and telling the user to delete an
+    // organization because they picked a taken name would be actively harmful.
+    const [organization] = db.organizations;
+    const other = db.projects.find(
+      (project) => project.organization_id === organization.id,
+    );
+    const collision = db.projects.find(
+      (project) =>
+        project.organization_id === organization.id && project.id !== other?.id,
+    );
+
+    try {
+      await mockRequest(
+        'PATCH',
+        `/v1/organizations/${organization.id}/projects/${other?.id}`,
+        { slug: collision?.slug },
+      );
+      throw new Error('expected the slug collision to be refused');
+    } catch (error) {
+      expect(error).toBeInstanceOf(MockHttpError);
       expect((error as MockHttpError).status).toBe(409);
       expect((error as MockHttpError).body.error.code).toBe('conflict');
     }

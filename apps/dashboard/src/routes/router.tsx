@@ -13,11 +13,9 @@ import { EventsPage } from '../features/events/EventsPage';
 import { GetStartedPage } from '../features/onboarding/GetStartedPage';
 import { OverviewPage } from '../features/overview/OverviewPage';
 import { AnalyticsPage } from '../features/analytics/AnalyticsPage';
-import {
-  BillingPage,
-  OrganizationSettingsPage,
-  ProjectSettingsPage,
-} from '../features/settings/placeholders';
+import { OrganizationSettingsPage } from '../features/settings/OrganizationSettingsPage';
+import { ProjectSettingsPage } from '../features/settings/ProjectSettingsPage';
+import { BillingPage } from '../features/settings/placeholders';
 import { SubscriptionsPage } from '../features/subscriptions/SubscriptionsPage';
 import { TeamPage } from '../features/team/TeamPage';
 import { UsagePage } from '../features/usage/UsagePage';

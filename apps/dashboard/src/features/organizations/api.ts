@@ -9,6 +9,7 @@ import type {
   Organization,
   Role,
   TotalPage,
+  UpdateOrganizationBody,
   UsageSummary,
 } from '../../types/api';
 
@@ -32,6 +33,31 @@ export function useOrganization(orgId: string) {
     queryKey: queryKeys.organization(orgId),
     queryFn: () => api.get<Organization>(`/v1/organizations/${orgId}`),
     enabled: Boolean(orgId),
+  });
+}
+
+/**
+ * `PATCH /v1/organizations/:orgId` — name and slug.
+ *
+ * `status` is not accepted: suspension is a platform and billing decision, and
+ * a writable status would let a customer un-suspend their own unpaid
+ * organization. Deleting has its own owner-gated route.
+ *
+ * Both the row AND the list are invalidated. The organization switcher, the
+ * breadcrumb and the session all read `useOrganizations()`, so a rename that
+ * dropped only `organization(orgId)` would leave the old name in the sidebar
+ * until a reload — which reads as the save having failed.
+ */
+export function useUpdateOrganization(orgId: string) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (body: UpdateOrganizationBody) =>
+      api.patch<Organization>(`/v1/organizations/${orgId}`, body),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: queryKeys.organization(orgId) });
+      void queryClient.invalidateQueries({ queryKey: queryKeys.organizationsRoot() });
+      void queryClient.invalidateQueries({ queryKey: queryKeys.session() });
+    },
   });
 }
 

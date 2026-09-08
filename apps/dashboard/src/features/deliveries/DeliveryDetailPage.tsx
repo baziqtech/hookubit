@@ -26,6 +26,7 @@ import { formatDuration, formatRelativeTime, formatTimestamp, truncateId } from 
 import { cn } from '../../lib/cn';
 import type { Delivery, DeliveryAttempt, DeliveryDetail, Endpoint } from '../../types/api';
 import { useEndpoint } from '../endpoints/api';
+import { EndpointActions } from '../endpoints/EndpointActions';
 import { useEventDeliveries } from '../events/api';
 import { useDelivery, useDeliveryAttempts, useReplayDelivery } from './api';
 
@@ -274,7 +275,7 @@ function EndpointHealthCheck({
   orgId: string;
   projectId: string;
 }) {
-  const endpoint = useEndpoint(delivery.endpoint_id);
+  const endpoint = useEndpoint(projectId, delivery.endpoint_id);
 
   // Silence is correct while loading or on error: a missing warning is better
   // than a wrong one, and the endpoint list is one click away regardless.
@@ -312,12 +313,26 @@ function EndpointHealthCheck({
           )}
         </p>
       )}
-      <Link
-        to={`/orgs/${orgId}/projects/${projectId}/endpoints`}
-        className="mt-2 inline-block text-xs font-medium text-accent hover:underline"
-      >
-        Review {target.name} →
-      </Link>
+      {/*
+        The cure, next to the diagnosis.
+
+        Until this existed the panel was a dead end: it named the problem
+        precisely and then required the operator to leave, find the endpoint by
+        name in a paged table, and act there — which at 2am is where the useful
+        page stopped being useful. The wording is deliberate and is explained in
+        `EndpointActions`: an endpoint the BREAKER disabled offers "Resume
+        deliveries anyway", because resuming does not repair the consumer that
+        caused it, and one a PERSON paused offers a plain "Resume deliveries".
+      */}
+      <div className="mt-3 flex flex-wrap items-center gap-2">
+        <EndpointActions endpoint={target} projectId={projectId} />
+        <Link
+          to={`/orgs/${orgId}/projects/${projectId}/endpoints`}
+          className="text-xs font-medium text-accent hover:underline"
+        >
+          Review {target.name} →
+        </Link>
+      </div>
     </section>
   );
 }

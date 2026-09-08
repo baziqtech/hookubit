@@ -19,21 +19,81 @@ export interface ApiError {
   code: ApiErrorCode | string;
   message: string;
   /**
+   * Every message the server sent, in order.
+   *
+   * A 400 from the global `ValidationPipe` carries an ARRAY at `error.message`
+   * — one entry per rejected property, each reading `"<property>: <reason>"`.
+   * That array is the only place the API says WHICH field it refused, and
+   * joining it into one sentence throws that away: a form then has to show a
+   * paragraph next to the submit button instead of an error under the input
+   * that caused it. `message` stays a string so every existing caller keeps
+   * working; `messages` is the structured original.
+   */
+  messages?: string[];
+  /**
    * Structured context the error envelope carries. This is where the throttle
    * guard puts `retry_after_seconds` and where a resource ceiling puts
-   * `limit`/`current` — the two facts that let the UI tell "slow down" apart
-   * from "you have hit a limit". See `src/lib/api-errors.ts`.
+   * `{ limit, current, resource }` — the facts that let the UI tell "slow
+   * down" apart from "you have hit a limit". See `src/lib/api-errors.ts`.
    */
   details?: Record<string, unknown>;
   request_id?: string;
 }
 
+/**
+ * An error envelope as it arrives — `message` may be the ValidationPipe's array.
+ * `ApiError` is the normalised form every caller sees.
+ */
+export interface RawApiError {
+  code: ApiErrorCode | string;
+  message: string | string[];
+  details?: Record<string, unknown>;
+  request_id?: string;
+}
+
+/**
+ * One shape out, whatever the server sent in.
+ *
+ * Both transports run this, so no caller can accidentally depend on a
+ * `message` that is sometimes an array — which would render as
+ * `"url: loopback address,name: too long"` in a UI that assumed a sentence.
+ */
+export function normaliseApiError(raw: unknown): ApiError {
+  const source = (typeof raw === 'object' && raw !== null ? raw : {}) as {
+    code?: unknown;
+    message?: unknown;
+    details?: unknown;
+    request_id?: unknown;
+  };
+
+  const messages = Array.isArray(source.message)
+    ? source.message.filter((entry): entry is string => typeof entry === 'string')
+    : typeof source.message === 'string'
+      ? [source.message]
+      : [];
+
+  return {
+    code: typeof source.code === 'string' ? source.code : 'internal_error',
+    message: messages.join(' ') || 'An unexpected error occurred.',
+    messages,
+    details:
+      typeof source.details === 'object' && source.details !== null
+        ? (source.details as Record<string, unknown>)
+        : undefined,
+    request_id: typeof source.request_id === 'string' ? source.request_id : undefined,
+  };
+}
+
 export class ApiRequestError extends Error {
+  readonly body: ApiError;
+
   constructor(
     readonly status: number,
-    readonly body: ApiError,
+    body: RawApiError,
   ) {
-    super(body.message);
+    const normalised = normaliseApiError(body);
+    super(normalised.message);
+    this.body = normalised;
     this.name = 'ApiRequestError';
   }
 
@@ -56,10 +116,10 @@ async function httpTransport<T>(method: string, path: string, body?: unknown): P
   });
 
   if (!response.ok) {
-    const payload = (await response.json().catch(() => null)) as { error?: ApiError } | null;
+    const payload = (await response.json().catch(() => null)) as { error?: unknown } | null;
     throw new ApiRequestError(
       response.status,
-      payload?.error ?? { code: 'internal_error', message: response.statusText },
+      normaliseApiError(payload?.error ?? { code: 'internal_error', message: response.statusText }),
     );
   }
   if (response.status === 204) return undefined as T;
@@ -73,7 +133,7 @@ async function mockTransport<T>(method: string, path: string, body?: unknown): P
     // Normalise to the same error type the HTTP transport throws, so no caller
     // can accidentally depend on mock-specific failure shapes.
     if (error instanceof MockHttpError) {
-      throw new ApiRequestError(error.status, error.body.error);
+      throw new ApiRequestError(error.status, normaliseApiError(error.body.error));
     }
     throw error;
   }

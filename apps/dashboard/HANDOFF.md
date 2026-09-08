@@ -126,37 +126,127 @@ final page reads as complete instead of promising one more empty page.
 `GET /v1/organizations/:orgId/projects`. A request to the old path would have
 404'd against the real API the moment the transport flipped.
 
-### Rate limits and ceilings are both refusals, and the API cannot tell them apart
+### Rate limits and ceilings are both refusals, and the API DOES tell them apart
 
-Every write route now carries `@Throttle`. Separately, creates can fail on a
-resource ceiling (organizations per user, projects per org, endpoints and API
-keys per project).
+*This section said the opposite until the routes were checked again. It was
+accurate when written and is corrected here rather than deleted, because the
+old behaviour is why the dashboard has a classifier at all.*
 
-**There is no `limit_exceeded` error code.** A ceiling is thrown as
-`AppError('conflict', …)`, so on the wire it is a 409 that is
-*indistinguishable from a duplicate-slug conflict on `code` alone*. The
-dashboard therefore classifies rather than switches, in `src/lib/api-errors.ts`:
+Every write route carries `@Throttle`. Separately, creates can fail on a
+resource ceiling (organizations per user, projects per org, endpoints, API keys
+and subscriptions per project).
 
-1. `details.limit` present on a 409 → ceiling, with numbers. Exact.
-2. otherwise a 409 whose message matches `/which is (its limit|the limit|the maximum)/`
-   → ceiling, without numbers. **Fragile — it breaks if anyone rewords a message.**
-3. anything else 409 → an ordinary conflict.
+**`limit_exceeded` exists.** It is in `ERROR_CODES` (`common/errors.ts:37`), it
+is a 409 like `conflict`, and **every ceiling raises it with
+`details: { limit, current, resource }`** — including the two this document
+previously said "attach nothing but prose": endpoints
+(`endpoints.service.ts` `requireHeadroom`, line ~407) and organizations
+(`organizations.service.ts` `create`, line ~140). Both were verified by reading
+the services.
+
+So `src/lib/api-errors.ts` **no longer matches prose**, and the old rule 2 —
+`/which is (its limit|the limit|the maximum)/` — is gone. Keeping it would now
+do harm rather than good: a genuine `conflict` worded like a ceiling would be
+classified as one, and the user told to delete something to fix a name
+collision. `api-errors.test.ts` pins exactly that case.
+
+    1. 429 / `rate_limited`   → throttled, transient, with `retry_after_seconds`
+    2. `limit_exceeded`       → ceiling, with `{ limit, current, resource }`
+    3. any other 409          → an ordinary conflict (duplicate slug, deleted row)
+    4. 400 / `invalid_request`→ invalid, split into per-field issues (below)
 
 The distinction matters because the remedies are opposites: a 429 clears itself
 and the panel says how long, a ceiling never does and its copy must never say
 "try again". `WriteErrorNotice` renders them differently and
 `WriteErrorNotice.test.tsx` pins that they cannot converge.
 
+### A 400 carries an ARRAY at `error.message`, and it is the only field map there is
+
+`AppExceptionFilter` passes a non-`AppError` `HttpException` body straight
+through (`common/errors.ts:82`), and the global `ValidationPipe` puts the array
+of per-property messages there. So a validation failure arrives as:
+
+```json
+{ "error": { "code": "invalid_request",
+             "message": ["url: loopback address", "timeout_ms: must not be less than 1000"] } }
+```
+
+Each entry is `"<property>: <reason>"`, produced by class-validator's
+`defaultMessage`. **That array is the only place the API says which field it
+refused.** Flattened into a sentence — which is what the dashboard used to do,
+because `ApiError.message` was typed `string` — a form can do nothing but show a
+paragraph next to the submit button.
+
+`normaliseApiError` in `src/lib/api.ts` now runs on both transports and keeps
+the array as `messages`; `classifyWriteError` splits it into
+`{ field, reason }` issues; forms call `setError(field, …)` and focus the first.
+`WriteErrorNotice` takes `claimedFields` and renders **nothing** when the form
+placed every reason under its own input, so a rejection is never shown twice and
+never silently dropped.
+
+## Four routes that already existed and were only unwired
+
+Checked against the controllers, not against this document:
+
+| Route | Wired in |
+| --- | --- |
+| `PATCH /v1/projects/:projectId/endpoints/:endpointId` | `EndpointEditDialog` |
+| `POST …/endpoints/:endpointId/enable` | `EndpointActions` |
+| `POST …/endpoints/:endpointId/disable` | `EndpointActions` |
+| `PATCH /v1/organizations/:orgId/projects/:projectId` | `ProjectSettingsPage` |
+| `PATCH /v1/organizations/:orgId` | `OrganizationSettingsPage` |
+
+### More route drift found while wiring them
+
+Both of these would have 404'd the moment the transport flipped, and both are
+fixed, in the hooks and in the mock:
+
+- **`GET /v1/endpoints/:id` does not exist.** `EndpointsController` is mounted
+  at `projects/:projectId/endpoints`, and the project id in the path is what
+  `TenantResolver` reads the organization off — it is a lookup key, never an
+  authorization claim. `useEndpoint` now takes a project id.
+  `/v1/endpoints/:id/secrets` **is** top-level, because
+  `EndpointSecretsController` is mounted separately. The asymmetry is real.
+- **`GET /v1/projects/:id` does not exist** either; projects are nested under
+  the organization for reads as well as for the list. `useProject` now takes an
+  org id, and its three callers pass the one already in the URL.
+
+### The breaker affordance says "Resume deliveries anyway"
+
+`enabled` is operator intent, `status` is the breaker's verdict, and the pair is
+the most easily misread thing in the product. The delivery page could already
+say *"no retry will run — the circuit breaker has disabled this endpoint"*; that
+is a diagnosis with no cure, and it sent the operator away to find the endpoint
+by name in a paged table.
+
+The rule, in `src/features/endpoints/breaker.ts` as pure data so it is testable
+without a DOM:
+
+- `enabled: true, status: 'disabled'` — the platform stopped it. Re-enabling
+  changes nothing about the consumer whose failures opened the breaker, so the
+  next run of failures opens it again, and the queued deliveries that resume in
+  the meantime hit a still-broken consumer as a burst. The control is
+  **"Resume deliveries anyway"** / **"Resume anyway"**: it offers the action and
+  refuses to imply a repair. `breaker.test.ts` asserts the label never matches
+  `/fix|restore|repair|re-?enable/`.
+- Alongside it, **"Pause it instead"** — the honest option when the consumer is
+  known broken. It converts a platform verdict into a recorded operator decision
+  with a reason in the audit log, which is what makes the delivery gap
+  explainable next week, and it stops the retry churn.
+- `enabled: false` — a person paused it. Reversing your own decision reads as
+  an ordinary action: **"Resume deliveries"**.
+
+`POST …/enable` is refused with a 409 when the endpoint has no live signing
+secret (the data plane fails closed rather than delivering unsigned). That
+branch is reachable in the mock via `ep_01JQPENDING` and is surfaced, not
+swallowed.
+
 ## Still needed from the control API
 
-1. **A distinct error code for a resource ceiling** — `limit_exceeded`, or a
-   stable `details.reason`. Rule 2 above is prose-matching in a UI, which is not
-   a contract. This is the single most valuable thing to add.
-2. **`details: { limit, current }` on every ceiling.** Projects
-   (`projects.service.ts:217`) and API keys (`api-keys.service.ts:212`) attach
-   it. **Endpoints (`endpoints.service.ts:401`) and organizations
-   (`organizations.service.ts:134`) attach nothing but prose**, so the UI cannot
-   tell the user how close they are for two of the four ceilings.
+1. ~~A distinct error code for a resource ceiling.~~ **Done** — `limit_exceeded`.
+2. ~~`details: { limit, current }` on every ceiling.~~ **Done**, on all four,
+   plus `resource`, which is what lets the copy say *"delete one of your
+   endpoints"* rather than *"delete something"*.
 3. **`Retry-After` / `retry_after_seconds` reachable from the browser.** The
    guard sets both, but a cross-origin deploy needs `Retry-After` in
    `Access-Control-Expose-Headers`; the dashboard currently reads only
@@ -165,12 +255,15 @@ and the panel says how long, a ceiling never does and its copy must never say
 5. **Publish `/docs-json`.** `src/types/api.ts` is a second source of truth and
    this whole document is the cost of it. `pnpm generate:api` deletes the
    problem.
-6. **Whether `secret_pending` is derivable after creation.** It appears only on
-   the create response. A dashboard listing endpoints cannot currently
-   distinguish "paused by an operator" from "paused because it has no secret" —
-   it infers it from `enabled` + `status`, which is a guess. A
-   `has_live_secret` field on `EndpointDto`, or the secrets count, would settle
-   it.
+6. **Whether `secret_pending` is derivable after creation.** Still open, and it
+   is now the sharpest gap on this page rather than a cosmetic one. `EndpointDto`
+   carries no signing-secret state, so the Endpoints table cannot distinguish
+   "paused by an operator" from "paused because it has no secret" — and it is
+   the second of those for which `POST …/enable` answers 409. The dashboard
+   therefore offers "Resume deliveries" on an endpoint that cannot be resumed,
+   and only learns better from the conflict. A `has_live_secret` boolean on
+   `EndpointDto` (or the active-secret count) would let the button be disabled
+   with the real reason instead.
 7. **Modules that do not exist yet.** Events, deliveries, subscriptions,
    analytics, usage and audit logs are still served only by the mock and are
    marked SPECULATIVE in `src/types/api.ts`. They currently use `CursorPage<T>`;
@@ -365,6 +458,23 @@ URL produces connection-refused, which is annoying but honest; deriving it from
 the dashboard's origin would produce a request that 404s against the *control*
 API, which looks like it reached something and is far more confusing.
 
+## The mock now accepts writes, and they persist
+
+`PATCH`, `enable` and `disable` mutate the fixtures in place — they have to, or
+a query invalidated after a mutation would refetch the old row and the change
+would look lost. That makes `src/lib/mock/data.ts` shared mutable state across a
+test file, so `resetMockState()` (which also clears the throttle counters)
+rewinds every write and is called from `beforeEach` in every mock suite.
+
+The write-side validation lives in `src/lib/mock/writes.ts` and mirrors
+`endpoint-url.ts`, `endpoint-headers.ts` and `endpoint-limits.ts` in the same
+words. `writes.test.ts` covers the failures the UI has to render, not just the
+200s: an SSRF-shaped URL (loopback, private, metadata, a bad scheme, embedded
+credentials), a reserved `Webhook-*` header, `status` refused by
+`forbidNonWhitelisted`, the numeric bounds, a 409 on a soft-deleted endpoint, a
+409 on enabling an endpoint with no signing secret, a slug collision, and a 429
+with `retry_after_seconds`.
+
 ## Mock changes that bring it closer to the real contract
 
 Two changes to `src/lib/mock/`, both of which make the mock **more** faithful:
@@ -391,21 +501,30 @@ Two changes to `src/lib/mock/`, both of which make the mock **more** faithful:
 7. **`onboarding_completed_at`** on the user, plus
    `POST /v1/auth/onboarding-completed`. Detailed above. Highest value of these.
 8. **`VITE_INGEST_BASE_URL`** passed as a build arg by the deployments side.
-9. **Endpoint enable/pause/disable routes.** The delivery detail page can now
-   tell an operator that the circuit breaker has disabled the endpoint their
-   delivery is queued against — which is the single most valuable fact on that
-   page — but there is no route to act on it. `PATCH /v1/endpoints/:id` with
-   `{ enabled }`, or explicit `:enable` / `:pause` actions, would close the loop
-   from "here is the problem" to "here is the fix".
-10. **`PATCH /v1/projects/:id` and `PATCH /v1/organizations/:id`.** The settings
-    pages now render the real read-only record and say plainly that nothing is
-    editable and why, naming the missing route. They become real settings pages
-    the day these land.
-11. **A billing surface, or a decision not to have one.** `BillingPage` is the
+9. ~~Endpoint enable/pause/disable routes.~~ **They already existed** —
+   `POST …/enable` and `POST …/disable`, plus `PATCH` for everything else — and
+   are now wired. See the breaker section above for what the control says and
+   why.
+10. ~~`PATCH /v1/projects/:id` and `PATCH /v1/organizations/:id`.~~ **They
+    already existed too** (nested under the organization), and both settings
+    pages are now real forms. What each DTO refuses — `environment`, `status` —
+    is rendered as a fact with the reason rather than as a disabled input, since
+    a greyed-out dropdown reads as "ask an admin" when the truth is "create a
+    second project".
+11. **A retry-policy picker.** `EndpointEditDialog` accepts `retry_policy_id` as
+    free text with the caveat spelled out, because `RetryPoliciesController` is
+    mounted (`projects/:projectId/retry-policies`) but has no dashboard hook and
+    no mock fixtures. Wiring that list turns the field into a select; until then
+    an id from another project answers 404 through the tenant scope.
+12. **An audit-log surface for these writes.** `POST …/disable` writes the
+    operator's reason to the audit log, which is what makes a delivery gap
+    explainable later — and `AuditPage` is still served only by the mock, so the
+    reason cannot actually be read back yet.
+13. **A billing surface, or a decision not to have one.** `BillingPage` is the
     only genuinely empty screen left. There is no route, no shape, not even a
     mock, so it renders an honest empty state pointing at Usage rather than a
     fabricated invoice table.
-12. **Analytics, events, deliveries and subscriptions modules.** `AnalyticsPage`
+14. **Analytics, events, deliveries and subscriptions modules.** `AnalyticsPage`
     is now built against the mock's `GET /v1/projects/:id/analytics`, since a
     working shape existed and a dead route was the worse option. It is still
     SPECULATIVE and the page says so on itself. When the real module lands,

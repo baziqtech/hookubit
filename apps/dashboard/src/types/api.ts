@@ -37,7 +37,16 @@
 export interface ApiErrorBody {
   error: {
     code: ApiErrorCode;
-    message: string;
+    /**
+     * A STRING, except on a 400 raised by the global `ValidationPipe`, where
+     * Nest puts the array of per-field messages here and `AppExceptionFilter`
+     * passes it through untouched (`common/errors.ts`). Each entry reads
+     * `"<property>: <reason>"` — `"url: loopback address"`,
+     * `'custom_headers: "Authorization": this header is reserved…'` — which is
+     * the only place the server says WHICH field it refused. `normaliseApiError`
+     * in `lib/api.ts` keeps the array so a form can point at the right input.
+     */
+    message: string | string[];
     details?: Record<string, unknown>;
     request_id?: string;
   };
@@ -47,9 +56,11 @@ export interface ApiErrorBody {
  * The exact key set of `ERROR_CODES` in control-api `src/common/errors.ts`.
  * Codes are additive; treat an unknown string as `internal_error`.
  *
- * NOTE: there is no `limit_exceeded` code. A resource ceiling is reported as
- * `conflict` (409) with a prose message, which is why the dashboard has to
- * classify it — see `classifyWriteError`.
+ * `limit_exceeded` EXISTS. It is a 409, like `conflict`, and it is the code a
+ * resource ceiling raises — every one of them carries
+ * `details: { limit, current, resource }`. `conflict` on the same status means
+ * something else entirely (a duplicate slug, a deleted endpoint), so the two
+ * must never be collapsed: see `classifyWriteError`.
  */
 export type ApiErrorCode =
   | 'invalid_request'
@@ -59,6 +70,8 @@ export type ApiErrorCode =
   | 'email_not_verified'
   | 'not_found'
   | 'conflict'
+  /** 409. A per-tenant resource ceiling, with `{ limit, current, resource }`. */
+  | 'limit_exceeded'
   | 'idempotency_key_reused'
   | 'payload_too_large'
   /** 429. Every write route carries a `@Throttle`. */
@@ -193,6 +206,48 @@ export interface Project {
   updated_at: string;
 }
 
+/**
+ * `UpdateProjectDto` — name and slug, and NOTHING else.
+ *
+ * `environment` is absent and its absence is the enforcement: the global
+ * `ValidationPipe` runs `forbidNonWhitelisted`, so a body carrying it is
+ * refused with `invalid_request` before the DTO is reached, and
+ * `ProjectsService.update` checks for the key again so the rule holds for a
+ * caller that arrives without the pipe. `status` is absent too — a soft delete
+ * is `DELETE`, audited as `project.deleted`, and a `status` slipped through a
+ * PATCH would be audited as an edit.
+ */
+export interface UpdateProjectBody {
+  name?: string;
+  slug?: string;
+}
+
+/**
+ * `UpdateOrganizationDto` — name and slug. `status` is absent because
+ * suspension is a platform decision (a customer could otherwise un-suspend
+ * their own unpaid organization) and deletion has its own owner-gated route.
+ */
+export interface UpdateOrganizationBody {
+  name?: string;
+  slug?: string;
+}
+
+/**
+ * Slug rules. The pattern and the floor are shared; THE CEILINGS ARE NOT —
+ * `organizations/dto/create-organization.dto.ts` says 48 and `projects/slug.ts`
+ * says 64. They are kept apart here rather than averaged into one number,
+ * because a shared constant would silently start refusing a legal project slug.
+ */
+export const SLUG_PATTERN = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
+export const SLUG_MIN_LENGTH = 2;
+export const ORGANIZATION_SLUG_MAX_LENGTH = 48;
+export const PROJECT_SLUG_MAX_LENGTH = 64;
+/** `@Length(1, 200)` on a project, `@Length(2, 200)` on an organization. */
+export const PROJECT_NAME_MAX_LENGTH = 200;
+export const PROJECT_NAME_MIN_LENGTH = 1;
+export const ORGANIZATION_NAME_MAX_LENGTH = 200;
+export const ORGANIZATION_NAME_MIN_LENGTH = 2;
+
 /* ── API keys ─────────────────────────────────────────────── VERIFIED ────── */
 
 /**
@@ -294,6 +349,70 @@ export interface CreateEndpointBody {
   rate_limit?: number;
   rate_limit_window_seconds?: number;
 }
+
+/**
+ * `UpdateEndpointDto` — `PartialType(CreateEndpointDto)`, so every field is
+ * optional and the constraints are identical.
+ *
+ * `status` is DELIBERATELY not here. Enabling, disabling and deleting have
+ * their own routes because each carries a precondition a PATCH would walk past
+ * (an endpoint cannot be enabled without a live signing secret; a delete must
+ * stay soft). A form offering a status dropdown would be offering a write the
+ * server refuses.
+ *
+ * `rate_limit`, `retry_policy_id` and `custom_headers` are nullable: null is
+ * how "unset" is expressed, and it is not the same request as omitting the key.
+ */
+export interface UpdateEndpointBody {
+  name?: string;
+  url?: string;
+  description?: string;
+  timeout_ms?: number;
+  max_concurrency?: number;
+  rate_limit?: number | null;
+  rate_limit_window_seconds?: number;
+  retry_policy_id?: string | null;
+  custom_headers?: Record<string, string> | null;
+}
+
+/** `DisableEndpointDto`. The reason is audited, so the delivery gap can be explained. */
+export interface DisableEndpointBody {
+  reason?: string;
+}
+
+/**
+ * `ENDPOINT_LIMITS` in control-api `src/endpoints/endpoint-limits.ts`, mirrored
+ * so a form can refuse an out-of-range value before spending a round trip.
+ *
+ * These are bounds on a lever into the SHARED data plane, not cosmetic
+ * validation — `timeout_ms` is how long one tenant may hold a worker slot — so
+ * the client copy is a convenience and the server remains the authority.
+ */
+export const ENDPOINT_LIMITS = {
+  timeout_ms: { min: 1_000, max: 120_000, default: 30_000 },
+  max_concurrency: { min: 1, max: 256, default: 16 },
+  rate_limit: { min: 1, max: 100_000 },
+  rate_limit_window_seconds: { min: 1, max: 3_600, default: 1 },
+} as const;
+
+export const MAX_ENDPOINT_NAME_LENGTH = 200;
+export const MAX_ENDPOINT_DESCRIPTION_LENGTH = 1_000;
+export const MAX_ENDPOINT_URL_LENGTH = 2_048;
+export const MAX_CUSTOM_HEADERS = 20;
+
+/**
+ * Header names the platform refuses, mirrored from
+ * `src/endpoints/endpoint-headers.ts`. `Webhook-*` is the whole namespace: it
+ * carries the signature and the delivery identity, so a tenant able to restate
+ * one could forge a webhook into their own consumer.
+ */
+export const RESERVED_HEADER_NAMES: readonly string[] = [
+  'authorization',
+  'host',
+  'content-length',
+  'transfer-encoding',
+];
+export const RESERVED_HEADER_PREFIX = 'webhook-';
 
 /* ── Endpoint secrets ─────────────────────────────────────── VERIFIED ────── */
 

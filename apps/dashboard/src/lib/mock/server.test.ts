@@ -1,7 +1,7 @@
-import { describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it } from 'vitest';
 import type { CursorPage, Delivery, EventDetail, Session, WebhookEvent } from '../../types/api';
 import * as db from './data';
-import { MockHttpError, mockRequest } from './server';
+import { MockHttpError, mockRequest, resetMockState } from './server';
 
 /**
  * The mock is a stand-in for the control API, so it is worth holding to the
@@ -10,6 +10,8 @@ import { MockHttpError, mockRequest } from './server';
  * These also catch the fixture generator failing at module load.
  */
 describe('mock control API', () => {
+  beforeEach(() => resetMockState());
+
   it('serves a session with organizations', async () => {
     const session = await mockRequest<Session>('GET', '/v1/auth/session');
     expect(session.user.email).toContain('@');

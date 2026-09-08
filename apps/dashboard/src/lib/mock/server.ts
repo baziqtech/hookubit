@@ -26,8 +26,18 @@ import type {
   TotalPage,
   WebhookEvent,
 } from '../../types/api';
-import { DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE } from '../../types/api';
+import {
+  DEFAULT_PAGE_SIZE,
+  MAX_PAGE_SIZE,
+  ORGANIZATION_NAME_MAX_LENGTH,
+  ORGANIZATION_NAME_MIN_LENGTH,
+  ORGANIZATION_SLUG_MAX_LENGTH,
+  PROJECT_NAME_MAX_LENGTH,
+  PROJECT_NAME_MIN_LENGTH,
+  PROJECT_SLUG_MAX_LENGTH,
+} from '../../types/api';
 import * as db from './data';
+import { rejectEndpointPatch, rejectIdentityPatch } from './writes';
 
 interface Handler {
   method: string;
@@ -45,17 +55,28 @@ class MockHttpError extends Error {
     readonly status: number,
     readonly body: ApiErrorBody,
   ) {
-    super(body.error.message);
+    // `message` is an array on a validation failure; join it for the `Error`
+    // and leave `body` carrying the original, which is what the transport
+    // normalises into per-field issues.
+    const { message } = body.error;
+    super(Array.isArray(message) ? message.join(' ') : message);
   }
 }
 
 let requestSeq = 0;
 const requestId = () => `req_01JQMOCK${(requestSeq += 1).toString().padStart(4, '0')}`;
 
+/**
+ * `message` may be a STRING ARRAY, because on a 400 the real API's is.
+ * `AppExceptionFilter` passes the global `ValidationPipe`'s array straight
+ * through, so each rejected property arrives as its own `"<property>: <reason>"`
+ * entry. A mock that flattened that to a sentence would let the dashboard's
+ * per-field error placement rot untested until it met a real 400.
+ */
 function fail(
   status: number,
   code: ApiErrorBody['error']['code'],
-  message: string,
+  message: string | string[],
   details?: Record<string, unknown>,
 ): never {
   throw new MockHttpError(status, {
@@ -151,16 +172,25 @@ function booleanQuery(query: URLSearchParams, name: string): boolean | undefined
 /**
  * Throttles and ceilings, kept distinct because the remedies are.
  *
- * A 429 is transient and carries `retry_after_seconds`. A ceiling is a 409 —
- * the control API has NO distinct code for one — and waiting does not clear it.
- * Both paths have to be reachable in the mock, or the UI that tells them apart
- * is never exercised before it meets a real user.
+ * A 429 is transient and carries `retry_after_seconds`. A ceiling is a 409
+ * `limit_exceeded` carrying `{ limit, current, resource }`, and waiting does not
+ * clear it. Both paths have to be reachable in the mock, or the UI that tells
+ * them apart is never exercised before it meets a real user.
  */
 const THROTTLE_LIMITS: Record<string, number> = {
   'projects.create': 20,
+  'projects.update': 30,
   'api-keys.create': 10,
   'endpoints.create': 60,
+  // Small on purpose, like the other mock buckets: a throttle the mock cannot
+  // reach is a UI path that first runs in production.
+  'endpoints.update': 10,
+  // Deliberately small. Enabling and disabling are the controls an operator
+  // reaches for during an incident, which is exactly when a 429 on one of them
+  // is most confusing — so the path has to be reachable here.
+  'endpoints.toggle': 10,
   'organizations.create': 10,
+  'organizations.update': 30,
   'members.invite': 20,
   'endpoint-secrets.rotate': 30,
 };
@@ -170,6 +200,32 @@ const throttleCounts = new Map<string, number>();
 /** Test seam: the counters are process-wide, so a suite must be able to reset them. */
 export function resetMockLimits(): void {
   throttleCounts.clear();
+}
+
+/**
+ * The fixtures as they were at module load.
+ *
+ * PATCH, enable and disable mutate `db` in place — they have to, or the UI
+ * that invalidates a query after a mutation would refetch the old row and the
+ * change would appear to have been lost. That makes the fixtures shared mutable
+ * state across a test file, so there has to be a way back.
+ */
+const pristine = {
+  endpoints: db.endpoints.map((endpoint) => ({ ...endpoint })),
+  projects: db.projects.map((project) => ({ ...project })),
+  organizations: db.organizations.map((organization) => ({ ...organization })),
+};
+
+/** Rewinds every write the mock has accepted, and the throttle counters. */
+export function resetMockState(): void {
+  throttleCounts.clear();
+  db.endpoints.splice(0, db.endpoints.length, ...pristine.endpoints.map((row) => ({ ...row })));
+  db.projects.splice(0, db.projects.length, ...pristine.projects.map((row) => ({ ...row })));
+  db.organizations.splice(
+    0,
+    db.organizations.length,
+    ...pristine.organizations.map((row) => ({ ...row })),
+  );
 }
 
 function charge(bucket: string): void {
@@ -184,20 +240,25 @@ function charge(bucket: string): void {
 }
 
 /**
- * A resource ceiling, reported the way the real API reports one: 409 `conflict`
- * with prose. `details` is attached only where the real service attaches it —
- * projects and API keys do, endpoints and organizations do NOT — because the
- * dashboard's classifier has to cope with both and pretending otherwise would
- * hide the gap the backend still needs to close.
+ * A resource ceiling, reported the way the real API reports one.
+ *
+ * `limit_exceeded`, NOT `conflict`, and always with
+ * `{ limit, current, resource }`. That is now true of all four ceilings in the
+ * control API — projects, API keys, endpoints (`endpoints.service.ts`
+ * `requireHeadroom`) and organizations (`organizations.service.ts` `create`).
+ * It was not always: two of them attached prose only, which is why the
+ * dashboard once had to match on the sentence. The mock must not keep serving
+ * the old shape, or the message-matching fallback would stay alive here long
+ * after the reason for it was gone.
  */
 function assertBelowCeiling(
   current: number,
   limit: number,
   message: string,
-  withDetails: boolean,
+  resource: string,
 ): void {
   if (current < limit) return;
-  fail(409, 'conflict', message, withDetails ? { limit, current } : undefined);
+  fail(409, 'limit_exceeded', message, { limit, current, resource });
 }
 
 function requireBody<T extends Record<string, unknown>>(body: unknown, fields: string[]): T {
@@ -263,6 +324,42 @@ function withoutPayload(event: EventDetail): WebhookEvent {
   delete summary.payload;
   delete summary.headers;
   return summary as unknown as WebhookEvent;
+}
+
+/** The endpoint, or the 404 that never distinguishes "gone" from "not yours". */
+function endpointOr404(projectId: string, endpointId: string) {
+  const endpoint = db.endpoints.find(
+    (candidate) => candidate.id === endpointId && candidate.project_id === projectId,
+  );
+  if (!endpoint) {
+    // One answer, one message, for "does not exist" and "belongs to another
+    // tenant" alike. A 403 here would confirm that an id scraped from somewhere
+    // else is live infrastructure belonging to someone.
+    fail(404, 'not_found', `Endpoint ${endpointId} was not found`);
+  }
+  return endpoint;
+}
+
+/**
+ * A deleted endpoint is kept forever so the delivery ledger stays readable, and
+ * every write against one is refused. Not a 404: the caller is inside the
+ * tenant and can still see the row through GET, so hiding it here would be
+ * confusing rather than protective.
+ */
+function assertNotDeleted(status: string): void {
+  if (status !== 'deleted') return;
+  fail(
+    409,
+    'conflict',
+    'This endpoint has been deleted. Deleted endpoints are kept so the delivery ledger stays ' +
+      'readable, but they cannot be modified.',
+  );
+}
+
+function assertRejections(rejections: string[]): void {
+  if (rejections.length === 0) return;
+  // An ARRAY, exactly as the ValidationPipe produces one.
+  fail(400, 'invalid_request', rejections);
 }
 
 const handlers: Handler[] = [
@@ -337,18 +434,17 @@ const handlers: Handler[] = [
        * Per-USER ceiling. The real limit is MAX_ORGANIZATIONS_PER_USER = 10;
        * the mock uses the fixture count so the ceiling branch is actually
        * REACHABLE. A limit the mock can never hit is a UI path that first runs
-       * in production — and this is the one ceiling that carries no `details`,
-       * so it is the one the dashboard's message-matching fallback depends on.
+       * in production.
        *
-       * The real service attaches prose only, never { limit, current }, so
-       * neither does the mock. See HANDOFF.md.
+       * It answers `limit_exceeded` with `{ limit, current, resource }`, like
+       * the real service does now — `organizations.service.ts` line 140.
        */
       const MOCK_ORGANIZATION_CEILING = db.organizations.length;
       assertBelowCeiling(
         db.organizations.length,
         MOCK_ORGANIZATION_CEILING,
         `You already own ${MOCK_ORGANIZATION_CEILING} organizations, which is the limit. Delete one, or ask to have the limit raised.`,
-        false,
+        'organizations',
       );
       fail(500, 'internal_error', 'The mock does not persist new organizations.');
     },
@@ -359,6 +455,40 @@ const handlers: Handler[] = [
     handle: ({ params }) =>
       db.organizations.find((org) => org.id === params.orgId) ??
       fail(404, 'not_found', `Organization ${params.orgId} was not found`),
+  },
+  {
+    method: 'PATCH',
+    pattern: '/v1/organizations/:orgId',
+    handle: ({ params, body }) => {
+      charge('organizations.update');
+      const organization = db.organizations.find((org) => org.id === params.orgId);
+      if (!organization) fail(404, 'not_found', `Organization ${params.orgId} was not found`);
+
+      const input = (typeof body === 'object' && body !== null ? body : {}) as Record<
+        string,
+        unknown
+      >;
+      assertRejections(
+        rejectIdentityPatch(input, {
+          nameMin: ORGANIZATION_NAME_MIN_LENGTH,
+          nameMax: ORGANIZATION_NAME_MAX_LENGTH,
+          slugMax: ORGANIZATION_SLUG_MAX_LENGTH,
+          kind: 'organization',
+        }),
+      );
+
+      if (typeof input.slug === 'string') {
+        const taken = db.organizations.some(
+          (candidate) => candidate.id !== organization.id && candidate.slug === input.slug,
+        );
+        if (taken) fail(409, 'conflict', `The slug "${input.slug}" is already taken.`);
+      }
+
+      if (typeof input.name === 'string') organization.name = input.name;
+      if (typeof input.slug === 'string') organization.slug = input.slug;
+      organization.updated_at = new Date().toISOString();
+      return organization;
+    },
   },
   {
     method: 'GET',
@@ -414,17 +544,73 @@ const handlers: Handler[] = [
         existing,
         100,
         `This organization already has ${existing} projects, which is its limit of 100. Delete a project you no longer need, or ask an operator to raise MAX_PROJECTS_PER_ORGANIZATION.`,
-        true,
+        'projects',
       );
       fail(500, 'internal_error', `The mock does not persist new projects ("${input.name}").`);
     },
   },
+  /*
+   * NESTED UNDER THE ORGANIZATION, like the list, because `ProjectsController`
+   * is mounted at `organizations/:orgId/projects`. There is no top-level
+   * `/v1/projects/:id` route on the real API and the mock no longer pretends
+   * there is — a route the mock serves and the API does not is a 404 that first
+   * appears the day the transport is switched.
+   */
   {
     method: 'GET',
-    pattern: '/v1/projects/:projectId',
+    pattern: '/v1/organizations/:orgId/projects/:projectId',
     handle: ({ params }) =>
-      db.projects.find((project) => project.id === params.projectId) ??
-      fail(404, 'not_found', `Project ${params.projectId} was not found`),
+      db.projects.find(
+        (project) =>
+          project.id === params.projectId && project.organization_id === params.orgId,
+      ) ?? fail(404, 'not_found', `Project ${params.projectId} was not found`),
+  },
+  {
+    method: 'PATCH',
+    pattern: '/v1/organizations/:orgId/projects/:projectId',
+    handle: ({ params, body }) => {
+      charge('projects.update');
+      const project = db.projects.find(
+        (candidate) =>
+          candidate.id === params.projectId && candidate.organization_id === params.orgId,
+      );
+      if (!project) fail(404, 'not_found', `Project ${params.projectId} was not found`);
+      if (project.status === 'deleted') {
+        fail(409, 'conflict', 'This project has been deleted and cannot be modified.');
+      }
+
+      const input = (typeof body === 'object' && body !== null ? body : {}) as Record<
+        string,
+        unknown
+      >;
+      assertRejections(
+        rejectIdentityPatch(input, {
+          nameMin: PROJECT_NAME_MIN_LENGTH,
+          nameMax: PROJECT_NAME_MAX_LENGTH,
+          slugMax: PROJECT_SLUG_MAX_LENGTH,
+          kind: 'project',
+        }),
+      );
+
+      // A slug is unique within the organization. This is a plain `conflict`
+      // and NOT a `limit_exceeded`: nothing has to be deleted to fix it.
+      if (typeof input.slug === 'string') {
+        const taken = db.projects.some(
+          (candidate) =>
+            candidate.organization_id === params.orgId &&
+            candidate.id !== project.id &&
+            candidate.slug === input.slug,
+        );
+        if (taken) {
+          fail(409, 'conflict', `Another project in this organization already uses "${input.slug}".`);
+        }
+      }
+
+      if (typeof input.name === 'string') project.name = input.name;
+      if (typeof input.slug === 'string') project.slug = input.slug;
+      project.updated_at = new Date().toISOString();
+      return project;
+    },
   },
 
   /* Endpoints — OffsetPage, no `count`. */
@@ -450,15 +636,18 @@ const handlers: Handler[] = [
     handle: ({ params, body }) => {
       const input = requireBody<{ name: string; url: string }>(body, ['name', 'url']);
       charge('endpoints.create');
+      // The URL is checked at CREATE as well as at update — the same mirror of
+      // the Go dial-time guard — so an unusable URL is refused at save time
+      // rather than becoming a day of silent delivery failures.
+      assertRejections(rejectEndpointPatch({ name: input.name, url: input.url }));
       const live = db.endpoints.filter(
         (endpoint) => endpoint.project_id === params.projectId && endpoint.status !== 'deleted',
       ).length;
-      // No details on the wire for this one — prose only, like the real service.
       assertBelowCeiling(
         live,
         500,
         'This project already has 500 endpoints, which is the maximum. Delete one you no longer deliver to, or talk to us about a higher limit.',
-        false,
+        'endpoints',
       );
 
       /*
@@ -567,7 +756,7 @@ const handlers: Handler[] = [
         live,
         50,
         `This project already holds ${live} un-revoked API keys, which is its limit of 50. Revoke a key you no longer need, or ask an operator to raise MAX_API_KEYS_PER_PROJECT.`,
-        true,
+        'api-keys',
       );
       const now = new Date().toISOString();
       // The plaintext, returned exactly once. Only the SHA-256 hash is stored,
@@ -627,13 +816,134 @@ const handlers: Handler[] = [
     handle: ({ params, query }) => cursorPage(filterDeliveries(params.projectId, query), query),
   },
 
-  /* Endpoints */
+  /*
+   * One endpoint, and the three writes against it.
+   *
+   * All nested under the project: `EndpointsController` is mounted at
+   * `projects/:projectId/endpoints`, and the project id is what the tenant
+   * resolver reads the organization off. (`/v1/endpoints/:id/secrets` above IS
+   * top-level, because `EndpointSecretsController` is mounted separately. The
+   * asymmetry is real.)
+   */
   {
     method: 'GET',
-    pattern: '/v1/endpoints/:endpointId',
-    handle: ({ params }) =>
-      db.endpoints.find((endpoint) => endpoint.id === params.endpointId) ??
-      fail(404, 'not_found', `Endpoint ${params.endpointId} was not found`),
+    pattern: '/v1/projects/:projectId/endpoints/:endpointId',
+    // Returns soft-deleted endpoints too, with `status: "deleted"`, so a
+    // delivery pointing at a removed endpoint is still readable.
+    handle: ({ params }) => endpointOr404(params.projectId, params.endpointId),
+  },
+  {
+    method: 'PATCH',
+    pattern: '/v1/projects/:projectId/endpoints/:endpointId',
+    handle: ({ params, body }) => {
+      charge('endpoints.update');
+      const endpoint = endpointOr404(params.projectId, params.endpointId);
+      assertNotDeleted(endpoint.status);
+
+      const input = (typeof body === 'object' && body !== null ? body : {}) as Record<
+        string,
+        unknown
+      >;
+      // The URL and the headers are re-validated on UPDATE with the same rules
+      // as on create. That is the point of exercising it here: a form that only
+      // ever saw a happy-path PATCH renders these as "request failed".
+      assertRejections(rejectEndpointPatch(input));
+
+      if (typeof input.name === 'string') endpoint.name = input.name;
+      if (typeof input.url === 'string') endpoint.url = input.url.trim();
+      if ('description' in input) {
+        const description = input.description;
+        endpoint.description =
+          typeof description === 'string' && description.length > 0 ? description : null;
+      }
+      if (typeof input.timeout_ms === 'number') endpoint.timeout_ms = input.timeout_ms;
+      if (typeof input.max_concurrency === 'number') {
+        endpoint.max_concurrency = input.max_concurrency;
+      }
+      if ('rate_limit' in input) {
+        endpoint.rate_limit = typeof input.rate_limit === 'number' ? input.rate_limit : null;
+      }
+      if (typeof input.rate_limit_window_seconds === 'number') {
+        endpoint.rate_limit_window_seconds = input.rate_limit_window_seconds;
+      }
+      if ('retry_policy_id' in input) {
+        endpoint.retry_policy_id =
+          typeof input.retry_policy_id === 'string' ? input.retry_policy_id : null;
+      }
+      if ('custom_headers' in input) {
+        const headers = input.custom_headers;
+        // An empty map is stored as NULL, so "unset" has one representation.
+        endpoint.custom_headers =
+          headers && typeof headers === 'object' && Object.keys(headers).length > 0
+            ? (headers as Record<string, string>)
+            : null;
+      }
+      endpoint.updated_at = new Date().toISOString();
+      return endpoint;
+    },
+  },
+  {
+    method: 'POST',
+    pattern: '/v1/projects/:projectId/endpoints/:endpointId/enable',
+    handle: ({ params }) => {
+      charge('endpoints.toggle');
+      const endpoint = endpointOr404(params.projectId, params.endpointId);
+      assertNotDeleted(endpoint.status);
+
+      /*
+       * The precondition that makes `enable` a route rather than a PATCH.
+       *
+       * With no active signing secret the data plane fails CLOSED — it will not
+       * deliver unsigned — so enabling would queue failures rather than
+       * deliveries. `ep_01JQPENDING` in the fixtures is exactly this endpoint:
+       * created by a developer who could not be handed a secret. The branch has
+       * to be reachable or the UI first meets it in production.
+       */
+      const active = (db.endpointSecrets[endpoint.id] ?? []).some((secret) => secret.active);
+      if (!active) {
+        fail(
+          409,
+          'conflict',
+          'This endpoint has no active signing secret, so deliveries to it could not be signed. ' +
+            'Rotate a secret and hand the plaintext to whoever runs the consumer, then enable it.',
+        );
+      }
+
+      endpoint.enabled = true;
+      endpoint.status = 'active';
+      // Resuming clears the breaker's verdict. If the consumer is still broken
+      // the breaker writes a new one — which is the whole reason the dashboard
+      // says "resume anyway" rather than implying anything has been fixed.
+      endpoint.disabled_reason = null;
+      endpoint.disabled_at = null;
+      endpoint.updated_at = new Date().toISOString();
+      return endpoint;
+    },
+  },
+  {
+    method: 'POST',
+    pattern: '/v1/projects/:projectId/endpoints/:endpointId/disable',
+    handle: ({ params, body }) => {
+      charge('endpoints.toggle');
+      const endpoint = endpointOr404(params.projectId, params.endpointId);
+      assertNotDeleted(endpoint.status);
+
+      const reason = (body as { reason?: unknown } | null)?.reason;
+      if (reason !== undefined && (typeof reason !== 'string' || reason.length > 200)) {
+        fail(400, 'invalid_request', ['reason: must be a string of at most 200 characters']);
+      }
+
+      endpoint.enabled = false;
+      endpoint.status = 'paused';
+      // Operator intent, recorded and attributed. Queued deliveries are not
+      // discarded; they wait.
+      endpoint.disabled_reason = reason
+        ? `Paused by ${db.user.email}: ${reason}`
+        : `Paused by ${db.user.email}.`;
+      endpoint.disabled_at = new Date().toISOString();
+      endpoint.updated_at = endpoint.disabled_at;
+      return endpoint;
+    },
   },
 
   /* Events */

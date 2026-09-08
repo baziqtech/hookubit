@@ -37,7 +37,7 @@ function isDeliverable(endpoint: { status: string; enabled: boolean }): boolean 
 
 export function useSetupState(orgId: string, projectId: string): SetupState {
   const organizations = useOrganizations();
-  const project = useProject(projectId);
+  const project = useProject(orgId, projectId);
   const apiKeys = useApiKeys(projectId);
   const endpoints = useEndpoints(projectId);
   const subscriptions = useSubscriptions(projectId);

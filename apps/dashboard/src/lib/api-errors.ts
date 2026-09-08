@@ -1,56 +1,98 @@
 /**
- * Telling "slow down" apart from "you have hit a limit".
+ * Telling "slow down" apart from "you have hit a limit" apart from
+ * "that one field is wrong".
  *
- * Every write route on the control API now carries a `@Throttle`, and creates
- * can additionally fail on a RESOURCE CEILING — organizations per user,
- * projects per organization, endpoints and API keys per project. These are
- * different problems with different remedies and they must not share a message:
+ * Every write route on the control API carries a `@Throttle`, and creates can
+ * additionally fail on a RESOURCE CEILING — organizations per user, projects
+ * per organization, endpoints, API keys and subscriptions per project. These
+ * are different problems with different remedies and they must not share a
+ * message:
  *
  *   - A 429 `rate_limited` is transient. Waiting fixes it. The guard sets a
  *     `Retry-After` header and puts `retry_after_seconds` in `error.details`.
  *   - A ceiling is permanent until the user deletes something or an operator
  *     raises the configured maximum. Waiting does nothing.
+ *   - A validation rejection names a FIELD, and belongs under that field.
  *
- * The awkward part, and the reason this file is a heuristic rather than a
- * switch: THE CONTROL API HAS NO DISTINCT CODE FOR A CEILING. It throws
- * `AppError('conflict', …)`, so a ceiling is a 409 that is indistinguishable
- * on `code` alone from "that slug is already taken". Two of the four ceilings
- * (projects, API keys) attach `details: { limit, current }`; the other two
- * (endpoints, organizations) attach nothing but prose. So:
+ * ## `limit_exceeded` now exists — this file no longer reads prose
  *
- *   1. `details.limit` present on a 409  → ceiling, with numbers. Exact.
- *   2. otherwise a 409 whose message matches the ceiling wording → ceiling,
- *      without numbers. Inexact, and tracked in HANDOFF.md as a backend ask.
- *   3. anything else 409 → an ordinary conflict, e.g. a duplicate slug.
+ * It used to. `ERROR_CODES` in control-api `src/common/errors.ts` had no code
+ * for a ceiling, so a ceiling was a 409 `conflict` indistinguishable from "that
+ * slug is already taken" except by matching the sentence, and only two of the
+ * four ceilings attached `details`. Both halves of that are fixed: the code
+ * exists, and every ceiling raises it with `{ limit, current, resource }` —
+ * endpoints at `endpoints.service.ts` `requireHeadroom` and organizations at
+ * `organizations.service.ts` `create` included.
  *
- * When the API grows a `limit_exceeded` code, delete rule 2 and match on it.
+ * So the message-matching fallback is GONE. Keeping it would now do harm
+ * rather than good: a genuine `conflict` that happens to be worded "…which is
+ * the limit" would be classified as a ceiling and the user told to delete
+ * something. The code is the contract; the message is for a human.
+ *
+ *   1. 429, or `rate_limited`             → throttled, transient.
+ *   2. `limit_exceeded`                   → ceiling, with numbers and resource.
+ *   3. any other 409                      → an ordinary conflict.
+ *   4. 400 / `invalid_request`            → invalid, with per-field issues.
  */
 import { ApiRequestError } from './api';
 
+/**
+ * One rejected property, as the server named it.
+ *
+ * `field` is the DTO property (`url`, `custom_headers`, `name`), which is what
+ * lets a form call `setError` on the input that caused it instead of showing a
+ * paragraph. It is null when the message carries no property prefix — an
+ * `AppError` raised by a service rather than by the validation pipe.
+ */
+export interface ValidationIssue {
+  field: string | null;
+  reason: string;
+  message: string;
+}
+
 export type WriteFailure =
   | { kind: 'throttled'; retryAfterSeconds: number | null; message: string }
-  | { kind: 'ceiling'; limit: number | null; current: number | null; message: string }
+  | {
+      kind: 'ceiling';
+      limit: number | null;
+      current: number | null;
+      /** `endpoints`, `projects`, … — names the thing to delete. */
+      resource: string | null;
+      message: string;
+    }
   | { kind: 'conflict'; message: string }
   | { kind: 'forbidden'; message: string }
-  | { kind: 'invalid'; message: string }
+  | { kind: 'invalid'; message: string; issues: ValidationIssue[] }
   | { kind: 'other'; message: string };
-
-/**
- * Wording the control API uses for its four ceilings, all of which are 409s:
- *
- *   projects       "…already has N projects, which is its limit of M."
- *   api keys       "…already holds N un-revoked API keys, which is its limit of M."
- *   endpoints      "…already has 500 endpoints, which is the maximum."
- *   organizations  "You already own N organizations, which is the limit."
- *
- * Matching prose is fragile by construction — it breaks if someone rewords a
- * message, and it is why rule 1 is preferred and why the backend is being asked
- * for a real code.
- */
-const CEILING_PROSE = /which is (its limit|the limit|the maximum)/i;
 
 function numberOrNull(value: unknown): number | null {
   return typeof value === 'number' && Number.isFinite(value) ? value : null;
+}
+
+function stringOrNull(value: unknown): string | null {
+  return typeof value === 'string' && value.length > 0 ? value : null;
+}
+
+/**
+ * Splits `"url: is not a deliverable URL"` into its property and its reason.
+ *
+ * The prefix is produced by class-validator's `defaultMessage`, which the
+ * endpoint DTO writes as `` `${args.property}: ${reason}` `` for both the SSRF
+ * mirror and the reserved-header check. A property name is a single
+ * identifier-shaped token, so anything else before the first colon (a URL, a
+ * sentence) is left alone rather than mistaken for a field.
+ */
+const PROPERTY_PREFIX = /^([a-z_][a-z0-9_]*):\s+(.*)$/is;
+
+export function parseValidationIssues(error: ApiRequestError): ValidationIssue[] {
+  const messages = error.body.messages ?? [error.body.message];
+  return messages
+    .filter((message) => message.length > 0)
+    .map((message) => {
+      const match = PROPERTY_PREFIX.exec(message);
+      if (!match) return { field: null, reason: message, message };
+      return { field: match[1], reason: match[2], message };
+    });
 }
 
 export function classifyWriteError(error: unknown): WriteFailure {
@@ -71,17 +113,26 @@ export function classifyWriteError(error: unknown): WriteFailure {
     };
   }
 
-  if (error.status === 409 || code === 'conflict') {
-    const limit = numberOrNull(details?.limit);
-    const current = numberOrNull(details?.current);
-    if (limit !== null || CEILING_PROSE.test(message)) {
-      return { kind: 'ceiling', limit, current, message };
-    }
-    return { kind: 'conflict', message };
+  // A ceiling has its own code and always carries details. Matching the code
+  // rather than the sentence is the whole point of it existing.
+  if (code === 'limit_exceeded') {
+    return {
+      kind: 'ceiling',
+      limit: numberOrNull(details?.limit),
+      current: numberOrNull(details?.current),
+      resource: stringOrNull(details?.resource),
+      message,
+    };
   }
 
+  // Every other 409 is an ordinary conflict: a duplicate slug, a deleted
+  // endpoint, an endpoint with no active signing secret.
+  if (error.status === 409 || code === 'conflict') return { kind: 'conflict', message };
+
   if (code === 'forbidden' || error.status === 403) return { kind: 'forbidden', message };
-  if (code === 'invalid_request' || error.status === 400) return { kind: 'invalid', message };
+  if (code === 'invalid_request' || error.status === 400) {
+    return { kind: 'invalid', message, issues: parseValidationIssues(error) };
+  }
   return { kind: 'other', message };
 }
 
@@ -120,9 +171,10 @@ export function writeFailureRemedy(failure: WriteFailure): string {
         failure.limit !== null && failure.current !== null
           ? ` You are at ${failure.current} of ${failure.limit}.`
           : '';
+      const what = failure.resource ? ` one of your ${failure.resource}` : ' something';
       return (
         `Waiting will not help — this limit does not reset.${counts} ` +
-        'Delete something you no longer need, or ask an operator to raise the limit.'
+        `Delete${what} you no longer need, or ask an operator to raise the limit.`
       );
     }
     default:
