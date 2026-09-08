@@ -1,4 +1,4 @@
-import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
+import { ApiProperty } from '@nestjs/swagger';
 import { RetryPolicy } from '@prisma/client';
 import { RETRY_STRATEGIES, RetryStrategy } from '../retry-policy-limits';
 import { RetrySettings } from '../retry-policy-rules';
@@ -33,7 +33,7 @@ export class RetryPolicyListDto {
       'derive it from a total, and a total would cost a second COUNT on every list request.',
   })
   has_more!: boolean;
-  @ApiPropertyOptional({ nullable: true, description: '`offset` for the next page, or null.' })
+  @ApiProperty({ type: Number, nullable: true, description: '`offset` for the next page, or null.' })
   next_offset!: number | null;
 }
 

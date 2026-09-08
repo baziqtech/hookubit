@@ -64,6 +64,7 @@ export class PayloadFilterConstraint implements ValidatorConstraintInterface {
 
 export class CreateSubscriptionDto {
   @ApiPropertyOptional({
+    type: String,
     maxLength: MAX_SUBSCRIPTION_NAME_LENGTH,
     nullable: true,
     example: 'Finance ledger - settlements only',

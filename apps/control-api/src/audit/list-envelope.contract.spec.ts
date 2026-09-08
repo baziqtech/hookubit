@@ -9,6 +9,8 @@ import { ProjectListDto } from '../projects/dto';
 import { RateLimitListDto } from '../rate-limits/dto';
 import { RetryPolicyListDto } from '../retry-policies/dto';
 import { SubscriptionListDto } from '../webhook-subscriptions/dto';
+import { DeliveryAttemptListDto, DeliveryListDto } from '../deliveries/dto';
+import { EventListDto } from '../events/dto';
 import { AuditLogListDto } from './dto';
 
 /**
@@ -76,6 +78,9 @@ const LIST_DTOS: Array<[string, ListDto, string]> = [
   ['retry-policies', RetryPolicyListDto, 'was already canonical'],
   ['rate-limits', RateLimitListDto, 'was already canonical'],
   ['audit', AuditLogListDto, 'new in this change'],
+  ['events', EventListDto, 'was already canonical'],
+  ['deliveries', DeliveryListDto, 'was already canonical'],
+  ['deliveries/attempts', DeliveryAttemptListDto, 'was already canonical'],
 ];
 
 function documentedProperties(dto: ListDto): string[] {
@@ -128,18 +133,19 @@ describe('every list route returns the same envelope', () => {
    *
    * `@ApiPropertyOptional` sets `required: false`, which generates a client
    * field that may be ABSENT as well as null - two things to branch on where
-   * the contract has one. It was declared that way on several modules; the
-   * seven below have been corrected. `webhook-subscriptions`, `retry-policies`
-   * and `rate-limits` still declare it optional, and so do the in-flight
-   * `events` and `deliveries` modules, all of which belong to other authors -
-   * see HANDOFF.md. Add each to this list as it is fixed; do not weaken the
-   * assertion.
+   * the contract has one. It was declared that way on several modules and this
+   * list used to carry only the seven that had been corrected, with
+   * `webhook-subscriptions`, `retry-policies`, `rate-limits`, `events` and
+   * `deliveries` still outstanding.
+   *
+   * THE LIST IS NOW EVERY MODULE, and it is `LIST_DTOS` itself rather than a
+   * restatement of it, so a module added later is covered the day it lands
+   * instead of the day someone remembers this file. The untyped half mattered
+   * as much as the optional half: leaving `type` off made the reflected design
+   * type `Object`, which generated `Record<string, never>` - a field no number
+   * is assignable to. See common/openapi-nullability.contract.spec.ts.
    */
-  const REQUIRED_NEXT_OFFSET = LIST_DTOS.filter(([module]) =>
-    ['organizations', 'members', 'projects', 'api-keys', 'endpoints', 'endpoint-secrets', 'audit'].includes(
-      module,
-    ),
-  );
+  const REQUIRED_NEXT_OFFSET = LIST_DTOS;
 
   it.each(REQUIRED_NEXT_OFFSET)(
     '%s documents next_offset as a REQUIRED number, not an optional one (%#)',

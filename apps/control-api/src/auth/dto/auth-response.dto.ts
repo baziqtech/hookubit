@@ -1,4 +1,4 @@
-import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
+import { ApiProperty } from '@nestjs/swagger';
 
 export class AuthUserDto {
   @ApiProperty({ example: 'usr_01J...' })
@@ -7,13 +7,14 @@ export class AuthUserDto {
   @ApiProperty({ example: 'ada@example.com' })
   email!: string;
 
-  @ApiPropertyOptional({ nullable: true })
+  @ApiProperty({ type: String, nullable: true })
   name!: string | null;
 
   @ApiProperty({ description: 'False until the verification token is presented.' })
   email_verified!: boolean;
 
-  @ApiPropertyOptional({
+  @ApiProperty({
+    type: String,
     nullable: true,
     format: 'date-time',
     example: '2026-09-08T14:20:00.000Z',

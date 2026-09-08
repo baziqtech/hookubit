@@ -1,4 +1,4 @@
-import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
+import { ApiProperty } from '@nestjs/swagger';
 
 /**
  * The window the numbers in the same response cover, echoed back.
@@ -81,7 +81,8 @@ export class DeliveryOutcomeSummaryDto {
   @ApiProperty({ description: '`cancelled`. Neither a success nor a failure.' })
   cancelled!: number;
 
-  @ApiPropertyOptional({
+  @ApiProperty({
+    type: Number,
     nullable: true,
     description:
       '`succeeded / (succeeded + failed + exhausted)`, in 0..1, over deliveries that have ' +
@@ -107,7 +108,8 @@ export class DeliveryOutcomesDto {
   })
   previous!: DeliveryOutcomeSummaryDto;
 
-  @ApiPropertyOptional({
+  @ApiProperty({
+    type: Number,
     nullable: true,
     description:
       '`current.success_rate - previous.success_rate`. Negative means worse. NULL when either ' +
@@ -123,7 +125,8 @@ export class DeliveryOutcomesDto {
 export class FailingEndpointDto {
   @ApiProperty() endpoint_id!: string;
 
-  @ApiPropertyOptional({
+  @ApiProperty({
+    type: String,
     nullable: true,
     description:
       'NULL when the endpoint row is gone. The delivery ledger is ON DELETE RESTRICT and ' +
@@ -133,15 +136,17 @@ export class FailingEndpointDto {
   })
   name!: string | null;
 
-  @ApiPropertyOptional({ nullable: true }) url!: string | null;
+  @ApiProperty({ type: String, nullable: true }) url!: string | null;
 
-  @ApiPropertyOptional({
+  @ApiProperty({
+    type: String,
     nullable: true,
     description: 'The endpoint status NOW - `active`, `paused`, `disabled`, `deleted`.',
   })
   status!: string | null;
 
-  @ApiPropertyOptional({
+  @ApiProperty({
+    type: Boolean,
     nullable: true,
     description: 'Operator intent NOW. `false` with a `failing` count is an endpoint someone ' +
       'already turned off, or one the circuit breaker did.',
@@ -185,17 +190,17 @@ export class FailingEndpointsDto {
 export class AttemptLatencyDto {
   @ApiProperty({ type: AnalyticsWindowDto }) window!: AnalyticsWindowDto;
 
-  @ApiPropertyOptional({ nullable: true, description: 'Nearest-rank p50 of `duration_ms`.' })
+  @ApiProperty({ type: Number, nullable: true, description: 'Nearest-rank p50 of `duration_ms`.' })
   p50_ms!: number | null;
 
-  @ApiPropertyOptional({ nullable: true, description: 'Nearest-rank p95 of `duration_ms`.' })
+  @ApiProperty({ type: Number, nullable: true, description: 'Nearest-rank p95 of `duration_ms`.' })
   p95_ms!: number | null;
 
-  @ApiPropertyOptional({ nullable: true, description: 'Nearest-rank p99 of `duration_ms`.' })
+  @ApiProperty({ type: Number, nullable: true, description: 'Nearest-rank p99 of `duration_ms`.' })
   p99_ms!: number | null;
 
-  @ApiPropertyOptional({ nullable: true }) min_ms!: number | null;
-  @ApiPropertyOptional({ nullable: true }) max_ms!: number | null;
+  @ApiProperty({ type: Number, nullable: true }) min_ms!: number | null;
+  @ApiProperty({ type: Number, nullable: true }) max_ms!: number | null;
 
   @ApiProperty({ description: 'How many attempts these percentiles were computed from.' })
   sample_size!: number;

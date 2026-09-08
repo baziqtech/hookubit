@@ -1,4 +1,4 @@
-import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
+import { ApiProperty } from '@nestjs/swagger';
 import { Delivery, DeliveryAttempt, DeliveryStatus, Endpoint, Event } from '@prisma/client';
 import { HEADER_REDACTED, isRedactedRequestHeader } from '../delivery-limits';
 
@@ -54,12 +54,12 @@ export class DeliveryAttemptDto {
   })
   status!: string;
 
-  @ApiPropertyOptional({ nullable: true }) http_status!: number | null;
+  @ApiProperty({ type: Number, nullable: true }) http_status!: number | null;
   @ApiProperty() started_at!: string;
-  @ApiPropertyOptional({ nullable: true }) completed_at!: string | null;
-  @ApiPropertyOptional({ nullable: true }) duration_ms!: number | null;
+  @ApiProperty({ type: String, nullable: true }) completed_at!: string | null;
+  @ApiProperty({ type: Number, nullable: true }) duration_ms!: number | null;
 
-  @ApiPropertyOptional({
+  @ApiProperty({
     type: 'object',
     additionalProperties: { type: 'string' },
     nullable: true,
@@ -71,32 +71,36 @@ export class DeliveryAttemptDto {
   })
   request_headers!: Record<string, string> | null;
 
-  @ApiPropertyOptional({
+  @ApiProperty({
     type: 'object',
     additionalProperties: { type: 'string' },
     nullable: true,
   })
   response_headers!: Record<string, string> | null;
 
-  @ApiPropertyOptional({
+  @ApiProperty({
+    type: String,
     nullable: true,
     description: 'Truncated by the worker to EGRESS_MAX_RESPONSE_BYTES.',
   })
   response_body!: string | null;
 
-  @ApiPropertyOptional({
+  @ApiProperty({
+    type: String,
     nullable: true,
     description: 'Set instead of `response_body` when the response was too large to inline.',
   })
   response_body_location!: string | null;
 
-  @ApiPropertyOptional({
+  @ApiProperty({
+    type: Number,
     nullable: true,
     description: 'Bytes the endpoint sent, BEFORE truncation. Compare with `response_body`.',
   })
   response_size!: number | null;
 
-  @ApiPropertyOptional({
+  @ApiProperty({
+    type: String,
     nullable: true,
     description:
       'Low-cardinality classification derived from the error TYPE, never its message: ' +
@@ -105,9 +109,10 @@ export class DeliveryAttemptDto {
   })
   error_code!: string | null;
 
-  @ApiPropertyOptional({ nullable: true }) error_message!: string | null;
+  @ApiProperty({ type: String, nullable: true }) error_message!: string | null;
 
-  @ApiPropertyOptional({
+  @ApiProperty({
+    type: String,
     nullable: true,
     description: 'Which worker made this attempt. Useful when one replica is misbehaving.',
   })
@@ -150,7 +155,8 @@ export class DeliveryDto {
   @ApiProperty() event_id!: string;
   @ApiProperty() endpoint_id!: string;
 
-  @ApiPropertyOptional({
+  @ApiProperty({
+    type: String,
     nullable: true,
     description:
       'The subscription that matched. Null on a replay whose subscription has since been ' +
@@ -181,23 +187,26 @@ export class DeliveryDto {
   @ApiProperty() attempt_count!: number;
   @ApiProperty() max_attempts!: number;
 
-  @ApiPropertyOptional({
+  @ApiProperty({
+    type: String,
     nullable: true,
     description: 'When the next attempt is due. Null means "as soon as a worker is free".',
   })
   next_attempt_at!: string | null;
 
-  @ApiPropertyOptional({ nullable: true }) last_attempt_at!: string | null;
-  @ApiPropertyOptional({ nullable: true }) completed_at!: string | null;
-  @ApiPropertyOptional({ nullable: true }) ordering_key!: string | null;
+  @ApiProperty({ type: String, nullable: true }) last_attempt_at!: string | null;
+  @ApiProperty({ type: String, nullable: true }) completed_at!: string | null;
+  @ApiProperty({ type: String, nullable: true }) ordering_key!: string | null;
 
-  @ApiPropertyOptional({
+  @ApiProperty({
+    type: String,
     nullable: true,
     description: 'The last failure, as the worker phrased it. The full history is in `attempts`.',
   })
   last_error!: string | null;
 
-  @ApiPropertyOptional({
+  @ApiProperty({
+    type: String,
     nullable: true,
     description:
       'The worker holding this delivery, and until when. A row stuck in `processing` whose ' +
@@ -205,9 +214,10 @@ export class DeliveryDto {
   })
   locked_by!: string | null;
 
-  @ApiPropertyOptional({ nullable: true }) locked_until!: string | null;
+  @ApiProperty({ type: String, nullable: true }) locked_until!: string | null;
 
-  @ApiPropertyOptional({
+  @ApiProperty({
+    type: String,
     nullable: true,
     description:
       'The delivery this one replays. Set on every replay and never on an original, which is ' +
@@ -215,7 +225,8 @@ export class DeliveryDto {
   })
   replay_of_delivery_id!: string | null;
 
-  @ApiPropertyOptional({
+  @ApiProperty({
+    type: String,
     nullable: true,
     description: 'The user id that asked for the replay. Null on originals.',
   })
@@ -274,7 +285,7 @@ export function toDeliveryDto(delivery: Delivery): DeliveryDto {
 export class DeliveryEventRefDto {
   @ApiProperty() id!: string;
   @ApiProperty() event_type!: string;
-  @ApiPropertyOptional({ nullable: true }) idempotency_key!: string | null;
+  @ApiProperty({ type: String, nullable: true }) idempotency_key!: string | null;
   @ApiProperty() created_at!: string;
 }
 
@@ -291,7 +302,7 @@ export class DeliveryEndpointRefDto {
   })
   status!: string;
 
-  @ApiPropertyOptional({ nullable: true }) disabled_reason!: string | null;
+  @ApiProperty({ type: String, nullable: true }) disabled_reason!: string | null;
 }
 
 /**
@@ -347,13 +358,13 @@ export function toEndpointRef(endpoint: Endpoint): DeliveryEndpointRefDto {
 export class DeliveryListDto {
   @ApiProperty({ type: [DeliveryDto] }) data!: DeliveryDto[];
   @ApiProperty() has_more!: boolean;
-  @ApiPropertyOptional({ nullable: true }) next_offset!: number | null;
+  @ApiProperty({ type: Number, nullable: true }) next_offset!: number | null;
 }
 
 export class DeliveryAttemptListDto {
   @ApiProperty({ type: [DeliveryAttemptDto] }) data!: DeliveryAttemptDto[];
   @ApiProperty() has_more!: boolean;
-  @ApiPropertyOptional({ nullable: true }) next_offset!: number | null;
+  @ApiProperty({ type: Number, nullable: true }) next_offset!: number | null;
 }
 
 /**

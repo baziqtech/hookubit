@@ -63,9 +63,9 @@ export class EndpointSecretDto {
       'has flipped the column.',
   })
   active!: boolean;
-  @ApiPropertyOptional({ nullable: true, description: 'When this secret stops signing.' })
+  @ApiProperty({ type: String, nullable: true, description: 'When this secret stops signing.' })
   expires_at!: string | null;
-  @ApiPropertyOptional({ nullable: true, description: 'When a rotation superseded it.' })
+  @ApiProperty({ type: String, nullable: true, description: 'When a rotation superseded it.' })
   rotated_at!: string | null;
   @ApiProperty() created_at!: string;
 }
@@ -79,7 +79,8 @@ export class RotatedSecretDto extends EndpointSecretDto {
   })
   secret!: string;
 
-  @ApiPropertyOptional({
+  @ApiProperty({
+    type: String,
     nullable: true,
     description:
       'The LAST moment any previously issued secret still signs - the maximum over every ' +

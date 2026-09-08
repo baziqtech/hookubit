@@ -1,4 +1,4 @@
-import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
+import { ApiProperty } from '@nestjs/swagger';
 import { Event, EventStatus } from '@prisma/client';
 import { HEADER_REDACTED, isRedactedRequestHeader } from '../../deliveries/delivery-limits';
 import { PayloadEncoding, PayloadSource, renderPayload } from '../event-payload';
@@ -44,13 +44,15 @@ export class EventDto {
   @ApiProperty() project_id!: string;
   @ApiProperty() event_type!: string;
 
-  @ApiPropertyOptional({
+  @ApiProperty({
+    type: String,
     nullable: true,
     description: 'The producer-supplied key that made ingest idempotent (ARCHITECTURE.md 17).',
   })
   idempotency_key!: string | null;
 
-  @ApiPropertyOptional({
+  @ApiProperty({
+    type: String,
     nullable: true,
     description:
       'Opt-in serialisation key, carried onto every delivery this event fanned out to. Stored ' +
@@ -79,13 +81,14 @@ export class EventDto {
   })
   payload_inline!: boolean;
 
-  @ApiPropertyOptional({
+  @ApiProperty({
+    type: String,
     nullable: true,
     description: '`s3://bucket/key` when the payload was too large to store inline.',
   })
   payload_location!: string | null;
 
-  @ApiPropertyOptional({
+  @ApiProperty({
     type: 'object',
     additionalProperties: { type: 'string' },
     nullable: true,
@@ -95,7 +98,8 @@ export class EventDto {
 
   @ApiProperty() created_at!: string;
 
-  @ApiPropertyOptional({
+  @ApiProperty({
+    type: String,
     nullable: true,
     description: 'When the fan-out first committed. Null until it has.',
   })
@@ -133,13 +137,14 @@ export class EventPayloadDto {
   })
   source!: PayloadSource;
 
-  @ApiPropertyOptional({
+  @ApiProperty({
+    type: String,
     nullable: true,
     description: 'THE DELIVERED BYTES, decoded. This is what was signed.',
   })
   body!: string | null;
 
-  @ApiPropertyOptional({
+  @ApiProperty({
     enum: ['utf-8', 'base64'],
     nullable: true,
     description:
@@ -148,7 +153,7 @@ export class EventPayloadDto {
   })
   encoding!: PayloadEncoding | null;
 
-  @ApiPropertyOptional({ nullable: true }) location!: string | null;
+  @ApiProperty({ type: String, nullable: true }) location!: string | null;
 
   @ApiProperty({ description: 'Bytes as received. Meaningful even when `body` is null.' })
   size_bytes!: number;
@@ -156,7 +161,7 @@ export class EventPayloadDto {
   @ApiProperty({ description: 'SHA-256 of the authoritative bytes, lowercase hex.' })
   sha256!: string;
 
-  @ApiPropertyOptional({
+  @ApiProperty({
     type: 'object',
     additionalProperties: true,
     nullable: true,
@@ -202,5 +207,5 @@ export function toEventDetailDto(event: Event): EventDetailDto {
 export class EventListDto {
   @ApiProperty({ type: [EventDto] }) data!: EventDto[];
   @ApiProperty() has_more!: boolean;
-  @ApiPropertyOptional({ nullable: true }) next_offset!: number | null;
+  @ApiProperty({ type: Number, nullable: true }) next_offset!: number | null;
 }

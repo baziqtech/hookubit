@@ -1,4 +1,4 @@
-import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
+import { ApiProperty } from '@nestjs/swagger';
 import { Endpoint, EndpointStatus } from '@prisma/client';
 
 /**
@@ -25,19 +25,19 @@ export class EndpointDto {
   @ApiProperty() project_id!: string;
   @ApiProperty() name!: string;
   @ApiProperty() url!: string;
-  @ApiPropertyOptional({ nullable: true }) description!: string | null;
+  @ApiProperty({ type: String, nullable: true }) description!: string | null;
   @ApiProperty({ enum: ['active', 'paused', 'disabled', 'deleted'] }) status!: EndpointStatus;
   @ApiProperty({ description: 'Operator intent. The circuit breaker uses `status` instead.' })
   enabled!: boolean;
-  @ApiPropertyOptional({ nullable: true, description: 'Set by the circuit breaker.' })
+  @ApiProperty({ type: String, nullable: true, description: 'Set by the circuit breaker.' })
   disabled_reason!: string | null;
-  @ApiPropertyOptional({ nullable: true }) disabled_at!: string | null;
+  @ApiProperty({ type: String, nullable: true }) disabled_at!: string | null;
   @ApiProperty() timeout_ms!: number;
   @ApiProperty() max_concurrency!: number;
-  @ApiPropertyOptional({ nullable: true }) rate_limit!: number | null;
+  @ApiProperty({ type: Number, nullable: true }) rate_limit!: number | null;
   @ApiProperty() rate_limit_window_seconds!: number;
-  @ApiPropertyOptional({ nullable: true }) retry_policy_id!: string | null;
-  @ApiPropertyOptional({ type: 'object', additionalProperties: { type: 'string' }, nullable: true })
+  @ApiProperty({ type: String, nullable: true }) retry_policy_id!: string | null;
+  @ApiProperty({ type: 'object', additionalProperties: { type: 'string' }, nullable: true })
   custom_headers!: Record<string, string> | null;
   @ApiProperty({
     description:
@@ -59,7 +59,8 @@ export class EndpointDto {
 }
 
 export class CreatedEndpointDto extends EndpointDto {
-  @ApiPropertyOptional({
+  @ApiProperty({
+    type: String,
     nullable: true,
     description:
       'The version 1 signing secret, in plaintext, returned HERE AND NOWHERE ELSE. ' +
