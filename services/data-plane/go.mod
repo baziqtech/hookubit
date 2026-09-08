@@ -8,10 +8,10 @@ module github.com/shaq/webhook-platform/services/data-plane
 // CI and the Dockerfiles deliberately BUILD with Go 1.23 to pick up the patched
 // standard library; a module declaring 1.21 compiles cleanly under 1.23. The
 // two numbers are allowed to differ and there is no mismatch to fix.
-go 1.21
+go 1.25.0
 
 require (
-	github.com/jackc/pgx/v5 v5.7.1
+	github.com/jackc/pgx/v5 v5.9.2
 	github.com/oklog/ulid/v2 v2.1.0
 	github.com/prometheus/client_golang v1.20.5
 )
@@ -27,9 +27,8 @@ require (
 	github.com/prometheus/client_model v0.6.1 // indirect
 	github.com/prometheus/common v0.55.0 // indirect
 	github.com/prometheus/procfs v0.15.1 // indirect
-	golang.org/x/crypto v0.27.0 // indirect
-	golang.org/x/sync v0.8.0 // indirect
+	golang.org/x/sync v0.21.0 // indirect
 	golang.org/x/sys v0.25.0 // indirect
-	golang.org/x/text v0.18.0 // indirect
+	golang.org/x/text v0.39.0 // indirect
 	google.golang.org/protobuf v1.34.2 // indirect
 )

@@ -75,6 +75,19 @@ func seed(t *testing.T, pool *pgxpool.Pool, projects int) *fixture {
 		f.projects = append(f.projects, id)
 	}
 
+	// Claim is a GLOBAL query - it orders the whole ready set by
+	// (next_attempt_at, created_at) and takes a LIMIT, with no tenant predicate.
+	// The tenant-fairness tests assert WHICH rows a batch contains, so a single
+	// delivery left behind by another package changes the answer. Same failure
+	// shape as the router package: passes alone, fails after its neighbours,
+	// looks like flakiness and is not.
+	if _, err := pool.Exec(ctx, `DELETE FROM delivery_attempts`); err != nil {
+		t.Fatalf("clear delivery_attempts before seeding: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `DELETE FROM deliveries`); err != nil {
+		t.Fatalf("clear deliveries before seeding: %v", err)
+	}
+
 	f.endpoint = ids.New(ids.Endpoint)
 	if _, err := pool.Exec(ctx,
 		`INSERT INTO endpoints (id, project_id, name, url, status, enabled, created_at, updated_at)

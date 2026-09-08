@@ -59,6 +59,21 @@ func seed(t *testing.T, pool *pgxpool.Pool, eventType string) *fixture {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// ClaimOutbox is a GLOBAL claim: it orders by (available_at, created_at) and
+	// takes a LIMIT, with no tenant predicate - correctly, since the router
+	// drains the whole queue. That makes every test in this package
+	// order-dependent on a shared database: a pending outbox row left by
+	// ANOTHER package sorts ahead of this fixture's row and consumes the batch,
+	// so RunOnce silently never reaches the row under test.
+	//
+	// Observed as TestPostgresRerunningAPartiallyAppliedBatchIsANoOp failing
+	// only when the router package ran after the worker package - and passing
+	// in isolation, which made it look like flakiness twice. It is not
+	// flakiness; it is a global query meeting shared state.
+	if _, err := pool.Exec(context.Background(), `DELETE FROM event_outbox`); err != nil {
+		t.Fatalf("clear outbox before seeding: %v", err)
+	}
+
 	f := &fixture{
 		pool:      pool,
 		orgID:     ids.New(ids.Organization),
