@@ -129,7 +129,33 @@ func (f *dbFixture) insertDelivery(t *testing.T, lockedBy string) string {
 	                        attempt_count, max_attempts, next_attempt_at, locked_by, locked_until,
 	                        created_at, updated_at)
 	                     VALUES ($1, $2, $3, $4, $5, 'processing', 0, 6, now(), $6, $7, now(), now())`,
-		id, f.eventID, f.endpointID, f.orgID, f.projectID, by, until)
+		id, f.newEvent(t), f.endpointID, f.orgID, f.projectID, by, until)
+	return id
+}
+
+// newEvent mints a fresh event for each delivery.
+//
+// Sharing one event across deliveries is what the in-memory fake allowed and
+// PostgreSQL does not: deliveries_event_endpoint_original_key is UNIQUE on
+// (event_id, endpoint_id) WHERE replay_of_delivery_id IS NULL. That index is
+// the router's ON CONFLICT arbiter - the thing that stops a re-run
+// double-fanning-out an event to every subscriber - so the constraint is
+// correct and the fixture was modelling a row the router cannot produce.
+func (f *dbFixture) newEvent(t *testing.T) string {
+	t.Helper()
+	id := ids.New(ids.Event)
+	// Carry the fixture's payload. An event minted without payload_raw makes
+	// Load return empty bytes, which is indistinguishable from the worker
+	// failing to read the column - and the worker would go on to sign and
+	// deliver an empty body.
+	mustExec(t, f.pool, `INSERT INTO events
+	                       (id, organization_id, project_id, event_type, payload, payload_raw,
+	                        payload_size, payload_hash, ordering_key, status, created_at)
+	                     VALUES ($1, $2, $3, 'order.created', $4::jsonb, $5, $6, repeat('0', 64), 'cust_1', 'received', now())`,
+		id, f.orgID, f.projectID, string(f.payload), f.payload, len(f.payload))
+	// Track the most recently minted event so single-delivery tests can still
+	// assert against f.eventID.
+	f.eventID = id
 	return id
 }
 

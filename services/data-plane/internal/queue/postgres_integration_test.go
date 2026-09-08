@@ -118,9 +118,30 @@ func (f *fixture) insertDelivery(t *testing.T, projectID, status, lockedBy strin
 		    attempt_count, max_attempts, next_attempt_at, locked_by, locked_until,
 		    created_at, updated_at)
 		 VALUES ($1, $2, $3, $4, $5, $6::"DeliveryStatus", 0, 5, now() + $7::interval, $8, $9, now(), now())`,
-		id, f.eventID, f.endpoint, f.orgID, projectID, status,
+		id, f.newEvent(t, projectID), f.endpoint, f.orgID, projectID, status,
 		intervalOf(due), by, until); err != nil {
 		t.Fatalf("insert delivery: %v", err)
+	}
+	return id
+}
+
+// newEvent mints a fresh event per delivery.
+//
+// The fixture used to share one event across every delivery it created, which
+// the in-memory fake accepted and PostgreSQL does not: deliveries_event_endpoint
+// _original_key is UNIQUE on (event_id, endpoint_id) WHERE replay_of_delivery_id
+// IS NULL, so a second original delivery for the same pair is a 23505. That
+// index is the router's ON CONFLICT arbiter and the reason a re-run cannot
+// double-fan-out, so the constraint is right and the old fixture was modelling
+// a row production cannot produce.
+func (f *fixture) newEvent(t *testing.T, projectID string) string {
+	t.Helper()
+	id := ids.New(ids.Event)
+	if _, err := f.pool.Exec(context.Background(),
+		`INSERT INTO events (id, organization_id, project_id, event_type, payload_size, payload_hash, status, created_at)
+		 VALUES ($1, $2, $3, 'queue.test', 2, repeat('0', 64), 'received', now())`,
+		id, f.orgID, projectID); err != nil {
+		t.Fatalf("seed event: %v", err)
 	}
 	return id
 }
