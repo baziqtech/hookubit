@@ -44,10 +44,10 @@ var prismaOnlyParams = map[string]string{
 	"sslpassword":      "",
 }
 
-// normaliseDSN rewrites a Prisma-flavoured connection string into one pgx can
+// NormaliseDSN rewrites a Prisma-flavoured connection string into one pgx can
 // use. It is deliberately conservative: anything it does not recognise is left
 // exactly as the operator wrote it.
-func normaliseDSN(raw string) (string, error) {
+func NormaliseDSN(raw string) (string, error) {
 	u, err := url.Parse(raw)
 	if err != nil {
 		// Not a URL - probably key=value DSN form, which pgx also accepts.
@@ -74,7 +74,7 @@ func normaliseDSN(raw string) (string, error) {
 }
 
 func Open(ctx context.Context, url string, maxConns int32, statementTimeout time.Duration) (*pgxpool.Pool, error) {
-	dsn, err := normaliseDSN(url)
+	dsn, err := NormaliseDSN(url)
 	if err != nil {
 		return nil, fmt.Errorf("normalise DATABASE_URL: %w", err)
 	}

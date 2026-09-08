@@ -4,35 +4,25 @@ import (
 	"bytes"
 	"context"
 	"errors"
-	"os"
 	"testing"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/shaq/webhook-platform/services/data-plane/internal/ids"
+	"github.com/shaq/webhook-platform/services/data-plane/internal/testsupport"
 )
 
 // These tests exercise the real SQL against a migrated database. They are the
 // only place column-name drift between this package and Prisma's schema is
 // caught, so they skip rather than fail when there is no database to talk to.
+//
+// The pool points at THIS PACKAGE'S OWN database, copied from the migrated
+// DATABASE_URL one by testsupport. Nothing here has to clean up after another
+// package, and nothing here can damage one.
 func requirePool(t *testing.T) *pgxpool.Pool {
 	t.Helper()
-	url := os.Getenv("DATABASE_URL")
-	if url == "" {
-		t.Skip("DATABASE_URL is not set; skipping PostgreSQL integration test")
-	}
-	ctx := context.Background()
-	pool, err := pgxpool.New(ctx, url)
-	if err != nil {
-		t.Fatalf("connect: %v", err)
-	}
-	if err := pool.Ping(ctx); err != nil {
-		pool.Close()
-		t.Fatalf("ping: %v", err)
-	}
-	t.Cleanup(pool.Close)
-	return pool
+	return testsupport.Pool(t)
 }
 
 // seedProject creates an organisation, project and API key, and removes them

@@ -3,7 +3,6 @@ package router
 import (
 	"context"
 	"errors"
-	"os"
 	"testing"
 	"time"
 
@@ -11,6 +10,7 @@ import (
 
 	"github.com/shaq/webhook-platform/services/data-plane/internal/ids"
 	"github.com/shaq/webhook-platform/services/data-plane/internal/retry"
+	"github.com/shaq/webhook-platform/services/data-plane/internal/testsupport"
 )
 
 // These tests run the real fan-out SQL against a migrated database. They are
@@ -18,23 +18,14 @@ import (
 // atomicity of the route transaction are actually verified, so they skip rather
 // than fail when there is nothing to talk to - the same convention as
 // internal/ingest and internal/queue.
+//
+// The pool points at THIS PACKAGE'S OWN database (see internal/testsupport).
+// ClaimOutbox is a GLOBAL claim with no tenant predicate, so "which rows are in
+// this batch" is only a well-posed question when the database holds nothing but
+// this package's rows.
 func requirePool(t *testing.T) *pgxpool.Pool {
 	t.Helper()
-	url := os.Getenv("DATABASE_URL")
-	if url == "" {
-		t.Skip("DATABASE_URL is not set; skipping PostgreSQL integration test")
-	}
-	ctx := context.Background()
-	pool, err := pgxpool.New(ctx, url)
-	if err != nil {
-		t.Fatalf("connect: %v", err)
-	}
-	if err := pool.Ping(ctx); err != nil {
-		pool.Close()
-		t.Fatalf("ping: %v", err)
-	}
-	t.Cleanup(pool.Close)
-	return pool
+	return testsupport.Pool(t)
 }
 
 type fixture struct {
@@ -60,19 +51,22 @@ func seed(t *testing.T, pool *pgxpool.Pool, eventType string) *fixture {
 		t.Fatal(err)
 	}
 	// ClaimOutbox is a GLOBAL claim: it orders by (available_at, created_at) and
-	// takes a LIMIT, with no tenant predicate - correctly, since the router
-	// drains the whole queue. That makes every test in this package
-	// order-dependent on a shared database: a pending outbox row left by
-	// ANOTHER package sorts ahead of this fixture's row and consumes the batch,
-	// so RunOnce silently never reaches the row under test.
+	// takes a LIMIT, with no tenant predicate - correctly, since the router drains
+	// the whole queue. On a database shared with other test packages that made
+	// every test here order-dependent: a pending outbox row seeded by ANOTHER
+	// package sorts ahead of this fixture's row, consumes the batch, and RunOnce
+	// silently never reaches the row under test.
 	//
-	// Observed as TestPostgresRerunningAPartiallyAppliedBatchIsANoOp failing
-	// only when the router package ran after the worker package - and passing
-	// in isolation, which made it look like flakiness twice. It is not
-	// flakiness; it is a global query meeting shared state.
-	if _, err := pool.Exec(context.Background(), `DELETE FROM event_outbox`); err != nil {
-		t.Fatalf("clear outbox before seeding: %v", err)
-	}
+	// Observed as TestPostgresRerunningAPartiallyAppliedBatchIsANoOp failing only
+	// when this package ran after the worker package, and passing in isolation -
+	// which made it look like flakiness twice. It was not flakiness; it was a
+	// global query meeting shared state.
+	//
+	// The fixture used to DELETE FROM event_outbox here to force the issue. That
+	// does not compose: the delete is itself a race between packages and it
+	// destroys another package's in-flight rows. testsupport now gives this
+	// package its own database instead, so the only outbox rows that exist are the
+	// ones these tests wrote.
 
 	f := &fixture{
 		pool:      pool,
@@ -415,9 +409,22 @@ func TestPostgresRerunningAPartiallyAppliedBatchIsANoOp(t *testing.T) {
 	}
 
 	// Put the row back exactly as a lease reclaim would.
+	//
+	// available_at goes a second into the PAST, not to now(). event_outbox.
+	// available_at is timestamp(3), and storing now() into it ROUNDS to the
+	// nearest millisecond - up, slightly more than half the time, by up to
+	// 0.5ms. The claim predicate is `available_at <= now()`, so a row re-queued
+	// at now() is invisible for that fraction of a millisecond, and the very
+	// next round trip lands inside the window often enough to fail this test
+	// roughly one run in ten. It reads exactly like a router idempotency bug and
+	// is not one; it is a rounding boundary.
+	//
+	// A row that a reclaim actually rescues has been ready since before the
+	// crash, so backdating is also the more faithful fixture.
 	mustExec(t, pool,
 		`UPDATE event_outbox SET status = 'pending', processed_at = NULL,
-		        locked_by = NULL, locked_until = NULL, available_at = now()
+		        locked_by = NULL, locked_until = NULL,
+		        available_at = now() - interval '1 second'
 		 WHERE id = $1`, f.outboxID)
 
 	if _, err := r.RunOnce(context.Background()); err != nil {
@@ -487,9 +494,13 @@ func TestPostgresPartialIndexArbitratesButPermitsReplay(t *testing.T) {
 
 	// And the router re-running must still not add a third: the replay row is
 	// invisible to the arbiter, but the original still conflicts.
+	// Backdated for the timestamp(3) rounding reason spelled out in
+	// TestPostgresRerunningAPartiallyAppliedBatchIsANoOp. It matters more here,
+	// not less: this test asserts that NOTHING new is written, so a claim the
+	// rounding quietly skipped would pass without exercising anything.
 	mustExec(t, pool,
 		`UPDATE event_outbox SET status = 'pending', processed_at = NULL, locked_by = NULL,
-		        locked_until = NULL, available_at = now() WHERE id = $1`, f.outboxID)
+		        locked_until = NULL, available_at = now() - interval '1 second' WHERE id = $1`, f.outboxID)
 	if _, err := r.RunOnce(ctx); err != nil {
 		t.Fatalf("RunOnce after replay: %v", err)
 	}

@@ -3,36 +3,27 @@ package queue
 import (
 	"context"
 	"errors"
-	"os"
 	"testing"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/shaq/webhook-platform/services/data-plane/internal/ids"
+	"github.com/shaq/webhook-platform/services/data-plane/internal/testsupport"
 )
 
 // These tests run the real claim, renew and release SQL against a migrated
 // database. They are the only place column-name drift against Prisma's schema
 // is caught, so they skip rather than fail when there is nothing to talk to -
 // the same convention as internal/ingest.
+//
+// The pool points at THIS PACKAGE'S OWN database (see internal/testsupport).
+// Claim is a GLOBAL query with no tenant predicate, which is correct - draining
+// a queue means draining it - and it is why these tests need a database of
+// their own rather than a share of a common one.
 func requirePool(t *testing.T) *pgxpool.Pool {
 	t.Helper()
-	url := os.Getenv("DATABASE_URL")
-	if url == "" {
-		t.Skip("DATABASE_URL is not set; skipping PostgreSQL integration test")
-	}
-	ctx := context.Background()
-	pool, err := pgxpool.New(ctx, url)
-	if err != nil {
-		t.Fatalf("connect: %v", err)
-	}
-	if err := pool.Ping(ctx); err != nil {
-		pool.Close()
-		t.Fatalf("ping: %v", err)
-	}
-	t.Cleanup(pool.Close)
-	return pool
+	return testsupport.Pool(t)
 }
 
 type fixture struct {
@@ -77,16 +68,15 @@ func seed(t *testing.T, pool *pgxpool.Pool, projects int) *fixture {
 
 	// Claim is a GLOBAL query - it orders the whole ready set by
 	// (next_attempt_at, created_at) and takes a LIMIT, with no tenant predicate.
-	// The tenant-fairness tests assert WHICH rows a batch contains, so a single
-	// delivery left behind by another package changes the answer. Same failure
-	// shape as the router package: passes alone, fails after its neighbours,
-	// looks like flakiness and is not.
-	if _, err := pool.Exec(ctx, `DELETE FROM delivery_attempts`); err != nil {
-		t.Fatalf("clear delivery_attempts before seeding: %v", err)
-	}
-	if _, err := pool.Exec(ctx, `DELETE FROM deliveries`); err != nil {
-		t.Fatalf("clear deliveries before seeding: %v", err)
-	}
+	// The tenant-fairness tests assert WHICH rows a batch contains, so on a shared
+	// database a single delivery left behind by another package changed the
+	// answer: same failure shape as internal/router, passes alone, fails after its
+	// neighbours, looks like flakiness and is not.
+	//
+	// The fixture used to DELETE FROM deliveries and delivery_attempts here.
+	// testsupport gives this package its own copy of the schema instead, so
+	// "global" means "global over this package's rows" and nothing has to be
+	// truncated out from under a neighbour.
 
 	f.endpoint = ids.New(ids.Endpoint)
 	if _, err := pool.Exec(ctx,

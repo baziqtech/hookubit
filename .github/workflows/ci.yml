@@ -124,12 +124,15 @@ jobs:
       - name: Vet
         working-directory: services/data-plane
         run: go vet ./...
-      # -p 1 because every integration package seeds and deletes rows in the
-      # one database; running packages in parallel makes them race each other,
-      # not the code. Same flag as `go:test:db` in the root package.json.
+      # No -p 1 needed: each integration package now creates its own database
+      # from the migrated hookubit_test template, so packages cannot see each
+      # other's rows. Claim and ClaimOutbox are deliberately GLOBAL queries -
+      # they order the whole ready set with a LIMIT and no tenant predicate -
+      # so on a shared database one stray row silently changed which rows a
+      # batch contained. That was misread as flakiness three times.
       - name: Test
         working-directory: services/data-plane
-        run: go test -race -p 1 -count=1 ./...
+        run: go test -race -count=1 ./...
 
   control-plane:
     name: Control plane and dashboard

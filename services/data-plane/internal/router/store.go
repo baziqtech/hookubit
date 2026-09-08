@@ -297,6 +297,12 @@ INSERT INTO deliveries (
 SELECT t.id, $1::text, t.endpoint_id, t.subscription_id,
        $2::text, $3::text,
        'pending'::"DeliveryStatus", 0, t.max_attempts,
+       -- next_attempt_at. NOTE: this column is timestamp(3) and the claim
+       -- predicate compares next_attempt_at <= now(), so storing a bare now()
+       -- rounds UP about half the time by up to 0.5ms and the row is briefly
+       -- invisible. Harmless here - the worker polls every 250ms, so the row
+       -- is claimed on the same cycle - but it is the same rounding that made
+       -- an outbox test fail 1 in 10, so it is worth knowing it exists.
        now(), $4::text,
        now(), now()
 FROM unnest($5::text[], $6::text[], $7::text[], $8::int[])

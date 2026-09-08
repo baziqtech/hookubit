@@ -3,13 +3,13 @@ package worker
 import (
 	"context"
 	"errors"
-	"os"
 	"testing"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/shaq/webhook-platform/services/data-plane/internal/ids"
+	"github.com/shaq/webhook-platform/services/data-plane/internal/testsupport"
 )
 
 // These run the real worker SQL against a migrated database. They are the only
@@ -17,23 +17,11 @@ import (
 // only place the circuit breaker's SQL is checked against NextHealth - the pure
 // function that is its specification. They skip rather than fail when there is
 // nothing to talk to, matching internal/queue and internal/ingest.
+//
+// The pool points at THIS PACKAGE'S OWN database (see internal/testsupport).
 func requirePool(t *testing.T) *pgxpool.Pool {
 	t.Helper()
-	url := os.Getenv("DATABASE_URL")
-	if url == "" {
-		t.Skip("DATABASE_URL is not set; skipping PostgreSQL integration test")
-	}
-	ctx := context.Background()
-	pool, err := pgxpool.New(ctx, url)
-	if err != nil {
-		t.Fatalf("connect: %v", err)
-	}
-	if err := pool.Ping(ctx); err != nil {
-		pool.Close()
-		t.Fatalf("ping: %v", err)
-	}
-	t.Cleanup(pool.Close)
-	return pool
+	return testsupport.Pool(t)
 }
 
 type dbFixture struct {
