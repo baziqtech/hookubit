@@ -673,3 +673,39 @@ jobs:
 
           [ "$fail" -eq 0 ] || exit 1
           echo "OK - default-deny is present and the private ranges are still excluded"
+
+  # One stable check for branch protection to require.
+  #
+  # The matrix jobs produce names that vary with their inputs - "Container
+  # images (control-api, deployments/docker/control-api.Dockerfile, runtime)" -
+  # so requiring them individually means editing the protection rule every time
+  # a matrix entry changes, and a renamed entry silently stops being required.
+  # This job depends on all of them, so protection needs exactly one name and
+  # adding a job to the matrix is automatically covered.
+  #
+  # `if: always()` plus an explicit result check is deliberate: without it a
+  # SKIPPED dependency (images is skipped on a direct push to dev) would make
+  # this job skip too, and a skipped required check is reported as passing.
+  ci-success:
+    name: CI success
+    runs-on: ubuntu-latest
+    needs:
+      - data-plane
+      - control-plane
+      - schema-drift
+      - security
+      - supply-chain
+      - images
+      - dockerfile-lint
+      - manifests
+    if: always()
+    steps:
+      - name: Verify no dependency failed or was cancelled
+        run: |
+          echo "results: ${{ join(needs.*.result, ', ') }}"
+          if [ -n "${{ join(needs.*.result, ' ') }}" ] && \
+             echo "${{ join(needs.*.result, ' ') }}" | grep -qE 'failure|cancelled'; then
+            echo "::error::at least one CI job failed or was cancelled"
+            exit 1
+          fi
+          echo "all required jobs succeeded or were intentionally skipped"
