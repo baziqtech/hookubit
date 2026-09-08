@@ -42,11 +42,12 @@ export const emptyPage = <T>(): Paged<T> => ({
  * `has_more` is read as written: a truthiness test would turn a missing field
  * into "complete", which is the silent-truncation failure again.
  *
- * `next_offset` needs a type guard rather than a cast. The newer control-plane
- * modules declare it `@ApiProperty({ nullable: true })` with no `type`, so the
- * published schema says only "nullable" and the generated type is
- * `Record<string, never> | null`. Reading it as a number without checking would
- * put an object into a URL as `[object Object]`.
+ * `next_offset` is `number | null` on all thirteen envelopes and the generated
+ * type now says so, so the guard below is no longer repairing a type — it is
+ * repairing a RESPONSE. This function is the boundary between the wire and the
+ * pager, and a non-number arriving here (an older deployment, a proxy that
+ * rewrote the body) would otherwise go into a URL as `[object Object]` and step
+ * the pager into nothing. Null is the safe answer: the pager stops.
  */
 export function offsetPage<T>(page: OffsetPage<T>): Paged<T> {
   const rows = page?.data ?? [];

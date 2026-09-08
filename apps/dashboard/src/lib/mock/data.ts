@@ -91,12 +91,11 @@ const id = (prefix: string) =>
  * `AuthUserDto`. `email_verified` is a BOOLEAN — there is no
  * `email_verified_at` and no `created_at` on the session user.
  *
- * `onboarding_completed_at` is null, and it is null because it CANNOT be
- * anything else: the schema emits it as an untyped nullable, so the generated
- * type is `Record<string, never> | null` and no ISO string is assignable. The
- * mock therefore cannot model an operator who has finished the tour. See
- * HANDOFF.md — the repair is `@ApiProperty({ type: String, nullable: true })`
- * on the control API, or another entry in `Patch<>`.
+ * `onboarding_completed_at` is `string | null` and now assignable either way —
+ * it used to be pinned to null because the schema emitted it as an untyped
+ * nullable. It stays null, but as a CHOICE: the demo operator has not finished
+ * the product tour, which is what makes the first-run experience visible under
+ * the mock transport.
  */
 export const user: User = {
   id: 'usr_01JQOPERATOR',
@@ -658,10 +657,15 @@ export const subscriptions: Subscription[] = [
  * still lists what it was minted with. Both are the drift this pair exists to
  * expose, and a fixture where the two lists always matched would hide it.
  *
- * `created_by_user_id` and `created_by_membership_id` are null on every row —
- * not a modelling choice. The schema emits them as untyped nullables, so the
- * generated type is `Record<string, never> | null` and no id string can be
- * assigned. The mock cannot say who minted a key until that is repaired.
+ * `created_by_user_id` and `created_by_membership_id` are now real ids, which
+ * they could not be while the schema emitted them as untyped nullables. They
+ * carry the same story the scope pair does: `key_01JQLIVE` was minted by the
+ * owner who is still an owner; `key_01JQBACKFILL`'s issuer holds the same
+ * membership but reads back as a viewer, because `created_by_role` is the
+ * role AS IT IS NOW rather than at mint time; `key_01JQEXPIRED`'s issuer has
+ * left, so the membership is null and the role with it — the going-null IS the
+ * signal, and it is why `effective_scopes` is empty. `key_01JQOLD` predates the
+ * column entirely, which is the other reason these are nullable at all.
  */
 export const apiKeys: ApiKey[] = [
   {
@@ -675,8 +679,8 @@ export const apiKeys: ApiKey[] = [
     // empty list here is normal and not a misconfiguration.
     scopes: [],
     effective_scopes: [],
-    created_by_user_id: null,
-    created_by_membership_id: null,
+    created_by_user_id: user.id,
+    created_by_membership_id: 'mem_01',
     created_by_role: 'owner',
     expires_at: null,
     last_used_at: minutesAgo(1),
@@ -694,8 +698,8 @@ export const apiKeys: ApiKey[] = [
     // Its issuer is a viewer now, and a viewer cannot replay. The key still
     // authenticates; the replay it was minted for would be refused.
     effective_scopes: ['endpoints.read'],
-    created_by_user_id: null,
-    created_by_membership_id: null,
+    created_by_user_id: 'usr_03',
+    created_by_membership_id: 'mem_03',
     created_by_role: 'viewer',
     expires_at: minutesAhead(60 * 24 * 20),
     last_used_at: minutesAgo(60 * 26),
@@ -713,7 +717,9 @@ export const apiKeys: ApiKey[] = [
     // The issuer's membership is gone, so the derivation has nothing to
     // intersect with: this key may do nothing, whatever it was minted with.
     effective_scopes: [],
-    created_by_user_id: null,
+    // The USER id survives — it is the membership going null that says the
+    // issuer has left, and it is what emptied `effective_scopes` above.
+    created_by_user_id: 'usr_departed',
     created_by_membership_id: null,
     created_by_role: null,
     expires_at: minutesAgo(60 * 24 * 3),
@@ -730,6 +736,8 @@ export const apiKeys: ApiKey[] = [
     status: 'revoked',
     scopes: [],
     effective_scopes: [],
+    // Minted before the column existed. Null here means "unknown", not
+    // "nobody" — the other reason all three of these are nullable.
     created_by_user_id: null,
     created_by_membership_id: null,
     created_by_role: null,

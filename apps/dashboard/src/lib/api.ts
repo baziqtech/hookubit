@@ -8,15 +8,26 @@
  *
  * TO SWAP IN THE REAL CLIENT: set `VITE_API_TRANSPORT=http` (or flip the
  * default in `resolveTransport` below) and delete `src/lib/mock/`. Nothing
- * else in the app changes. Request and response types come from the generated
- * OpenAPI client at that point (ARCHITECTURE.md 7); `src/types/api.ts` is the
- * temporary hand-written stand-in and goes with it.
+ * else in the app changes. Request and response types — the error envelope
+ * included — come from the generated OpenAPI document (ARCHITECTURE.md 7);
+ * `src/types/api.ts` only gives them domain names.
  */
 import { mockRequest, MockHttpError } from './mock/server';
-import type { ApiErrorCode } from '../types/api';
+import { isApiErrorCode } from '../types/api';
+import type { ApiErrorCode, ApiErrorDetails, ApiErrorPayload } from '../types/api';
 
 export interface ApiError {
-  code: ApiErrorCode | string;
+  /**
+   * A CLOSED union, not `string`.
+   *
+   * It used to be `ApiErrorCode | string`, which collapses to `string` and made
+   * every consumer's code check a comparison against a free-form value: a typo
+   * compiled, and a code the API had added but the UI did not handle fell
+   * through to a generic "Request failed" at runtime. Now the document declares
+   * the enum, `normaliseApiError` narrows to it, and an unhandled code is a
+   * compile error in `ErrorState`'s title map.
+   */
+  code: ApiErrorCode;
   message: string;
   /**
    * Every message the server sent, in order.
@@ -31,25 +42,27 @@ export interface ApiError {
    */
   messages?: string[];
   /**
-   * Structured context the error envelope carries. This is where the throttle
-   * guard puts `retry_after_seconds` and where a resource ceiling puts
-   * `{ limit, current, resource }` — the facts that let the UI tell "slow
-   * down" apart from "you have hit a limit". See `src/lib/api-errors.ts`.
+   * Structured context, as the document declares it: `retry_after_seconds` from
+   * the throttle guard, `{ limit, current, resource }` from a resource ceiling
+   * — the facts that let the UI tell "slow down" apart from "you have hit a
+   * limit". Those four are typed; the schema stays open, so anything else is
+   * `unknown`. See `src/lib/api-errors.ts`.
    */
-  details?: Record<string, unknown>;
+  details?: ApiErrorDetails;
   request_id?: string;
 }
 
 /**
- * An error envelope as it arrives — `message` may be the ValidationPipe's array.
- * `ApiError` is the normalised form every caller sees.
+ * An error envelope as it arrives, before normalisation — `message` may still
+ * be the ValidationPipe's array. `ApiError` is the form every caller sees.
+ *
+ * `request_id` is optional HERE ONLY, and that is not a disagreement with the
+ * document, which requires it. This type also covers the envelope the client
+ * SYNTHESISES when a response body could not be parsed at all — a proxy's HTML
+ * 502 — where there is no id to quote because the API never answered.
  */
-export interface RawApiError {
-  code: ApiErrorCode | string;
-  message: string | string[];
-  details?: Record<string, unknown>;
-  request_id?: string;
-}
+export type RawApiError = Omit<ApiErrorPayload, 'request_id'> &
+  Partial<Pick<ApiErrorPayload, 'request_id'>>;
 
 /**
  * One shape out, whatever the server sent in.
@@ -73,12 +86,16 @@ export function normaliseApiError(raw: unknown): ApiError {
       : [];
 
   return {
-    code: typeof source.code === 'string' ? source.code : 'internal_error',
+    // An unrecognised code becomes `internal_error`. Codes are additive on the
+    // server, so a client one version behind WILL meet one it does not know;
+    // folding it into the catch-all is honest, and `API_ERROR_CODES` makes
+    // adding the real handling a compile error rather than a memory.
+    code: isApiErrorCode(source.code) ? source.code : 'internal_error',
     message: messages.join(' ') || 'An unexpected error occurred.',
     messages,
     details:
       typeof source.details === 'object' && source.details !== null
-        ? (source.details as Record<string, unknown>)
+        ? (source.details as ApiErrorDetails)
         : undefined,
     request_id: typeof source.request_id === 'string' ? source.request_id : undefined,
   };

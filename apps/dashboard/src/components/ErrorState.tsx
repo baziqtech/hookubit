@@ -1,4 +1,5 @@
 import { ApiRequestError } from '../lib/api';
+import type { ApiErrorCode } from '../types/api';
 import { Button } from './Button';
 import { EmptyState } from './EmptyState';
 
@@ -69,10 +70,25 @@ function describe(error: unknown): {
   return { title: 'Request failed', message: 'An unexpected error occurred.', code: 'unknown' };
 }
 
-const TITLES: Record<string, string> = {
+/**
+ * A headline for EVERY code the document declares.
+ *
+ * `Record<ApiErrorCode, string>` rather than `Record<string, string>` is the
+ * point of adopting the generated envelope: this map used to cover five of the
+ * eleven codes, and the other six rendered as a bare "Request failed" with no
+ * indication that the UI simply had nothing to say. A code added to the control
+ * API's enum now fails the build here instead.
+ */
+const TITLES: Record<ApiErrorCode, string> = {
+  invalid_request: 'That request was not valid',
   unauthenticated: 'Your session has expired',
   forbidden: 'You do not have access to this',
+  email_not_verified: 'Verify your email address first',
   not_found: 'Not found',
+  conflict: 'That conflicts with something that already exists',
+  limit_exceeded: 'You have reached a limit',
+  idempotency_key_reused: 'That idempotency key has already been used',
+  payload_too_large: 'That payload is too large',
   rate_limited: 'Rate limited',
   internal_error: 'Something went wrong on our side',
 };

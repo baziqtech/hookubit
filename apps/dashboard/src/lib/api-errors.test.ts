@@ -1,12 +1,15 @@
 import { describe, expect, it } from 'vitest';
 import { ApiRequestError } from './api';
 import { classifyWriteError, writeFailureRemedy, writeFailureTitle } from './api-errors';
+import type { ApiErrorCode, ApiErrorDetails } from '../types/api';
 
+// `code` is the document's enum, not `string`: a test that invents a code the
+// API cannot send would be asserting on behaviour that cannot happen.
 const error = (
   status: number,
-  code: string,
+  code: ApiErrorCode,
   message: string,
-  details?: Record<string, unknown>,
+  details?: ApiErrorDetails,
 ) => new ApiRequestError(status, { code, message, details });
 
 /**

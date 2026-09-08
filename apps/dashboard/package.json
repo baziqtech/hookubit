@@ -9,7 +9,7 @@
     "preview": "vite preview",
     "lint": "eslint src --ext ts,tsx",
     "test": "vitest run --passWithNoTests",
-    "generate:api": "openapi-typescript http://localhost:3000/docs-json -o src/types/api.d.ts"
+    "generate:api": "openapi-typescript http://localhost:3000/docs-json --default-non-nullable false -o src/types/api.d.ts"
   },
   "dependencies": {
     "@tanstack/react-query": "^5.62.7",

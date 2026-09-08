@@ -1056,7 +1056,7 @@ export interface components {
             id: string;
             /** @example ada@example.com */
             email: string;
-            name?: Record<string, never> | null;
+            name: string | null;
             /** @description False until the verification token is presented. */
             email_verified: boolean;
             /**
@@ -1064,7 +1064,7 @@ export interface components {
              * @description ISO-8601 instant at which the user finished OR skipped the product tour; null if neither. Carried on every response that returns a user - session, login, verify-email - so the client never needs a second request to decide whether to show the tour. Set by POST /v1/auth/onboarding-completed.
              * @example 2026-09-08T14:20:00.000Z
              */
-            onboarding_completed_at?: Record<string, never> | null;
+            onboarding_completed_at: string | null;
         };
         SessionResponseDto: {
             user: components["schemas"]["AuthUserDto"];
@@ -1144,8 +1144,8 @@ export interface components {
             /** @example usr_01J... */
             user_id: string;
             /** @example ada@example.com */
-            email?: Record<string, never> | null;
-            name?: Record<string, never> | null;
+            email: string | null;
+            name: string | null;
             /** @enum {string} */
             role: "owner" | "admin" | "developer" | "viewer" | "billing";
             /** @description True when the account has been disabled platform-wide. */
@@ -1247,7 +1247,7 @@ export interface components {
              * @description CANNOT BE CHANGED LATER. Defaults to `test`, so a project is never created live by omission. API keys minted here must carry the matching prefix (wk_test_/wk_live_) and the ingest path re-checks the pair on every request.
              * @default test
              */
-            environment: components["schemas"]["Environment"];
+            environment?: components["schemas"]["Environment"];
         };
         UpdateProjectDto: {
             /** @example Payments */
@@ -1287,23 +1287,23 @@ export interface components {
              * @description WHO MINTED THIS KEY. Taken from the resolved session at creation, never from the request body. Null for a key minted before the column existed, or whose user row has been deleted.
              * @example usr_01J8ZK...
              */
-            created_by_user_id?: Record<string, never> | null;
+            created_by_user_id: string | null;
             /**
              * @description The issuer's membership, which is what the effective-scope derivation joins to. It goes NULL when the membership is removed, and that going NULL is itself the signal that the issuer has left - at which point `effective_scopes` is empty.
              * @example mem_01J8ZK...
              */
-            created_by_membership_id?: Record<string, never> | null;
+            created_by_membership_id: string | null;
             /** @description The issuer's role AS IT IS NOW, not as it was at mint time. Null when the issuer is no longer a member. This is the role `effective_scopes` was derived from. */
-            created_by_role?: components["schemas"]["MemberRole"] | null;
+            created_by_role: components["schemas"]["MemberRole"] | null;
             /** Format: date-time */
-            expires_at?: Record<string, never> | null;
+            expires_at: string | null;
             /**
              * Format: date-time
              * @description Best-effort, written by the data plane. Never a basis for an authorization call.
              */
-            last_used_at?: Record<string, never> | null;
+            last_used_at: string | null;
             /** Format: date-time */
-            revoked_at?: Record<string, never> | null;
+            revoked_at: string | null;
             /** Format: date-time */
             created_at: string;
         };
@@ -1367,23 +1367,23 @@ export interface components {
              * @description WHO MINTED THIS KEY. Taken from the resolved session at creation, never from the request body. Null for a key minted before the column existed, or whose user row has been deleted.
              * @example usr_01J8ZK...
              */
-            created_by_user_id?: Record<string, never> | null;
+            created_by_user_id: string | null;
             /**
              * @description The issuer's membership, which is what the effective-scope derivation joins to. It goes NULL when the membership is removed, and that going NULL is itself the signal that the issuer has left - at which point `effective_scopes` is empty.
              * @example mem_01J8ZK...
              */
-            created_by_membership_id?: Record<string, never> | null;
+            created_by_membership_id: string | null;
             /** @description The issuer's role AS IT IS NOW, not as it was at mint time. Null when the issuer is no longer a member. This is the role `effective_scopes` was derived from. */
-            created_by_role?: components["schemas"]["MemberRole"] | null;
+            created_by_role: components["schemas"]["MemberRole"] | null;
             /** Format: date-time */
-            expires_at?: Record<string, never> | null;
+            expires_at: string | null;
             /**
              * Format: date-time
              * @description Best-effort, written by the data plane. Never a basis for an authorization call.
              */
-            last_used_at?: Record<string, never> | null;
+            last_used_at: string | null;
             /** Format: date-time */
-            revoked_at?: Record<string, never> | null;
+            revoked_at: string | null;
             /** Format: date-time */
             created_at: string;
             /**
@@ -1397,20 +1397,20 @@ export interface components {
             project_id: string;
             name: string;
             url: string;
-            description?: Record<string, never> | null;
+            description: string | null;
             /** @enum {string} */
             status: "active" | "paused" | "disabled" | "deleted";
             /** @description Operator intent. The circuit breaker uses `status` instead. */
             enabled: boolean;
             /** @description Set by the circuit breaker. */
-            disabled_reason?: Record<string, never> | null;
-            disabled_at?: Record<string, never> | null;
+            disabled_reason: string | null;
+            disabled_at: string | null;
             timeout_ms: number;
             max_concurrency: number;
-            rate_limit?: Record<string, never> | null;
+            rate_limit: number | null;
             rate_limit_window_seconds: number;
-            retry_policy_id?: Record<string, never> | null;
-            custom_headers?: {
+            retry_policy_id: string | null;
+            custom_headers: {
                 [key: string]: string;
             } | null;
             /**
@@ -1449,18 +1449,18 @@ export interface components {
              * @description How long one delivery attempt may hold a worker slot.
              * @default 30000
              */
-            timeout_ms: number;
+            timeout_ms?: number;
             /**
              * @description In-flight attempts allowed against this endpoint at once.
              * @default 16
              */
-            max_concurrency: number;
+            max_concurrency?: number;
             /** @description Deliveries per window. Null means no per-endpoint limit. */
-            rate_limit?: Record<string, never> | null;
+            rate_limit?: number | null;
             /** @default 1 */
-            rate_limit_window_seconds: number;
+            rate_limit_window_seconds?: number;
             /** @description Retry policy in THIS project. Resolved through the tenant scope. */
-            retry_policy_id?: Record<string, never> | null;
+            retry_policy_id?: string | null;
             /** @description Up to 20 extra request headers. Webhook-*, Authorization, Host, Content-Length and Transfer-Encoding are reserved and rejected. */
             custom_headers?: {
                 [key: string]: string;
@@ -1471,20 +1471,20 @@ export interface components {
             project_id: string;
             name: string;
             url: string;
-            description?: Record<string, never> | null;
+            description: string | null;
             /** @enum {string} */
             status: "active" | "paused" | "disabled" | "deleted";
             /** @description Operator intent. The circuit breaker uses `status` instead. */
             enabled: boolean;
             /** @description Set by the circuit breaker. */
-            disabled_reason?: Record<string, never> | null;
-            disabled_at?: Record<string, never> | null;
+            disabled_reason: string | null;
+            disabled_at: string | null;
             timeout_ms: number;
             max_concurrency: number;
-            rate_limit?: Record<string, never> | null;
+            rate_limit: number | null;
             rate_limit_window_seconds: number;
-            retry_policy_id?: Record<string, never> | null;
-            custom_headers?: {
+            retry_policy_id: string | null;
+            custom_headers: {
                 [key: string]: string;
             } | null;
             /**
@@ -1497,7 +1497,7 @@ export interface components {
             created_at: string;
             updated_at: string;
             /** @description The version 1 signing secret, in plaintext, returned HERE AND NOWHERE ELSE. Present only when the caller also holds `endpoint-secrets.write` (owner or admin): a developer may create endpoints but may not read signing secrets, so for them this is null, the endpoint stays paused, and `secret_pending` says so. */
-            secret?: Record<string, never> | null;
+            secret: string | null;
             /** @description True when the endpoint was created with a signing secret this caller may not receive, so it is PAUSED and not delivering. An owner or admin must rotate (POST /v1/endpoints/{id}/secrets/rotate), hand the consumer the plaintext, then enable it. Going live here instead would sign every delivery with a key nobody holds: the consumer would reject all of them, and the rotation that fixed it would change the secret AGAIN - two verification outages instead of none. */
             secret_pending: boolean;
             /** @description Version of the secret that was minted with this endpoint. */
@@ -1516,18 +1516,18 @@ export interface components {
              * @description How long one delivery attempt may hold a worker slot.
              * @default 30000
              */
-            timeout_ms: number;
+            timeout_ms?: number;
             /**
              * @description In-flight attempts allowed against this endpoint at once.
              * @default 16
              */
-            max_concurrency: number;
+            max_concurrency?: number;
             /** @description Deliveries per window. Null means no per-endpoint limit. */
-            rate_limit?: Record<string, never> | null;
+            rate_limit?: number | null;
             /** @default 1 */
-            rate_limit_window_seconds: number;
+            rate_limit_window_seconds?: number;
             /** @description Retry policy in THIS project. Resolved through the tenant scope. */
-            retry_policy_id?: Record<string, never> | null;
+            retry_policy_id?: string | null;
             /** @description Up to 20 extra request headers. Webhook-*, Authorization, Host, Content-Length and Transfer-Encoding are reserved and rejected. */
             custom_headers?: {
                 [key: string]: string;
@@ -1545,9 +1545,9 @@ export interface components {
             /** @description Whether this secret currently signs deliveries: the stored `active` flag AND an `expires_at` that has not passed. An expired row reads false here before any sweep has flipped the column. */
             active: boolean;
             /** @description When this secret stops signing. */
-            expires_at?: Record<string, never> | null;
+            expires_at: string | null;
             /** @description When a rotation superseded it. */
-            rotated_at?: Record<string, never> | null;
+            rotated_at: string | null;
             created_at: string;
         };
         EndpointSecretListDto: {
@@ -1568,7 +1568,7 @@ export interface components {
              * @description How long the CURRENT secrets keep signing alongside the new one. Every active secret produces its own `v1=` component in Webhook-Signature and a consumer that matches any one of them verifies, so this is the window in which consumers can be rolled. 0 stops the old secrets immediately - use it for a leak, not for a routine rotation.
              * @default 86400
              */
-            overlap_seconds: number;
+            overlap_seconds?: number;
         };
         RotatedSecretDto: {
             id: string;
@@ -1578,14 +1578,14 @@ export interface components {
             /** @description Whether this secret currently signs deliveries: the stored `active` flag AND an `expires_at` that has not passed. An expired row reads false here before any sweep has flipped the column. */
             active: boolean;
             /** @description When this secret stops signing. */
-            expires_at?: Record<string, never> | null;
+            expires_at: string | null;
             /** @description When a rotation superseded it. */
-            rotated_at?: Record<string, never> | null;
+            rotated_at: string | null;
             created_at: string;
             /** @description The plaintext secret. RETURNED EXACTLY ONCE, in this response. It is encrypted at rest with a key this API does not hand out and is never included in any other response, log line or audit entry. If it is lost, rotate again. */
             secret: string;
             /** @description The LAST moment any previously issued secret still signs - the maximum over every version in `overlapping_versions`, not just the ones this rotation moved. Null when no prior secret is signing any more (a rotation with `overlap_seconds: 0`, or the first secret on an endpoint). Consumers must accept both old and new until this passes. */
-            previous_secrets_expire_at?: Record<string, never> | null;
+            previous_secrets_expire_at: string | null;
             /** @description EVERY prior version that still signs after this rotation, newest first - including versions whose own expiry this rotation did not move, because they are still emitting a `v1=` component and a consumer rolling its secrets off this list must know about them. */
             overlapping_versions: number[];
         };
@@ -1593,11 +1593,11 @@ export interface components {
             id: string;
             project_id: string;
             endpoint_id: string;
-            name?: Record<string, never> | null;
+            name: string | null;
             /** @description Exactly as stored. Never rewritten, never widened, never defaulted. */
             event_types: string[];
             /** @description The stored JSON predicate, or null. NOT YET EVALUATED by the data plane: a subscription with a payload filter currently behaves as if this were null. */
-            payload_filter?: {
+            payload_filter: {
                 [key: string]: unknown;
             } | null;
             /** @description A disabled subscription matches no events at all. */
@@ -1610,14 +1610,14 @@ export interface components {
             /** @description More subscriptions match than this page carries. */
             has_more: boolean;
             /** @description Pass back as `offset` for the next page. Null when this page was the last. */
-            next_offset?: Record<string, never> | null;
+            next_offset: number | null;
         };
         CreateSubscriptionDto: {
             /**
              * @description For humans reading the subscription list. Optional; the column is nullable.
              * @example Finance ledger - settlements only
              */
-            name?: Record<string, never> | null;
+            name?: string | null;
             /**
              * @description An endpoint in THIS project. Resolved through the tenant scope, so an id belonging to another customer answers 404 with the same message as an id that does not exist.
              * @example ep_01J8ZK...
@@ -1647,11 +1647,11 @@ export interface components {
              * @description A disabled subscription never matches - `Match()` skips it before the event-type test. This is how you stop deliveries without touching the filter.
              * @default true
              */
-            enabled: boolean;
+            enabled?: boolean;
         };
         UpdateSubscriptionDto: {
             /** @description Null clears the name. */
-            name?: Record<string, never> | null;
+            name?: string | null;
             /** @description Re-point this subscription at a different endpoint in the same project. Resolved through the tenant scope; a deleted endpoint is refused. */
             endpoint_id?: string;
             /** @description Replaces the whole filter - this is not a merge. The same three forms are accepted as on create, and the same refusals apply: an invalid pattern is a 400, never a silent widening to "*", and an empty array is refused. */
@@ -1687,7 +1687,7 @@ export interface components {
             /** @description More policies match than this page carries. The load-bearing field: a client cannot derive it from a total, and a total would cost a second COUNT on every list request. */
             has_more: boolean;
             /** @description `offset` for the next page, or null. */
-            next_offset?: Record<string, never> | null;
+            next_offset: number | null;
         };
         CreateRetryPolicyDto: {
             /** @example Patient partners */
@@ -1696,43 +1696,43 @@ export interface components {
              * @description Make this the project default. Exactly one policy per project is the default; setting this clears the previous one in the same transaction. The FIRST policy created in a project becomes the default whether or not this is set, because a project with policies and no default is a state nothing can resolve.
              * @default false
              */
-            is_default: boolean;
+            is_default?: boolean;
             /**
              * @description `exponential` multiplies the previous delay; `linear` adds `initial_delay_ms` each time; `constant` repeats `initial_delay_ms`. `multiplier` is read by `exponential` only — the delivery workers ignore it for the other two.
              * @default exponential
              * @enum {string}
              */
-            strategy: "exponential" | "linear" | "constant";
+            strategy?: "exponential" | "linear" | "constant";
             /**
              * @description Total attempts including the first delivery. Never 0: 0 means "no cap" downstream.
              * @default 8
              */
-            max_attempts: number;
+            max_attempts?: number;
             /**
              * @description Delay before the FIRST retry. Must not exceed max_delay_ms.
              * @default 5000
              */
-            initial_delay_ms: number;
+            initial_delay_ms?: number;
             /**
              * @description Ceiling on any computed delay. MUST be positive: an unset ceiling is what let the exponential term overflow int64 in the delivery workers and schedule the next attempt permanently in the past.
              * @default 3600000
              */
-            max_delay_ms: number;
+            max_delay_ms?: number;
             /**
              * @description Exponential growth factor. Must be strictly greater than 1 when strategy is `exponential` — the delivery workers replace any multiplier <= 1 with 2, so storing 1 would store a policy that does not describe what happens.
              * @default 2
              */
-            multiplier: number;
+            multiplier?: number;
             /**
              * @description Symmetric jitter as a fraction of the computed delay, so a thousand deliveries to one recovering endpoint do not stampede in lockstep. Above 1 the delay goes negative and is clamped to zero, which is the stampede again.
              * @default 0.2
              */
-            jitter_ratio: number;
+            jitter_ratio?: number;
             /**
              * @description Wall-clock budget from the first attempt. Capped at 7 days because the column is a PostgreSQL integer. Never 0: 0 means "no budget cap" downstream, and eight attempts with an hour ceiling would keep a dead endpoint hot for days.
              * @default 86400000
              */
-            max_retry_duration_ms: number;
+            max_retry_duration_ms?: number;
         };
         UpdateRetryPolicyDto: {
             /** @example Patient partners */
@@ -1742,37 +1742,37 @@ export interface components {
              * @default exponential
              * @enum {string}
              */
-            strategy: "exponential" | "linear" | "constant";
+            strategy?: "exponential" | "linear" | "constant";
             /**
              * @description Total attempts including the first delivery. Never 0: 0 means "no cap" downstream.
              * @default 8
              */
-            max_attempts: number;
+            max_attempts?: number;
             /**
              * @description Delay before the FIRST retry. Must not exceed max_delay_ms.
              * @default 5000
              */
-            initial_delay_ms: number;
+            initial_delay_ms?: number;
             /**
              * @description Ceiling on any computed delay. MUST be positive: an unset ceiling is what let the exponential term overflow int64 in the delivery workers and schedule the next attempt permanently in the past.
              * @default 3600000
              */
-            max_delay_ms: number;
+            max_delay_ms?: number;
             /**
              * @description Exponential growth factor. Must be strictly greater than 1 when strategy is `exponential` — the delivery workers replace any multiplier <= 1 with 2, so storing 1 would store a policy that does not describe what happens.
              * @default 2
              */
-            multiplier: number;
+            multiplier?: number;
             /**
              * @description Symmetric jitter as a fraction of the computed delay, so a thousand deliveries to one recovering endpoint do not stampede in lockstep. Above 1 the delay goes negative and is clamped to zero, which is the stampede again.
              * @default 0.2
              */
-            jitter_ratio: number;
+            jitter_ratio?: number;
             /**
              * @description Wall-clock budget from the first attempt. Capped at 7 days because the column is a PostgreSQL integer. Never 0: 0 means "no budget cap" downstream, and eight attempts with an hour ceiling would keep a dead endpoint hot for days.
              * @default 86400000
              */
-            max_retry_duration_ms: number;
+            max_retry_duration_ms?: number;
         };
         RateLimitDto: {
             id: string;
@@ -1780,11 +1780,11 @@ export interface components {
             /** @enum {string} */
             scope: "organization" | "project" | "endpoint" | "ingest";
             /** @description Null means every resource in this scope. */
-            resource_id?: Record<string, never> | null;
+            resource_id: string | null;
             limit: number;
             window_seconds: number;
             /** @description Null means the same as `limit`. */
-            burst?: Record<string, never> | null;
+            burst: number | null;
             created_at: string;
             updated_at: string;
         };
@@ -1793,7 +1793,7 @@ export interface components {
             /** @description More policies match than this page carries. The load-bearing field: a client cannot derive it from a total, and a total would cost a second COUNT on every list request. */
             has_more: boolean;
             /** @description `offset` for the next page, or null. */
-            next_offset?: Record<string, never> | null;
+            next_offset: number | null;
         };
         CreateRateLimitDto: {
             /**
@@ -1802,16 +1802,16 @@ export interface components {
              */
             scope: "organization" | "project" | "endpoint" | "ingest";
             /** @description The specific resource this limit covers, or null for EVERY resource in this scope. What it names depends on `scope`: an endpoint id, an API key id (`ingest`), this project’s id, or this organization’s id. It is resolved through the scoped repository for that table, so an id belonging to another tenant is a 404. */
-            resource_id?: Record<string, never> | null;
+            resource_id?: string | null;
             /** @description Requests allowed per window. Never 0 or negative: 0 would disable delivery or ingestion entirely for whatever this policy covers. */
             limit: number;
             /**
              * @description Window length. Never 0: the refill rate is `limit / window`, so a zero window is a division by zero downstream.
              * @default 1
              */
-            window_seconds: number;
+            window_seconds?: number;
             /** @description Bucket capacity. Null means "the same as `limit`". When set it must be at least `limit`, or the bucket could never hold one window’s worth of tokens and the configured limit would be unreachable. */
-            burst?: Record<string, never> | null;
+            burst?: number | null;
         };
         UpdateRateLimitDto: {
             /**
@@ -1820,25 +1820,25 @@ export interface components {
              */
             scope?: "organization" | "project" | "endpoint" | "ingest";
             /** @description The specific resource this limit covers, or null for EVERY resource in this scope. What it names depends on `scope`: an endpoint id, an API key id (`ingest`), this project’s id, or this organization’s id. It is resolved through the scoped repository for that table, so an id belonging to another tenant is a 404. */
-            resource_id?: Record<string, never> | null;
+            resource_id?: string | null;
             /** @description Requests allowed per window. Never 0 or negative: 0 would disable delivery or ingestion entirely for whatever this policy covers. */
             limit?: number;
             /**
              * @description Window length. Never 0: the refill rate is `limit / window`, so a zero window is a division by zero downstream.
              * @default 1
              */
-            window_seconds: number;
+            window_seconds?: number;
             /** @description Bucket capacity. Null means "the same as `limit`". When set it must be at least `limit`, or the bucket could never hold one window’s worth of tokens and the configured limit would be unreachable. */
-            burst?: Record<string, never> | null;
+            burst?: number | null;
         };
         EventDto: {
             id: string;
             project_id: string;
             event_type: string;
             /** @description The producer-supplied key that made ingest idempotent (ARCHITECTURE.md 17). */
-            idempotency_key?: Record<string, never> | null;
+            idempotency_key: string | null;
             /** @description Opt-in serialisation key, carried onto every delivery this event fanned out to. Stored from day one; ordering enforcement is deferred (ADR-0004), so this does NOT currently guarantee anything about delivery order. */
-            ordering_key?: Record<string, never> | null;
+            ordering_key: string | null;
             /**
              * @description The INGEST/fan-out state, not a delivery outcome. `processed` means the fan-out committed, which says nothing about whether any endpoint accepted it - that is what the deliveries are for.
              * @enum {string}
@@ -1851,19 +1851,19 @@ export interface components {
             /** @description False when the raw bytes are not in the database (offloaded, or aged out). */
             payload_inline: boolean;
             /** @description `s3://bucket/key` when the payload was too large to store inline. */
-            payload_location?: Record<string, never> | null;
+            payload_location: string | null;
             /** @description Ingest request headers. Credential-shaped values are `[redacted]`. */
-            headers?: {
+            headers: {
                 [key: string]: string;
             } | null;
             created_at: string;
             /** @description When the fan-out first committed. Null until it has. */
-            processed_at?: Record<string, never> | null;
+            processed_at: string | null;
         };
         EventListDto: {
             data: components["schemas"]["EventDto"][];
             has_more: boolean;
-            next_offset?: Record<string, never> | null;
+            next_offset: number | null;
         };
         EventPayloadDto: {
             /**
@@ -1872,19 +1872,19 @@ export interface components {
              */
             source: "inline" | "object_storage" | "unavailable";
             /** @description THE DELIVERED BYTES, decoded. This is what was signed. */
-            body?: Record<string, never> | null;
+            body: string | null;
             /**
              * @description `base64` when the payload is not valid UTF-8. Checked by re-encoding, so a binary body is never rendered as replacement characters that look like data.
              * @enum {string|null}
              */
-            encoding?: "utf-8" | "base64" | null;
-            location?: Record<string, never> | null;
+            encoding: "utf-8" | "base64" | null;
+            location: string | null;
             /** @description Bytes as received. Meaningful even when `body` is null. */
             size_bytes: number;
             /** @description SHA-256 of the authoritative bytes, lowercase hex. */
             sha256: string;
             /** @description THE JSONB COPY. For filtering, search and display convenience only. NOT what was delivered: PostgreSQL normalises jsonb, so key order, whitespace and duplicate keys differ from the bytes that were signed. Never verify a signature against this. */
-            normalised_json?: {
+            normalised_json: {
                 [key: string]: unknown;
             } | null;
             /** @description Says the above in a sentence, for whoever is reading the JSON. */
@@ -1895,9 +1895,9 @@ export interface components {
             project_id: string;
             event_type: string;
             /** @description The producer-supplied key that made ingest idempotent (ARCHITECTURE.md 17). */
-            idempotency_key?: Record<string, never> | null;
+            idempotency_key: string | null;
             /** @description Opt-in serialisation key, carried onto every delivery this event fanned out to. Stored from day one; ordering enforcement is deferred (ADR-0004), so this does NOT currently guarantee anything about delivery order. */
-            ordering_key?: Record<string, never> | null;
+            ordering_key: string | null;
             /**
              * @description The INGEST/fan-out state, not a delivery outcome. `processed` means the fan-out committed, which says nothing about whether any endpoint accepted it - that is what the deliveries are for.
              * @enum {string}
@@ -1910,14 +1910,14 @@ export interface components {
             /** @description False when the raw bytes are not in the database (offloaded, or aged out). */
             payload_inline: boolean;
             /** @description `s3://bucket/key` when the payload was too large to store inline. */
-            payload_location?: Record<string, never> | null;
+            payload_location: string | null;
             /** @description Ingest request headers. Credential-shaped values are `[redacted]`. */
-            headers?: {
+            headers: {
                 [key: string]: string;
             } | null;
             created_at: string;
             /** @description When the fan-out first committed. Null until it has. */
-            processed_at?: Record<string, never> | null;
+            processed_at: string | null;
             payload: components["schemas"]["EventPayloadDto"];
         };
         DeliveryDto: {
@@ -1925,7 +1925,7 @@ export interface components {
             event_id: string;
             endpoint_id: string;
             /** @description The subscription that matched. Null on a replay whose subscription has since been deleted - the provenance of that replay is `replay_of_delivery_id`, which never goes away. */
-            subscription_id?: Record<string, never> | null;
+            subscription_id: string | null;
             project_id: string;
             /** @enum {string} */
             status: "pending" | "scheduled" | "queued" | "processing" | "succeeded" | "failed" | "retrying" | "exhausted" | "cancelled";
@@ -1934,19 +1934,19 @@ export interface components {
             attempt_count: number;
             max_attempts: number;
             /** @description When the next attempt is due. Null means "as soon as a worker is free". */
-            next_attempt_at?: Record<string, never> | null;
-            last_attempt_at?: Record<string, never> | null;
-            completed_at?: Record<string, never> | null;
-            ordering_key?: Record<string, never> | null;
+            next_attempt_at: string | null;
+            last_attempt_at: string | null;
+            completed_at: string | null;
+            ordering_key: string | null;
             /** @description The last failure, as the worker phrased it. The full history is in `attempts`. */
-            last_error?: Record<string, never> | null;
+            last_error: string | null;
             /** @description The worker holding this delivery, and until when. A row stuck in `processing` whose `locked_until` is in the past is a crashed worker; the scheduler reclaims it. */
-            locked_by?: Record<string, never> | null;
-            locked_until?: Record<string, never> | null;
+            locked_by: string | null;
+            locked_until: string | null;
             /** @description The delivery this one replays. Set on every replay and never on an original, which is what the partial unique index `deliveries_event_endpoint_original_key` relies on. */
-            replay_of_delivery_id?: Record<string, never> | null;
+            replay_of_delivery_id: string | null;
             /** @description The user id that asked for the replay. Null on originals. */
-            replayed_by?: Record<string, never> | null;
+            replayed_by: string | null;
             /** @description Shorthand for `replay_of_delivery_id !== null`. */
             is_replay: boolean;
             created_at: string;
@@ -1955,7 +1955,7 @@ export interface components {
         DeliveryListDto: {
             data: components["schemas"]["DeliveryDto"][];
             has_more: boolean;
-            next_offset?: Record<string, never> | null;
+            next_offset: number | null;
         };
         ReplayEventDto: {
             /** @description Recorded on the audit entry for this replay. Not stored on the delivery. */
@@ -1973,7 +1973,7 @@ export interface components {
         DeliveryEventRefDto: {
             id: string;
             event_type: string;
-            idempotency_key?: Record<string, never> | null;
+            idempotency_key: string | null;
             created_at: string;
         };
         DeliveryEndpointRefDto: {
@@ -1985,7 +1985,7 @@ export interface components {
              * @enum {string}
              */
             status: "active" | "paused" | "disabled" | "deleted";
-            disabled_reason?: Record<string, never> | null;
+            disabled_reason: string | null;
         };
         DeliveryAttemptDto: {
             id: string;
@@ -1997,28 +1997,28 @@ export interface components {
              * @enum {string}
              */
             status: "success" | "failure" | "timeout" | "error";
-            http_status?: Record<string, never> | null;
+            http_status: number | null;
             started_at: string;
-            completed_at?: Record<string, never> | null;
-            duration_ms?: Record<string, never> | null;
+            completed_at: string | null;
+            duration_ms: number | null;
             /** @description What we sent. Credential-shaped header VALUES are replaced with `[redacted]` - the key stays, so "did we send Authorization?" is still answerable. The signature header is NOT redacted: it is an HMAC over the payload, not the key, and it is what a consumer compares against when verification fails. */
-            request_headers?: {
+            request_headers: {
                 [key: string]: string;
             } | null;
-            response_headers?: {
+            response_headers: {
                 [key: string]: string;
             } | null;
             /** @description Truncated by the worker to EGRESS_MAX_RESPONSE_BYTES. */
-            response_body?: Record<string, never> | null;
+            response_body: string | null;
             /** @description Set instead of `response_body` when the response was too large to inline. */
-            response_body_location?: Record<string, never> | null;
+            response_body_location: string | null;
             /** @description Bytes the endpoint sent, BEFORE truncation. Compare with `response_body`. */
-            response_size?: Record<string, never> | null;
+            response_size: number | null;
             /** @description Low-cardinality classification derived from the error TYPE, never its message: `timeout`, `dns`, `connection`, `transport`, `blocked_target`, `signing_failed`, `payload_unavailable`, `permanent`, or `http_<status>`. */
-            error_code?: Record<string, never> | null;
-            error_message?: Record<string, never> | null;
+            error_code: string | null;
+            error_message: string | null;
             /** @description Which worker made this attempt. Useful when one replica is misbehaving. */
-            worker_id?: Record<string, never> | null;
+            worker_id: string | null;
             created_at: string;
         };
         DeliveryDetailDto: {
@@ -2026,7 +2026,7 @@ export interface components {
             event_id: string;
             endpoint_id: string;
             /** @description The subscription that matched. Null on a replay whose subscription has since been deleted - the provenance of that replay is `replay_of_delivery_id`, which never goes away. */
-            subscription_id?: Record<string, never> | null;
+            subscription_id: string | null;
             project_id: string;
             /** @enum {string} */
             status: "pending" | "scheduled" | "queued" | "processing" | "succeeded" | "failed" | "retrying" | "exhausted" | "cancelled";
@@ -2035,19 +2035,19 @@ export interface components {
             attempt_count: number;
             max_attempts: number;
             /** @description When the next attempt is due. Null means "as soon as a worker is free". */
-            next_attempt_at?: Record<string, never> | null;
-            last_attempt_at?: Record<string, never> | null;
-            completed_at?: Record<string, never> | null;
-            ordering_key?: Record<string, never> | null;
+            next_attempt_at: string | null;
+            last_attempt_at: string | null;
+            completed_at: string | null;
+            ordering_key: string | null;
             /** @description The last failure, as the worker phrased it. The full history is in `attempts`. */
-            last_error?: Record<string, never> | null;
+            last_error: string | null;
             /** @description The worker holding this delivery, and until when. A row stuck in `processing` whose `locked_until` is in the past is a crashed worker; the scheduler reclaims it. */
-            locked_by?: Record<string, never> | null;
-            locked_until?: Record<string, never> | null;
+            locked_by: string | null;
+            locked_until: string | null;
             /** @description The delivery this one replays. Set on every replay and never on an original, which is what the partial unique index `deliveries_event_endpoint_original_key` relies on. */
-            replay_of_delivery_id?: Record<string, never> | null;
+            replay_of_delivery_id: string | null;
             /** @description The user id that asked for the replay. Null on originals. */
-            replayed_by?: Record<string, never> | null;
+            replayed_by: string | null;
             /** @description Shorthand for `replay_of_delivery_id !== null`. */
             is_replay: boolean;
             created_at: string;
@@ -2062,7 +2062,7 @@ export interface components {
         DeliveryAttemptListDto: {
             data: components["schemas"]["DeliveryAttemptDto"][];
             has_more: boolean;
-            next_offset?: Record<string, never> | null;
+            next_offset: number | null;
         };
         ReplayDeliveryDto: {
             /** @description Recorded on the audit entry for this replay. Not stored on the delivery. */
@@ -2176,7 +2176,7 @@ export interface components {
             /** @description `cancelled`. Neither a success nor a failure. */
             cancelled: number;
             /** @description `succeeded / (succeeded + failed + exhausted)`, in 0..1, over deliveries that have SETTLED. NULL when nothing settled in the window - not 0, which means the opposite. */
-            success_rate?: Record<string, never> | null;
+            success_rate: number | null;
             by_status: components["schemas"]["DeliveryStatusCountsDto"];
         };
         DeliveryOutcomesDto: {
@@ -2185,19 +2185,19 @@ export interface components {
             /** @description The same numbers for the immediately preceding window of equal length. This is what makes "is it getting worse?" answerable from one request. */
             previous: components["schemas"]["DeliveryOutcomeSummaryDto"];
             /** @description `current.success_rate - previous.success_rate`. Negative means worse. NULL when either window had nothing settled, because a change from "unknown" is not a change. */
-            success_rate_delta?: Record<string, never> | null;
+            success_rate_delta: number | null;
             /** @description `current.total - previous.total`. Negative means quieter. */
             total_delta: number;
         };
         FailingEndpointDto: {
             endpoint_id: string;
             /** @description NULL when the endpoint row is gone. The delivery ledger is ON DELETE RESTRICT and endpoints are soft-deleted, so this should not happen - but the ranking is still the truth about what failed, and dropping the row to hide a missing name would hide the failure with it. */
-            name?: Record<string, never> | null;
-            url?: Record<string, never> | null;
+            name: string | null;
+            url: string | null;
             /** @description The endpoint status NOW - `active`, `paused`, `disabled`, `deleted`. */
-            status?: Record<string, never> | null;
+            status: string | null;
             /** @description Operator intent NOW. `false` with a `failing` count is an endpoint someone already turned off, or one the circuit breaker did. */
-            enabled?: Record<string, never> | null;
+            enabled: boolean | null;
             /** @description `failed` + `exhausted` in the window. The ranking key. */
             failing: number;
             failed: number;
@@ -2219,13 +2219,13 @@ export interface components {
         AttemptLatencyDto: {
             window: components["schemas"]["AnalyticsWindowDto"];
             /** @description Nearest-rank p50 of `duration_ms`. */
-            p50_ms?: Record<string, never> | null;
+            p50_ms: number | null;
             /** @description Nearest-rank p95 of `duration_ms`. */
-            p95_ms?: Record<string, never> | null;
+            p95_ms: number | null;
             /** @description Nearest-rank p99 of `duration_ms`. */
-            p99_ms?: Record<string, never> | null;
-            min_ms?: Record<string, never> | null;
-            max_ms?: Record<string, never> | null;
+            p99_ms: number | null;
+            min_ms: number | null;
+            max_ms: number | null;
             /** @description How many attempts these percentiles were computed from. */
             sample_size: number;
             /** @description TRUE when the sample IS every measured attempt in the window, so the percentiles are exact. FALSE when the window held more traffic than the sample cap, in which case the numbers describe the MOST RECENT traffic in the window, not the whole of it. This flag is the honest part of the response - see HANDOFF.md for why an exact percentile is not reachable through the tenant scope today. */
@@ -2249,6 +2249,36 @@ export interface components {
             by_type: components["schemas"]["EventTypeCountDto"][];
             /** @description True when more event types occurred than `limit`. */
             has_more: boolean;
+        };
+        /** @description The response body of EVERY non-2xx response from this API. There is no other error shape: `AppExceptionFilter` is a catch-all filter, so even an unhandled exception is rendered as this envelope with `code: "internal_error"`. */
+        ApiErrorResponse: {
+            error: {
+                /**
+                 * @description STABLE and machine-readable - branch on this, never on `message`. Codes are never removed or repurposed, only added. Several share an HTTP status on purpose: `conflict`, `limit_exceeded` and `idempotency_key_reused` are all 409, and a client that must tell them apart was previously reduced to matching on the human-readable sentence.
+                 * @enum {string}
+                 */
+                code: "invalid_request" | "unauthenticated" | "forbidden" | "email_not_verified" | "not_found" | "conflict" | "limit_exceeded" | "idempotency_key_reused" | "payload_too_large" | "rate_limited" | "internal_error";
+                /** @description For a HUMAN. A STRING on most errors, but a STRING ARRAY on a validation failure - `ValidationPipe` puts one entry per rejected field here, and it is the only field map this API returns. Narrow before rendering it. */
+                message: string | string[];
+                /**
+                 * @description The correlation id, echoed from a well-formed `x-request-id` or minted here. It appears on the matching log lines; quote it in a bug report.
+                 * @example req_2f8b0c1e-6a4d-4c2e-9f10-3b5a7c9d1e22
+                 */
+                request_id: string;
+                /** @description Structured, code-specific context. ABSENT on most errors. Two shapes are part of the contract: `limit_exceeded` ALWAYS carries `{ limit, current, resource }` - the ceiling, what the tenant holds now, and which resource - and `rate_limited` carries `retry_after_seconds`. The message is for a human; these are the contract. Other codes may add keys, so this is not closed. */
+                details?: {
+                    /** @description The ceiling that was reached. Always present on `limit_exceeded`. */
+                    limit?: number;
+                    /** @description What the tenant holds now. Always present on `limit_exceeded`. */
+                    current?: number;
+                    /** @description Which resource the ceiling covers. Always present on `limit_exceeded`. */
+                    resource?: string;
+                    /** @description How long to wait before retrying. Present on `rate_limited`; mirrors the `Retry-After` header. */
+                    retry_after_seconds?: number;
+                } & {
+                    [key: string]: unknown;
+                };
+            };
         };
     };
     responses: never;
@@ -2496,12 +2526,14 @@ export interface operations {
                     "application/json": components["schemas"]["OrganizationDto"];
                 };
             };
-            /** @description Two different 409s, told apart by `error.code`, never by the message. `limit_exceeded` - the per-account organization cap is reached; `details` carries `{ limit, current, resource }`. `conflict` - the explicitly requested slug is already taken. */
+            /** @description Two different 409s, told apart by `error.code`, never by the message. `limit_exceeded` - the per-account organization cap is reached; `details` carries `{ limit, current, resource }`. `conflict` - the explicitly requested slug is already taken. (error.code: `conflict`, `limit_exceeded`, `idempotency_key_reused`) */
             409: {
                 headers: {
                     [name: string]: unknown;
                 };
-                content?: never;
+                content: {
+                    "application/json": components["schemas"]["ApiErrorResponse"];
+                };
             };
         };
     };
@@ -2524,12 +2556,14 @@ export interface operations {
                     "application/json": components["schemas"]["OrganizationDto"];
                 };
             };
-            /** @description Absent, or the caller is not a member. Same answer. */
+            /** @description Absent, or the caller is not a member. Same answer. (error.code: `not_found`) */
             404: {
                 headers: {
                     [name: string]: unknown;
                 };
-                content?: never;
+                content: {
+                    "application/json": components["schemas"]["ApiErrorResponse"];
+                };
             };
         };
     };
@@ -2550,12 +2584,14 @@ export interface operations {
                 };
                 content?: never;
             };
-            /** @description The caller is a member but is not an owner. */
+            /** @description The caller is a member but is not an owner. (error.code: `forbidden`, `email_not_verified`) */
             403: {
                 headers: {
                     [name: string]: unknown;
                 };
-                content?: never;
+                content: {
+                    "application/json": components["schemas"]["ApiErrorResponse"];
+                };
             };
         };
     };
@@ -2582,12 +2618,14 @@ export interface operations {
                     "application/json": components["schemas"]["OrganizationDto"];
                 };
             };
-            /** @description The requested slug is already taken. */
+            /** @description The requested slug is already taken. (error.code: `conflict`, `limit_exceeded`, `idempotency_key_reused`) */
             409: {
                 headers: {
                     [name: string]: unknown;
                 };
-                content?: never;
+                content: {
+                    "application/json": components["schemas"]["ApiErrorResponse"];
+                };
             };
         };
     };
@@ -2613,12 +2651,14 @@ export interface operations {
                     "application/json": components["schemas"]["MemberListDto"];
                 };
             };
-            /** @description Absent, or the caller is not a member. Same answer. */
+            /** @description Absent, or the caller is not a member. Same answer. (error.code: `not_found`) */
             404: {
                 headers: {
                     [name: string]: unknown;
                 };
-                content?: never;
+                content: {
+                    "application/json": components["schemas"]["ApiErrorResponse"];
+                };
             };
         };
     };
@@ -2645,12 +2685,14 @@ export interface operations {
                     "application/json": components["schemas"]["InvitationAcceptedDto"];
                 };
             };
-            /** @description The caller may not assign that role. */
+            /** @description The caller may not assign that role. (error.code: `forbidden`, `email_not_verified`) */
             403: {
                 headers: {
                     [name: string]: unknown;
                 };
-                content?: never;
+                content: {
+                    "application/json": components["schemas"]["ApiErrorResponse"];
+                };
             };
         };
     };
@@ -2672,19 +2714,23 @@ export interface operations {
                 };
                 content?: never;
             };
-            /** @description The lattice refused the removal. */
+            /** @description The lattice refused the removal. (error.code: `forbidden`, `email_not_verified`) */
             403: {
                 headers: {
                     [name: string]: unknown;
                 };
-                content?: never;
+                content: {
+                    "application/json": components["schemas"]["ApiErrorResponse"];
+                };
             };
-            /** @description The removal would leave the organization with no owner. */
+            /** @description The removal would leave the organization with no owner. (error.code: `conflict`, `limit_exceeded`, `idempotency_key_reused`) */
             409: {
                 headers: {
                     [name: string]: unknown;
                 };
-                content?: never;
+                content: {
+                    "application/json": components["schemas"]["ApiErrorResponse"];
+                };
             };
         };
     };
@@ -2712,19 +2758,23 @@ export interface operations {
                     "application/json": components["schemas"]["MemberDto"];
                 };
             };
-            /** @description The lattice refused the change. */
+            /** @description The lattice refused the change. (error.code: `forbidden`, `email_not_verified`) */
             403: {
                 headers: {
                     [name: string]: unknown;
                 };
-                content?: never;
+                content: {
+                    "application/json": components["schemas"]["ApiErrorResponse"];
+                };
             };
-            /** @description The change would leave the organization with no owner. */
+            /** @description The change would leave the organization with no owner. (error.code: `conflict`, `limit_exceeded`, `idempotency_key_reused`) */
             409: {
                 headers: {
                     [name: string]: unknown;
                 };
-                content?: never;
+                content: {
+                    "application/json": components["schemas"]["ApiErrorResponse"];
+                };
             };
         };
     };
@@ -2749,19 +2799,23 @@ export interface operations {
                     "application/json": components["schemas"]["AcceptedInvitationDto"];
                 };
             };
-            /** @description Unknown, consumed, expired, or issued to a different address - one answer for all four. */
+            /** @description Unknown, consumed, expired, or issued to a different address - one answer for all four. (error.code: `invalid_request`) */
             400: {
                 headers: {
                     [name: string]: unknown;
                 };
-                content?: never;
+                content: {
+                    "application/json": components["schemas"]["ApiErrorResponse"];
+                };
             };
-            /** @description The organization or the inviting member can no longer support the invitation. */
+            /** @description The organization or the inviting member can no longer support the invitation. (error.code: `conflict`, `limit_exceeded`, `idempotency_key_reused`) */
             409: {
                 headers: {
                     [name: string]: unknown;
                 };
-                content?: never;
+                content: {
+                    "application/json": components["schemas"]["ApiErrorResponse"];
+                };
             };
         };
     };
@@ -2790,26 +2844,32 @@ export interface operations {
                     "application/json": components["schemas"]["ProjectListDto"];
                 };
             };
-            /** @description Membership is proven but the role is short of the permission. */
+            /** @description Membership is proven but the role is short of the permission. (error.code: `forbidden`, `email_not_verified`) */
             403: {
                 headers: {
                     [name: string]: unknown;
                 };
-                content?: never;
+                content: {
+                    "application/json": components["schemas"]["ApiErrorResponse"];
+                };
             };
-            /** @description The organization or project is not visible to this caller - it does not exist, it is deleted, or it belongs to another tenant. All three answer identically and with the same message, so the response cannot be used to prove another customer's ids are real. */
+            /** @description The organization or project is not visible to this caller - it does not exist, it is deleted, or it belongs to another tenant. All three answer identically and with the same message, so the response cannot be used to prove another customer's ids are real. (error.code: `not_found`) */
             404: {
                 headers: {
                     [name: string]: unknown;
                 };
-                content?: never;
+                content: {
+                    "application/json": components["schemas"]["ApiErrorResponse"];
+                };
             };
-            /** @description Rate limited. Carries `Retry-After` (seconds) and `details.retry_after_seconds`. Only the write routes are limited. */
+            /** @description Rate limited. Carries `Retry-After` (seconds) and `details.retry_after_seconds`. Only the write routes are limited. (error.code: `rate_limited`) */
             429: {
                 headers: {
                     [name: string]: unknown;
                 };
-                content?: never;
+                content: {
+                    "application/json": components["schemas"]["ApiErrorResponse"];
+                };
             };
         };
     };
@@ -2836,33 +2896,41 @@ export interface operations {
                     "application/json": components["schemas"]["ProjectDto"];
                 };
             };
-            /** @description Membership is proven but the role is short of the permission. */
+            /** @description Membership is proven but the role is short of the permission. (error.code: `forbidden`, `email_not_verified`) */
             403: {
                 headers: {
                     [name: string]: unknown;
                 };
-                content?: never;
+                content: {
+                    "application/json": components["schemas"]["ApiErrorResponse"];
+                };
             };
-            /** @description The organization or project is not visible to this caller - it does not exist, it is deleted, or it belongs to another tenant. All three answer identically and with the same message, so the response cannot be used to prove another customer's ids are real. */
+            /** @description The organization or project is not visible to this caller - it does not exist, it is deleted, or it belongs to another tenant. All three answer identically and with the same message, so the response cannot be used to prove another customer's ids are real. (error.code: `not_found`) */
             404: {
                 headers: {
                     [name: string]: unknown;
                 };
-                content?: never;
+                content: {
+                    "application/json": components["schemas"]["ApiErrorResponse"];
+                };
             };
-            /** @description Two different 409s, told apart by `error.code`, never by the message. `limit_exceeded` - the organization is at its project ceiling; `details` carries `{ limit, current, resource }`. `conflict` - the slug is already taken in this organization. */
+            /** @description Two different 409s, told apart by `error.code`, never by the message. `limit_exceeded` - the organization is at its project ceiling; `details` carries `{ limit, current, resource }`. `conflict` - the slug is already taken in this organization. (error.code: `conflict`, `limit_exceeded`, `idempotency_key_reused`) */
             409: {
                 headers: {
                     [name: string]: unknown;
                 };
-                content?: never;
+                content: {
+                    "application/json": components["schemas"]["ApiErrorResponse"];
+                };
             };
-            /** @description Rate limited. Carries `Retry-After` (seconds) and `details.retry_after_seconds`. Only the write routes are limited. */
+            /** @description Rate limited. Carries `Retry-After` (seconds) and `details.retry_after_seconds`. Only the write routes are limited. (error.code: `rate_limited`) */
             429: {
                 headers: {
                     [name: string]: unknown;
                 };
-                content?: never;
+                content: {
+                    "application/json": components["schemas"]["ApiErrorResponse"];
+                };
             };
         };
     };
@@ -2886,26 +2954,32 @@ export interface operations {
                     "application/json": components["schemas"]["ProjectDto"];
                 };
             };
-            /** @description Membership is proven but the role is short of the permission. */
+            /** @description Membership is proven but the role is short of the permission. (error.code: `forbidden`, `email_not_verified`) */
             403: {
                 headers: {
                     [name: string]: unknown;
                 };
-                content?: never;
+                content: {
+                    "application/json": components["schemas"]["ApiErrorResponse"];
+                };
             };
-            /** @description The organization or project is not visible to this caller - it does not exist, it is deleted, or it belongs to another tenant. All three answer identically and with the same message, so the response cannot be used to prove another customer's ids are real. */
+            /** @description The organization or project is not visible to this caller - it does not exist, it is deleted, or it belongs to another tenant. All three answer identically and with the same message, so the response cannot be used to prove another customer's ids are real. (error.code: `not_found`) */
             404: {
                 headers: {
                     [name: string]: unknown;
                 };
-                content?: never;
+                content: {
+                    "application/json": components["schemas"]["ApiErrorResponse"];
+                };
             };
-            /** @description Rate limited. Carries `Retry-After` (seconds) and `details.retry_after_seconds`. Only the write routes are limited. */
+            /** @description Rate limited. Carries `Retry-After` (seconds) and `details.retry_after_seconds`. Only the write routes are limited. (error.code: `rate_limited`) */
             429: {
                 headers: {
                     [name: string]: unknown;
                 };
-                content?: never;
+                content: {
+                    "application/json": components["schemas"]["ApiErrorResponse"];
+                };
             };
         };
     };
@@ -2929,26 +3003,32 @@ export interface operations {
                     "application/json": components["schemas"]["ProjectDto"];
                 };
             };
-            /** @description Membership is proven but the role is short of the permission. */
+            /** @description Membership is proven but the role is short of the permission. (error.code: `forbidden`, `email_not_verified`) */
             403: {
                 headers: {
                     [name: string]: unknown;
                 };
-                content?: never;
+                content: {
+                    "application/json": components["schemas"]["ApiErrorResponse"];
+                };
             };
-            /** @description The organization or project is not visible to this caller - it does not exist, it is deleted, or it belongs to another tenant. All three answer identically and with the same message, so the response cannot be used to prove another customer's ids are real. */
+            /** @description The organization or project is not visible to this caller - it does not exist, it is deleted, or it belongs to another tenant. All three answer identically and with the same message, so the response cannot be used to prove another customer's ids are real. (error.code: `not_found`) */
             404: {
                 headers: {
                     [name: string]: unknown;
                 };
-                content?: never;
+                content: {
+                    "application/json": components["schemas"]["ApiErrorResponse"];
+                };
             };
-            /** @description Rate limited. Carries `Retry-After` (seconds) and `details.retry_after_seconds`. Only the write routes are limited. */
+            /** @description Rate limited. Carries `Retry-After` (seconds) and `details.retry_after_seconds`. Only the write routes are limited. (error.code: `rate_limited`) */
             429: {
                 headers: {
                     [name: string]: unknown;
                 };
-                content?: never;
+                content: {
+                    "application/json": components["schemas"]["ApiErrorResponse"];
+                };
             };
         };
     };
@@ -2976,33 +3056,41 @@ export interface operations {
                     "application/json": components["schemas"]["ProjectDto"];
                 };
             };
-            /** @description Membership is proven but the role is short of the permission. */
+            /** @description Membership is proven but the role is short of the permission. (error.code: `forbidden`, `email_not_verified`) */
             403: {
                 headers: {
                     [name: string]: unknown;
                 };
-                content?: never;
+                content: {
+                    "application/json": components["schemas"]["ApiErrorResponse"];
+                };
             };
-            /** @description The organization or project is not visible to this caller - it does not exist, it is deleted, or it belongs to another tenant. All three answer identically and with the same message, so the response cannot be used to prove another customer's ids are real. */
+            /** @description The organization or project is not visible to this caller - it does not exist, it is deleted, or it belongs to another tenant. All three answer identically and with the same message, so the response cannot be used to prove another customer's ids are real. (error.code: `not_found`) */
             404: {
                 headers: {
                     [name: string]: unknown;
                 };
-                content?: never;
+                content: {
+                    "application/json": components["schemas"]["ApiErrorResponse"];
+                };
             };
-            /** @description The slug is already taken in this organization. */
+            /** @description The slug is already taken in this organization. (error.code: `conflict`, `limit_exceeded`, `idempotency_key_reused`) */
             409: {
                 headers: {
                     [name: string]: unknown;
                 };
-                content?: never;
+                content: {
+                    "application/json": components["schemas"]["ApiErrorResponse"];
+                };
             };
-            /** @description Rate limited. Carries `Retry-After` (seconds) and `details.retry_after_seconds`. Only the write routes are limited. */
+            /** @description Rate limited. Carries `Retry-After` (seconds) and `details.retry_after_seconds`. Only the write routes are limited. (error.code: `rate_limited`) */
             429: {
                 headers: {
                     [name: string]: unknown;
                 };
-                content?: never;
+                content: {
+                    "application/json": components["schemas"]["ApiErrorResponse"];
+                };
             };
         };
     };
@@ -3029,26 +3117,32 @@ export interface operations {
                     "application/json": components["schemas"]["ApiKeyListDto"];
                 };
             };
-            /** @description Membership is proven but the role is short of the permission. */
+            /** @description Membership is proven but the role is short of the permission. (error.code: `forbidden`, `email_not_verified`) */
             403: {
                 headers: {
                     [name: string]: unknown;
                 };
-                content?: never;
+                content: {
+                    "application/json": components["schemas"]["ApiErrorResponse"];
+                };
             };
-            /** @description The project or key is not visible to this caller - absent, deleted, or another tenant's. All of those answer identically, so this API cannot be used to confirm that an id is real. */
+            /** @description The project or key is not visible to this caller - absent, deleted, or another tenant's. All of those answer identically, so this API cannot be used to confirm that an id is real. (error.code: `not_found`) */
             404: {
                 headers: {
                     [name: string]: unknown;
                 };
-                content?: never;
+                content: {
+                    "application/json": components["schemas"]["ApiErrorResponse"];
+                };
             };
-            /** @description Rate limited. Carries `Retry-After` (seconds) and `details.retry_after_seconds`. Only the write routes are limited; the listing is not. */
+            /** @description Rate limited. Carries `Retry-After` (seconds) and `details.retry_after_seconds`. Only the write routes are limited; the listing is not. (error.code: `rate_limited`) */
             429: {
                 headers: {
                     [name: string]: unknown;
                 };
-                content?: never;
+                content: {
+                    "application/json": components["schemas"]["ApiErrorResponse"];
+                };
             };
         };
     };
@@ -3075,33 +3169,41 @@ export interface operations {
                     "application/json": components["schemas"]["CreatedApiKeyDto"];
                 };
             };
-            /** @description Membership is proven but the role is short of the permission. */
+            /** @description Membership is proven but the role is short of the permission. (error.code: `forbidden`, `email_not_verified`) */
             403: {
                 headers: {
                     [name: string]: unknown;
                 };
-                content?: never;
+                content: {
+                    "application/json": components["schemas"]["ApiErrorResponse"];
+                };
             };
-            /** @description The project or key is not visible to this caller - absent, deleted, or another tenant's. All of those answer identically, so this API cannot be used to confirm that an id is real. */
+            /** @description The project or key is not visible to this caller - absent, deleted, or another tenant's. All of those answer identically, so this API cannot be used to confirm that an id is real. (error.code: `not_found`) */
             404: {
                 headers: {
                     [name: string]: unknown;
                 };
-                content?: never;
+                content: {
+                    "application/json": components["schemas"]["ApiErrorResponse"];
+                };
             };
-            /** @description `limit_exceeded` - the project is at its API-key ceiling; `details` carries `{ limit, current, resource }`. Revoke a key to free a slot. Match on `error.code`, never on the message. */
+            /** @description `limit_exceeded` - the project is at its API-key ceiling; `details` carries `{ limit, current, resource }`. Revoke a key to free a slot. Match on `error.code`, never on the message. (error.code: `conflict`, `limit_exceeded`, `idempotency_key_reused`) */
             409: {
                 headers: {
                     [name: string]: unknown;
                 };
-                content?: never;
+                content: {
+                    "application/json": components["schemas"]["ApiErrorResponse"];
+                };
             };
-            /** @description Rate limited. Carries `Retry-After` (seconds) and `details.retry_after_seconds`. Only the write routes are limited; the listing is not. */
+            /** @description Rate limited. Carries `Retry-After` (seconds) and `details.retry_after_seconds`. Only the write routes are limited; the listing is not. (error.code: `rate_limited`) */
             429: {
                 headers: {
                     [name: string]: unknown;
                 };
-                content?: never;
+                content: {
+                    "application/json": components["schemas"]["ApiErrorResponse"];
+                };
             };
         };
     };
@@ -3125,26 +3227,32 @@ export interface operations {
                     "application/json": components["schemas"]["ApiKeyDto"];
                 };
             };
-            /** @description Membership is proven but the role is short of the permission. */
+            /** @description Membership is proven but the role is short of the permission. (error.code: `forbidden`, `email_not_verified`) */
             403: {
                 headers: {
                     [name: string]: unknown;
                 };
-                content?: never;
+                content: {
+                    "application/json": components["schemas"]["ApiErrorResponse"];
+                };
             };
-            /** @description The project or key is not visible to this caller - absent, deleted, or another tenant's. All of those answer identically, so this API cannot be used to confirm that an id is real. */
+            /** @description The project or key is not visible to this caller - absent, deleted, or another tenant's. All of those answer identically, so this API cannot be used to confirm that an id is real. (error.code: `not_found`) */
             404: {
                 headers: {
                     [name: string]: unknown;
                 };
-                content?: never;
+                content: {
+                    "application/json": components["schemas"]["ApiErrorResponse"];
+                };
             };
-            /** @description Rate limited. Carries `Retry-After` (seconds) and `details.retry_after_seconds`. Only the write routes are limited; the listing is not. */
+            /** @description Rate limited. Carries `Retry-After` (seconds) and `details.retry_after_seconds`. Only the write routes are limited; the listing is not. (error.code: `rate_limited`) */
             429: {
                 headers: {
                     [name: string]: unknown;
                 };
-                content?: never;
+                content: {
+                    "application/json": components["schemas"]["ApiErrorResponse"];
+                };
             };
         };
     };
@@ -3171,19 +3279,23 @@ export interface operations {
                     "application/json": components["schemas"]["EndpointListDto"];
                 };
             };
-            /** @description You are in this tenant but your role does not allow it. */
+            /** @description You are in this tenant but your role does not allow it. (error.code: `forbidden`, `email_not_verified`) */
             403: {
                 headers: {
                     [name: string]: unknown;
                 };
-                content?: never;
+                content: {
+                    "application/json": components["schemas"]["ApiErrorResponse"];
+                };
             };
-            /** @description The project or endpoint does not exist, or belongs to another tenant. The two are one answer, with one message, on purpose: a 403 here would confirm that an id scraped from somewhere else is live infrastructure belonging to another customer. */
+            /** @description The project or endpoint does not exist, or belongs to another tenant. The two are one answer, with one message, on purpose: a 403 here would confirm that an id scraped from somewhere else is live infrastructure belonging to another customer. (error.code: `not_found`) */
             404: {
                 headers: {
                     [name: string]: unknown;
                 };
-                content?: never;
+                content: {
+                    "application/json": components["schemas"]["ApiErrorResponse"];
+                };
             };
         };
     };
@@ -3208,26 +3320,32 @@ export interface operations {
                     "application/json": components["schemas"]["CreatedEndpointDto"];
                 };
             };
-            /** @description You are in this tenant but your role does not allow it. */
+            /** @description You are in this tenant but your role does not allow it. (error.code: `forbidden`, `email_not_verified`) */
             403: {
                 headers: {
                     [name: string]: unknown;
                 };
-                content?: never;
+                content: {
+                    "application/json": components["schemas"]["ApiErrorResponse"];
+                };
             };
-            /** @description The project or endpoint does not exist, or belongs to another tenant. The two are one answer, with one message, on purpose: a 403 here would confirm that an id scraped from somewhere else is live infrastructure belonging to another customer. */
+            /** @description The project or endpoint does not exist, or belongs to another tenant. The two are one answer, with one message, on purpose: a 403 here would confirm that an id scraped from somewhere else is live infrastructure belonging to another customer. (error.code: `not_found`) */
             404: {
                 headers: {
                     [name: string]: unknown;
                 };
-                content?: never;
+                content: {
+                    "application/json": components["schemas"]["ApiErrorResponse"];
+                };
             };
-            /** @description `limit_exceeded` - the project is at its endpoint ceiling; `details` carries `{ limit, current, resource }`. Every other 409 on this controller is a plain `conflict` (the endpoint is deleted, or has no active signing secret). Match on `error.code`, never on the message. */
+            /** @description `limit_exceeded` - the project is at its endpoint ceiling; `details` carries `{ limit, current, resource }`. Every other 409 on this controller is a plain `conflict` (the endpoint is deleted, or has no active signing secret). Match on `error.code`, never on the message. (error.code: `conflict`, `limit_exceeded`, `idempotency_key_reused`) */
             409: {
                 headers: {
                     [name: string]: unknown;
                 };
-                content?: never;
+                content: {
+                    "application/json": components["schemas"]["ApiErrorResponse"];
+                };
             };
         };
     };
@@ -3250,19 +3368,23 @@ export interface operations {
                     "application/json": components["schemas"]["EndpointDto"];
                 };
             };
-            /** @description You are in this tenant but your role does not allow it. */
+            /** @description You are in this tenant but your role does not allow it. (error.code: `forbidden`, `email_not_verified`) */
             403: {
                 headers: {
                     [name: string]: unknown;
                 };
-                content?: never;
+                content: {
+                    "application/json": components["schemas"]["ApiErrorResponse"];
+                };
             };
-            /** @description The project or endpoint does not exist, or belongs to another tenant. The two are one answer, with one message, on purpose: a 403 here would confirm that an id scraped from somewhere else is live infrastructure belonging to another customer. */
+            /** @description The project or endpoint does not exist, or belongs to another tenant. The two are one answer, with one message, on purpose: a 403 here would confirm that an id scraped from somewhere else is live infrastructure belonging to another customer. (error.code: `not_found`) */
             404: {
                 headers: {
                     [name: string]: unknown;
                 };
-                content?: never;
+                content: {
+                    "application/json": components["schemas"]["ApiErrorResponse"];
+                };
             };
         };
     };
@@ -3283,19 +3405,23 @@ export interface operations {
                 };
                 content?: never;
             };
-            /** @description You are in this tenant but your role does not allow it. */
+            /** @description You are in this tenant but your role does not allow it. (error.code: `forbidden`, `email_not_verified`) */
             403: {
                 headers: {
                     [name: string]: unknown;
                 };
-                content?: never;
+                content: {
+                    "application/json": components["schemas"]["ApiErrorResponse"];
+                };
             };
-            /** @description The project or endpoint does not exist, or belongs to another tenant. The two are one answer, with one message, on purpose: a 403 here would confirm that an id scraped from somewhere else is live infrastructure belonging to another customer. */
+            /** @description The project or endpoint does not exist, or belongs to another tenant. The two are one answer, with one message, on purpose: a 403 here would confirm that an id scraped from somewhere else is live infrastructure belonging to another customer. (error.code: `not_found`) */
             404: {
                 headers: {
                     [name: string]: unknown;
                 };
-                content?: never;
+                content: {
+                    "application/json": components["schemas"]["ApiErrorResponse"];
+                };
             };
         };
     };
@@ -3322,26 +3448,32 @@ export interface operations {
                     "application/json": components["schemas"]["EndpointDto"];
                 };
             };
-            /** @description You are in this tenant but your role does not allow it. */
+            /** @description You are in this tenant but your role does not allow it. (error.code: `forbidden`, `email_not_verified`) */
             403: {
                 headers: {
                     [name: string]: unknown;
                 };
-                content?: never;
+                content: {
+                    "application/json": components["schemas"]["ApiErrorResponse"];
+                };
             };
-            /** @description The project or endpoint does not exist, or belongs to another tenant. The two are one answer, with one message, on purpose: a 403 here would confirm that an id scraped from somewhere else is live infrastructure belonging to another customer. */
+            /** @description The project or endpoint does not exist, or belongs to another tenant. The two are one answer, with one message, on purpose: a 403 here would confirm that an id scraped from somewhere else is live infrastructure belonging to another customer. (error.code: `not_found`) */
             404: {
                 headers: {
                     [name: string]: unknown;
                 };
-                content?: never;
+                content: {
+                    "application/json": components["schemas"]["ApiErrorResponse"];
+                };
             };
-            /** @description The endpoint has been deleted. */
+            /** @description The endpoint has been deleted. (error.code: `conflict`, `limit_exceeded`, `idempotency_key_reused`) */
             409: {
                 headers: {
                     [name: string]: unknown;
                 };
-                content?: never;
+                content: {
+                    "application/json": components["schemas"]["ApiErrorResponse"];
+                };
             };
         };
     };
@@ -3364,26 +3496,32 @@ export interface operations {
                     "application/json": components["schemas"]["EndpointDto"];
                 };
             };
-            /** @description You are in this tenant but your role does not allow it. */
+            /** @description You are in this tenant but your role does not allow it. (error.code: `forbidden`, `email_not_verified`) */
             403: {
                 headers: {
                     [name: string]: unknown;
                 };
-                content?: never;
+                content: {
+                    "application/json": components["schemas"]["ApiErrorResponse"];
+                };
             };
-            /** @description The project or endpoint does not exist, or belongs to another tenant. The two are one answer, with one message, on purpose: a 403 here would confirm that an id scraped from somewhere else is live infrastructure belonging to another customer. */
+            /** @description The project or endpoint does not exist, or belongs to another tenant. The two are one answer, with one message, on purpose: a 403 here would confirm that an id scraped from somewhere else is live infrastructure belonging to another customer. (error.code: `not_found`) */
             404: {
                 headers: {
                     [name: string]: unknown;
                 };
-                content?: never;
+                content: {
+                    "application/json": components["schemas"]["ApiErrorResponse"];
+                };
             };
-            /** @description Deleted, or no active signing secret - the latter is exactly `has_live_secret: false`. */
+            /** @description Deleted, or no active signing secret - the latter is exactly `has_live_secret: false`. (error.code: `conflict`, `limit_exceeded`, `idempotency_key_reused`) */
             409: {
                 headers: {
                     [name: string]: unknown;
                 };
-                content?: never;
+                content: {
+                    "application/json": components["schemas"]["ApiErrorResponse"];
+                };
             };
         };
     };
@@ -3410,26 +3548,32 @@ export interface operations {
                     "application/json": components["schemas"]["EndpointDto"];
                 };
             };
-            /** @description You are in this tenant but your role does not allow it. */
+            /** @description You are in this tenant but your role does not allow it. (error.code: `forbidden`, `email_not_verified`) */
             403: {
                 headers: {
                     [name: string]: unknown;
                 };
-                content?: never;
+                content: {
+                    "application/json": components["schemas"]["ApiErrorResponse"];
+                };
             };
-            /** @description The project or endpoint does not exist, or belongs to another tenant. The two are one answer, with one message, on purpose: a 403 here would confirm that an id scraped from somewhere else is live infrastructure belonging to another customer. */
+            /** @description The project or endpoint does not exist, or belongs to another tenant. The two are one answer, with one message, on purpose: a 403 here would confirm that an id scraped from somewhere else is live infrastructure belonging to another customer. (error.code: `not_found`) */
             404: {
                 headers: {
                     [name: string]: unknown;
                 };
-                content?: never;
+                content: {
+                    "application/json": components["schemas"]["ApiErrorResponse"];
+                };
             };
-            /** @description The endpoint has been deleted. */
+            /** @description The endpoint has been deleted. (error.code: `conflict`, `limit_exceeded`, `idempotency_key_reused`) */
             409: {
                 headers: {
                     [name: string]: unknown;
                 };
-                content?: never;
+                content: {
+                    "application/json": components["schemas"]["ApiErrorResponse"];
+                };
             };
         };
     };
@@ -3455,19 +3599,23 @@ export interface operations {
                     "application/json": components["schemas"]["EndpointSecretListDto"];
                 };
             };
-            /** @description You are in this tenant, but signing secrets are owner/admin only. */
+            /** @description You are in this tenant, but signing secrets are owner/admin only. (error.code: `forbidden`, `email_not_verified`) */
             403: {
                 headers: {
                     [name: string]: unknown;
                 };
-                content?: never;
+                content: {
+                    "application/json": components["schemas"]["ApiErrorResponse"];
+                };
             };
-            /** @description No such endpoint, or it belongs to another tenant - one answer for both. */
+            /** @description No such endpoint, or it belongs to another tenant - one answer for both. (error.code: `not_found`) */
             404: {
                 headers: {
                     [name: string]: unknown;
                 };
-                content?: never;
+                content: {
+                    "application/json": components["schemas"]["ApiErrorResponse"];
+                };
             };
         };
     };
@@ -3494,26 +3642,32 @@ export interface operations {
                     "application/json": components["schemas"]["RotatedSecretDto"];
                 };
             };
-            /** @description You are in this tenant, but signing secrets are owner/admin only. */
+            /** @description You are in this tenant, but signing secrets are owner/admin only. (error.code: `forbidden`, `email_not_verified`) */
             403: {
                 headers: {
                     [name: string]: unknown;
                 };
-                content?: never;
+                content: {
+                    "application/json": components["schemas"]["ApiErrorResponse"];
+                };
             };
-            /** @description No such endpoint, or it belongs to another tenant - one answer for both. */
+            /** @description No such endpoint, or it belongs to another tenant - one answer for both. (error.code: `not_found`) */
             404: {
                 headers: {
                     [name: string]: unknown;
                 };
-                content?: never;
+                content: {
+                    "application/json": components["schemas"]["ApiErrorResponse"];
+                };
             };
-            /** @description The endpoint is deleted, or a concurrent rotation took the next version. */
+            /** @description The endpoint is deleted, or a concurrent rotation took the next version. (error.code: `conflict`, `limit_exceeded`, `idempotency_key_reused`) */
             409: {
                 headers: {
                     [name: string]: unknown;
                 };
-                content?: never;
+                content: {
+                    "application/json": components["schemas"]["ApiErrorResponse"];
+                };
             };
         };
     };
@@ -3537,26 +3691,32 @@ export interface operations {
                     "application/json": components["schemas"]["EndpointSecretDto"];
                 };
             };
-            /** @description You are in this tenant, but signing secrets are owner/admin only. */
+            /** @description You are in this tenant, but signing secrets are owner/admin only. (error.code: `forbidden`, `email_not_verified`) */
             403: {
                 headers: {
                     [name: string]: unknown;
                 };
-                content?: never;
+                content: {
+                    "application/json": components["schemas"]["ApiErrorResponse"];
+                };
             };
-            /** @description No such endpoint, or it belongs to another tenant - one answer for both. */
+            /** @description No such endpoint, or it belongs to another tenant - one answer for both. (error.code: `not_found`) */
             404: {
                 headers: {
                     [name: string]: unknown;
                 };
-                content?: never;
+                content: {
+                    "application/json": components["schemas"]["ApiErrorResponse"];
+                };
             };
-            /** @description This is the endpoint`s last active secret. */
+            /** @description This is the endpoint`s last active secret. (error.code: `conflict`, `limit_exceeded`, `idempotency_key_reused`) */
             409: {
                 headers: {
                     [name: string]: unknown;
                 };
-                content?: never;
+                content: {
+                    "application/json": components["schemas"]["ApiErrorResponse"];
+                };
             };
         };
     };
@@ -3586,26 +3746,32 @@ export interface operations {
                     "application/json": components["schemas"]["SubscriptionListDto"];
                 };
             };
-            /** @description Membership is proven but the role is short of the permission. */
+            /** @description Membership is proven but the role is short of the permission. (error.code: `forbidden`, `email_not_verified`) */
             403: {
                 headers: {
                     [name: string]: unknown;
                 };
-                content?: never;
+                content: {
+                    "application/json": components["schemas"]["ApiErrorResponse"];
+                };
             };
-            /** @description The project, subscription or endpoint is not visible to this caller - absent, or another tenant's. Those answer identically, with one message, so this API cannot be used to confirm that an id scraped from a log or an old dashboard URL is live infrastructure belonging to another customer. */
+            /** @description The project, subscription or endpoint is not visible to this caller - absent, or another tenant's. Those answer identically, with one message, so this API cannot be used to confirm that an id scraped from a log or an old dashboard URL is live infrastructure belonging to another customer. (error.code: `not_found`) */
             404: {
                 headers: {
                     [name: string]: unknown;
                 };
-                content?: never;
+                content: {
+                    "application/json": components["schemas"]["ApiErrorResponse"];
+                };
             };
-            /** @description Rate limited. Carries `Retry-After` (seconds) and `details.retry_after_seconds`. Only the write routes are limited; the listing and the fetch are not. */
+            /** @description Rate limited. Carries `Retry-After` (seconds) and `details.retry_after_seconds`. Only the write routes are limited; the listing and the fetch are not. (error.code: `rate_limited`) */
             429: {
                 headers: {
                     [name: string]: unknown;
                 };
-                content?: never;
+                content: {
+                    "application/json": components["schemas"]["ApiErrorResponse"];
+                };
             };
         };
     };
@@ -3632,40 +3798,50 @@ export interface operations {
                     "application/json": components["schemas"]["SubscriptionDto"];
                 };
             };
-            /** @description An event-type pattern is not one of "*", "prefix.*" or an exact type; `event_types` is empty; "*" appears alongside other patterns; or `payload_filter` is not a valid, bounded predicate. `details.field` names which. */
+            /** @description An event-type pattern is not one of "*", "prefix.*" or an exact type; `event_types` is empty; "*" appears alongside other patterns; or `payload_filter` is not a valid, bounded predicate. `details.field` names which. (error.code: `invalid_request`) */
             400: {
                 headers: {
                     [name: string]: unknown;
                 };
-                content?: never;
+                content: {
+                    "application/json": components["schemas"]["ApiErrorResponse"];
+                };
             };
-            /** @description Membership is proven but the role is short of the permission. */
+            /** @description Membership is proven but the role is short of the permission. (error.code: `forbidden`, `email_not_verified`) */
             403: {
                 headers: {
                     [name: string]: unknown;
                 };
-                content?: never;
+                content: {
+                    "application/json": components["schemas"]["ApiErrorResponse"];
+                };
             };
-            /** @description The project, subscription or endpoint is not visible to this caller - absent, or another tenant's. Those answer identically, with one message, so this API cannot be used to confirm that an id scraped from a log or an old dashboard URL is live infrastructure belonging to another customer. */
+            /** @description The project, subscription or endpoint is not visible to this caller - absent, or another tenant's. Those answer identically, with one message, so this API cannot be used to confirm that an id scraped from a log or an old dashboard URL is live infrastructure belonging to another customer. (error.code: `not_found`) */
             404: {
                 headers: {
                     [name: string]: unknown;
                 };
-                content?: never;
+                content: {
+                    "application/json": components["schemas"]["ApiErrorResponse"];
+                };
             };
-            /** @description Two different 409s, told apart by `error.code`, never by the message. `limit_exceeded` - the project is at its subscription ceiling; `details` carries `{ limit, current, resource }`. `conflict` - the endpoint named by `endpoint_id` has been deleted. */
+            /** @description Two different 409s, told apart by `error.code`, never by the message. `limit_exceeded` - the project is at its subscription ceiling; `details` carries `{ limit, current, resource }`. `conflict` - the endpoint named by `endpoint_id` has been deleted. (error.code: `conflict`, `limit_exceeded`, `idempotency_key_reused`) */
             409: {
                 headers: {
                     [name: string]: unknown;
                 };
-                content?: never;
+                content: {
+                    "application/json": components["schemas"]["ApiErrorResponse"];
+                };
             };
-            /** @description Rate limited. Carries `Retry-After` (seconds) and `details.retry_after_seconds`. Only the write routes are limited; the listing and the fetch are not. */
+            /** @description Rate limited. Carries `Retry-After` (seconds) and `details.retry_after_seconds`. Only the write routes are limited; the listing and the fetch are not. (error.code: `rate_limited`) */
             429: {
                 headers: {
                     [name: string]: unknown;
                 };
-                content?: never;
+                content: {
+                    "application/json": components["schemas"]["ApiErrorResponse"];
+                };
             };
         };
     };
@@ -3689,26 +3865,32 @@ export interface operations {
                     "application/json": components["schemas"]["SubscriptionDto"];
                 };
             };
-            /** @description Membership is proven but the role is short of the permission. */
+            /** @description Membership is proven but the role is short of the permission. (error.code: `forbidden`, `email_not_verified`) */
             403: {
                 headers: {
                     [name: string]: unknown;
                 };
-                content?: never;
+                content: {
+                    "application/json": components["schemas"]["ApiErrorResponse"];
+                };
             };
-            /** @description The project, subscription or endpoint is not visible to this caller - absent, or another tenant's. Those answer identically, with one message, so this API cannot be used to confirm that an id scraped from a log or an old dashboard URL is live infrastructure belonging to another customer. */
+            /** @description The project, subscription or endpoint is not visible to this caller - absent, or another tenant's. Those answer identically, with one message, so this API cannot be used to confirm that an id scraped from a log or an old dashboard URL is live infrastructure belonging to another customer. (error.code: `not_found`) */
             404: {
                 headers: {
                     [name: string]: unknown;
                 };
-                content?: never;
+                content: {
+                    "application/json": components["schemas"]["ApiErrorResponse"];
+                };
             };
-            /** @description Rate limited. Carries `Retry-After` (seconds) and `details.retry_after_seconds`. Only the write routes are limited; the listing and the fetch are not. */
+            /** @description Rate limited. Carries `Retry-After` (seconds) and `details.retry_after_seconds`. Only the write routes are limited; the listing and the fetch are not. (error.code: `rate_limited`) */
             429: {
                 headers: {
                     [name: string]: unknown;
                 };
-                content?: never;
+                content: {
+                    "application/json": components["schemas"]["ApiErrorResponse"];
+                };
             };
         };
     };
@@ -3730,26 +3912,32 @@ export interface operations {
                 };
                 content?: never;
             };
-            /** @description Membership is proven but the role is short of the permission. */
+            /** @description Membership is proven but the role is short of the permission. (error.code: `forbidden`, `email_not_verified`) */
             403: {
                 headers: {
                     [name: string]: unknown;
                 };
-                content?: never;
+                content: {
+                    "application/json": components["schemas"]["ApiErrorResponse"];
+                };
             };
-            /** @description The project, subscription or endpoint is not visible to this caller - absent, or another tenant's. Those answer identically, with one message, so this API cannot be used to confirm that an id scraped from a log or an old dashboard URL is live infrastructure belonging to another customer. */
+            /** @description The project, subscription or endpoint is not visible to this caller - absent, or another tenant's. Those answer identically, with one message, so this API cannot be used to confirm that an id scraped from a log or an old dashboard URL is live infrastructure belonging to another customer. (error.code: `not_found`) */
             404: {
                 headers: {
                     [name: string]: unknown;
                 };
-                content?: never;
+                content: {
+                    "application/json": components["schemas"]["ApiErrorResponse"];
+                };
             };
-            /** @description Rate limited. Carries `Retry-After` (seconds) and `details.retry_after_seconds`. Only the write routes are limited; the listing and the fetch are not. */
+            /** @description Rate limited. Carries `Retry-After` (seconds) and `details.retry_after_seconds`. Only the write routes are limited; the listing and the fetch are not. (error.code: `rate_limited`) */
             429: {
                 headers: {
                     [name: string]: unknown;
                 };
-                content?: never;
+                content: {
+                    "application/json": components["schemas"]["ApiErrorResponse"];
+                };
             };
         };
     };
@@ -3777,40 +3965,50 @@ export interface operations {
                     "application/json": components["schemas"]["SubscriptionDto"];
                 };
             };
-            /** @description Same validation as create. `details.field` names it. */
+            /** @description Same validation as create. `details.field` names it. (error.code: `invalid_request`) */
             400: {
                 headers: {
                     [name: string]: unknown;
                 };
-                content?: never;
+                content: {
+                    "application/json": components["schemas"]["ApiErrorResponse"];
+                };
             };
-            /** @description Membership is proven but the role is short of the permission. */
+            /** @description Membership is proven but the role is short of the permission. (error.code: `forbidden`, `email_not_verified`) */
             403: {
                 headers: {
                     [name: string]: unknown;
                 };
-                content?: never;
+                content: {
+                    "application/json": components["schemas"]["ApiErrorResponse"];
+                };
             };
-            /** @description The project, subscription or endpoint is not visible to this caller - absent, or another tenant's. Those answer identically, with one message, so this API cannot be used to confirm that an id scraped from a log or an old dashboard URL is live infrastructure belonging to another customer. */
+            /** @description The project, subscription or endpoint is not visible to this caller - absent, or another tenant's. Those answer identically, with one message, so this API cannot be used to confirm that an id scraped from a log or an old dashboard URL is live infrastructure belonging to another customer. (error.code: `not_found`) */
             404: {
                 headers: {
                     [name: string]: unknown;
                 };
-                content?: never;
+                content: {
+                    "application/json": components["schemas"]["ApiErrorResponse"];
+                };
             };
-            /** @description The new endpoint has been deleted. */
+            /** @description The new endpoint has been deleted. (error.code: `conflict`, `limit_exceeded`, `idempotency_key_reused`) */
             409: {
                 headers: {
                     [name: string]: unknown;
                 };
-                content?: never;
+                content: {
+                    "application/json": components["schemas"]["ApiErrorResponse"];
+                };
             };
-            /** @description Rate limited. Carries `Retry-After` (seconds) and `details.retry_after_seconds`. Only the write routes are limited; the listing and the fetch are not. */
+            /** @description Rate limited. Carries `Retry-After` (seconds) and `details.retry_after_seconds`. Only the write routes are limited; the listing and the fetch are not. (error.code: `rate_limited`) */
             429: {
                 headers: {
                     [name: string]: unknown;
                 };
-                content?: never;
+                content: {
+                    "application/json": components["schemas"]["ApiErrorResponse"];
+                };
             };
         };
     };
@@ -3834,26 +4032,32 @@ export interface operations {
                     "application/json": components["schemas"]["SubscriptionDto"];
                 };
             };
-            /** @description Membership is proven but the role is short of the permission. */
+            /** @description Membership is proven but the role is short of the permission. (error.code: `forbidden`, `email_not_verified`) */
             403: {
                 headers: {
                     [name: string]: unknown;
                 };
-                content?: never;
+                content: {
+                    "application/json": components["schemas"]["ApiErrorResponse"];
+                };
             };
-            /** @description The project, subscription or endpoint is not visible to this caller - absent, or another tenant's. Those answer identically, with one message, so this API cannot be used to confirm that an id scraped from a log or an old dashboard URL is live infrastructure belonging to another customer. */
+            /** @description The project, subscription or endpoint is not visible to this caller - absent, or another tenant's. Those answer identically, with one message, so this API cannot be used to confirm that an id scraped from a log or an old dashboard URL is live infrastructure belonging to another customer. (error.code: `not_found`) */
             404: {
                 headers: {
                     [name: string]: unknown;
                 };
-                content?: never;
+                content: {
+                    "application/json": components["schemas"]["ApiErrorResponse"];
+                };
             };
-            /** @description Rate limited. Carries `Retry-After` (seconds) and `details.retry_after_seconds`. Only the write routes are limited; the listing and the fetch are not. */
+            /** @description Rate limited. Carries `Retry-After` (seconds) and `details.retry_after_seconds`. Only the write routes are limited; the listing and the fetch are not. (error.code: `rate_limited`) */
             429: {
                 headers: {
                     [name: string]: unknown;
                 };
-                content?: never;
+                content: {
+                    "application/json": components["schemas"]["ApiErrorResponse"];
+                };
             };
         };
     };
@@ -3881,26 +4085,32 @@ export interface operations {
                     "application/json": components["schemas"]["SubscriptionDto"];
                 };
             };
-            /** @description Membership is proven but the role is short of the permission. */
+            /** @description Membership is proven but the role is short of the permission. (error.code: `forbidden`, `email_not_verified`) */
             403: {
                 headers: {
                     [name: string]: unknown;
                 };
-                content?: never;
+                content: {
+                    "application/json": components["schemas"]["ApiErrorResponse"];
+                };
             };
-            /** @description The project, subscription or endpoint is not visible to this caller - absent, or another tenant's. Those answer identically, with one message, so this API cannot be used to confirm that an id scraped from a log or an old dashboard URL is live infrastructure belonging to another customer. */
+            /** @description The project, subscription or endpoint is not visible to this caller - absent, or another tenant's. Those answer identically, with one message, so this API cannot be used to confirm that an id scraped from a log or an old dashboard URL is live infrastructure belonging to another customer. (error.code: `not_found`) */
             404: {
                 headers: {
                     [name: string]: unknown;
                 };
-                content?: never;
+                content: {
+                    "application/json": components["schemas"]["ApiErrorResponse"];
+                };
             };
-            /** @description Rate limited. Carries `Retry-After` (seconds) and `details.retry_after_seconds`. Only the write routes are limited; the listing and the fetch are not. */
+            /** @description Rate limited. Carries `Retry-After` (seconds) and `details.retry_after_seconds`. Only the write routes are limited; the listing and the fetch are not. (error.code: `rate_limited`) */
             429: {
                 headers: {
                     [name: string]: unknown;
                 };
-                content?: never;
+                content: {
+                    "application/json": components["schemas"]["ApiErrorResponse"];
+                };
             };
         };
     };
@@ -3926,19 +4136,23 @@ export interface operations {
                     "application/json": components["schemas"]["RetryPolicyListDto"];
                 };
             };
-            /** @description You are in this tenant but your role does not allow it. */
+            /** @description You are in this tenant but your role does not allow it. (error.code: `forbidden`, `email_not_verified`) */
             403: {
                 headers: {
                     [name: string]: unknown;
                 };
-                content?: never;
+                content: {
+                    "application/json": components["schemas"]["ApiErrorResponse"];
+                };
             };
-            /** @description The project or policy does not exist, or belongs to another tenant. The two are one answer, with one message, on purpose: a 403 here would confirm that an id scraped from somewhere else is live configuration belonging to another customer. */
+            /** @description The project or policy does not exist, or belongs to another tenant. The two are one answer, with one message, on purpose: a 403 here would confirm that an id scraped from somewhere else is live configuration belonging to another customer. (error.code: `not_found`) */
             404: {
                 headers: {
                     [name: string]: unknown;
                 };
-                content?: never;
+                content: {
+                    "application/json": components["schemas"]["ApiErrorResponse"];
+                };
             };
         };
     };
@@ -3963,26 +4177,32 @@ export interface operations {
                     "application/json": components["schemas"]["RetryPolicyDto"];
                 };
             };
-            /** @description You are in this tenant but your role does not allow it. */
+            /** @description You are in this tenant but your role does not allow it. (error.code: `forbidden`, `email_not_verified`) */
             403: {
                 headers: {
                     [name: string]: unknown;
                 };
-                content?: never;
+                content: {
+                    "application/json": components["schemas"]["ApiErrorResponse"];
+                };
             };
-            /** @description The project or policy does not exist, or belongs to another tenant. The two are one answer, with one message, on purpose: a 403 here would confirm that an id scraped from somewhere else is live configuration belonging to another customer. */
+            /** @description The project or policy does not exist, or belongs to another tenant. The two are one answer, with one message, on purpose: a 403 here would confirm that an id scraped from somewhere else is live configuration belonging to another customer. (error.code: `not_found`) */
             404: {
                 headers: {
                     [name: string]: unknown;
                 };
-                content?: never;
+                content: {
+                    "application/json": components["schemas"]["ApiErrorResponse"];
+                };
             };
-            /** @description The project is at its retry-policy ceiling. */
+            /** @description The project is at its retry-policy ceiling. (error.code: `conflict`, `limit_exceeded`, `idempotency_key_reused`) */
             409: {
                 headers: {
                     [name: string]: unknown;
                 };
-                content?: never;
+                content: {
+                    "application/json": components["schemas"]["ApiErrorResponse"];
+                };
             };
         };
     };
@@ -4005,19 +4225,23 @@ export interface operations {
                     "application/json": components["schemas"]["RetryPolicyDto"];
                 };
             };
-            /** @description You are in this tenant but your role does not allow it. */
+            /** @description You are in this tenant but your role does not allow it. (error.code: `forbidden`, `email_not_verified`) */
             403: {
                 headers: {
                     [name: string]: unknown;
                 };
-                content?: never;
+                content: {
+                    "application/json": components["schemas"]["ApiErrorResponse"];
+                };
             };
-            /** @description The project or policy does not exist, or belongs to another tenant. The two are one answer, with one message, on purpose: a 403 here would confirm that an id scraped from somewhere else is live configuration belonging to another customer. */
+            /** @description The project or policy does not exist, or belongs to another tenant. The two are one answer, with one message, on purpose: a 403 here would confirm that an id scraped from somewhere else is live configuration belonging to another customer. (error.code: `not_found`) */
             404: {
                 headers: {
                     [name: string]: unknown;
                 };
-                content?: never;
+                content: {
+                    "application/json": components["schemas"]["ApiErrorResponse"];
+                };
             };
         };
     };
@@ -4041,26 +4265,32 @@ export interface operations {
                 };
                 content?: never;
             };
-            /** @description You are in this tenant but your role does not allow it. */
+            /** @description You are in this tenant but your role does not allow it. (error.code: `forbidden`, `email_not_verified`) */
             403: {
                 headers: {
                     [name: string]: unknown;
                 };
-                content?: never;
+                content: {
+                    "application/json": components["schemas"]["ApiErrorResponse"];
+                };
             };
-            /** @description The project or policy does not exist, or belongs to another tenant. The two are one answer, with one message, on purpose: a 403 here would confirm that an id scraped from somewhere else is live configuration belonging to another customer. */
+            /** @description The project or policy does not exist, or belongs to another tenant. The two are one answer, with one message, on purpose: a 403 here would confirm that an id scraped from somewhere else is live configuration belonging to another customer. (error.code: `not_found`) */
             404: {
                 headers: {
                     [name: string]: unknown;
                 };
-                content?: never;
+                content: {
+                    "application/json": components["schemas"]["ApiErrorResponse"];
+                };
             };
-            /** @description Endpoints still reference it, or it is the default and no successor was named. */
+            /** @description Endpoints still reference it, or it is the default and no successor was named. (error.code: `conflict`, `limit_exceeded`, `idempotency_key_reused`) */
             409: {
                 headers: {
                     [name: string]: unknown;
                 };
-                content?: never;
+                content: {
+                    "application/json": components["schemas"]["ApiErrorResponse"];
+                };
             };
         };
     };
@@ -4087,19 +4317,23 @@ export interface operations {
                     "application/json": components["schemas"]["RetryPolicyDto"];
                 };
             };
-            /** @description You are in this tenant but your role does not allow it. */
+            /** @description You are in this tenant but your role does not allow it. (error.code: `forbidden`, `email_not_verified`) */
             403: {
                 headers: {
                     [name: string]: unknown;
                 };
-                content?: never;
+                content: {
+                    "application/json": components["schemas"]["ApiErrorResponse"];
+                };
             };
-            /** @description The project or policy does not exist, or belongs to another tenant. The two are one answer, with one message, on purpose: a 403 here would confirm that an id scraped from somewhere else is live configuration belonging to another customer. */
+            /** @description The project or policy does not exist, or belongs to another tenant. The two are one answer, with one message, on purpose: a 403 here would confirm that an id scraped from somewhere else is live configuration belonging to another customer. (error.code: `not_found`) */
             404: {
                 headers: {
                     [name: string]: unknown;
                 };
-                content?: never;
+                content: {
+                    "application/json": components["schemas"]["ApiErrorResponse"];
+                };
             };
         };
     };
@@ -4122,19 +4356,23 @@ export interface operations {
                     "application/json": components["schemas"]["RetryPolicyDto"];
                 };
             };
-            /** @description You are in this tenant but your role does not allow it. */
+            /** @description You are in this tenant but your role does not allow it. (error.code: `forbidden`, `email_not_verified`) */
             403: {
                 headers: {
                     [name: string]: unknown;
                 };
-                content?: never;
+                content: {
+                    "application/json": components["schemas"]["ApiErrorResponse"];
+                };
             };
-            /** @description The project or policy does not exist, or belongs to another tenant. The two are one answer, with one message, on purpose: a 403 here would confirm that an id scraped from somewhere else is live configuration belonging to another customer. */
+            /** @description The project or policy does not exist, or belongs to another tenant. The two are one answer, with one message, on purpose: a 403 here would confirm that an id scraped from somewhere else is live configuration belonging to another customer. (error.code: `not_found`) */
             404: {
                 headers: {
                     [name: string]: unknown;
                 };
-                content?: never;
+                content: {
+                    "application/json": components["schemas"]["ApiErrorResponse"];
+                };
             };
         };
     };
@@ -4161,19 +4399,23 @@ export interface operations {
                     "application/json": components["schemas"]["RateLimitListDto"];
                 };
             };
-            /** @description You are in this tenant but your role does not allow it. */
+            /** @description You are in this tenant but your role does not allow it. (error.code: `forbidden`, `email_not_verified`) */
             403: {
                 headers: {
                     [name: string]: unknown;
                 };
-                content?: never;
+                content: {
+                    "application/json": components["schemas"]["ApiErrorResponse"];
+                };
             };
-            /** @description The project, the policy, or the resource named by `resource_id` does not exist or belongs to another tenant. One answer, one message: a 403 here would confirm that an id scraped from somewhere else is live infrastructure belonging to another customer. */
+            /** @description The project, the policy, or the resource named by `resource_id` does not exist or belongs to another tenant. One answer, one message: a 403 here would confirm that an id scraped from somewhere else is live infrastructure belonging to another customer. (error.code: `not_found`) */
             404: {
                 headers: {
                     [name: string]: unknown;
                 };
-                content?: never;
+                content: {
+                    "application/json": components["schemas"]["ApiErrorResponse"];
+                };
             };
         };
     };
@@ -4198,26 +4440,32 @@ export interface operations {
                     "application/json": components["schemas"]["RateLimitDto"];
                 };
             };
-            /** @description You are in this tenant but your role does not allow it. */
+            /** @description You are in this tenant but your role does not allow it. (error.code: `forbidden`, `email_not_verified`) */
             403: {
                 headers: {
                     [name: string]: unknown;
                 };
-                content?: never;
+                content: {
+                    "application/json": components["schemas"]["ApiErrorResponse"];
+                };
             };
-            /** @description The project, the policy, or the resource named by `resource_id` does not exist or belongs to another tenant. One answer, one message: a 403 here would confirm that an id scraped from somewhere else is live infrastructure belonging to another customer. */
+            /** @description The project, the policy, or the resource named by `resource_id` does not exist or belongs to another tenant. One answer, one message: a 403 here would confirm that an id scraped from somewhere else is live infrastructure belonging to another customer. (error.code: `not_found`) */
             404: {
                 headers: {
                     [name: string]: unknown;
                 };
-                content?: never;
+                content: {
+                    "application/json": components["schemas"]["ApiErrorResponse"];
+                };
             };
-            /** @description A policy already covers this scope and resource, or the project is at its ceiling. */
+            /** @description A policy already covers this scope and resource, or the project is at its ceiling. (error.code: `conflict`, `limit_exceeded`, `idempotency_key_reused`) */
             409: {
                 headers: {
                     [name: string]: unknown;
                 };
-                content?: never;
+                content: {
+                    "application/json": components["schemas"]["ApiErrorResponse"];
+                };
             };
         };
     };
@@ -4240,19 +4488,23 @@ export interface operations {
                     "application/json": components["schemas"]["RateLimitDto"];
                 };
             };
-            /** @description You are in this tenant but your role does not allow it. */
+            /** @description You are in this tenant but your role does not allow it. (error.code: `forbidden`, `email_not_verified`) */
             403: {
                 headers: {
                     [name: string]: unknown;
                 };
-                content?: never;
+                content: {
+                    "application/json": components["schemas"]["ApiErrorResponse"];
+                };
             };
-            /** @description The project, the policy, or the resource named by `resource_id` does not exist or belongs to another tenant. One answer, one message: a 403 here would confirm that an id scraped from somewhere else is live infrastructure belonging to another customer. */
+            /** @description The project, the policy, or the resource named by `resource_id` does not exist or belongs to another tenant. One answer, one message: a 403 here would confirm that an id scraped from somewhere else is live infrastructure belonging to another customer. (error.code: `not_found`) */
             404: {
                 headers: {
                     [name: string]: unknown;
                 };
-                content?: never;
+                content: {
+                    "application/json": components["schemas"]["ApiErrorResponse"];
+                };
             };
         };
     };
@@ -4273,19 +4525,23 @@ export interface operations {
                 };
                 content?: never;
             };
-            /** @description You are in this tenant but your role does not allow it. */
+            /** @description You are in this tenant but your role does not allow it. (error.code: `forbidden`, `email_not_verified`) */
             403: {
                 headers: {
                     [name: string]: unknown;
                 };
-                content?: never;
+                content: {
+                    "application/json": components["schemas"]["ApiErrorResponse"];
+                };
             };
-            /** @description The project, the policy, or the resource named by `resource_id` does not exist or belongs to another tenant. One answer, one message: a 403 here would confirm that an id scraped from somewhere else is live infrastructure belonging to another customer. */
+            /** @description The project, the policy, or the resource named by `resource_id` does not exist or belongs to another tenant. One answer, one message: a 403 here would confirm that an id scraped from somewhere else is live infrastructure belonging to another customer. (error.code: `not_found`) */
             404: {
                 headers: {
                     [name: string]: unknown;
                 };
-                content?: never;
+                content: {
+                    "application/json": components["schemas"]["ApiErrorResponse"];
+                };
             };
         };
     };
@@ -4312,26 +4568,32 @@ export interface operations {
                     "application/json": components["schemas"]["RateLimitDto"];
                 };
             };
-            /** @description You are in this tenant but your role does not allow it. */
+            /** @description You are in this tenant but your role does not allow it. (error.code: `forbidden`, `email_not_verified`) */
             403: {
                 headers: {
                     [name: string]: unknown;
                 };
-                content?: never;
+                content: {
+                    "application/json": components["schemas"]["ApiErrorResponse"];
+                };
             };
-            /** @description The project, the policy, or the resource named by `resource_id` does not exist or belongs to another tenant. One answer, one message: a 403 here would confirm that an id scraped from somewhere else is live infrastructure belonging to another customer. */
+            /** @description The project, the policy, or the resource named by `resource_id` does not exist or belongs to another tenant. One answer, one message: a 403 here would confirm that an id scraped from somewhere else is live infrastructure belonging to another customer. (error.code: `not_found`) */
             404: {
                 headers: {
                     [name: string]: unknown;
                 };
-                content?: never;
+                content: {
+                    "application/json": components["schemas"]["ApiErrorResponse"];
+                };
             };
-            /** @description Another policy already covers the new scope and resource. */
+            /** @description Another policy already covers the new scope and resource. (error.code: `conflict`, `limit_exceeded`, `idempotency_key_reused`) */
             409: {
                 headers: {
                     [name: string]: unknown;
                 };
-                content?: never;
+                content: {
+                    "application/json": components["schemas"]["ApiErrorResponse"];
+                };
             };
         };
     };
@@ -4365,19 +4627,23 @@ export interface operations {
                     "application/json": components["schemas"]["EventListDto"];
                 };
             };
-            /** @description You are in this tenant but your role does not allow it. */
+            /** @description You are in this tenant but your role does not allow it. (error.code: `forbidden`, `email_not_verified`) */
             403: {
                 headers: {
                     [name: string]: unknown;
                 };
-                content?: never;
+                content: {
+                    "application/json": components["schemas"]["ApiErrorResponse"];
+                };
             };
-            /** @description The project, event or endpoint does not exist, or belongs to another tenant. One answer with one message for all of them, on purpose: this route takes an event id in the path AND an endpoint id in the body, so distinguishable 404s would make it an oracle over another customer's endpoint ids. */
+            /** @description The project, event or endpoint does not exist, or belongs to another tenant. One answer with one message for all of them, on purpose: this route takes an event id in the path AND an endpoint id in the body, so distinguishable 404s would make it an oracle over another customer's endpoint ids. (error.code: `not_found`) */
             404: {
                 headers: {
                     [name: string]: unknown;
                 };
-                content?: never;
+                content: {
+                    "application/json": components["schemas"]["ApiErrorResponse"];
+                };
             };
         };
     };
@@ -4400,19 +4666,23 @@ export interface operations {
                     "application/json": components["schemas"]["EventDetailDto"];
                 };
             };
-            /** @description You are in this tenant but your role does not allow it. */
+            /** @description You are in this tenant but your role does not allow it. (error.code: `forbidden`, `email_not_verified`) */
             403: {
                 headers: {
                     [name: string]: unknown;
                 };
-                content?: never;
+                content: {
+                    "application/json": components["schemas"]["ApiErrorResponse"];
+                };
             };
-            /** @description The project, event or endpoint does not exist, or belongs to another tenant. One answer with one message for all of them, on purpose: this route takes an event id in the path AND an endpoint id in the body, so distinguishable 404s would make it an oracle over another customer's endpoint ids. */
+            /** @description The project, event or endpoint does not exist, or belongs to another tenant. One answer with one message for all of them, on purpose: this route takes an event id in the path AND an endpoint id in the body, so distinguishable 404s would make it an oracle over another customer's endpoint ids. (error.code: `not_found`) */
             404: {
                 headers: {
                     [name: string]: unknown;
                 };
-                content?: never;
+                content: {
+                    "application/json": components["schemas"]["ApiErrorResponse"];
+                };
             };
         };
     };
@@ -4454,19 +4724,23 @@ export interface operations {
                     "application/json": components["schemas"]["DeliveryListDto"];
                 };
             };
-            /** @description You are in this tenant but your role does not allow it. */
+            /** @description You are in this tenant but your role does not allow it. (error.code: `forbidden`, `email_not_verified`) */
             403: {
                 headers: {
                     [name: string]: unknown;
                 };
-                content?: never;
+                content: {
+                    "application/json": components["schemas"]["ApiErrorResponse"];
+                };
             };
-            /** @description The project, event or endpoint does not exist, or belongs to another tenant. One answer with one message for all of them, on purpose: this route takes an event id in the path AND an endpoint id in the body, so distinguishable 404s would make it an oracle over another customer's endpoint ids. */
+            /** @description The project, event or endpoint does not exist, or belongs to another tenant. One answer with one message for all of them, on purpose: this route takes an event id in the path AND an endpoint id in the body, so distinguishable 404s would make it an oracle over another customer's endpoint ids. (error.code: `not_found`) */
             404: {
                 headers: {
                     [name: string]: unknown;
                 };
-                content?: never;
+                content: {
+                    "application/json": components["schemas"]["ApiErrorResponse"];
+                };
             };
         };
     };
@@ -4493,26 +4767,32 @@ export interface operations {
                     "application/json": components["schemas"]["ReplayResultDto"];
                 };
             };
-            /** @description You are in this tenant but your role does not allow it. */
+            /** @description You are in this tenant but your role does not allow it. (error.code: `forbidden`, `email_not_verified`) */
             403: {
                 headers: {
                     [name: string]: unknown;
                 };
-                content?: never;
+                content: {
+                    "application/json": components["schemas"]["ApiErrorResponse"];
+                };
             };
-            /** @description The project, event or endpoint does not exist, or belongs to another tenant. One answer with one message for all of them, on purpose: this route takes an event id in the path AND an endpoint id in the body, so distinguishable 404s would make it an oracle over another customer's endpoint ids. */
+            /** @description The project, event or endpoint does not exist, or belongs to another tenant. One answer with one message for all of them, on purpose: this route takes an event id in the path AND an endpoint id in the body, so distinguishable 404s would make it an oracle over another customer's endpoint ids. (error.code: `not_found`) */
             404: {
                 headers: {
                     [name: string]: unknown;
                 };
-                content?: never;
+                content: {
+                    "application/json": components["schemas"]["ApiErrorResponse"];
+                };
             };
-            /** @description The event reached no endpoints, the named endpoint never received it, an endpoint is deleted or disabled, or the fan-out exceeds 50 deliveries. */
+            /** @description The event reached no endpoints, the named endpoint never received it, an endpoint is deleted or disabled, or the fan-out exceeds 50 deliveries. (error.code: `conflict`, `limit_exceeded`, `idempotency_key_reused`) */
             409: {
                 headers: {
                     [name: string]: unknown;
                 };
-                content?: never;
+                content: {
+                    "application/json": components["schemas"]["ApiErrorResponse"];
+                };
             };
         };
     };
@@ -4552,19 +4832,23 @@ export interface operations {
                     "application/json": components["schemas"]["DeliveryListDto"];
                 };
             };
-            /** @description You are in this tenant but your role does not allow it. */
+            /** @description You are in this tenant but your role does not allow it. (error.code: `forbidden`, `email_not_verified`) */
             403: {
                 headers: {
                     [name: string]: unknown;
                 };
-                content?: never;
+                content: {
+                    "application/json": components["schemas"]["ApiErrorResponse"];
+                };
             };
-            /** @description The project or delivery does not exist, or belongs to another tenant. The two are one answer, with one message, on purpose: a 403 here would confirm that an id scraped from somewhere else names a live delivery belonging to another customer. */
+            /** @description The project or delivery does not exist, or belongs to another tenant. The two are one answer, with one message, on purpose: a 403 here would confirm that an id scraped from somewhere else names a live delivery belonging to another customer. (error.code: `not_found`) */
             404: {
                 headers: {
                     [name: string]: unknown;
                 };
-                content?: never;
+                content: {
+                    "application/json": components["schemas"]["ApiErrorResponse"];
+                };
             };
         };
     };
@@ -4587,19 +4871,23 @@ export interface operations {
                     "application/json": components["schemas"]["DeliveryDetailDto"];
                 };
             };
-            /** @description You are in this tenant but your role does not allow it. */
+            /** @description You are in this tenant but your role does not allow it. (error.code: `forbidden`, `email_not_verified`) */
             403: {
                 headers: {
                     [name: string]: unknown;
                 };
-                content?: never;
+                content: {
+                    "application/json": components["schemas"]["ApiErrorResponse"];
+                };
             };
-            /** @description The project or delivery does not exist, or belongs to another tenant. The two are one answer, with one message, on purpose: a 403 here would confirm that an id scraped from somewhere else names a live delivery belonging to another customer. */
+            /** @description The project or delivery does not exist, or belongs to another tenant. The two are one answer, with one message, on purpose: a 403 here would confirm that an id scraped from somewhere else names a live delivery belonging to another customer. (error.code: `not_found`) */
             404: {
                 headers: {
                     [name: string]: unknown;
                 };
-                content?: never;
+                content: {
+                    "application/json": components["schemas"]["ApiErrorResponse"];
+                };
             };
         };
     };
@@ -4625,19 +4913,23 @@ export interface operations {
                     "application/json": components["schemas"]["DeliveryAttemptListDto"];
                 };
             };
-            /** @description You are in this tenant but your role does not allow it. */
+            /** @description You are in this tenant but your role does not allow it. (error.code: `forbidden`, `email_not_verified`) */
             403: {
                 headers: {
                     [name: string]: unknown;
                 };
-                content?: never;
+                content: {
+                    "application/json": components["schemas"]["ApiErrorResponse"];
+                };
             };
-            /** @description The project or delivery does not exist, or belongs to another tenant. The two are one answer, with one message, on purpose: a 403 here would confirm that an id scraped from somewhere else names a live delivery belonging to another customer. */
+            /** @description The project or delivery does not exist, or belongs to another tenant. The two are one answer, with one message, on purpose: a 403 here would confirm that an id scraped from somewhere else names a live delivery belonging to another customer. (error.code: `not_found`) */
             404: {
                 headers: {
                     [name: string]: unknown;
                 };
-                content?: never;
+                content: {
+                    "application/json": components["schemas"]["ApiErrorResponse"];
+                };
             };
         };
     };
@@ -4664,26 +4956,32 @@ export interface operations {
                     "application/json": components["schemas"]["ReplayResultDto"];
                 };
             };
-            /** @description You are in this tenant but your role does not allow it. */
+            /** @description You are in this tenant but your role does not allow it. (error.code: `forbidden`, `email_not_verified`) */
             403: {
                 headers: {
                     [name: string]: unknown;
                 };
-                content?: never;
+                content: {
+                    "application/json": components["schemas"]["ApiErrorResponse"];
+                };
             };
-            /** @description The project or delivery does not exist, or belongs to another tenant. The two are one answer, with one message, on purpose: a 403 here would confirm that an id scraped from somewhere else names a live delivery belonging to another customer. */
+            /** @description The project or delivery does not exist, or belongs to another tenant. The two are one answer, with one message, on purpose: a 403 here would confirm that an id scraped from somewhere else names a live delivery belonging to another customer. (error.code: `not_found`) */
             404: {
                 headers: {
                     [name: string]: unknown;
                 };
-                content?: never;
+                content: {
+                    "application/json": components["schemas"]["ApiErrorResponse"];
+                };
             };
-            /** @description The endpoint is deleted or disabled, or the replay would exceed 50 deliveries. */
+            /** @description The endpoint is deleted or disabled, or the replay would exceed 50 deliveries. (error.code: `conflict`, `limit_exceeded`, `idempotency_key_reused`) */
             409: {
                 headers: {
                     [name: string]: unknown;
                 };
-                content?: never;
+                content: {
+                    "application/json": components["schemas"]["ApiErrorResponse"];
+                };
             };
         };
     };
@@ -4721,19 +5019,23 @@ export interface operations {
                     "application/json": components["schemas"]["AuditLogListDto"];
                 };
             };
-            /** @description You are in this tenant but your role does not allow it. `audit.read` is owner/admin: these rows carry other members’ actions, IP addresses and user agents. */
+            /** @description You are in this tenant but your role does not allow it. `audit.read` is owner/admin: these rows carry other members’ actions, IP addresses and user agents. (error.code: `forbidden`, `email_not_verified`) */
             403: {
                 headers: {
                     [name: string]: unknown;
                 };
-                content?: never;
+                content: {
+                    "application/json": components["schemas"]["ApiErrorResponse"];
+                };
             };
-            /** @description The organization or audit row does not exist, or belongs to another tenant. One answer with one message, on purpose: a 403 here would confirm that an id scraped from somewhere else names a real row in someone else’s organization. */
+            /** @description The organization or audit row does not exist, or belongs to another tenant. One answer with one message, on purpose: a 403 here would confirm that an id scraped from somewhere else names a real row in someone else’s organization. (error.code: `not_found`) */
             404: {
                 headers: {
                     [name: string]: unknown;
                 };
-                content?: never;
+                content: {
+                    "application/json": components["schemas"]["ApiErrorResponse"];
+                };
             };
         };
     };
@@ -4757,19 +5059,23 @@ export interface operations {
                     "application/json": components["schemas"]["AuditLogDto"];
                 };
             };
-            /** @description You are in this tenant but your role does not allow it. `audit.read` is owner/admin: these rows carry other members’ actions, IP addresses and user agents. */
+            /** @description You are in this tenant but your role does not allow it. `audit.read` is owner/admin: these rows carry other members’ actions, IP addresses and user agents. (error.code: `forbidden`, `email_not_verified`) */
             403: {
                 headers: {
                     [name: string]: unknown;
                 };
-                content?: never;
+                content: {
+                    "application/json": components["schemas"]["ApiErrorResponse"];
+                };
             };
-            /** @description The organization or audit row does not exist, or belongs to another tenant. One answer with one message, on purpose: a 403 here would confirm that an id scraped from somewhere else names a real row in someone else’s organization. */
+            /** @description The organization or audit row does not exist, or belongs to another tenant. One answer with one message, on purpose: a 403 here would confirm that an id scraped from somewhere else names a real row in someone else’s organization. (error.code: `not_found`) */
             404: {
                 headers: {
                     [name: string]: unknown;
                 };
-                content?: never;
+                content: {
+                    "application/json": components["schemas"]["ApiErrorResponse"];
+                };
             };
         };
     };
@@ -4793,26 +5099,32 @@ export interface operations {
                     "application/json": components["schemas"]["DeliveryOutcomesDto"];
                 };
             };
-            /** @description `window_hours` was out of range - above 720 is REFUSED, never clamped. */
+            /** @description `window_hours` was out of range - above 720 is REFUSED, never clamped. (error.code: `invalid_request`) */
             400: {
                 headers: {
                     [name: string]: unknown;
                 };
-                content?: never;
+                content: {
+                    "application/json": components["schemas"]["ApiErrorResponse"];
+                };
             };
-            /** @description You are in this tenant but your role does not allow it. */
+            /** @description You are in this tenant but your role does not allow it. (error.code: `forbidden`, `email_not_verified`) */
             403: {
                 headers: {
                     [name: string]: unknown;
                 };
-                content?: never;
+                content: {
+                    "application/json": components["schemas"]["ApiErrorResponse"];
+                };
             };
-            /** @description The project does not exist, or belongs to another tenant. One answer with one message, on purpose: a 403 here would confirm that a project id scraped from somewhere else names live infrastructure belonging to another customer. */
+            /** @description The project does not exist, or belongs to another tenant. One answer with one message, on purpose: a 403 here would confirm that a project id scraped from somewhere else names live infrastructure belonging to another customer. (error.code: `not_found`) */
             404: {
                 headers: {
                     [name: string]: unknown;
                 };
-                content?: never;
+                content: {
+                    "application/json": components["schemas"]["ApiErrorResponse"];
+                };
             };
         };
     };
@@ -4838,26 +5150,32 @@ export interface operations {
                     "application/json": components["schemas"]["FailingEndpointsDto"];
                 };
             };
-            /** @description `window_hours` was out of range - above 720 is REFUSED, never clamped. */
+            /** @description `window_hours` was out of range - above 720 is REFUSED, never clamped. (error.code: `invalid_request`) */
             400: {
                 headers: {
                     [name: string]: unknown;
                 };
-                content?: never;
+                content: {
+                    "application/json": components["schemas"]["ApiErrorResponse"];
+                };
             };
-            /** @description You are in this tenant but your role does not allow it. */
+            /** @description You are in this tenant but your role does not allow it. (error.code: `forbidden`, `email_not_verified`) */
             403: {
                 headers: {
                     [name: string]: unknown;
                 };
-                content?: never;
+                content: {
+                    "application/json": components["schemas"]["ApiErrorResponse"];
+                };
             };
-            /** @description The project does not exist, or belongs to another tenant. One answer with one message, on purpose: a 403 here would confirm that a project id scraped from somewhere else names live infrastructure belonging to another customer. */
+            /** @description The project does not exist, or belongs to another tenant. One answer with one message, on purpose: a 403 here would confirm that a project id scraped from somewhere else names live infrastructure belonging to another customer. (error.code: `not_found`) */
             404: {
                 headers: {
                     [name: string]: unknown;
                 };
-                content?: never;
+                content: {
+                    "application/json": components["schemas"]["ApiErrorResponse"];
+                };
             };
         };
     };
@@ -4881,26 +5199,32 @@ export interface operations {
                     "application/json": components["schemas"]["AttemptLatencyDto"];
                 };
             };
-            /** @description `window_hours` was out of range - above 720 is REFUSED, never clamped. */
+            /** @description `window_hours` was out of range - above 720 is REFUSED, never clamped. (error.code: `invalid_request`) */
             400: {
                 headers: {
                     [name: string]: unknown;
                 };
-                content?: never;
+                content: {
+                    "application/json": components["schemas"]["ApiErrorResponse"];
+                };
             };
-            /** @description You are in this tenant but your role does not allow it. */
+            /** @description You are in this tenant but your role does not allow it. (error.code: `forbidden`, `email_not_verified`) */
             403: {
                 headers: {
                     [name: string]: unknown;
                 };
-                content?: never;
+                content: {
+                    "application/json": components["schemas"]["ApiErrorResponse"];
+                };
             };
-            /** @description The project does not exist, or belongs to another tenant. One answer with one message, on purpose: a 403 here would confirm that a project id scraped from somewhere else names live infrastructure belonging to another customer. */
+            /** @description The project does not exist, or belongs to another tenant. One answer with one message, on purpose: a 403 here would confirm that a project id scraped from somewhere else names live infrastructure belonging to another customer. (error.code: `not_found`) */
             404: {
                 headers: {
                     [name: string]: unknown;
                 };
-                content?: never;
+                content: {
+                    "application/json": components["schemas"]["ApiErrorResponse"];
+                };
             };
         };
     };
@@ -4926,26 +5250,32 @@ export interface operations {
                     "application/json": components["schemas"]["EventVolumeDto"];
                 };
             };
-            /** @description `window_hours` was out of range - above 720 is REFUSED, never clamped. */
+            /** @description `window_hours` was out of range - above 720 is REFUSED, never clamped. (error.code: `invalid_request`) */
             400: {
                 headers: {
                     [name: string]: unknown;
                 };
-                content?: never;
+                content: {
+                    "application/json": components["schemas"]["ApiErrorResponse"];
+                };
             };
-            /** @description You are in this tenant but your role does not allow it. */
+            /** @description You are in this tenant but your role does not allow it. (error.code: `forbidden`, `email_not_verified`) */
             403: {
                 headers: {
                     [name: string]: unknown;
                 };
-                content?: never;
+                content: {
+                    "application/json": components["schemas"]["ApiErrorResponse"];
+                };
             };
-            /** @description The project does not exist, or belongs to another tenant. One answer with one message, on purpose: a 403 here would confirm that a project id scraped from somewhere else names live infrastructure belonging to another customer. */
+            /** @description The project does not exist, or belongs to another tenant. One answer with one message, on purpose: a 403 here would confirm that a project id scraped from somewhere else names live infrastructure belonging to another customer. (error.code: `not_found`) */
             404: {
                 headers: {
                     [name: string]: unknown;
                 };
-                content?: never;
+                content: {
+                    "application/json": components["schemas"]["ApiErrorResponse"];
+                };
             };
         };
     };

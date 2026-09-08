@@ -43,18 +43,18 @@ describe('offsetPage — every list route, because there is now ONE envelope', (
   });
 
   /**
-   * The newer control-plane modules declare `next_offset` as
-   * `@ApiProperty({ nullable: true })` with no `type`, so the published schema
-   * says only "nullable" and the generated type is
-   * `Record<string, never> | null`. Read without a check it would go into a URL
-   * as `[object Object]` and the pager would step into nothing.
+   * `next_offset` is typed `number | null` on every envelope now, so this is no
+   * longer a type repair — it is the runtime guard at the wire boundary. An
+   * older deployment or a proxy that rewrote the body could still put a
+   * non-number here, and read without a check it would go into a URL as
+   * `[object Object]` and step the pager into nothing.
    */
   it('refuses a next_offset that is not a number', () => {
     const page = offsetPage({
       data: [{ id: 'a' }],
       has_more: true,
-      next_offset: {} as Record<string, never>,
-    });
+      next_offset: {},
+    } as unknown as OffsetPage<{ id: string }>);
 
     expect(page.hasMore).toBe(true);
     expect(page.nextOffset).toBeNull();

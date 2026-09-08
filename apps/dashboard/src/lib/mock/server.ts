@@ -9,6 +9,8 @@
  */
 import type {
   ApiErrorBody,
+  ApiErrorCode,
+  ApiErrorDetails,
   ApiKey,
   AuditLogEntry,
   CreatedApiKey,
@@ -77,9 +79,9 @@ const requestId = () => `req_01JQMOCK${(requestSeq += 1).toString().padStart(4, 
  */
 function fail(
   status: number,
-  code: ApiErrorBody['error']['code'],
+  code: ApiErrorCode,
   message: string | string[],
-  details?: Record<string, unknown>,
+  details?: ApiErrorDetails,
 ): never {
   throw new MockHttpError(status, {
     error: { code, message, details, request_id: requestId() },
@@ -846,6 +848,14 @@ const handlers: Handler[] = [
         environment: 'live',
         status: 'active',
         scopes: [],
+        // WHO MINTED IT, taken from the session rather than the body — as the
+        // control API takes it from the resolved session. These three were
+        // omitted here until the schema stated their types; the generated type
+        // required them the moment it did, which is the whole argument for
+        // generating it.
+        created_by_user_id: db.user.id,
+        created_by_membership_id: 'mem_01',
+        created_by_role: 'owner',
         expires_at: null,
         last_used_at: null,
         revoked_at: null,

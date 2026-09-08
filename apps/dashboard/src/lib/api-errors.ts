@@ -65,11 +65,21 @@ export type WriteFailure =
   | { kind: 'invalid'; message: string; issues: ValidationIssue[] }
   | { kind: 'other'; message: string };
 
-function numberOrNull(value: unknown): number | null {
+/**
+ * `details` is TYPED now — `ApiError.details` is the document's own schema, so
+ * `limit`, `current`, `resource` and `retry_after_seconds` arrive with their
+ * declared types and these two take those rather than `unknown`. That is the guard that matters: the schema's `details` stays open
+ * (`additionalProperties`), so reading a key it does NOT declare yields
+ * `unknown` and fails to compile here. A rename on the server is caught at
+ * build time instead of quietly becoming `null` and a vaguer message.
+ *
+ * The runtime checks stay because these values still arrive over a network.
+ */
+function numberOrNull(value: number | undefined): number | null {
   return typeof value === 'number' && Number.isFinite(value) ? value : null;
 }
 
-function stringOrNull(value: unknown): string | null {
+function stringOrNull(value: string | undefined): string | null {
   return typeof value === 'string' && value.length > 0 ? value : null;
 }
 

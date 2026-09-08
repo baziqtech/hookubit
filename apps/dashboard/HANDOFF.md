@@ -553,17 +553,24 @@ clone type-checks without a running API; it is not a source file.
 
 ## What survives by hand in `src/types/api.ts`, and why
 
-Three groups, each of them something the document does not carry:
+Two groups, each of them something the document **cannot** carry. The other two
+groups are gone: the error envelope is a declared schema now, and there are no
+nullability repairs left at all.
 
-1. **The error envelope.** `ApiErrorBody` / `ApiErrorCode`. Nest's Swagger module
-   documents 2xx bodies only — **there is no error schema in the document at
-   all** — so this is still mirrored from `src/common/errors.ts` and is the one
-   type that can silently drift again. See the asks below.
-2. **Nullability repairs** (`Patch<>`), covered in its own section.
-3. **Client-side mirrors of server limits** — `ENDPOINT_LIMITS`, the slug rules,
-   `RESERVED_HEADER_NAMES`, `MAX_PAGE_SIZE`. A form uses them to refuse a value
-   before spending a round trip; the server stays the authority, and a stale one
-   costs a 400 rather than corruption.
+1. **`OffsetPage<T>`** — a generic. The document declares thirteen concrete
+   `*ListDto` schemas; a type parameterised over its row type is not expressible
+   in OpenAPI. Its fields match the generated envelopes exactly
+   (`{ data, has_more, next_offset: number | null }`).
+2. **Client-side mirrors of server limits** — `ENDPOINT_LIMITS`, the slug rules,
+   `RESERVED_HEADER_NAMES`, `MAX_PAGE_SIZE`. openapi-typescript does not emit
+   `minLength`/`maximum`/`pattern` into the type at all, so these cannot be
+   derived. A form uses them to refuse a value before spending a round trip; the
+   server stays the authority, and a stale one costs a 400 rather than
+   corruption.
+
+Plus the mock-only view models at the foot of the file (`ProjectAnalytics`,
+`UsageSummary`) — two screens the control API has no module for. Not drift: no
+route, no schema.
 
 `CountedOffsetPage`, `TotalPage` and `CursorPage` are **deleted**, along with
 `totalPage()` in `src/lib/pagination.ts` and `Paged.total`.
@@ -718,32 +725,39 @@ which may be null (a platform action has neither — the circuit breaker
 auto-disabling an endpoint is exactly that case). The target is `resource_type`
 plus a nullable `resource_id`. `ip` → **`ip_address`**. New: `user_agent`.
 
-## Two repairs applied to the generated output, and why they are not drift
+## The two repairs are gone. What closed them
 
-Both are in `src/types/api.ts` as explicit, per-field `Patch<>` overrides — the
-types are hand-supplied, the **field set is not**, so a rename upstream still
-breaks the build.
+The dashboard carried **21 `Patch<>` types** re-declaring fields the document
+described wrongly. All 21 are deleted; **none survived**. Both causes were fixed
+at the source rather than worked around.
 
-**1. Nullable properties have no type.** The control API writes
-`@ApiProperty({ nullable: true })` with no `type`, so the emitted schema is
-`{ nullable: true }` with nothing else and openapi-typescript renders it,
-correctly, as `Record<string, never> | null`. `rate_limit` is therefore a type no
-number can be assigned to and `expires_at` one no string can. They also come out
-**optional**, because `nullable` without `type` loses `required` in the Nest
-emitter. The fix on the backend is one decorator argument —
-`@ApiProperty({ type: String, nullable: true })` — and it **deletes the whole
-`Patch` helper.** This affects ~40 properties across 15 schemas.
+**1. Nullable properties had no type — fixed on the control API.** It wrote
+`@ApiProperty({ nullable: true })` with no `type`, so the emitted schema was
+`{ nullable: true }` and openapi-typescript rendered it, correctly, as
+`Record<string, never> | null`: `rate_limit` was a type no number could be
+assigned to and `expires_at` one no string could. The root cause is worth
+recording — there is **no @nestjs/swagger CLI plugin**, so the schema comes from
+TypeScript's `design:type` reflection, and reflection emits `Object` for *any*
+union. `x!: string | null` was therefore indistinguishable from a free-form
+object. Every nullable property now states its type explicitly and required-ness
+is correct per field: **101 properties across 34 schemas.** The regenerated
+document contains **zero** `Record<string, never>` properties.
 
-`offsetPage()` type-guards `next_offset` for this reason: read without a check,
-an object would go into a URL as `[object Object]`.
-
-**2. `default` implies required.** `CreateEndpointDto`'s `required` array is
-`["name","url"]`, exactly right — but `timeout_ms`, `max_concurrency` and
-`rate_limit_window_seconds` each carry a `default`, and openapi-typescript's
+**2. `default` implies required — fixed with a generator flag.** `generate:api`
+now passes **`--default-non-nullable false`**. `CreateEndpointDto`'s `required`
+array is `["name","url"]`, exactly right, but `timeout_ms`, `max_concurrency`
+and `rate_limit_window_seconds` each carry a `default`, and openapi-typescript's
 `defaultNonNullable` (on by default) renders any property with a default as
-required. Left alone, the create dialog would have to send three numbers the
-operator never chose, overriding the server defaults that exist so it does not
-have to.
+required — which would make the create dialog send three numbers the operator
+never chose, overriding the server defaults that exist so it does not have to.
+The flag's blast radius is 26 fields, **all of them in `Create*` / `Update*` /
+`RotateSecretDto` request bodies and none in a response DTO**, so it is strictly
+more correct rather than a loosening.
+
+`offsetPage()` still type-guards `next_offset`, but for a different reason now:
+all thirteen envelopes type it `number | null`, so the guard is no longer
+repairing a type, it is repairing a **response** — an older deployment or a
+proxy that rewrote the body would otherwise put `[object Object]` into a URL.
 
 ## What was wired
 
@@ -785,37 +799,35 @@ worse than either.
 
 Ordered by what costs most today.
 
-1. **`@ApiProperty({ type: …, nullable: true })` on every nullable property.**
-   Deletes the `Patch` helper and roughly 80 lines of type repair. Nothing about
-   the API changes; the document just stops being ambiguous.
-2. **An `actor_email` (or a nested actor) on `AuditLogDto`.** The audit page's
+1. **An `actor_email` (or a nested actor) on `AuditLogDto`.** The audit page's
    entire job is "who paused this endpoint and why", and it can currently answer
    *why* but only show a `usr_…` id for *who*. Every alternative — a member
    lookup per row, a client-side join against a paged member list — is worse
    than the API returning the string it already has.
-3. **`last_status_code` on `DeliveryDto`.** The deliveries list can say "gave up
+2. **`last_status_code` on `DeliveryDto`.** The deliveries list can say "gave up
    after 8 attempts" but not "HTTP 504", because the code is only on an attempt.
    One denormalised column would put the cause back in the list, which is where
    an operator scanning for a pattern needs it.
-4. **`delivery_counts` on `EventDto`.** Restores the fan-out column on the events
+3. **`delivery_counts` on `EventDto`.** Restores the fan-out column on the events
    list. Without it, "which of my events failed to reach somebody" needs one
    click per event.
-5. **The error envelope in the OpenAPI document.** `ApiErrorBody` and
-   `ApiErrorCode` are the last hand-written contract in the dashboard and the
-   only remaining place drift can hide. An `@ApiResponse` on the exception filter
-   would close it.
-6. **Restart the control API before regenerating.** `has_live_secret` is on
-   `EndpointDto` in the source, correctly decorated
-   (`endpoint-response.dto.ts:56`), and is **absent from the document served on
-   :3000** — the running process predates
-   `feat(control-api): expose has_live_secret on endpoints`. So the generated
-   types do not have it, the Endpoints table still cannot distinguish "paused by
-   an operator" from "paused because it has no secret", and it still offers
-   "Resume deliveries" on an endpoint that answers 409.
-
-   The general point is worth more than the field: **`generate:api` is only as
-   fresh as the process serving `/docs-json`.** A stale server silently produces
-   stale types, which is the same failure mode as hand-writing them, just
-   faster. Regenerate against a restarted API and this closes on its own.
-7. **`POST /v1/auth/resend-verification`** and **`onboarding_completed_at`** —
+4. **`POST /v1/auth/resend-verification`** and **`onboarding_completed_at`** —
    both unchanged from the sections above, both still open.
+
+### Closed since the last handoff
+
+- **The error envelope is in the document.** `ApiErrorResponse` is declared and
+  attached to all 150 error responses, with an 11-value `code` enum, `message`
+  as `string | string[]` and typed `details`. `ApiErrorBody` / `ApiErrorCode` /
+  `ApiErrorDetails` are aliases of it now, not hand-written mirrors, and
+  `ApiError.code` is a **closed union**: `ErrorState`'s title map is
+  `Record<ApiErrorCode, string>`, so a code added on the server is a build
+  failure here rather than a silent "Request failed".
+- **`has_live_secret` is on `EndpointDto`.** The document served on :3000 now
+  carries it, so the Endpoints table can tell "paused by an operator" from
+  "paused because it has no secret".
+
+  The general point outlived the field and is worth keeping: **`generate:api` is
+  only as fresh as the process serving `/docs-json`.** A stale server silently
+  produces stale types — the same failure mode as hand-writing them, just
+  faster.
