@@ -172,7 +172,7 @@ func TestRedactHeadersHidesCredentialsButKeepsTheSignature(t *testing.T) {
 	in := headerInput()
 	in.Custom = map[string]string{
 		"Authorization": "Bearer customer-token",
-		"X-Api-Key":     "sk_live_secret",
+		"X-Api-Key":     "xx_live_placeholder",
 		"Cookie":        "session=abc",
 		"X-Tenant":      "acme",
 	}

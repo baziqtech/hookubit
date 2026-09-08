@@ -59,6 +59,10 @@ func TestValidateKeyShape(t *testing.T) {
 		{"live key", validKey, true},
 		{"test key", "wk_test_0123456789abcdef0123456789abcdef", true},
 		{"unknown environment", "wk_prod_0123456789abcdef0123456789abcdef", false},
+		// Deliberately NOT a real vendor prefix. This asserts that any scheme
+		// other than wk_ is rejected; using sk_ (Stripe) made the line a
+		// Stripe-shaped string that GitHub push protection blocks, and a fake
+		// secret that trips a scanner costs exactly as much as a real one.
 		{"wrong scheme", "xx_live_0123456789abcdef0123456789abcdef", false},
 		{"too short", "wk_live_abc", false},
 		{"no secret part", "wk_live_", false},

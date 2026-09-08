@@ -62,6 +62,7 @@ describe('API key contract with the Go data plane (FIX 9)', () => {
   it('rejects everything ValidateKeyShape rejects', () => {
     expect(isValidApiKeyShape('')).toBe(false);
     expect(isValidApiKeyShape('wk_live_short')).toBe(false); // under minKeyLength
+    // xx_ deliberately, not a real vendor prefix - see apikey_test.go.
     expect(isValidApiKeyShape('xx_live_0123456789abcdefghij')).toBe(false); // wrong scheme
     expect(isValidApiKeyShape('wk_prod_0123456789abcdefghij')).toBe(false); // unknown env
     expect(isValidApiKeyShape('wk_live0123456789abcdefghijk')).toBe(false); // no separator
