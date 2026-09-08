@@ -10,11 +10,12 @@
 import type {
   ApiErrorBody,
   ApiKey,
-  CountedOffsetPage,
+  AuditLogEntry,
   CreatedApiKey,
   CreatedEndpoint,
-  CursorPage,
   Delivery,
+  DeliveryAttempt,
+  DeliveryDetail,
   Endpoint,
   EndpointSecret,
   EventDetail,
@@ -22,8 +23,9 @@ import type {
   OffsetPage,
   Organization,
   Project,
+  RetryPolicy,
   RotatedSecret,
-  TotalPage,
+  Subscription,
   WebhookEvent,
 } from '../../types/api';
 import {
@@ -85,25 +87,6 @@ function fail(
 }
 
 /**
- * Cursor pagination — MOCK-ONLY ROUTES.
- *
- * No control-plane module returns this shape. It is kept for events,
- * deliveries and audit logs, which have no module yet; everything that does
- * have one uses the offset envelopes below.
- */
-function cursorPage<T>(items: T[], query: URLSearchParams): CursorPage<T> {
-  const limit = Math.min(Number(query.get('limit') ?? 25) || 25, 100);
-  const offset = Number(query.get('cursor') ?? 0) || 0;
-  const slice = items.slice(offset, offset + limit);
-  const next = offset + limit;
-  return {
-    data: slice,
-    has_more: next < items.length,
-    next_cursor: next < items.length ? String(next) : null,
-  };
-}
-
-/**
  * `limit`/`offset` as the control API validates them.
  *
  * A `limit` above `MAX_PAGE_SIZE` is a 400, not a silent clamp: a caller that
@@ -126,30 +109,19 @@ function readPaging(query: URLSearchParams): { limit: number; offset: number } {
   return { limit, offset };
 }
 
-/** `EndpointListDto` / `EndpointSecretListDto` — no `count`. */
+/**
+ * THE list envelope. Every `*ListDto` in the published document is this shape —
+ * `{ data, has_more, next_offset }` — including organizations and members,
+ * which used to carry `{ total, limit, offset }`, and projects and API keys,
+ * which used to carry a `count`. Neither of those exists any more, so neither
+ * is served here: a mock that disagrees with the schema is worse than no mock.
+ */
 function offsetEnvelope<T>(items: T[], query: URLSearchParams): OffsetPage<T> {
   const { limit, offset } = readPaging(query);
   const slice = items.slice(offset, offset + limit);
   const next = offset + slice.length;
   const hasMore = next < items.length;
   return { data: slice, has_more: hasMore, next_offset: hasMore ? next : null };
-}
-
-/** `ProjectListDto` / `ApiKeyListDto` — `count` is the rows in THIS page. */
-function countedEnvelope<T>(items: T[], query: URLSearchParams): CountedOffsetPage<T> {
-  const page = offsetEnvelope(items, query);
-  return { ...page, count: page.data.length };
-}
-
-/** `OrganizationListDto` / `MemberListDto` — a real total, no `has_more`. */
-function totalEnvelope<T>(items: T[], query: URLSearchParams): TotalPage<T> {
-  const { limit, offset } = readPaging(query);
-  return {
-    data: items.slice(offset, offset + limit),
-    total: items.length,
-    limit,
-    offset,
-  };
 }
 
 /**
@@ -274,15 +246,58 @@ function requireBody<T extends Record<string, unknown>>(body: unknown, fields: s
   return record as T;
 }
 
+/**
+ * A replay is a NEW delivery row pointing back at the original, not a reset of
+ * it. Both rows survive, which is what stops the ledger lying about how many
+ * times a consumer was called.
+ */
+function replayOf(delivery: Delivery): Delivery {
+  const now = new Date().toISOString();
+  return {
+    ...delivery,
+    id: `del_01JQRPL${Math.floor(Math.random() * 1e6).toString(36).toUpperCase()}`,
+    status: 'queued',
+    terminal: false,
+    attempt_count: 0,
+    last_error: null,
+    last_attempt_at: null,
+    next_attempt_at: now,
+    completed_at: null,
+    replay_of_delivery_id: delivery.id,
+    replayed_by: null,
+    is_replay: true,
+    created_at: now,
+    updated_at: now,
+  };
+}
+
 /** Deliveries for one event, ordered so the failing rows are on top. */
 function deliveriesForEvent(eventId: string): Delivery[] {
   return db.deliveries.filter((delivery) => delivery.event_id === eventId);
 }
 
+/** Everything that has failed and not recovered — `?failing_now=true`. */
+const FAILING_NOW = ['retrying', 'failed', 'exhausted'];
+
 function filterDeliveries(projectId: string, query: URLSearchParams): Delivery[] {
   const status = query.get('status');
+  const failingNow = booleanQuery(query, 'failing_now') ?? false;
   const endpointId = query.get('endpoint_id');
-  const search = query.get('search')?.toLowerCase();
+  const eventId = query.get('event_id');
+  const eventType = query.get('event_type');
+  const origin = query.get('origin');
+
+  /*
+   * The API REFUSES `status` and `failing_now` together rather than picking
+   * one, because they contradict each other. The mock refuses it too — a mock
+   * that quietly accepted the pair would let the UI ship a combination the real
+   * API 400s on.
+   */
+  if (status && failingNow) {
+    fail(400, 'invalid_request', [
+      'failing_now: cannot be combined with status — they would contradict each other',
+    ]);
+  }
 
   return db.deliveries.filter((delivery) => {
     // Tenant scoping is the whole point of a project. Without it every project
@@ -291,15 +306,16 @@ function filterDeliveries(projectId: string, query: URLSearchParams): Delivery[]
     // experience has to be designed against.
     if (delivery.project_id !== projectId) return false;
     if (status && delivery.status !== status) return false;
+    if (failingNow && !FAILING_NOW.includes(delivery.status)) return false;
     if (endpointId && delivery.endpoint_id !== endpointId) return false;
-    if (
-      search &&
-      !`${delivery.id} ${delivery.event_id} ${delivery.event_type} ${delivery.endpoint_name}`
-        .toLowerCase()
-        .includes(search)
-    ) {
-      return false;
+    if (eventId && delivery.event_id !== eventId) return false;
+    if (eventType) {
+      // `event_type` is a JOIN to `events` — a delivery row does not carry it.
+      const event = db.events.find((candidate) => candidate.id === delivery.event_id);
+      if (event?.event_type !== eventType) return false;
     }
+    if (origin === 'original' && delivery.is_replay) return false;
+    if (origin === 'replay' && !delivery.is_replay) return false;
     return true;
   });
 }
@@ -307,23 +323,37 @@ function filterDeliveries(projectId: string, query: URLSearchParams): Delivery[]
 function filterEvents(projectId: string, query: URLSearchParams): EventDetail[] {
   const eventType = query.get('event_type');
   const status = query.get('status');
-  const search = query.get('search')?.toLowerCase();
+  // A case-insensitive SUBSTRING of the producer's key. There is no general
+  // `search` parameter and the mock must not invent one.
+  const idempotencyKey = query.get('idempotency_key')?.toLowerCase();
+
+  if (idempotencyKey !== undefined && idempotencyKey.length > 0 && idempotencyKey.length < 3) {
+    fail(400, 'invalid_request', ['idempotency_key: must be at least 3 characters']);
+  }
 
   return db.events.filter((event) => {
     if (event.project_id !== projectId) return false;
     if (eventType && event.event_type !== eventType) return false;
     if (status && event.status !== status) return false;
-    if (search && !`${event.id} ${event.event_type}`.toLowerCase().includes(search)) return false;
+    if (
+      idempotencyKey &&
+      !(event.idempotency_key ?? '').toLowerCase().includes(idempotencyKey)
+    ) {
+      return false;
+    }
     return true;
   });
 }
 
-/** Event list rows omit the payload; only the detail route carries it. */
+/**
+ * `EventDto` is `EventDetailDto` MINUS `payload`. `headers` stays: it is on the
+ * list DTO too, so stripping it here would make the mock narrower than the
+ * schema — the opposite failure, but a failure.
+ */
 function withoutPayload(event: EventDetail): WebhookEvent {
-  const summary: Record<string, unknown> = { ...event };
-  delete summary.payload;
-  delete summary.headers;
-  return summary as unknown as WebhookEvent;
+  const { payload: _payload, ...summary } = event;
+  void _payload;
+  return summary;
 }
 
 /** The endpoint, or the 404 that never distinguishes "gone" from "not yours". */
@@ -364,10 +394,17 @@ function assertRejections(rejections: string[]): void {
 
 const handlers: Handler[] = [
   /* Auth */
+  /*
+   * `SessionResponseDto` is `{ user }` and NOTHING ELSE.
+   *
+   * The mock returned an `organizations` array alongside it, the login redirect
+   * and the landing route both read `session.organizations[0]`, and neither
+   * would have found anything against the real API. The list has its own route.
+   */
   {
     method: 'GET',
     pattern: '/v1/auth/session',
-    handle: () => ({ user: db.user, organizations: db.organizations }),
+    handle: () => ({ user: db.user }),
   },
   {
     method: 'POST',
@@ -381,7 +418,7 @@ const handlers: Handler[] = [
       if (credentials.password === 'wrong') {
         fail(401, 'unauthenticated', 'Email or password is incorrect');
       }
-      return { user: { ...db.user, email: credentials.email }, organizations: db.organizations };
+      return { user: { ...db.user, email: credentials.email } };
     },
   },
   {
@@ -418,11 +455,11 @@ const handlers: Handler[] = [
     },
   },
 
-  /* Organizations — TotalPage envelope: { data, total, limit, offset }. */
+  /* Organizations — the one list envelope: { data, has_more, next_offset }. */
   {
     method: 'GET',
     pattern: '/v1/organizations',
-    handle: ({ query }) => totalEnvelope<Organization>(db.organizations, query),
+    handle: ({ query }) => offsetEnvelope<Organization>(db.organizations, query),
   },
   {
     method: 'POST',
@@ -494,7 +531,7 @@ const handlers: Handler[] = [
     method: 'GET',
     pattern: '/v1/organizations/:orgId/members',
     handle: ({ params, query }) =>
-      totalEnvelope<Member>(db.members[params.orgId] ?? [], query),
+      offsetEnvelope<Member>(db.members[params.orgId] ?? [], query),
   },
   {
     method: 'POST',
@@ -508,14 +545,46 @@ const handlers: Handler[] = [
       return { status: 'accepted' };
     },
   },
+  /*
+   * Audit logs — a REAL module, offset paged like everything else, gated on
+   * `audit.read`.
+   *
+   * The mock has one session and no role switching, so the 403 branch is
+   * reachable through `?as=viewer`. That exists only so the permission-denied
+   * state can be seen without a second account: a viewer holds `members.read`
+   * and NOT `audit.read`, and a page that renders that as a red "request
+   * failed" with a retry button is a page nobody can act on.
+   */
   {
     method: 'GET',
     pattern: '/v1/organizations/:orgId/audit-logs',
-    handle: ({ query }) => cursorPage(db.auditLogs, query),
+    handle: ({ params, query }) => {
+      if (query.get('as') === 'viewer') {
+        fail(403, 'forbidden', 'This action requires the audit.read permission.');
+      }
+      const action = query.get('action');
+      const resourceType = query.get('resource_type');
+      const resourceId = query.get('resource_id');
+      const userId = query.get('user_id');
+      const after = query.get('created_after');
+      const before = query.get('created_before');
+
+      const rows = db.auditLogs.filter((entry) => {
+        if (entry.organization_id !== params.orgId) return false;
+        if (action && entry.action !== action) return false;
+        if (resourceType && entry.resource_type !== resourceType) return false;
+        if (resourceId && entry.resource_id !== resourceId) return false;
+        if (userId && entry.user_id !== userId) return false;
+        if (after && entry.created_at < after) return false;
+        if (before && entry.created_at > before) return false;
+        return true;
+      });
+      return offsetEnvelope<AuditLogEntry>(rows, query);
+    },
   },
   { method: 'GET', pattern: '/v1/organizations/:orgId/usage', handle: () => db.usage },
 
-  /* Projects — CountedOffsetPage, and nested under the organization. */
+  /* Projects — nested under the organization. */
   {
     method: 'GET',
     pattern: '/v1/organizations/:orgId/projects',
@@ -528,7 +597,7 @@ const handlers: Handler[] = [
         if (status) return project.status === status;
         return project.status !== 'deleted';
       });
-      return countedEnvelope<Project>(rows, query);
+      return offsetEnvelope<Project>(rows, query);
     },
   },
   {
@@ -613,7 +682,7 @@ const handlers: Handler[] = [
     },
   },
 
-  /* Endpoints — OffsetPage, no `count`. */
+  /* Endpoints. */
   {
     method: 'GET',
     pattern: '/v1/projects/:projectId/endpoints',
@@ -665,6 +734,11 @@ const handlers: Handler[] = [
       const canReadSecrets = !input.name.toLowerCase().includes('developer');
       const now = new Date().toISOString();
       const created: CreatedEndpoint = {
+        // A create by someone who cannot read secrets returns secret_pending
+        // and leaves the endpoint paused, so it has no live secret and
+        // "Resume" on it will genuinely 409. Mirroring that here is the point
+        // of the flag existing.
+        has_live_secret: canReadSecrets,
         id: `ep_01JQNEW${Math.floor(Math.random() * 1e6).toString(36).toUpperCase()}`,
         project_id: params.projectId,
         name: input.name,
@@ -733,12 +807,12 @@ const handlers: Handler[] = [
     },
   },
 
-  /* API keys — CountedOffsetPage. */
+  /* API keys. */
   {
     method: 'GET',
     pattern: '/v1/projects/:projectId/api-keys',
     handle: ({ params, query }) =>
-      countedEnvelope<ApiKey>(
+      offsetEnvelope<ApiKey>(
         db.apiKeys.filter((key) => key.project_id === params.projectId),
         query,
       ),
@@ -762,6 +836,9 @@ const handlers: Handler[] = [
       // The plaintext, returned exactly once. Only the SHA-256 hash is stored,
       // so nothing can reproduce it later — not this API, not psql.
       const created: CreatedApiKey = {
+        // Effective scopes are re-derived at use time from the issuer's CURRENT
+        // role, so a freshly minted key with no explicit scopes has none.
+        effective_scopes: [],
         id: `key_01JQNEW${Math.floor(Math.random() * 1e6).toString(36).toUpperCase()}`,
         project_id: params.projectId,
         name: input.name,
@@ -789,15 +866,43 @@ const handlers: Handler[] = [
     },
   },
 
-  /* Subscriptions — SPECULATIVE: no control-plane module exists yet. */
+  /* Subscriptions — offset paged, like every other list. */
   {
     method: 'GET',
     pattern: '/v1/projects/:projectId/subscriptions',
-    handle: ({ params }) => ({
-      data: db.subscriptions.filter(
-        (subscription) => subscription.project_id === params.projectId,
-      ),
-    }),
+    handle: ({ params, query }) => {
+      const endpointId = query.get('endpoint_id');
+      const enabled = booleanQuery(query, 'enabled');
+      const rows = db.subscriptions.filter((subscription) => {
+        if (subscription.project_id !== params.projectId) return false;
+        if (endpointId && subscription.endpoint_id !== endpointId) return false;
+        if (enabled !== undefined && subscription.enabled !== enabled) return false;
+        return true;
+      });
+      return offsetEnvelope<Subscription>(rows, query);
+    },
+  },
+
+  /*
+   * Retry policies, scoped to the project.
+   *
+   * Only the first project has any. That is deliberate: the endpoint edit
+   * form has to render an honest "this project has no policies" state, and a
+   * mock where every project has some leaves that branch first running in
+   * production.
+   */
+  {
+    method: 'GET',
+    pattern: '/v1/projects/:projectId/retry-policies',
+    handle: ({ params, query }) => {
+      const isDefault = booleanQuery(query, 'is_default');
+      const rows = db.retryPolicies.filter((policy) => {
+        if (policy.project_id !== params.projectId) return false;
+        if (isDefault !== undefined && policy.is_default !== isDefault) return false;
+        return true;
+      });
+      return offsetEnvelope<RetryPolicy>(rows, query);
+    },
   },
   {
     method: 'GET',
@@ -808,12 +913,16 @@ const handlers: Handler[] = [
     method: 'GET',
     pattern: '/v1/projects/:projectId/events',
     handle: ({ params, query }) =>
-      cursorPage(filterEvents(params.projectId, query).map(withoutPayload), query),
+      offsetEnvelope<WebhookEvent>(
+        filterEvents(params.projectId, query).map(withoutPayload),
+        query,
+      ),
   },
   {
     method: 'GET',
     pattern: '/v1/projects/:projectId/deliveries',
-    handle: ({ params, query }) => cursorPage(filterDeliveries(params.projectId, query), query),
+    handle: ({ params, query }) =>
+      offsetEnvelope<Delivery>(filterDeliveries(params.projectId, query), query),
   },
 
   /*
@@ -946,60 +1055,110 @@ const handlers: Handler[] = [
     },
   },
 
-  /* Events */
+  /*
+   * Events and deliveries — ALL NESTED UNDER THE PROJECT.
+   *
+   * `EventsController` is mounted at `projects/:projectId/events` and
+   * `DeliveriesController` at `projects/:projectId/deliveries`, so the
+   * top-level `/v1/events/:id` and `/v1/deliveries/:id` routes the mock used to
+   * serve do not exist. Every one of them would have 404'd the moment the
+   * transport flipped. The project id in the path is what the tenant resolver
+   * reads the organization off; it is a lookup key, never an authorization
+   * claim.
+   */
   {
     method: 'GET',
-    pattern: '/v1/events/:eventId',
+    pattern: '/v1/projects/:projectId/events/:eventId',
     handle: ({ params }) =>
-      db.events.find((event) => event.id === params.eventId) ??
-      fail(404, 'not_found', `Event ${params.eventId} was not found`),
+      db.events.find(
+        (event) => event.id === params.eventId && event.project_id === params.projectId,
+      ) ?? fail(404, 'not_found', `Event ${params.eventId} was not found`),
   },
   {
     method: 'GET',
-    pattern: '/v1/events/:eventId/deliveries',
-    handle: ({ params }) => ({ data: deliveriesForEvent(params.eventId) }),
+    pattern: '/v1/projects/:projectId/events/:eventId/deliveries',
+    handle: ({ params, query }) =>
+      offsetEnvelope<Delivery>(deliveriesForEvent(params.eventId), query),
   },
   {
     method: 'POST',
-    pattern: '/v1/events/:eventId/replay',
-    handle: ({ params }) => ({
-      replayed: deliveriesForEvent(params.eventId).length,
-      event_id: params.eventId,
-    }),
+    pattern: '/v1/projects/:projectId/events/:eventId/replay',
+    handle: ({ params }) => {
+      // `ReplayResultDto` — the created rows, not a bare `{ replayed }` count.
+      const originals = deliveriesForEvent(params.eventId);
+      return {
+        deliveries: originals.map((delivery) => replayOf(delivery)),
+        replayed_count: originals.length,
+        replay_of: originals.map((delivery) => delivery.id),
+      };
+    },
   },
 
-  /* Deliveries */
   {
     method: 'GET',
-    pattern: '/v1/deliveries/:deliveryId',
+    pattern: '/v1/projects/:projectId/deliveries/:deliveryId',
     handle: ({ params }) => {
-      const delivery = db.deliveries.find((candidate) => candidate.id === params.deliveryId);
+      const delivery = db.deliveries.find(
+        (candidate) =>
+          candidate.id === params.deliveryId && candidate.project_id === params.projectId,
+      );
       if (!delivery) fail(404, 'not_found', `Delivery ${params.deliveryId} was not found`);
       const event = db.events.find((candidate) => candidate.id === delivery.event_id);
-      return {
+      const endpoint = db.endpoints.find((candidate) => candidate.id === delivery.endpoint_id);
+      const attempts = db.attempts[delivery.id] ?? [];
+
+      /*
+       * `DeliveryDetailDto` — the row, NESTED `event` and `endpoint` refs, the
+       * embedded attempt history and `attempts_truncated`.
+       *
+       * There is no `payload` and no `request_headers` on a delivery. The
+       * payload lives on the event (one copy, however many deliveries) and the
+       * request headers on each attempt, because the signature is recomputed
+       * per attempt. The mock served both on the delivery and neither exists.
+       *
+       * The embedded array is capped so `attempts_truncated` is REACHABLE: a
+       * flag that is always false is a branch the UI never runs.
+       */
+      const EMBEDDED_ATTEMPT_LIMIT = 5;
+      const detail: DeliveryDetail = {
         ...delivery,
-        payload: event?.payload ?? null,
-        request_headers: {
-          'content-type': 'application/json',
-          'webhook-id': delivery.event_id,
-          'webhook-delivery-id': delivery.id,
-          'webhook-event-type': delivery.event_type,
-          'webhook-attempt': String(delivery.attempt_count),
-          'webhook-timestamp': String(Math.floor(new Date(delivery.created_at).getTime() / 1000)),
-          'webhook-signature': 't=1757155200,v1=6f2c…9a41,v1=b03e…1cc7',
+        event: {
+          id: delivery.event_id,
+          event_type: event?.event_type ?? 'unknown',
+          idempotency_key: event?.idempotency_key ?? null,
+          created_at: event?.created_at ?? delivery.created_at,
         },
+        endpoint: {
+          id: delivery.endpoint_id,
+          name: endpoint?.name ?? 'deleted endpoint',
+          url: endpoint?.url ?? '',
+          status: endpoint?.status ?? 'deleted',
+          disabled_reason: endpoint?.disabled_reason ?? null,
+        },
+        attempts: attempts.slice(0, EMBEDDED_ATTEMPT_LIMIT),
+        attempts_truncated: attempts.length > EMBEDDED_ATTEMPT_LIMIT,
       };
+      return detail;
     },
   },
   {
     method: 'GET',
-    pattern: '/v1/deliveries/:deliveryId/attempts',
-    handle: ({ params }) => ({ data: db.attempts[params.deliveryId] ?? [] }),
+    pattern: '/v1/projects/:projectId/deliveries/:deliveryId/attempts',
+    handle: ({ params, query }) =>
+      offsetEnvelope<DeliveryAttempt>(db.attempts[params.deliveryId] ?? [], query),
   },
   {
     method: 'POST',
-    pattern: '/v1/deliveries/:deliveryId/replay',
-    handle: ({ params }) => ({ delivery_id: params.deliveryId, status: 'queued' }),
+    pattern: '/v1/projects/:projectId/deliveries/:deliveryId/replay',
+    handle: ({ params }) => {
+      const delivery = db.deliveries.find(
+        (candidate) =>
+          candidate.id === params.deliveryId && candidate.project_id === params.projectId,
+      );
+      if (!delivery) fail(404, 'not_found', `Delivery ${params.deliveryId} was not found`);
+      // A NEW delivery row, not a reset of this one. Both stay in the ledger.
+      return replayOf(delivery);
+    },
   },
 
   /* Health, so the existing overview probe keeps working. */

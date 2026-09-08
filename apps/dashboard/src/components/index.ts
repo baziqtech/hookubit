@@ -22,6 +22,7 @@ export { Field } from './Field';
 export type { FieldProps } from './Field';
 export { Input } from './Input';
 export type { InputProps } from './Input';
+export { NoBackendRoute } from './NoBackendRoute';
 export { Pager } from './Pager';
 export type { PagerProps } from './Pager';
 export { PageHeader, Panel, Stat } from './Panel';

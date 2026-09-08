@@ -1,48 +1,99 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { api, queryString } from '../../lib/api';
+import { offsetPage, pageParams } from '../../lib/pagination';
 import { queryKeys } from '../../lib/query-keys';
-import type { Delivery, EventDetail, CursorPage, WebhookEvent } from '../../types/api';
+import type {
+  Delivery,
+  EventDetail,
+  EventStatus,
+  OffsetPage,
+  ReplayResult,
+  WebhookEvent,
+} from '../../types/api';
 
+/**
+ * Filters `EventsController` actually accepts.
+ *
+ * There is NO `search`. The closest thing is `idempotency_key`, a
+ * case-insensitive SUBSTRING of the producer-supplied key — "the producer says
+ * they sent order 41f9, did we get it?" — with a three-character minimum, and
+ * it is explicitly not index-supported, so it belongs next to a date range
+ * rather than presented as a general search box over all of history.
+ */
 export interface EventFilters {
   event_type?: string;
-  status?: string;
-  search?: string;
+  status?: EventStatus | '';
+  idempotency_key?: string;
+  created_after?: string;
+  created_before?: string;
 }
 
-export function useEvents(projectId: string, filters: EventFilters) {
+/** `GET /v1/projects/:projectId/events` — offset paged, not cursor paged. */
+export function useEvents(projectId: string, filters: EventFilters, offset = 0) {
   return useQuery({
-    queryKey: queryKeys.events(projectId, filters as Record<string, string>),
-    queryFn: () =>
-      api.get<CursorPage<WebhookEvent>>(`/v1/projects/${projectId}/events${queryString({ ...filters })}`),
+    queryKey: queryKeys.events(projectId, filters as Record<string, string>, offset),
+    queryFn: async () =>
+      offsetPage(
+        await api.get<OffsetPage<WebhookEvent>>(
+          `/v1/projects/${projectId}/events${queryString({ ...filters, ...pageParams(offset) })}`,
+        ),
+      ),
     enabled: Boolean(projectId),
   });
 }
 
-export function useEvent(eventId: string) {
+/**
+ * NESTED UNDER THE PROJECT — `GET /v1/events/:id` does not exist.
+ *
+ * The detail response's `payload` is an ENVELOPE (`EventPayloadDto`), not the
+ * raw body: it says whether the bytes are inline, in object storage, or
+ * unavailable, and carries a `notice` explaining which. An event whose payload
+ * was offloaded must not render as an empty code block.
+ */
+export function useEvent(projectId: string, eventId: string) {
   return useQuery({
-    queryKey: queryKeys.event(eventId),
-    queryFn: () => api.get<EventDetail>(`/v1/events/${eventId}`),
-    enabled: Boolean(eventId),
+    queryKey: queryKeys.event(projectId, eventId),
+    queryFn: () => api.get<EventDetail>(`/v1/projects/${projectId}/events/${eventId}`),
+    enabled: Boolean(projectId && eventId),
   });
 }
 
-export function useEventDeliveries(eventId: string) {
+/**
+ * The materialised fan-out for one event: one row per matching subscription,
+ * each with its own retry chain. This is the query that answers "did finance
+ * ever receive this?".
+ */
+export function useEventDeliveries(projectId: string, eventId: string) {
   return useQuery({
-    queryKey: queryKeys.eventDeliveries(eventId),
+    queryKey: queryKeys.eventDeliveries(projectId, eventId),
     queryFn: async () =>
-      (await api.get<{ data: Delivery[] }>(`/v1/events/${eventId}/deliveries`)).data,
-    enabled: Boolean(eventId),
+      offsetPage(
+        await api.get<OffsetPage<Delivery>>(
+          `/v1/projects/${projectId}/events/${eventId}/deliveries${queryString(pageParams(0))}`,
+        ),
+      ),
+    enabled: Boolean(projectId && eventId),
   });
 }
 
-/** Replay fans the event out again; every affected delivery row must be refetched. */
-export function useReplayEvent(eventId: string) {
+/**
+ * Replay fans the event out AGAIN, creating new delivery rows rather than
+ * resetting the old ones — `ReplayResultDto` returns them, with `replayed_count`
+ * and the `replay_of` ids. `endpoint_id` narrows it to one endpoint, which is
+ * usually what you want: replaying to every subscriber to fix one broken
+ * consumer re-delivers to four that were fine.
+ */
+export function useReplayEvent(projectId: string, eventId: string) {
   const queryClient = useQueryClient();
   return useMutation({
-    mutationFn: () => api.post<{ replayed: number }>(`/v1/events/${eventId}/replay`),
+    mutationFn: (body: { reason?: string; endpoint_id?: string } = {}) =>
+      api.post<ReplayResult>(`/v1/projects/${projectId}/events/${eventId}/replay`, body),
     onSuccess: () => {
-      void queryClient.invalidateQueries({ queryKey: queryKeys.eventDeliveries(eventId) });
-      void queryClient.invalidateQueries({ queryKey: queryKeys.event(eventId) });
+      void queryClient.invalidateQueries({
+        queryKey: queryKeys.eventDeliveries(projectId, eventId),
+      });
+      void queryClient.invalidateQueries({ queryKey: queryKeys.event(projectId, eventId) });
+      void queryClient.invalidateQueries({ queryKey: queryKeys.deliveriesRoot(projectId) });
     },
   });
 }

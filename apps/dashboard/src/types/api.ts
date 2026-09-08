@@ -1,38 +1,74 @@
 /**
  * ─────────────────────────────────────────────────────────────────────────────
- * TEMPORARY — hand-written, now realigned against the CONTROL API SOURCE
- * (apps/control-api/src/{organizations,members,projects,api-keys,endpoints,
- * endpoint-secrets}/dto/**) rather than against docs/API.md.
+ * DOMAIN TYPES, DERIVED FROM THE GENERATED OPENAPI DOCUMENT.
  *
- * The control API does not publish its OpenAPI document yet. The moment
- * `/docs-json` is live, run:
+ * `src/types/api.d.ts` is written by `pnpm --filter @webhook/dashboard
+ * generate:api` from the control API's live `/docs-json`. It is the contract.
+ * NOTHING in this file re-states a field name or a field type by hand — every
+ * alias below is `components['schemas'][…]`, so a rename on the wire is a
+ * compile error here rather than an `undefined` on a page.
  *
- *     pnpm --filter @webhook/dashboard generate:api
+ * That is the whole point. Three rounds of drift were found in the previous
+ * hand-written version of this file, every one of them only by calling the real
+ * API, because TypeScript believes whatever a hand-written type asserts.
  *
- * which writes `src/types/api.d.ts`, and then DELETE this file, re-pointing
- * consumers at the generated `components['schemas'][...]` types.
- * ARCHITECTURE.md 7: request and response types are never hand-duplicated.
+ * WHAT SURVIVES BY HAND, AND WHY. Each of the three groups below is something
+ * the OpenAPI document does not carry, not something that was too tedious to
+ * migrate:
  *
- * Types below are split into two groups, and the split is the important part:
- *
- *   VERIFIED — copied field-for-field from a DTO class that exists and is
- *   mounted. If one of these is wrong, the control API changed.
- *
- *   SPECULATIVE — no module exists yet (events, deliveries, subscriptions,
- *   analytics, usage, audit). These are the mock's invention and WILL drift.
- *   Nothing here should be trusted as a contract; see HANDOFF.md.
+ *   1. THE ERROR ENVELOPE. Nest's Swagger module documents 2xx bodies only —
+ *      there is no error schema in the document at all. `ApiErrorBody` and
+ *      `ApiErrorCode` are therefore still mirrored from control-api
+ *      `src/common/errors.ts`. See HANDOFF.md: publishing the envelope is a
+ *      real backend ask, and until it lands this is the one type that can
+ *      silently drift again.
+ *   2. NULLABILITY REPAIRS (`Patch<>` below).
+ *   3. CLIENT-SIDE MIRRORS OF SERVER LIMITS — numbers a form uses to refuse a
+ *      value before spending a round trip. They are conveniences; the server
+ *      stays the authority, and a stale one costs a 400 rather than corruption.
  * ─────────────────────────────────────────────────────────────────────────────
  */
+import type { components } from './api.d';
 
-/* ── Errors ───────────────────────────────────────────────── VERIFIED ────── */
+type S = components['schemas'];
+
+/**
+ * Repairs one specific defect in the generated output.
+ *
+ * The control API decorates nullable properties with `@ApiProperty({ nullable:
+ * true })` and no `type`, so the emitted schema is `{ nullable: true }` with no
+ * type at all — and openapi-typescript renders that, correctly, as
+ * `Record<string, never> | null`. A field like `rate_limit`, which is a
+ * `number | null`, therefore arrives as a type no number can be assigned to,
+ * and `expires_at` as one no string can.
+ *
+ * The repair is deliberately EXPLICIT and per-field rather than a blanket
+ * `Record<string, never> → unknown` sweep, because the key names are still
+ * being taken from the generated type: `Patch` constrains every key it is given
+ * to a key that exists on the source schema, so if `rate_limit` is renamed or
+ * dropped upstream, this file stops compiling. The types are hand-supplied; the
+ * FIELD SET is not.
+ *
+ * These properties are also emitted OPTIONAL (`?`) rather than required, for
+ * the same reason — `nullable` without `type` loses `required` in the Nest
+ * emitter. They are always present on the wire (a DTO class assigns every
+ * property), so the repair makes them required-and-nullable, which is what the
+ * reading code already assumes.
+ *
+ * HANDOFF.md carries the backend ask: `@ApiProperty({ type: String, nullable:
+ * true })` on every nullable property deletes this helper entirely.
+ */
+type Patch<T, O extends { [K in keyof O]: K extends keyof T ? O[K] : never }> = Omit<T, keyof O> & O;
+
+/* ── Errors ────────────────────────────── NOT IN THE OPENAPI DOCUMENT ────── */
 
 /**
  * Error envelope, identical on every non-2xx response.
  *
- * `details` was missing from this type and is load-bearing: it is where the
- * throttle guard puts `retry_after_seconds` and where a resource ceiling puts
- * `limit`/`current`. Without it the UI cannot tell "slow down" from "you have
- * hit a limit" — see `src/lib/api-errors.ts`.
+ * `details` is load-bearing: it is where the throttle guard puts
+ * `retry_after_seconds` and where a resource ceiling puts `limit`/`current`.
+ * Without it the UI cannot tell "slow down" from "you have hit a limit" — see
+ * `src/lib/api-errors.ts`.
  */
 export interface ApiErrorBody {
   error: {
@@ -40,11 +76,8 @@ export interface ApiErrorBody {
     /**
      * A STRING, except on a 400 raised by the global `ValidationPipe`, where
      * Nest puts the array of per-field messages here and `AppExceptionFilter`
-     * passes it through untouched (`common/errors.ts`). Each entry reads
-     * `"<property>: <reason>"` — `"url: loopback address"`,
-     * `'custom_headers: "Authorization": this header is reserved…'` — which is
-     * the only place the server says WHICH field it refused. `normaliseApiError`
-     * in `lib/api.ts` keeps the array so a form can point at the right input.
+     * passes it through untouched. Each entry reads `"<property>: <reason>"`,
+     * which is the only place the server says WHICH field it refused.
      */
     message: string | string[];
     details?: Record<string, unknown>;
@@ -53,14 +86,8 @@ export interface ApiErrorBody {
 }
 
 /**
- * The exact key set of `ERROR_CODES` in control-api `src/common/errors.ts`.
+ * The key set of `ERROR_CODES` in control-api `src/common/errors.ts`.
  * Codes are additive; treat an unknown string as `internal_error`.
- *
- * `limit_exceeded` EXISTS. It is a 409, like `conflict`, and it is the code a
- * resource ceiling raises — every one of them carries
- * `details: { limit, current, resource }`. `conflict` on the same status means
- * something else entirely (a duplicate slug, a deleted endpoint), so the two
- * must never be collapsed: see `classifyWriteError`.
  */
 export type ApiErrorCode =
   | 'invalid_request'
@@ -78,315 +105,220 @@ export type ApiErrorCode =
   | 'rate_limited'
   | 'internal_error';
 
-/* ── Pagination ───────────────────────────────────────────── VERIFIED ────── */
+/* ── Pagination ───────────────────────────────────────────────────────────── */
 
 /**
- * The control API pages by OFFSET, not by cursor, and it returns THREE
- * different envelopes. They are modelled separately on purpose: collapsing them
- * into one optional-everything type is exactly how a missing `has_more` becomes
- * `undefined` and a truncated list renders as a complete one.
+ * ONE list envelope, not three.
  *
- * Page size is bounded by `MAX_PAGE_SIZE` (200) in control-api
- * `src/authz/tenant-scope.ts`; the default is `DEFAULT_PAGE_SIZE` (50). Asking
- * for more is a 400, not a silent clamp.
- */
-export const MAX_PAGE_SIZE = 200;
-export const DEFAULT_PAGE_SIZE = 50;
-
-/**
- * `EndpointListDto`, `EndpointSecretListDto`. No `count` — the array length is
- * the count, and the DTO deliberately does not repeat it.
+ * Every `*ListDto` in the document is now `{ data, has_more, next_offset }` —
+ * including organizations and members, which used to be
+ * `{ data, total, limit, offset }`, and projects and API keys, which used to
+ * carry a `count`. Both of those older shapes were still modelled here and
+ * still being read. See HANDOFF.md.
+ *
+ * `next_offset` is `number | null` on organizations, members, projects, API
+ * keys, endpoints, endpoint secrets and audit logs, and the untyped-nullable
+ * `Record<string, never> | null` on the newer modules (subscriptions, retry
+ * policies, rate limits, events, deliveries, attempts). The generic below is
+ * what every caller reads, and `offsetPage()` in `src/lib/pagination.ts` is the
+ * only thing that touches the raw envelope.
  */
 export interface OffsetPage<T> {
   data: T[];
   has_more: boolean;
-  next_offset: number | null;
+  next_offset?: number | Record<string, never> | null;
 }
+
+/** Page size bounds from control-api `src/authz/tenant-scope.ts`. */
+export const MAX_PAGE_SIZE = 200;
+export const DEFAULT_PAGE_SIZE = 50;
+
+/* ── Identity ─────────────────────────────────────────────────────────────── */
+
+export type Role = S['OrganizationDto']['role'];
 
 /**
- * `ProjectListDto`, `ApiKeyListDto`. Same as `OffsetPage` plus `count`, which
- * is the number of rows in THIS page — not a total. The DTO comment is explicit
- * that comparing it against `limit` to detect the last page is the bug
- * `has_more` exists to close.
+ * `AuthUserDto`.
+ *
+ * `email_verified` is a BOOLEAN. The hand-written type had
+ * `email_verified_at: string | null`, and there is no `created_at` here at all.
  */
-export interface CountedOffsetPage<T> extends OffsetPage<T> {
-  count: number;
-}
+export type User = Patch<S['AuthUserDto'], { name: string | null }>;
 
 /**
- * `OrganizationListDto`, `MemberListDto`. A different shape again: a genuine
- * `total` across the whole collection, and the echoed `limit`/`offset` — but NO
- * `has_more` and NO `next_offset`. The caller derives both from the arithmetic;
- * `totalPage()` in `src/lib/pagination.ts` is the only place that does.
+ * `SessionResponseDto` — `{ user }` and NOTHING ELSE.
+ *
+ * The hand-written type also carried `organizations: Organization[]`, and the
+ * login redirect and the landing route both read `session.organizations[0]`.
+ * That property does not exist. Callers now read `GET /v1/organizations`.
  */
-export interface TotalPage<T> {
-  data: T[];
-  total: number;
-  limit: number;
-  offset: number;
-}
-
-/**
- * Cursor paging, kept ONLY for the mock-only routes (events, deliveries, audit
- * logs). No control-plane module returns this shape. When those modules land
- * they will almost certainly return an offset envelope like everything else.
- */
-export interface CursorPage<T> {
-  data: T[];
-  has_more: boolean;
-  next_cursor: string | null;
-}
-
-/* ── Identity ─────────────────────────────────────────────── VERIFIED ────── */
-
-/** `MemberRole` in the Prisma schema. */
-export type Role = 'owner' | 'admin' | 'developer' | 'viewer' | 'billing';
-
-export interface User {
-  id: string;
-  email: string;
-  name: string;
-  email_verified_at: string | null;
-  created_at: string;
-}
+export type Session = Patch<S['SessionResponseDto'], { user: User }>;
 
 /** `OrganizationDto`. `role` is the CALLER's role, not a property of the org. */
-export interface Organization {
-  id: string;
-  name: string;
-  slug: string;
-  status: 'active' | 'suspended' | 'deleted';
-  role: Role;
-  created_at: string;
-  updated_at: string;
-}
+export type Organization = S['OrganizationDto'];
 
 /**
- * `MemberDto`. Identity is FLAT (`user_id`/`email`/`name`), not a nested `user`
- * object, and `email`/`name` are nullable — a membership whose user row is gone
- * is a data-integrity problem an operator must see, not one the API hides.
- *
- * There is no `status` and no `joined_at`. An invitation creates no member row
- * at all: the invitee redeems a token at `POST /v1/invitations/accept`, so a
- * pending invite is simply not in this list.
+ * `MemberDto`. Identity is FLAT and nullable — a membership whose user row is
+ * gone is a data-integrity problem an operator must see, not one the API hides.
+ * There is no `status` and no `joined_at`: an invitation creates no member row,
+ * so a pending invite is simply not in this list.
  */
-export interface Member {
-  id: string;
-  user_id: string;
-  email: string | null;
-  name: string | null;
-  role: Role;
-  /** True when the account is disabled platform-wide. */
-  disabled: boolean;
-  created_at: string;
-}
+export type Member = Patch<S['MemberDto'], { email: string | null; name: string | null }>;
 
-export interface Session {
-  user: User;
-  organizations: Organization[];
-}
+/* ── Projects ─────────────────────────────────────────────────────────────── */
 
-/* ── Projects ─────────────────────────────────────────────── VERIFIED ────── */
-
-/** Prisma `Environment`. Two values, not three, and neither is "production". */
-export type Environment = 'test' | 'live';
-
-/** Prisma `ProjectStatus`. `deleted` is a soft delete; the row and ledger survive. */
-export type ProjectStatus = 'active' | 'suspended' | 'deleted';
-
-export interface Project {
-  id: string;
-  organization_id: string;
-  name: string;
-  slug: string;
-  /** IMMUTABLE after creation — it re-scopes every key and endpoint underneath. */
-  environment: Environment;
-  status: ProjectStatus;
-  created_at: string;
-  updated_at: string;
-}
+/** Two values, not three, and neither is "production". */
+export type Environment = S['Environment'];
+export type ProjectStatus = S['ProjectStatus'];
+export type Project = S['ProjectDto'];
 
 /**
  * `UpdateProjectDto` — name and slug, and NOTHING else.
  *
- * `environment` is absent and its absence is the enforcement: the global
- * `ValidationPipe` runs `forbidNonWhitelisted`, so a body carrying it is
- * refused with `invalid_request` before the DTO is reached, and
- * `ProjectsService.update` checks for the key again so the rule holds for a
- * caller that arrives without the pipe. `status` is absent too — a soft delete
- * is `DELETE`, audited as `project.deleted`, and a `status` slipped through a
- * PATCH would be audited as an edit.
+ * `environment` is absent and its absence is the enforcement: `ValidationPipe`
+ * runs `forbidNonWhitelisted`, so a body carrying it is refused before the DTO
+ * is reached. `status` is absent too — a soft delete is `DELETE`.
  */
-export interface UpdateProjectBody {
-  name?: string;
-  slug?: string;
-}
-
-/**
- * `UpdateOrganizationDto` — name and slug. `status` is absent because
- * suspension is a platform decision (a customer could otherwise un-suspend
- * their own unpaid organization) and deletion has its own owner-gated route.
- */
-export interface UpdateOrganizationBody {
-  name?: string;
-  slug?: string;
-}
+export type UpdateProjectBody = S['UpdateProjectDto'];
+export type CreateProjectBody = S['CreateProjectDto'];
+export type UpdateOrganizationBody = S['UpdateOrganizationDto'];
 
 /**
  * Slug rules. The pattern and the floor are shared; THE CEILINGS ARE NOT —
- * `organizations/dto/create-organization.dto.ts` says 48 and `projects/slug.ts`
- * says 64. They are kept apart here rather than averaged into one number,
+ * organizations cap at 48 and projects at 64. Kept apart rather than averaged,
  * because a shared constant would silently start refusing a legal project slug.
  */
 export const SLUG_PATTERN = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 export const SLUG_MIN_LENGTH = 2;
 export const ORGANIZATION_SLUG_MAX_LENGTH = 48;
 export const PROJECT_SLUG_MAX_LENGTH = 64;
-/** `@Length(1, 200)` on a project, `@Length(2, 200)` on an organization. */
 export const PROJECT_NAME_MAX_LENGTH = 200;
 export const PROJECT_NAME_MIN_LENGTH = 1;
 export const ORGANIZATION_NAME_MAX_LENGTH = 200;
 export const ORGANIZATION_NAME_MIN_LENGTH = 2;
 
-/* ── API keys ─────────────────────────────────────────────── VERIFIED ────── */
+/* ── API keys ─────────────────────────────────────────────────────────────── */
 
-/**
- * Derived from `revoked_at`/`expires_at` at read time, exactly as the Go ingest
- * path derives it. `active` still does not mean the key works: a suspended or
- * deleted project refuses every key under it.
- */
-export type ApiKeyState = 'active' | 'expired' | 'revoked';
+export type ApiKeyState = S['ApiKeyDto']['status'];
 
-export interface ApiKey {
-  id: string;
-  project_id: string;
-  name: string;
-  /** First 12 characters, e.g. `wk_live_a9Kd`. Safe to display and to log. */
-  key_prefix: string;
-  environment: Environment;
-  status: ApiKeyState;
-  scopes: string[];
-  expires_at: string | null;
-  last_used_at: string | null;
-  revoked_at: string | null;
-  created_at: string;
-}
+/** `key_prefix` — the first 12 characters. There is no `masked_key`. */
+export type ApiKey = Patch<
+  S['ApiKeyDto'],
+  { expires_at: string | null; last_used_at: string | null; revoked_at: string | null }
+>;
 
 /**
  * `CreatedApiKeyDto` — the ONLY response that ever carries `key`.
  *
- * Only the SHA-256 hash is stored, so nothing in the system can reproduce the
- * plaintext: not the API, not the database, not an operator with psql. A caller
- * that loses it revokes and re-issues. It must never be written to a query
- * cache, a URL or `localStorage`.
+ * Only the SHA-256 hash is stored, so nothing can reproduce the plaintext: not
+ * the API, not the database, not an operator with psql. It must never be
+ * written to a query cache, a URL or `localStorage`.
  */
-export interface CreatedApiKey extends ApiKey {
-  key: string;
-}
+export type CreatedApiKey = Patch<
+  S['CreatedApiKeyDto'],
+  { expires_at: string | null; last_used_at: string | null; revoked_at: string | null }
+>;
 
-/* ── Endpoints ────────────────────────────────────────────── VERIFIED ────── */
+/* ── Endpoints ────────────────────────────────────────────────────────────── */
 
-/** Prisma `EndpointStatus`. `deleted` is a soft delete and is filtered out by default. */
-export type EndpointStatus = 'active' | 'paused' | 'disabled' | 'deleted';
+export type EndpointStatus = S['EndpointDto']['status'];
 
 /**
  * `EndpointDto`.
  *
- * `circuit_state`, `rate_limit_per_second` and `success_rate_24h` do NOT exist
- * on the wire — they were hand-written inventions. The breaker reports through
- * `status` + `disabled_reason` + `disabled_at` instead ("Operator intent. The
- * circuit breaker uses `status`."), and the token bucket is
- * `rate_limit` per `rate_limit_window_seconds`, not a per-second scalar.
+ * There is no `circuit_state`, no `rate_limit_per_second` and no
+ * `success_rate_24h`: the breaker reports through `status` + `disabled_reason`
+ * + `disabled_at`, and the token bucket is `rate_limit` per
+ * `rate_limit_window_seconds`.
+ *
+ * There is also no `has_live_secret`, despite the commit that added one — see
+ * HANDOFF.md; the property is not in the published document.
  */
-export interface Endpoint {
-  id: string;
-  project_id: string;
-  name: string;
-  url: string;
-  description: string | null;
-  status: EndpointStatus;
-  /** Operator intent, independent of the breaker's `status`. */
-  enabled: boolean;
-  /** Set by the circuit breaker. */
-  disabled_reason: string | null;
-  disabled_at: string | null;
-  timeout_ms: number;
-  max_concurrency: number;
-  /** Tokens per `rate_limit_window_seconds`. Null means unlimited. */
-  rate_limit: number | null;
-  rate_limit_window_seconds: number;
-  retry_policy_id: string | null;
-  custom_headers: Record<string, string> | null;
-  created_at: string;
-  updated_at: string;
-}
+export type Endpoint = Patch<
+  S['EndpointDto'],
+  {
+    description: string | null;
+    disabled_reason: string | null;
+    disabled_at: string | null;
+    rate_limit: number | null;
+    retry_policy_id: string | null;
+  }
+>;
 
 /**
  * `CreatedEndpointDto`.
  *
- * The half of the contract the UI must never paper over: a caller WITHOUT
- * `endpoint-secrets.write` (i.e. a developer, not an owner or admin) creates an
- * endpoint that is PAUSED with `secret: null` and `secret_pending: true`. It is
- * not delivering and will not deliver until an owner or admin rotates its
- * secret and enables it. Going live instead would sign every delivery with a
- * key nobody holds — the consumer would reject all of them, and the rotation
- * that fixed it would change the secret again: two verification outages
- * instead of none.
+ * A caller WITHOUT `endpoint-secrets.write` creates an endpoint that is PAUSED
+ * with `secret: null` and `secret_pending: true`. It is not delivering and will
+ * not deliver until an owner or admin rotates its secret and enables it. Going
+ * live instead would sign every delivery with a key nobody holds.
  */
-export interface CreatedEndpoint extends Endpoint {
-  /** Plaintext v1 signing secret, returned HERE AND NOWHERE ELSE, or null. */
-  secret: string | null;
-  secret_pending: boolean;
-  secret_version: number;
-}
-
-export interface CreateEndpointBody {
-  name: string;
-  url: string;
-  description?: string;
-  timeout_ms?: number;
-  max_concurrency?: number;
-  rate_limit?: number;
-  rate_limit_window_seconds?: number;
-}
+export type CreatedEndpoint = Patch<
+  S['CreatedEndpointDto'],
+  {
+    description: string | null;
+    disabled_reason: string | null;
+    disabled_at: string | null;
+    rate_limit: number | null;
+    retry_policy_id: string | null;
+    secret: string | null;
+  }
+>;
 
 /**
- * `UpdateEndpointDto` — `PartialType(CreateEndpointDto)`, so every field is
- * optional and the constraints are identical.
+ * `CreateEndpointDto`.
  *
- * `status` is DELIBERATELY not here. Enabling, disabling and deleting have
- * their own routes because each carries a precondition a PATCH would walk past
- * (an endpoint cannot be enabled without a live signing secret; a delete must
- * stay soft). A form offering a status dropdown would be offering a write the
- * server refuses.
- *
- * `rate_limit`, `retry_policy_id` and `custom_headers` are nullable: null is
- * how "unset" is expressed, and it is not the same request as omitting the key.
+ * `timeout_ms`, `max_concurrency` and `rate_limit_window_seconds` are restored
+ * to OPTIONAL here, and that is a generator repair rather than a contract
+ * disagreement: the published schema's `required` array is `["name","url"]`,
+ * exactly right, but each of those three carries a `default`, and
+ * openapi-typescript's `defaultNonNullable` (on by default) renders any
+ * property with a default as required. Left alone it would make the create
+ * dialog send three numbers the operator never chose, overriding server
+ * defaults that exist precisely so it does not have to.
  */
-export interface UpdateEndpointBody {
-  name?: string;
-  url?: string;
-  description?: string;
-  timeout_ms?: number;
-  max_concurrency?: number;
-  rate_limit?: number | null;
-  rate_limit_window_seconds?: number;
-  retry_policy_id?: string | null;
-  custom_headers?: Record<string, string> | null;
-}
+export type CreateEndpointBody = Patch<
+  S['CreateEndpointDto'],
+  {
+    timeout_ms?: number;
+    max_concurrency?: number;
+    rate_limit_window_seconds?: number;
+    rate_limit?: number | null;
+    retry_policy_id?: string | null;
+  }
+>;
 
-/** `DisableEndpointDto`. The reason is audited, so the delivery gap can be explained. */
-export interface DisableEndpointBody {
-  reason?: string;
-}
+/**
+ * `UpdateEndpointDto` — `status` is DELIBERATELY not here. Enabling, disabling
+ * and deleting have their own routes because each carries a precondition a
+ * PATCH would walk past.
+ *
+ * The same `default`-implies-required generator repair as the create body. The
+ * schema has no `required` array at all here, which is `PartialType` doing
+ * exactly what it should.
+ *
+ * `custom_headers` IS NOT NULLABLE in the schema, unlike `rate_limit` and
+ * `retry_policy_id`. Unsetting them is therefore `{}` and not `null` — the
+ * service stores an empty map as NULL so that "unset" has one representation.
+ */
+export type UpdateEndpointBody = Patch<
+  S['UpdateEndpointDto'],
+  {
+    timeout_ms?: number;
+    max_concurrency?: number;
+    rate_limit_window_seconds?: number;
+    rate_limit?: number | null;
+    retry_policy_id?: string | null;
+  }
+>;
+
+export type DisableEndpointBody = S['DisableEndpointDto'];
 
 /**
  * `ENDPOINT_LIMITS` in control-api `src/endpoints/endpoint-limits.ts`, mirrored
  * so a form can refuse an out-of-range value before spending a round trip.
- *
  * These are bounds on a lever into the SHARED data plane, not cosmetic
- * validation — `timeout_ms` is how long one tenant may hold a worker slot — so
- * the client copy is a convenience and the server remains the authority.
+ * validation — `timeout_ms` is how long one tenant may hold a worker slot.
  */
 export const ENDPOINT_LIMITS = {
   timeout_ms: { min: 1_000, max: 120_000, default: 30_000 },
@@ -414,112 +346,210 @@ export const RESERVED_HEADER_NAMES: readonly string[] = [
 ];
 export const RESERVED_HEADER_PREFIX = 'webhook-';
 
-/* ── Endpoint secrets ─────────────────────────────────────── VERIFIED ────── */
+/* ── Endpoint secrets ─────────────────────────────────────────────────────── */
 
 /**
- * `EndpointSecretDto` — METADATA ONLY. There is no field here that could hold a
- * secret, and that is the point: this is the type every read path returns, so a
- * plaintext value has nowhere to leak into even by accident. There is no
- * `masked_secret`; that was invented.
+ * `EndpointSecretDto` — METADATA ONLY. There is no field here that could hold
+ * a secret, and that is the point: this is the type every read path returns, so
+ * a plaintext value has nowhere to leak into even by accident.
  */
-export interface EndpointSecret {
-  id: string;
-  endpoint_id: string;
-  /** Monotonic per endpoint. Highest version is the newest. */
-  version: number;
-  /** Signing right now: the stored flag AND an `expires_at` that has not passed. */
-  active: boolean;
-  expires_at: string | null;
-  rotated_at: string | null;
-  created_at: string;
-}
+export type EndpointSecret = Patch<
+  S['EndpointSecretDto'],
+  { expires_at: string | null; rotated_at: string | null }
+>;
 
 /**
  * `RotatedSecretDto`. Overlapping validity is the point: during rotation every
  * active secret emits its own `v1=` component, a consumer matching any one of
  * them verifies, and `previous_secrets_expire_at` is the deadline for rolling.
  */
-export interface RotatedSecret extends EndpointSecret {
-  /** Plaintext, returned exactly once, in this response. */
-  secret: string;
-  previous_secrets_expire_at: string | null;
-  /** Every prior version that still signs, newest first. */
-  overlapping_versions: number[];
-}
+export type RotatedSecret = Patch<
+  S['RotatedSecretDto'],
+  {
+    expires_at: string | null;
+    rotated_at: string | null;
+    previous_secrets_expire_at: string | null;
+  }
+>;
 
 /** Default `overlap_seconds` on the control API. */
 export const DEFAULT_OVERLAP_SECONDS = 86_400;
 
-/* ── Auth request bodies ──────────────────────────────────── VERIFIED ────── */
-
-export interface LoginBody {
-  email: string;
-  password: string;
-}
-
-export interface RegisterBody {
-  name: string;
-  email: string;
-  password: string;
-  organization_name: string;
-}
-
-export interface ForgotPasswordBody {
-  email: string;
-}
-
-export interface ResetPasswordBody {
-  token: string;
-  password: string;
-}
+/* ── Subscriptions ────────────────────────────────────────────────────────── */
 
 /**
- * `POST /v1/auth/register` answers `202 {"status":"accepted"}` with no body of
- * substance and NO `Set-Cookie`, identically whether or not the address was
- * already taken. A distinguishable response — a 409, or a session cookie on the
- * success path alone — turns registration into an account-enumeration oracle.
- * Registering does not sign the user in: they verify by email, then log in.
+ * `SubscriptionDto`.
+ *
+ * `endpoint_name` does not exist — the row carries `endpoint_id` only, so a
+ * screen that shows a name has to join against the endpoint list. The filter
+ * field is `payload_filter`, not `filter`, and there is an `updated_at`.
  */
-export interface RegistrationAccepted {
-  status: 'accepted';
-}
+export type Subscription = Patch<S['SubscriptionDto'], { name: string | null }>;
+
+/* ── Retry policies ───────────────────────────────────────────────────────── */
+
+export type RetryPolicy = S['RetryPolicyDto'];
+export type RetryStrategy = S['RetryPolicyDto']['strategy'];
+
+/* ── Events ───────────────────────────────────────────────────────────────── */
+
+export type EventStatus = S['EventDto']['status'];
+
+/**
+ * `EventDto`.
+ *
+ * The size field is `payload_size`, not `payload_size_bytes`, and there is NO
+ * `delivery_counts` — the fan-out roll-up an event row showed was invented.
+ * `payload_hash`, `payload_inline`, `payload_location`, `headers` and
+ * `processed_at` are all new.
+ */
+export type WebhookEvent = Patch<
+  S['EventDto'],
+  {
+    idempotency_key: string | null;
+    ordering_key: string | null;
+    payload_location: string | null;
+    processed_at: string | null;
+  }
+>;
+
+/**
+ * `EventPayloadDto` — the payload is an ENVELOPE, not the raw body.
+ *
+ * It says where the bytes came from (`inline`, `object_storage`, `unavailable`)
+ * and carries a `notice` explaining the case, because an event whose payload
+ * was offloaded to object storage and is not currently readable must not render
+ * as an empty code block.
+ */
+export type EventPayload = Patch<
+  S['EventPayloadDto'],
+  { body: string | null; location: string | null }
+>;
+
+export type EventDetail = Patch<
+  S['EventDetailDto'],
+  {
+    idempotency_key: string | null;
+    ordering_key: string | null;
+    payload_location: string | null;
+    processed_at: string | null;
+    payload: EventPayload;
+  }
+>;
+
+/* ── Deliveries ───────────────────────────────────────────────────────────── */
+
+export type DeliveryStatus = S['DeliveryDto']['status'];
+
+/**
+ * `DeliveryDto`.
+ *
+ * `event_type`, `endpoint_name`, `endpoint_url` and `last_status_code` DO NOT
+ * EXIST on a list row. The list carries ids; the identifying detail lives on
+ * `DeliveryDetailDto` as nested `event` and `endpoint` objects, and the last
+ * status code only ever existed on an attempt (`http_status`).
+ *
+ * `is_replay`, `replay_of_delivery_id` and `replayed_by` are new and matter: a
+ * replay is a real delivery row, and hiding it would make the ledger lie.
+ */
+export type Delivery = Patch<
+  S['DeliveryDto'],
+  {
+    subscription_id: string | null;
+    next_attempt_at: string | null;
+    last_attempt_at: string | null;
+    completed_at: string | null;
+    ordering_key: string | null;
+    last_error: string | null;
+    locked_by: string | null;
+    locked_until: string | null;
+    replay_of_delivery_id: string | null;
+    replayed_by: string | null;
+  }
+>;
+
+export type DeliveryEventRef = Patch<
+  S['DeliveryEventRefDto'],
+  { idempotency_key: string | null }
+>;
+export type DeliveryEndpointRef = Patch<
+  S['DeliveryEndpointRefDto'],
+  { disabled_reason: string | null }
+>;
+
+/**
+ * `DeliveryAttemptDto`.
+ *
+ * `status_code` is `http_status`; `error` is `error_message` (plus a separate
+ * `error_code`); `attempted_at` is `started_at`; `response_truncated` is gone
+ * in favour of `response_size` and `response_body_location`. `duration_ms` is
+ * NULLABLE — an attempt that is still in flight has not got one.
+ */
+export type DeliveryAttempt = Patch<
+  S['DeliveryAttemptDto'],
+  {
+    http_status: number | null;
+    completed_at: string | null;
+    duration_ms: number | null;
+    response_body: string | null;
+    response_body_location: string | null;
+    response_size: number | null;
+    error_code: string | null;
+    error_message: string | null;
+    worker_id: string | null;
+  }
+>;
+
+/**
+ * `DeliveryDetailDto` — the row, plus the nested refs and the attempt history.
+ *
+ * `attempts` is EMBEDDED, and `attempts_truncated` says whether the embedded
+ * list is complete. The separate `…/attempts` route is the pager for when it is
+ * not; a detail page must read the flag rather than assume the array is whole.
+ */
+export type DeliveryDetail = Patch<
+  S['DeliveryDetailDto'],
+  {
+    subscription_id: string | null;
+    next_attempt_at: string | null;
+    last_attempt_at: string | null;
+    completed_at: string | null;
+    ordering_key: string | null;
+    last_error: string | null;
+    locked_by: string | null;
+    locked_until: string | null;
+    replay_of_delivery_id: string | null;
+    replayed_by: string | null;
+    event: DeliveryEventRef;
+    endpoint: DeliveryEndpointRef;
+    attempts: DeliveryAttempt[];
+  }
+>;
+
+export type ReplayResult = Patch<S['ReplayResultDto'], { deliveries: Delivery[] }>;
+
+/* ── Audit log ────────────────────────────────────────────────────────────── */
+
+/**
+ * `AuditLogDto`.
+ *
+ * There is no nested `actor` object: the actor is `user_id` OR `api_key_id`,
+ * either of which may be null (a platform action has neither). `target` is
+ * `resource_type` + `resource_id`, and `ip` is `ip_address`. `user_agent` is
+ * new. NOTE that only IDS are returned — there is no email or display name on
+ * the row, so a screen cannot show "who" without a second lookup.
+ */
+export type AuditLogEntry = S['AuditLogDto'];
 
 /* ═══════════════════════════════════════════════════════════════════════════
- * SPECULATIVE — no control-plane module exists for anything below this line.
- * The mock invented these shapes. Do not treat them as a contract.
+ * MOCK-ONLY. No route and no schema in the OpenAPI document.
+ *
+ * These are NOT contracts and must not be treated as any. They are the shapes
+ * `src/lib/mock/server.ts` invented for two screens the control API has no
+ * module for at all — not "a module whose types drifted", a module that does
+ * not exist. Both screens now say so when the real transport is on, rather than
+ * rendering a 404 as an error or, worse, rendering fabricated numbers.
  * ═══════════════════════════════════════════════════════════════════════════ */
-
-export interface Subscription {
-  id: string;
-  project_id: string;
-  endpoint_id: string;
-  endpoint_name: string;
-  name: string;
-  /** `['*']` means every event type in the project. */
-  event_types: string[];
-  filter: Record<string, unknown> | null;
-  enabled: boolean;
-  created_at: string;
-}
-
-export type EventStatus = 'received' | 'processing' | 'processed' | 'failed';
-
-export interface WebhookEvent {
-  id: string;
-  project_id: string;
-  event_type: string;
-  status: EventStatus;
-  ordering_key: string | null;
-  idempotency_key: string | null;
-  payload_size_bytes: number;
-  delivery_counts: DeliveryCounts;
-  created_at: string;
-}
-
-export interface EventDetail extends WebhookEvent {
-  payload: unknown;
-  headers: Record<string, string>;
-}
 
 export interface DeliveryCounts {
   total: number;
@@ -527,62 +557,6 @@ export interface DeliveryCounts {
   failed: number;
   pending: number;
   exhausted: number;
-}
-
-/** ARCHITECTURE.md 19 — explicit states, never a bag of booleans. */
-export type DeliveryStatus =
-  | 'pending'
-  | 'scheduled'
-  | 'queued'
-  | 'processing'
-  | 'succeeded'
-  | 'failed'
-  | 'retrying'
-  | 'exhausted'
-  | 'cancelled';
-
-export interface Delivery {
-  id: string;
-  project_id: string;
-  event_id: string;
-  event_type: string;
-  endpoint_id: string;
-  endpoint_name: string;
-  endpoint_url: string;
-  status: DeliveryStatus;
-  /**
-   * Whether the delivery has finished, from the server. Do NOT re-derive it by
-   * testing next_attempt_at for null: a terminal delivery now carries a
-   * timestamp there rather than NULL, because the column is becoming NOT NULL -
-   * the claim query orders NULLS FIRST, so any row written NULL silently jumps
-   * ahead of work that is actually due.
-   */
-  terminal: boolean;
-  attempt_count: number;
-  max_attempts: number;
-  last_status_code: number | null;
-  last_error: string | null;
-  next_attempt_at: string | null;
-  created_at: string;
-  completed_at: string | null;
-}
-
-export interface DeliveryDetail extends Delivery {
-  payload: unknown;
-  request_headers: Record<string, string>;
-}
-
-export interface DeliveryAttempt {
-  id: string;
-  delivery_id: string;
-  attempt_number: number;
-  status_code: number | null;
-  duration_ms: number;
-  error: string | null;
-  response_headers: Record<string, string> | null;
-  response_body: string | null;
-  response_truncated: boolean;
-  attempted_at: string;
 }
 
 export interface AnalyticsPoint {
@@ -610,12 +584,23 @@ export interface UsageSummary {
   overage_events: number;
 }
 
-export interface AuditLogEntry {
-  id: string;
-  actor: { id: string; email: string; type: 'user' | 'api_key' | 'system' };
-  action: string;
-  target: string;
-  ip: string | null;
-  metadata: Record<string, unknown> | null;
-  created_at: string;
-}
+/* ── Auth request bodies ──────────────────────────────────────────────────── */
+
+export type LoginBody = S['LoginDto'];
+
+/**
+ * `RegisterDto`. `name` and `organization_name` are OPTIONAL on the wire — the
+ * hand-written type required both, and the register form still asks for both,
+ * which is a product choice rather than a contract.
+ */
+export type RegisterBody = S['RegisterDto'];
+export type ForgotPasswordBody = S['ForgotPasswordDto'];
+export type ResetPasswordBody = S['ResetPasswordDto'];
+
+/**
+ * `POST /v1/auth/register` answers `{"status":"accepted"}` with no session
+ * cookie, identically whether or not the address was already taken. A
+ * distinguishable response would turn registration into an account-enumeration
+ * oracle. `status` is typed `string`, not the literal.
+ */
+export type RegistrationAccepted = S['AcknowledgedDto'];

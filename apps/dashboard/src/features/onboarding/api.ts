@@ -50,7 +50,7 @@ export function useSetupState(orgId: string, projectId: string): SetupState {
 
   const organization = organizations.data?.rows.find((row) => row.id === orgId);
   const endpointRows = endpoints.data?.rows ?? [];
-  const subscriptionRows = subscriptions.data ?? [];
+  const subscriptionRows = subscriptions.data?.rows ?? [];
 
   const inputs: SetupInputs = {
     organizationName: organization?.name ?? null,
@@ -63,7 +63,7 @@ export function useSetupState(orgId: string, projectId: string): SetupState {
     ).length,
     enabledSubscriptionCount: subscriptionRows.filter((row) => row.enabled).length,
     disabledSubscriptionCount: subscriptionRows.filter((row) => !row.enabled).length,
-    eventCount: events.data?.data.length ?? 0,
+    eventCount: events.data?.rows.length ?? 0,
   };
 
   return { steps: deriveSetupSteps(inputs), isPending, isError };

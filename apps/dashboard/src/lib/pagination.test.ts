@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { booleanParam, offsetPage, pageRange, totalPage } from './pagination';
-import type { CountedOffsetPage, OffsetPage, TotalPage } from '../types/api';
+import { booleanParam, offsetPage, pageRange } from './pagination';
+import type { OffsetPage } from '../types/api';
 
 /**
  * The property under test is one thing: A FULL PAGE MUST NOT LOOK LIKE A
@@ -11,7 +11,7 @@ import type { CountedOffsetPage, OffsetPage, TotalPage } from '../types/api';
  * consequence is not cosmetic — "revoke every key that can authenticate as us"
  * quietly covering only the first page is the failure the envelope closes.
  */
-describe('offsetPage — endpoints, endpoint secrets, projects, API keys', () => {
+describe('offsetPage — every list route, because there is now ONE envelope', () => {
   it('reports a FULL page as incomplete, not as the whole result', () => {
     const wire: OffsetPage<{ id: string }> = {
       data: Array.from({ length: 50 }, (_, index) => ({ id: `row-${index}` })),
@@ -42,19 +42,22 @@ describe('offsetPage — endpoints, endpoint secrets, projects, API keys', () =>
     expect(page.nextOffset).toBeNull();
   });
 
-  it('ignores `count`, which is this page’s length and never a total', () => {
-    const wire: CountedOffsetPage<{ id: string }> = {
-      data: [{ id: 'a' }, { id: 'b' }],
-      count: 2,
+  /**
+   * The newer control-plane modules declare `next_offset` as
+   * `@ApiProperty({ nullable: true })` with no `type`, so the published schema
+   * says only "nullable" and the generated type is
+   * `Record<string, never> | null`. Read without a check it would go into a URL
+   * as `[object Object]` and the pager would step into nothing.
+   */
+  it('refuses a next_offset that is not a number', () => {
+    const page = offsetPage({
+      data: [{ id: 'a' }],
       has_more: true,
-      next_offset: 2,
-    };
+      next_offset: {} as Record<string, never>,
+    });
 
-    const page = offsetPage(wire);
-
-    // `count === data.length` must not be read as "that is everything".
     expect(page.hasMore).toBe(true);
-    expect(page.total).toBeNull();
+    expect(page.nextOffset).toBeNull();
   });
 
   it('treats a missing has_more as NOT complete-by-default', () => {
@@ -67,45 +70,8 @@ describe('offsetPage — endpoints, endpoint secrets, projects, API keys', () =>
   });
 });
 
-describe('totalPage — organizations and members', () => {
-  it('derives has_more from offset + rows < total, because the envelope has neither', () => {
-    const wire: TotalPage<{ id: string }> = {
-      data: [{ id: 'a' }, { id: 'b' }],
-      total: 7,
-      limit: 2,
-      offset: 0,
-    };
-
-    const page = totalPage(wire);
-
-    expect(page.hasMore).toBe(true);
-    expect(page.nextOffset).toBe(2);
-    expect(page.total).toBe(7);
-  });
-
-  it('reports the last page as complete, using rows returned rather than limit', () => {
-    // A short final page: offset 6 + 1 row === total. Using `limit` here would
-    // promise one more page that does not exist.
-    const page = totalPage({ data: [{ id: 'g' }], total: 7, limit: 2, offset: 6 });
-
-    expect(page.hasMore).toBe(false);
-    expect(page.nextOffset).toBeNull();
-  });
-
-  it('reports a full page that exactly reaches the total as complete', () => {
-    const page = totalPage({
-      data: [{ id: 'f' }, { id: 'g' }],
-      total: 7,
-      limit: 2,
-      offset: 5,
-    });
-
-    expect(page.hasMore).toBe(false);
-  });
-});
-
 describe('pageRange', () => {
-  it('never invents a total for an envelope that does not carry one', () => {
+  it('never invents a total — NO envelope carries one any more', () => {
     const page = offsetPage({
       data: [{ id: 'a' }, { id: 'b' }],
       has_more: true,
@@ -115,9 +81,9 @@ describe('pageRange', () => {
     expect(pageRange(0, page)).toBe('1–2 of more');
   });
 
-  it('uses the real total when the envelope carries one', () => {
-    const page = totalPage({ data: [{ id: 'a' }], total: 9, limit: 1, offset: 4 });
-    expect(pageRange(4, page)).toBe('5 of 9');
+  it('states a complete result as complete rather than as a total it was not given', () => {
+    const page = offsetPage({ data: [{ id: 'a' }], has_more: false, next_offset: null });
+    expect(pageRange(4, page)).toBe('5 of 5');
   });
 
   it('says so when there is nothing', () => {

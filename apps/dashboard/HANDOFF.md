@@ -65,6 +65,13 @@ Needed from the control API, then a button on that panel:
 
 ## Contract drift found against the six mounted control-plane modules
 
+> **Superseded, and kept for the reasoning rather than the findings.** This
+> section was written by reading `apps/control-api/src/**/dto/**` by hand. The
+> control API now publishes `/docs-json` and the types are generated from it —
+> see **"The types are generated now, and here is everything that was wrong"** at
+> the end of this file, which corrects several claims below (there is one list
+> envelope, not three; `SessionResponseDto` carries no organizations).
+
 `src/types/api.ts` was hand-written against `docs/API.md` and had silently
 drifted from the DTO classes that actually exist. **TypeScript could not catch
 any of this** — the compiler believes whatever the hand-written type says, which
@@ -530,3 +537,285 @@ Two changes to `src/lib/mock/`, both of which make the mock **more** faithful:
     SPECULATIVE and the page says so on itself. When the real module lands,
     expect an offset envelope rather than the cursor page the mock returns, and
     these screens will need the same treatment the other five got.
+
+---
+
+# The types are generated now, and here is everything that was wrong
+
+`src/types/api.d.ts` is written by `pnpm --filter @webhook/dashboard
+generate:api` from the control API's live `/docs-json` — 42 paths, 68 schemas.
+`src/types/api.ts` no longer states a single field name or field type by hand:
+every domain type is `components['schemas'][…]`, so a rename on the wire is now
+a compile error rather than an `undefined` on a page.
+
+**Regenerate it whenever the control API changes.** It is checked in so a fresh
+clone type-checks without a running API; it is not a source file.
+
+## What survives by hand in `src/types/api.ts`, and why
+
+Three groups, each of them something the document does not carry:
+
+1. **The error envelope.** `ApiErrorBody` / `ApiErrorCode`. Nest's Swagger module
+   documents 2xx bodies only — **there is no error schema in the document at
+   all** — so this is still mirrored from `src/common/errors.ts` and is the one
+   type that can silently drift again. See the asks below.
+2. **Nullability repairs** (`Patch<>`), covered in its own section.
+3. **Client-side mirrors of server limits** — `ENDPOINT_LIMITS`, the slug rules,
+   `RESERVED_HEADER_NAMES`, `MAX_PAGE_SIZE`. A form uses them to refuse a value
+   before spending a round trip; the server stays the authority, and a stale one
+   costs a 400 rather than corruption.
+
+`CountedOffsetPage`, `TotalPage` and `CursorPage` are **deleted**, along with
+`totalPage()` in `src/lib/pagination.ts` and `Paged.total`.
+
+## The drift the generated types exposed
+
+Every item below was believed correct, was type-checked, and was wrong. Each one
+would have broken the moment `VITE_API_TRANSPORT=http` was set.
+
+### Routes that do not exist
+
+The dashboard called five paths the control API does not serve. All five were
+already the *correct-looking* shape, which is exactly why nothing caught them.
+
+| Called | Actually |
+| --- | --- |
+| `GET /v1/events/:id` | `GET /v1/projects/:projectId/events/:eventId` |
+| `GET /v1/events/:id/deliveries` | `…/projects/:projectId/events/:eventId/deliveries` |
+| `POST /v1/events/:id/replay` | `…/projects/:projectId/events/:eventId/replay` |
+| `GET /v1/deliveries/:id` | `GET /v1/projects/:projectId/deliveries/:deliveryId` |
+| `GET /v1/deliveries/:id/attempts` | `…/projects/:projectId/deliveries/:deliveryId/attempts` |
+| `POST /v1/deliveries/:id/replay` | `…/projects/:projectId/deliveries/:deliveryId/replay` |
+
+`EventsController` and `DeliveriesController` are mounted under the project. The
+project id in the path is what `TenantResolver` reads the organization off — a
+lookup key, never an authorization claim. (`/v1/endpoints/:id/secrets` **is**
+top-level; that asymmetry is real and unchanged.)
+
+### The session does not carry organizations
+
+`SessionResponseDto` is **`{ user }` and nothing else.** The hand-written
+`Session` had `organizations: Organization[]`, and **two places read
+`session.organizations[0]`** to decide where to land the user after login:
+`LoginPage` and `RootRedirect`. Both would have thrown on the first real
+response — on the first screen after signing in.
+
+Both now read `GET /v1/organizations`. Login navigates to `/orgs` and lets
+`RootRedirect` forward, which costs one request on a transition the user is
+already waiting through.
+
+`AuthUserDto` also disagreed: **`email_verified` is a boolean**, not
+`email_verified_at: string | null`, and there is **no `created_at`** on it.
+
+### There is ONE list envelope, not three
+
+Every `*ListDto` in the document is `{ data, has_more, next_offset }`.
+
+- **`count` is gone** from `ProjectListDto` and `ApiKeyListDto`.
+- **`{ total, limit, offset }` is gone** from `OrganizationListDto` and
+  `MemberListDto` — they use the same offset envelope as everything else.
+
+The organizations and members pagers were reading `total` to render "1–3 of 7".
+That property does not exist, so the range would have read **"1–3 of undefined"**
+and `totalPage()` would have derived `hasMore` from `offset + rows < undefined`
+— always `false`, so **the pager would have reported every truncated list as
+complete.** That is precisely the failure the envelope was introduced to close.
+
+`pageRange()` no longer shows a total for anything, because nothing carries one.
+
+`next_cursor` **does not exist anywhere.** Events, deliveries and audit logs are
+offset paged like the rest.
+
+### `DeliveryDto` — four invented fields, one of them load-bearing
+
+`event_type`, `endpoint_name`, `endpoint_url` and **`last_status_code`** are not
+on a delivery row. The row carries ids; the identifying detail is on
+`DeliveryDetailDto` as nested `event` and `endpoint` objects, and **the status
+code only ever existed on an attempt, as `http_status`.**
+
+`last_status_code` was read by `describeDelivery`, `diagnoseDelivery` and the
+delivery detail page's "Last response" tile — the three things the operator
+surface exists for. They now take an explicit `DeliveryOutcome`, built by
+`deliveryOutcome(delivery, attempts)`: the code comes from the highest-numbered
+attempt where there is one, and is `null` where there is not. A list row has no
+attempts, so it degrades to "no HTTP response", which `classifyFailure` already
+treats as a transport failure — the honest reading, not a fabricated code.
+
+Names are joined client-side from the endpoint list the page already loads, with
+the id as the fallback. New on the wire and now used: `is_replay`,
+`replay_of_delivery_id`, `replayed_by`, `subscription_id`, `last_attempt_at`.
+
+### `DeliveryAttemptDto` — every field name was different
+
+`status_code` → **`http_status`**; `error` → **`error_message`** (plus a separate
+`error_code`); `attempted_at` → **`started_at`**; `response_truncated` → gone, in
+favour of `response_size` and `response_body_location`. `duration_ms` is
+**nullable** — an attempt in flight has not got one, and `formatDuration(null)`
+would have rendered "NaNms". New and now used: the attempt's own `status`
+(`success | failure | timeout | error`) and per-attempt `request_headers`.
+
+### The delivery detail page had no payload and no request headers
+
+`DeliveryDetailDto` carries **neither**. The page rendered
+`delivery.request_headers` and `delivery.payload`; both were the mock's
+invention. The request headers are per **attempt** (the signature is recomputed
+each time, so that is the more accurate place anyway) and the payload is on the
+**event** — one copy, however many deliveries. The Request tab now shows the
+latest attempt's headers and links to the event for the body.
+
+`attempts` is **embedded** in the detail response, with `attempts_truncated`
+saying whether it is complete. The page reads the flag and only then fetches the
+paged route. The mock caps the embedded array at 5 so the flag is reachable.
+
+### `EventDto` — no `delivery_counts`, and a renamed size
+
+`payload_size_bytes` → **`payload_size`**. **`delivery_counts` does not exist**;
+the "3 ok / 1 exhausted" fan-out column on the events list was invented, and
+there is no route returning per-event counts in a list. Deriving it would mean
+one request per visible row — fifty requests to paint one page — so **the column
+is gone** and the list shows the idempotency key instead. The detail page keeps
+the roll-up, derived from the delivery rows via `summarizeDeliveries()`, which
+is better anyway: a denormalised counter can disagree with the table printed
+directly beneath it and a derived one cannot.
+
+**`EventDetailDto.payload` is an envelope, not the body.** `EventPayloadDto` says
+where the bytes came from (`inline | object_storage | unavailable`), carries a
+`notice`, and may have no body at all. Reading it as the body would render an
+offloaded payload as an empty code block. New: `payload_hash`, `payload_inline`,
+`payload_location`, `processed_at`, `headers`.
+
+### Filters the dashboard sent that do not exist
+
+**Neither events nor deliveries accepts `search`.** Both pages had a free-text
+box wired to `?search=`, which `forbidNonWhitelisted` refuses. What exists:
+
+- Events: `event_type` (exact), `status`, `created_after`/`created_before`, and
+  **`idempotency_key`** — a case-insensitive substring, 3-character minimum.
+  That last one is what the box was really being used for.
+- Deliveries: `status`, **`failing_now`**, `endpoint_id`, `event_id`,
+  `event_type`, the date range, and **`origin`**.
+
+The events page also had a **hard-coded list of five payment event types** in its
+dropdown. No route enumerates the types a project has seen, so a project
+publishing `shipment.dispatched` could not filter for it at all. It is a text
+input now.
+
+`failing_now` and `status` **cannot be combined** — the API refuses the pair
+rather than picking one — so the status select is disabled while it is on, and
+the mock refuses the combination too.
+
+### `SubscriptionDto`
+
+No `endpoint_name` (joined client-side). `filter` → **`payload_filter`**. `name`
+is **nullable**. New `updated_at`. The list was read as a bare `{ data }` array
+and is offset paged, so it was **silently truncating at the page size**.
+
+### `AuditLogDto` — the actor is not an object
+
+There is **no nested `actor: { id, email, type }`** and **no `target` string**;
+the page rendered both. The actor is `user_id` **or** `api_key_id`, either of
+which may be null (a platform action has neither — the circuit breaker
+auto-disabling an endpoint is exactly that case). The target is `resource_type`
+plus a nullable `resource_id`. `ip` → **`ip_address`**. New: `user_agent`.
+
+## Two repairs applied to the generated output, and why they are not drift
+
+Both are in `src/types/api.ts` as explicit, per-field `Patch<>` overrides — the
+types are hand-supplied, the **field set is not**, so a rename upstream still
+breaks the build.
+
+**1. Nullable properties have no type.** The control API writes
+`@ApiProperty({ nullable: true })` with no `type`, so the emitted schema is
+`{ nullable: true }` with nothing else and openapi-typescript renders it,
+correctly, as `Record<string, never> | null`. `rate_limit` is therefore a type no
+number can be assigned to and `expires_at` one no string can. They also come out
+**optional**, because `nullable` without `type` loses `required` in the Nest
+emitter. The fix on the backend is one decorator argument —
+`@ApiProperty({ type: String, nullable: true })` — and it **deletes the whole
+`Patch` helper.** This affects ~40 properties across 15 schemas.
+
+`offsetPage()` type-guards `next_offset` for this reason: read without a check,
+an object would go into a URL as `[object Object]`.
+
+**2. `default` implies required.** `CreateEndpointDto`'s `required` array is
+`["name","url"]`, exactly right — but `timeout_ms`, `max_concurrency` and
+`rate_limit_window_seconds` each carry a `default`, and openapi-typescript's
+`defaultNonNullable` (on by default) renders any property with a default as
+required. Left alone, the create dialog would have to send three numbers the
+operator never chose, overriding the server defaults that exist so it does not
+have to.
+
+## What was wired
+
+**Retry-policy picker.** `useRetryPolicies` reads
+`GET /v1/projects/:projectId/retry-policies`. `EndpointEditDialog`'s free-text
+`retry_policy_id` box is a `<select>` whose options say what the policy *does*
+("8 attempts, exponential ×2 from 1s up to 60m") rather than showing an id. The
+old box invited the obvious thing — paste the id from the project that already
+retries the way you want — which answers **404**, because the id is resolved
+through the tenant scope. Three states: the list, an **honest empty state** that
+names `POST /v1/projects/:id/retry-policies` because there is no screen for
+creating one either, and a **saved id not on the current page kept as an explicit
+option** so saving cannot silently unset a policy nobody touched.
+
+**Audit log.** `useAuditLogs` reads `GET /v1/organizations/:orgId/audit-logs`
+with the real filters and offset paging. This matters because
+`POST …/endpoints/:id/disable` writes the operator's reason here, and **until now
+that reason could not be read back at all** — the whole point of asking for it
+was unreachable. A `viewer` (who holds `members.read`, **not** `audit.read`) gets
+`PermissionDenied` naming their actual role from `OrganizationDto.role`, not a
+red "request failed" with a retry button that will fail identically forever.
+`retry: false` is what makes that state appear promptly. Reachable in the mock
+via `?as=viewer`.
+
+## Honest gaps — screens with no backend at all
+
+Not "a module whose shape drifted": **no route in the document**.
+
+- **`GET /v1/projects/:projectId/analytics`** — no analytics module.
+- **`GET /v1/organizations/:orgId/usage`** — no usage or billing module.
+
+Both pages are finished and work against the mock. Under the real transport they
+render `NoBackendRoute`, which names the missing route and what it would have to
+return, and **does not run the query**. A 404 shown as an error reads as an
+outage and invites a retry; fabricated overage figures shown to an operator are
+worse than either.
+
+## Still needed from the control API
+
+Ordered by what costs most today.
+
+1. **`@ApiProperty({ type: …, nullable: true })` on every nullable property.**
+   Deletes the `Patch` helper and roughly 80 lines of type repair. Nothing about
+   the API changes; the document just stops being ambiguous.
+2. **An `actor_email` (or a nested actor) on `AuditLogDto`.** The audit page's
+   entire job is "who paused this endpoint and why", and it can currently answer
+   *why* but only show a `usr_…` id for *who*. Every alternative — a member
+   lookup per row, a client-side join against a paged member list — is worse
+   than the API returning the string it already has.
+3. **`last_status_code` on `DeliveryDto`.** The deliveries list can say "gave up
+   after 8 attempts" but not "HTTP 504", because the code is only on an attempt.
+   One denormalised column would put the cause back in the list, which is where
+   an operator scanning for a pattern needs it.
+4. **`delivery_counts` on `EventDto`.** Restores the fan-out column on the events
+   list. Without it, "which of my events failed to reach somebody" needs one
+   click per event.
+5. **The error envelope in the OpenAPI document.** `ApiErrorBody` and
+   `ApiErrorCode` are the last hand-written contract in the dashboard and the
+   only remaining place drift can hide. An `@ApiResponse` on the exception filter
+   would close it.
+6. **Restart the control API before regenerating.** `has_live_secret` is on
+   `EndpointDto` in the source, correctly decorated
+   (`endpoint-response.dto.ts:56`), and is **absent from the document served on
+   :3000** — the running process predates
+   `feat(control-api): expose has_live_secret on endpoints`. So the generated
+   types do not have it, the Endpoints table still cannot distinguish "paused by
+   an operator" from "paused because it has no secret", and it still offers
+   "Resume deliveries" on an endpoint that answers 409.
+
+   The general point is worth more than the field: **`generate:api` is only as
+   fresh as the process serving `/docs-json`.** A stale server silently produces
+   stale types, which is the same failure mode as hand-writing them, just
+   faster. Regenerate against a restarted API and this closes on its own.
+7. **`POST /v1/auth/resend-verification`** and **`onboarding_completed_at`** —
+   both unchanged from the sections above, both still open.

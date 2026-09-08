@@ -49,11 +49,18 @@ export function LoginPage() {
   } = useForm<LoginBody>({ defaultValues: { email: '', password: '' } });
 
   const onSubmit = handleSubmit(async (values) => {
-    const session = await login.mutateAsync(values);
-    // The session response carries the org list, so we can land the user
-    // somewhere real instead of on an "org selection" dead end.
-    const first = session.organizations[0];
-    navigate(first ? `/orgs/${first.id}` : '/orgs', { replace: true });
+    await login.mutateAsync(values);
+    /*
+     * `/orgs`, NOT `/orgs/<first org>`.
+     *
+     * `SessionResponseDto` is `{ user }` and nothing else — it does NOT carry
+     * an organization list, though this line read `session.organizations[0]`
+     * until the generated types said otherwise. Landing on `/orgs` lets
+     * `RootRedirect` fetch the list from the route that actually serves it and
+     * forward from there, which is one extra request on a page transition the
+     * user is already waiting through.
+     */
+    navigate('/orgs', { replace: true });
   });
 
   return (

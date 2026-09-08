@@ -183,12 +183,24 @@ export function useRotateSecret(endpointId: string) {
   });
 }
 
-/** SPECULATIVE — no subscriptions module exists in the control API yet. */
-export function useSubscriptions(projectId: string) {
+/**
+ * `GET /v1/projects/:projectId/subscriptions` — a real module, offset paged
+ * like everything else. It used to be read as a bare `{ data }` array, which
+ * would have silently truncated at the page size.
+ *
+ * A row carries `endpoint_id` and NOT `endpoint_name`, and its filter field is
+ * `payload_filter`, not `filter`. Callers wanting a name join against
+ * `useEndpoints`.
+ */
+export function useSubscriptions(projectId: string, offset = 0) {
   return useQuery({
-    queryKey: queryKeys.subscriptions(projectId),
+    queryKey: queryKeys.subscriptions(projectId, offset),
     queryFn: async () =>
-      (await api.get<{ data: Subscription[] }>(`/v1/projects/${projectId}/subscriptions`)).data,
+      offsetPage(
+        await api.get<OffsetPage<Subscription>>(
+          `/v1/projects/${projectId}/subscriptions${queryString(pageParams(offset))}`,
+        ),
+      ),
     enabled: Boolean(projectId),
   });
 }

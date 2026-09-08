@@ -15,16 +15,33 @@ import {
   Tabs,
   type Column,
 } from '../../components';
-import { describeDelivery } from '../../lib/delivery-status';
+import {
+  deliveryOutcome,
+  describeDelivery,
+  summarizeDeliveries,
+} from '../../lib/delivery-status';
 import { formatBytes, formatRelativeTime, formatTimestamp, truncateId } from '../../lib/format';
-import type { Delivery, DeliveryCounts } from '../../types/api';
+import type { Delivery, DeliveryCounts, EventPayload } from '../../types/api';
+import { useEndpoints } from '../endpoints/api';
 import { useEvent, useEventDeliveries, useReplayEvent } from './api';
 
 export function EventDetailPage() {
   const { orgId = '', projectId = '', eventId = '' } = useParams();
-  const event = useEvent(eventId);
-  const deliveries = useEventDeliveries(eventId);
-  const replay = useReplayEvent(eventId);
+  const event = useEvent(projectId, eventId);
+  const deliveries = useEventDeliveries(projectId, eventId);
+  const replay = useReplayEvent(projectId, eventId);
+  // A delivery row carries `endpoint_id` and no name; the name is joined here.
+  const endpoints = useEndpoints(projectId);
+  const endpointNames = new Map(
+    (endpoints.data?.rows ?? []).map((endpoint) => [endpoint.id, endpoint.name]),
+  );
+  /*
+   * The fan-out roll-up is DERIVED from the delivery rows, not read off the
+   * event. `EventDto` has no `delivery_counts` — that object was invented — and
+   * deriving it is better anyway: a denormalised counter can disagree with the
+   * table printed directly beneath it, and this one cannot.
+   */
+  const counts = summarizeDeliveries(deliveries.data?.rows ?? []);
   const [tab, setTab] = useState('deliveries');
   const [confirming, setConfirming] = useState(false);
 
@@ -56,10 +73,10 @@ export function EventDetailPage() {
               }
             />
 
-            <FanOutSummary counts={data.delivery_counts} />
+            <FanOutSummary counts={counts} pending={deliveries.isPending} />
 
             <dl className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
-              <Meta label="Payload size" value={formatBytes(data.payload_size_bytes)} />
+              <Meta label="Payload size" value={formatBytes(data.payload_size)} />
               <Meta
                 label="Idempotency key"
                 value={data.idempotency_key ?? 'None sent'}
@@ -87,7 +104,7 @@ export function EventDetailPage() {
               value={tab}
               onChange={setTab}
               items={[
-                { value: 'deliveries', label: 'Deliveries', badge: data.delivery_counts.total },
+                { value: 'deliveries', label: 'Deliveries', badge: counts.total },
                 { value: 'payload', label: 'Payload' },
                 { value: 'headers', label: 'Headers' },
               ]}
@@ -97,7 +114,7 @@ export function EventDetailPage() {
                   <Panel flush>
                     <Async
                       query={deliveries}
-                      isEmpty={(rows) => rows.length === 0}
+                      isEmpty={(page) => page.rows.length === 0}
                       empty={
                         <EmptyState
                           title="No matching subscriptions"
@@ -105,21 +122,21 @@ export function EventDetailPage() {
                         />
                       }
                     >
-                      {(rows) => (
+                      {(page) => (
                         <Table
                           caption="Deliveries for this event"
-                          columns={deliveryColumns(orgId, projectId)}
-                          rows={rows}
+                          columns={deliveryColumns(orgId, projectId, endpointNames)}
+                          rows={page.rows}
                           rowKey={(row) => row.id}
                         />
                       )}
                     </Async>
                   </Panel>
                 )}
-                {tab === 'payload' && (
-                  <CodeBlock value={data.payload} label="payload" showLineNumbers maxHeight="34rem" />
+                {tab === 'payload' && <PayloadTab payload={data.payload} />}
+                {tab === 'headers' && (
+                  <CodeBlock value={data.headers ?? {}} label="ingest headers" />
                 )}
-                {tab === 'headers' && <CodeBlock value={data.headers} label="request headers" />}
               </div>
             </Tabs>
 
@@ -135,7 +152,7 @@ export function EventDetailPage() {
                     variant="primary"
                     loading={replay.isPending}
                     onClick={async () => {
-                      await replay.mutateAsync();
+                      await replay.mutateAsync({});
                       setConfirming(false);
                     }}
                   >
@@ -167,8 +184,17 @@ export function EventDetailPage() {
  * meeting that for the first time needs it said out loud rather than inferred
  * from a number.
  */
-function FanOutSummary({ counts }: { counts: DeliveryCounts }) {
+function FanOutSummary({ counts, pending }: { counts: DeliveryCounts; pending: boolean }) {
   const noun = counts.total === 1 ? 'delivery' : 'deliveries';
+  // Counted from the rows below. Until they arrive, say so rather than showing
+  // a confident zero that is about to change.
+  if (pending) {
+    return (
+      <section aria-label="Fan-out" className="rounded-lg border border-line bg-panel px-4 py-3">
+        <p className="text-sm text-ink">Counting the deliveries this event fanned out to…</p>
+      </section>
+    );
+  }
   const outstanding = counts.exhausted + counts.failed;
 
   return (
@@ -238,7 +264,55 @@ function Meta({
   );
 }
 
-function deliveryColumns(orgId: string, projectId: string): Column<Delivery>[] {
+/**
+ * The payload, as the API actually returns it.
+ *
+ * `EventDetailDto.payload` is an ENVELOPE, not the raw body: it says where the
+ * bytes came from and carries a `notice` explaining the case. An event whose
+ * payload was offloaded to object storage — or is simply gone — must not render
+ * as an empty code block, which is what reading `data.payload` as the body
+ * would have produced.
+ */
+function PayloadTab({ payload }: { payload: EventPayload }) {
+  const body =
+    payload.normalised_json ??
+    (payload.encoding === 'base64' ? payload.body : (payload.body ?? null));
+
+  return (
+    <div className="flex flex-col gap-2">
+      <p className="flex flex-wrap items-center gap-2 text-2xs text-ink-subtle">
+        <Badge tone={payload.source === 'inline' ? 'neutral' : 'warn'}>{payload.source}</Badge>
+        <span>{formatBytes(payload.size_bytes)}</span>
+        <span className="font-mono">sha256:{truncateId(payload.sha256, 12)}</span>
+      </p>
+      {payload.notice && (
+        <p className="rounded-md border border-line bg-raised px-3 py-2 text-xs leading-relaxed text-ink-muted">
+          {payload.notice}
+        </p>
+      )}
+      {body === null ? (
+        <p className="rounded-md border border-warn/40 bg-warn-soft px-3 py-2 text-xs text-warn">
+          The payload is not available to read here
+          {payload.location ? ` — it is held at ${payload.location}.` : '.'}
+        </p>
+      ) : (
+        <CodeBlock
+          value={body}
+          language={payload.encoding === 'base64' ? 'text' : undefined}
+          label="payload"
+          showLineNumbers
+          maxHeight="34rem"
+        />
+      )}
+    </div>
+  );
+}
+
+function deliveryColumns(
+  orgId: string,
+  projectId: string,
+  endpointNames: Map<string, string>,
+): Column<Delivery>[] {
   return [
     {
       key: 'endpoint',
@@ -248,7 +322,9 @@ function deliveryColumns(orgId: string, projectId: string): Column<Delivery>[] {
           to={`/orgs/${orgId}/projects/${projectId}/deliveries/${row.id}`}
           className="flex flex-col hover:underline"
         >
-          <span className="text-xs font-medium text-ink">{row.endpoint_name}</span>
+          <span className="text-xs font-medium text-ink">
+            {endpointNames.get(row.endpoint_id) ?? truncateId(row.endpoint_id)}
+          </span>
           <span className="font-mono text-2xs text-ink-subtle">{truncateId(row.id)}</span>
         </Link>
       ),
@@ -262,7 +338,10 @@ function deliveryColumns(orgId: string, projectId: string): Column<Delivery>[] {
       key: 'outcome',
       header: 'Outcome',
       secondary: true,
-      render: (row) => <span className="text-xs text-ink-muted">{describeDelivery(row)}</span>,
+      // No status code: it lives on an attempt, and this list carries none.
+      render: (row) => (
+        <span className="text-xs text-ink-muted">{describeDelivery(deliveryOutcome(row))}</span>
+      ),
     },
     {
       key: 'attempts',

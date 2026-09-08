@@ -3,7 +3,8 @@ import { api, queryString } from '../../lib/api';
 import { offsetPage, pageParams } from '../../lib/pagination';
 import { queryKeys } from '../../lib/query-keys';
 import type {
-  CountedOffsetPage,
+  CreateProjectBody,
+  OffsetPage,
   Project,
   ProjectAnalytics,
   UpdateProjectBody,
@@ -14,16 +15,16 @@ import type {
  * There is no top-level `/v1/projects?organization_id=` route — that was the
  * mock's invention, and a request to it would have 404'd against the real API.
  *
- * The response is a `CountedOffsetPage`, so the hook returns the normalised
- * page rather than a bare array: a caller holding only `rows` cannot tell a
- * full page from a complete result.
+ * The hook returns the normalised page rather than a bare array: a caller
+ * holding only `rows` cannot tell a full page from a complete result.
+ * `ProjectListDto` no longer carries `count`; `has_more` is the only signal.
  */
 export function useProjects(orgId: string, offset = 0) {
   return useQuery({
     queryKey: queryKeys.projects(orgId, offset),
     queryFn: async () =>
       offsetPage(
-        await api.get<CountedOffsetPage<Project>>(
+        await api.get<OffsetPage<Project>>(
           `/v1/organizations/${orgId}/projects${queryString(pageParams(offset))}`,
         ),
       ),
@@ -76,14 +77,19 @@ export function useUpdateProject(orgId: string, projectId: string) {
 export function useCreateProject(orgId: string) {
   const queryClient = useQueryClient();
   return useMutation({
-    mutationFn: (body: { name: string; slug?: string; environment?: 'test' | 'live' }) =>
+    mutationFn: (body: CreateProjectBody) =>
       api.post<Project>(`/v1/organizations/${orgId}/projects`, body),
     onSuccess: () =>
       void queryClient.invalidateQueries({ queryKey: queryKeys.projectsRoot(orgId) }),
   });
 }
 
-/** SPECULATIVE — no analytics module exists in the control API yet. */
+/**
+ * MOCK-ONLY. `GET /v1/projects/:id/analytics` IS NOT IN THE OPENAPI DOCUMENT —
+ * there is no analytics module at all, not one whose shape drifted. Against the
+ * real transport this 404s, so `AnalyticsPage` refuses to run it and says so
+ * instead of rendering an error or, worse, fabricated numbers.
+ */
 export function useAnalytics(projectId: string) {
   return useQuery({
     queryKey: queryKeys.analytics(projectId),

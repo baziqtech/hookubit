@@ -17,7 +17,7 @@ import {
   formatRelativeTime,
   truncateId,
 } from '../../lib/format';
-import { describeDelivery } from '../../lib/delivery-status';
+import { deliveryOutcome, describeDelivery } from '../../lib/delivery-status';
 import type { Delivery, Endpoint } from '../../types/api';
 import { useDeliveries } from '../deliveries/api';
 import { useEndpoints } from '../endpoints/api';
@@ -236,7 +236,7 @@ function Health({ orgId, projectId }: { orgId: string; projectId: string }) {
         >
           <Async
             query={failing}
-            isEmpty={(page) => page.data.length === 0}
+            isEmpty={(page) => page.rows.length === 0}
             empty={
               <EmptyState
                 title="Nothing exhausted"
@@ -248,7 +248,7 @@ function Health({ orgId, projectId }: { orgId: string; projectId: string }) {
               <Table
                 caption="Exhausted deliveries"
                 columns={failureColumns(orgId, projectId)}
-                rows={page.data.slice(0, 8)}
+                rows={page.rows.slice(0, 8)}
                 rowKey={(row) => row.id}
               />
             )}
@@ -323,8 +323,13 @@ function failureColumns(orgId: string, projectId: string): Column<Delivery>[] {
           className="flex flex-col hover:underline"
         >
           <span className="font-mono text-xs text-ink">{truncateId(row.id)}</span>
-          <span className="text-2xs text-ink-subtle">
-            {row.event_type} → {row.endpoint_name}
+          {/*
+            A delivery row carries IDS, not names: there is no `event_type` and
+            no `endpoint_name` on `DeliveryDto`. The ids are shown rather than a
+            name this row cannot supply — the detail page has both.
+          */}
+          <span className="font-mono text-2xs text-ink-subtle">
+            {truncateId(row.event_id)} → {truncateId(row.endpoint_id)}
           </span>
         </Link>
       ),
@@ -333,7 +338,9 @@ function failureColumns(orgId: string, projectId: string): Column<Delivery>[] {
       key: 'why',
       header: 'Outcome',
       secondary: true,
-      render: (row) => <span className="text-xs text-ink-muted">{describeDelivery(row)}</span>,
+      render: (row) => (
+        <span className="text-xs text-ink-muted">{describeDelivery(deliveryOutcome(row))}</span>
+      ),
     },
     {
       key: 'when',

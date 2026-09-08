@@ -2,14 +2,14 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { api, queryString } from '../../lib/api';
 import { offsetPage, pageParams } from '../../lib/pagination';
 import { queryKeys } from '../../lib/query-keys';
-import type { ApiKey, CountedOffsetPage, CreatedApiKey } from '../../types/api';
+import type { ApiKey, CreatedApiKey, OffsetPage } from '../../types/api';
 
 export function useApiKeys(projectId: string, offset = 0) {
   return useQuery({
     queryKey: queryKeys.apiKeys(projectId, offset),
     queryFn: async () =>
       offsetPage(
-        await api.get<CountedOffsetPage<ApiKey>>(
+        await api.get<OffsetPage<ApiKey>>(
           `/v1/projects/${projectId}/api-keys${queryString(pageParams(offset))}`,
         ),
       ),

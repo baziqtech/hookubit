@@ -37,7 +37,9 @@ export function isReservedHeader(name: string): boolean {
 }
 
 /** `{ 'x-a': '1' }` → `"x-a: 1"`. Round-trips through `parseCustomHeaders`. */
-export function formatCustomHeaders(headers: Record<string, string> | null): string {
+export function formatCustomHeaders(
+  headers: Record<string, string> | null | undefined,
+): string {
   if (!headers) return '';
   return Object.entries(headers)
     .map(([name, value]) => `${name}: ${value}`)

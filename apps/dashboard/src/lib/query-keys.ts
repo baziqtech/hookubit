@@ -18,7 +18,9 @@ export const queryKeys = {
   membersRoot: (orgId: string) => ['organization', orgId, 'members'] as const,
   members: (orgId: string, offset = 0) => ['organization', orgId, 'members', { offset }] as const,
 
-  auditLogs: (orgId: string) => ['organization', orgId, 'audit-logs'] as const,
+  auditLogsRoot: (orgId: string) => ['organization', orgId, 'audit-logs'] as const,
+  auditLogs: (orgId: string, filters: Record<string, string>, offset = 0) =>
+    ['organization', orgId, 'audit-logs', filters, { offset }] as const,
   usage: (orgId: string) => ['organization', orgId, 'usage'] as const,
 
   projectsRoot: (orgId: string) => ['projects', orgId] as const,
@@ -39,14 +41,24 @@ export const queryKeys = {
   apiKeys: (projectId: string, offset = 0) =>
     ['project', projectId, 'api-keys', { offset }] as const,
 
-  subscriptions: (projectId: string) => ['project', projectId, 'subscriptions'] as const,
+  subscriptionsRoot: (projectId: string) => ['project', projectId, 'subscriptions'] as const,
+  subscriptions: (projectId: string, offset = 0) =>
+    ['project', projectId, 'subscriptions', { offset }] as const,
+
+  retryPoliciesRoot: (projectId: string) => ['project', projectId, 'retry-policies'] as const,
+  retryPolicies: (projectId: string, offset = 0) =>
+    ['project', projectId, 'retry-policies', { offset }] as const,
   analytics: (projectId: string) => ['project', projectId, 'analytics'] as const,
-  events: (projectId: string, filters: Record<string, string>) =>
-    ['project', projectId, 'events', filters] as const,
-  event: (eventId: string) => ['event', eventId] as const,
-  eventDeliveries: (eventId: string) => ['event', eventId, 'deliveries'] as const,
-  deliveries: (projectId: string, filters: Record<string, string>) =>
-    ['project', projectId, 'deliveries', filters] as const,
-  delivery: (deliveryId: string) => ['delivery', deliveryId] as const,
-  deliveryAttempts: (deliveryId: string) => ['delivery', deliveryId, 'attempts'] as const,
+  events: (projectId: string, filters: Record<string, string>, offset = 0) =>
+    ['project', projectId, 'events', filters, { offset }] as const,
+  event: (projectId: string, eventId: string) => ['project', projectId, 'event', eventId] as const,
+  eventDeliveries: (projectId: string, eventId: string) =>
+    ['project', projectId, 'event', eventId, 'deliveries'] as const,
+  deliveriesRoot: (projectId: string) => ['project', projectId, 'deliveries'] as const,
+  deliveries: (projectId: string, filters: Record<string, string>, offset = 0) =>
+    ['project', projectId, 'deliveries', filters, { offset }] as const,
+  delivery: (projectId: string, deliveryId: string) =>
+    ['project', projectId, 'delivery', deliveryId] as const,
+  deliveryAttempts: (projectId: string, deliveryId: string) =>
+    ['project', projectId, 'delivery', deliveryId, 'attempts'] as const,
 };

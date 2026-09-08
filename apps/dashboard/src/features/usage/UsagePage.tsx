@@ -1,11 +1,36 @@
 import { useParams } from 'react-router-dom';
-import { Async, PageHeader, Panel, Stat } from '../../components';
+import { Async, NoBackendRoute, PageHeader, Panel, Stat } from '../../components';
+import { usingMockApi } from '../../lib/api';
 import { formatCount, formatTimestamp } from '../../lib/format';
 import { useUsage } from '../organizations/api';
 
+/**
+ * `GET /v1/organizations/:orgId/usage` IS NOT IN THE OPENAPI DOCUMENT. There is
+ * no usage or billing module, so under the real transport this page states that
+ * rather than rendering a 404 as an error — or, far worse, showing an operator
+ * a plausible overage figure that was fabricated by a mock.
+ */
 export function UsagePage() {
   const { orgId = '' } = useParams();
   const usage = useUsage(orgId);
+
+  if (!usingMockApi) {
+    return (
+      <div className="flex flex-col gap-4">
+        <PageHeader
+          title="Usage"
+          description="Metered on events ingested, not deliveries attempted."
+        />
+        <Panel>
+          <NoBackendRoute
+            title="Usage"
+            path="GET /v1/organizations/:orgId/usage"
+            purpose="It would need a billing period plus counts of events ingested and delivery attempts made inside it — an aggregate, not something a paged list can answer."
+          />
+        </Panel>
+      </div>
+    );
+  }
 
   return (
     <div className="flex flex-col gap-4">

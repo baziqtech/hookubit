@@ -1,23 +1,24 @@
 /**
  * One place that knows how to read a list response.
  *
- * The control API returns THREE different list envelopes (see `OffsetPage`,
- * `CountedOffsetPage` and `TotalPage` in `src/types/api.ts`). Every list screen
- * needs the same two facts out of them — the rows, and whether the server had
- * more it did not send — so the arithmetic lives here once instead of being
- * re-derived per page.
+ * THE ENVELOPE IS NOW ONE SHAPE, NOT THREE. Every `*ListDto` in the generated
+ * OpenAPI document is `{ data, has_more, next_offset }`. The dashboard used to
+ * model three — organizations and members as `{ data, total, limit, offset }`
+ * and projects and API keys with an extra `count` — and read both of the ones
+ * that no longer exist. See HANDOFF.md.
  *
- * The rule this file exists to enforce, from `ProjectListDto`:
+ * The rule this file exists to enforce is unchanged, and is the reason the
+ * envelope exists at all:
  *
- *   "Never compare `count` against `limit` to detect the last page — read
- *   `has_more`."
+ *   "Never compare the row count against `limit` to detect the last page —
+ *    read `has_more`."
  *
  * A caller that received exactly `limit` rows cannot tell a full page from a
  * complete result. That is not a cosmetic bug: "revoke every key that can
  * authenticate as us" quietly covering only the first page is the failure the
  * envelope was introduced to close.
  */
-import type { CountedOffsetPage, OffsetPage, TotalPage } from '../types/api';
+import type { OffsetPage } from '../types/api';
 import { DEFAULT_PAGE_SIZE } from '../types/api';
 
 /** The normalised list result every page component consumes. */
@@ -27,54 +28,34 @@ export interface Paged<T> {
   hasMore: boolean;
   /** Offset that returns the next page, or null on the last one. */
   nextOffset: number | null;
-  /** Rows across the whole collection, when the envelope carries one. */
-  total: number | null;
 }
 
 export const emptyPage = <T>(): Paged<T> => ({
   rows: [],
   hasMore: false,
   nextOffset: null,
-  total: 0,
 });
 
 /**
- * `{ data, has_more, next_offset }` and `{ data, count, has_more, next_offset }`.
+ * `{ data, has_more, next_offset }` — every list route.
  *
- * `count` is deliberately ignored: it is the length of THIS page, not a total,
- * and treating it as one is the exact confusion `has_more` was added to
- * prevent. `has_more` is read as written — a truthiness test would turn a
- * missing field into "complete", which is the silent-truncation failure again.
+ * `has_more` is read as written: a truthiness test would turn a missing field
+ * into "complete", which is the silent-truncation failure again.
+ *
+ * `next_offset` needs a type guard rather than a cast. The newer control-plane
+ * modules declare it `@ApiProperty({ nullable: true })` with no `type`, so the
+ * published schema says only "nullable" and the generated type is
+ * `Record<string, never> | null`. Reading it as a number without checking would
+ * put an object into a URL as `[object Object]`.
  */
-export function offsetPage<T>(page: OffsetPage<T> | CountedOffsetPage<T>): Paged<T> {
+export function offsetPage<T>(page: OffsetPage<T>): Paged<T> {
   const rows = page?.data ?? [];
-  const hasMore = page?.has_more === true;
+  const next = page?.next_offset;
   return {
     rows,
-    hasMore,
-    // Trust the server's offset when it sent one; fall back to arithmetic only
-    // if `has_more` is true and `next_offset` was omitted, which would be a bug
-    // on the wire rather than a normal response.
-    nextOffset: page?.next_offset ?? null,
-    total: null,
+    hasMore: page?.has_more === true,
+    nextOffset: typeof next === 'number' ? next : null,
   };
-}
-
-/**
- * `{ data, total, limit, offset }` — organizations and members.
- *
- * This envelope has no `has_more` and no `next_offset`, so both are derived
- * here and nowhere else. `offset + data.length < total` is the whole
- * definition; note it uses the ROWS RETURNED, not `limit`, so a short final
- * page reads as complete rather than promising one more empty page.
- */
-export function totalPage<T>(page: TotalPage<T>): Paged<T> {
-  const rows = page?.data ?? [];
-  const total = typeof page?.total === 'number' ? page.total : rows.length;
-  const offset = typeof page?.offset === 'number' ? page.offset : 0;
-  const seen = offset + rows.length;
-  const hasMore = seen < total;
-  return { rows, hasMore, nextOffset: hasMore ? seen : null, total };
 }
 
 /**
@@ -87,17 +68,18 @@ export function pageParams(offset: number, limit: number = DEFAULT_PAGE_SIZE) {
 }
 
 /**
- * Human range for a pager, 1-based and inclusive: "51–100".
- * `total` is shown only when the envelope actually carried one — inventing a
- * total from a page that has no total is how "1–50 of 50" gets rendered over a
- * collection of four thousand.
+ * Human range for a pager, 1-based and inclusive: "51-100".
+ *
+ * NO ENVELOPE CARRIES A TOTAL any more, so none is ever shown: inventing one
+ * from a page is how "1-50 of 50" gets rendered over a collection of four
+ * thousand. `has_more` is the only completeness signal there is, and the copy
+ * says which of the two cases this is.
  */
 export function pageRange(offset: number, page: Paged<unknown>): string {
   if (page.rows.length === 0) return 'No results';
   const first = offset + 1;
   const last = offset + page.rows.length;
   const span = first === last ? `${first}` : `${first}–${last}`;
-  if (page.total !== null) return `${span} of ${page.total}`;
   return page.hasMore ? `${span} of more` : `${span} of ${last}`;
 }
 

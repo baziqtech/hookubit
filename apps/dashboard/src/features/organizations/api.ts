@@ -1,29 +1,30 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { api, queryString } from '../../lib/api';
-import { pageParams, totalPage } from '../../lib/pagination';
+import { offsetPage, pageParams } from '../../lib/pagination';
 import { queryKeys } from '../../lib/query-keys';
 import type {
-  AuditLogEntry,
-  CursorPage,
   Member,
+  OffsetPage,
   Organization,
   Role,
-  TotalPage,
   UpdateOrganizationBody,
   UsageSummary,
 } from '../../types/api';
 
 /**
- * Organizations and members return the THIRD envelope shape:
- * `{ data, total, limit, offset }` — a real total, but no `has_more` and no
- * `next_offset`. `totalPage()` derives both; nothing else may.
+ * `OrganizationListDto` is `{ data, has_more, next_offset }` like every other
+ * list route. It used to be `{ data, total, limit, offset }` and was still
+ * being read that way — `total` was rendered in the pager and is simply not
+ * there, so the range read "1–3 of undefined". See HANDOFF.md.
  */
 export function useOrganizations(offset = 0) {
   return useQuery({
     queryKey: queryKeys.organizations(offset),
     queryFn: async () =>
-      totalPage(
-        await api.get<TotalPage<Organization>>(`/v1/organizations${queryString(pageParams(offset))}`),
+      offsetPage(
+        await api.get<OffsetPage<Organization>>(
+          `/v1/organizations${queryString(pageParams(offset))}`,
+        ),
       ),
   });
 }
@@ -65,8 +66,8 @@ export function useMembers(orgId: string, offset = 0) {
   return useQuery({
     queryKey: queryKeys.members(orgId, offset),
     queryFn: async () =>
-      totalPage(
-        await api.get<TotalPage<Member>>(
+      offsetPage(
+        await api.get<OffsetPage<Member>>(
           `/v1/organizations/${orgId}/members${queryString(pageParams(offset))}`,
         ),
       ),
@@ -89,17 +90,11 @@ export function useInviteMember(orgId: string) {
   });
 }
 
-/** SPECULATIVE — no audit module exists in the control API yet. */
-export function useAuditLogs(orgId: string) {
-  return useQuery({
-    queryKey: queryKeys.auditLogs(orgId),
-    queryFn: async () =>
-      (await api.get<CursorPage<AuditLogEntry>>(`/v1/organizations/${orgId}/audit-logs`)).data,
-    enabled: Boolean(orgId),
-  });
-}
-
-/** SPECULATIVE — no usage module exists in the control API yet. */
+/**
+ * MOCK-ONLY. `GET /v1/organizations/:orgId/usage` IS NOT IN THE OPENAPI
+ * DOCUMENT — there is no usage or billing module. Against the real transport
+ * this 404s, so `UsagePage` refuses to run it and says so.
+ */
 export function useUsage(orgId: string) {
   return useQuery({
     queryKey: queryKeys.usage(orgId),

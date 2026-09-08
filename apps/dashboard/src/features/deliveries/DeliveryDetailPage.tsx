@@ -18,14 +18,16 @@ import {
   attemptsRemaining,
   canReplay,
   classifyFailure,
+  deliveryOutcome,
   diagnoseDelivery,
   failureKindLabel,
+  type DeliveryOutcome,
   type FailureKind,
 } from '../../lib/delivery-status';
 import { formatDuration, formatRelativeTime, formatTimestamp, truncateId } from '../../lib/format';
 import { cn } from '../../lib/cn';
 import type { Delivery, DeliveryAttempt, DeliveryDetail, Endpoint } from '../../types/api';
-import { useEndpoint } from '../endpoints/api';
+import { useEndpoint, useEndpoints } from '../endpoints/api';
 import { EndpointActions } from '../endpoints/EndpointActions';
 import { useEventDeliveries } from '../events/api';
 import { useDelivery, useDeliveryAttempts, useReplayDelivery } from './api';
@@ -53,9 +55,18 @@ import { useDelivery, useDeliveryAttempts, useReplayDelivery } from './api';
  */
 export function DeliveryDetailPage() {
   const { orgId = '', projectId = '', deliveryId = '' } = useParams();
-  const delivery = useDelivery(deliveryId);
-  const attempts = useDeliveryAttempts(deliveryId);
-  const replay = useReplayDelivery(deliveryId);
+  const delivery = useDelivery(projectId, deliveryId);
+  /*
+   * The attempt history is EMBEDDED in the detail response, so the common case
+   * costs no second request. `attempts_truncated` says when the embedded array
+   * is not the whole story, and only then is the paged `…/attempts` route
+   * fetched — rendering a truncated history as a complete one, on the screen
+   * whose entire job is "what happened to this delivery", is the worst possible
+   * place to be quietly incomplete.
+   */
+  const truncated = delivery.data?.attempts_truncated === true;
+  const moreAttempts = useDeliveryAttempts(projectId, deliveryId, truncated);
+  const replay = useReplayDelivery(projectId, deliveryId);
   const [tab, setTab] = useState('attempts');
   const [confirming, setConfirming] = useState(false);
 
@@ -77,11 +88,9 @@ export function DeliveryDetailPage() {
                   <span className="font-mono text-xs text-ink-subtle">{data.id}</span>
                 </>
               }
-              title={data.endpoint_name}
+              title={data.endpoint.name}
               description={
-                <span className="font-mono text-2xs text-ink-subtle">
-                  POST {data.endpoint_url}
-                </span>
+                <span className="font-mono text-2xs text-ink-subtle">POST {data.endpoint.url}</span>
               }
               actions={
                 <>
@@ -101,9 +110,9 @@ export function DeliveryDetailPage() {
               }
             />
 
-            <Diagnosis delivery={data} />
+            <Diagnosis delivery={data} outcome={outcomeOf(data, moreAttempts.data?.rows)} />
             <EndpointHealthCheck delivery={data} orgId={orgId} projectId={projectId} />
-            <RetrySchedule delivery={data} />
+            <RetrySchedule delivery={data} outcome={outcomeOf(data, moreAttempts.data?.rows)} />
 
             <Tabs
               aria-label="Delivery detail"
@@ -117,40 +126,18 @@ export function DeliveryDetailPage() {
             >
               <div className="pt-4">
                 {tab === 'attempts' && (
-                  <Async
-                    query={attempts}
-                    isEmpty={(rows) => rows.length === 0}
-                    empty={
-                      <EmptyState
-                        title="No attempts yet"
-                        description="This delivery is queued and the first request has not been made. Attempts appear here as soon as a worker picks it up."
-                      />
-                    }
-                  >
-                    {(rows) => (
-                      <ol className="flex flex-col gap-2">
-                        {/* Newest first: in an incident you want the last thing that happened. */}
-                        {[...rows].reverse().map((attempt) => (
-                          <li key={attempt.id}>
-                            <AttemptCard attempt={attempt} total={data.max_attempts} />
-                          </li>
-                        ))}
-                      </ol>
-                    )}
-                  </Async>
-                )}
-                {tab === 'siblings' && (
-                  <SiblingDeliveries
-                    delivery={data}
-                    orgId={orgId}
-                    projectId={projectId}
+                  <AttemptHistory
+                    embedded={data.attempts}
+                    paged={moreAttempts.data?.rows}
+                    truncated={data.attempts_truncated}
+                    total={data.max_attempts}
                   />
                 )}
+                {tab === 'siblings' && (
+                  <SiblingDeliveries delivery={data} orgId={orgId} projectId={projectId} />
+                )}
                 {tab === 'request' && (
-                  <div className="flex flex-col gap-3">
-                    <CodeBlock value={data.request_headers} label="request headers" />
-                    <CodeBlock value={data.payload} label="request body" showLineNumbers />
-                  </div>
+                  <RequestTab delivery={data} orgId={orgId} projectId={projectId} />
                 )}
               </div>
             </Tabs>
@@ -159,7 +146,7 @@ export function DeliveryDetailPage() {
               open={confirming}
               onClose={() => setConfirming(false)}
               title="Replay this delivery?"
-              description={`A fresh attempt chain is queued for ${data.endpoint_name}.`}
+              description={`A fresh attempt chain is queued for ${data.endpoint.name}.`}
               footer={
                 <>
                   <Button onClick={() => setConfirming(false)}>Cancel</Button>
@@ -167,7 +154,7 @@ export function DeliveryDetailPage() {
                     variant="primary"
                     loading={replay.isPending}
                     onClick={async () => {
-                      await replay.mutateAsync();
+                      await replay.mutateAsync({});
                       setConfirming(false);
                     }}
                   >
@@ -196,8 +183,27 @@ export function DeliveryDetailPage() {
  * already know how this system works, which is the assumption that makes
  * operator surfaces unusable to everyone except the person who built them.
  */
-function Diagnosis({ delivery }: { delivery: DeliveryDetail }) {
-  const diagnosis = diagnoseDelivery(delivery);
+/**
+ * `outcomeOf` is the join the wire no longer does for us.
+ *
+ * `DeliveryDto` has no `last_status_code` — the code only ever existed on an
+ * attempt, as `http_status` — so the diagnosis is built from the row plus the
+ * attempts in hand. On the detail page there always are some; on the list page
+ * there are none, and the diagnosis degrades to "no HTTP response", which is
+ * the honest reading rather than a fabricated code.
+ */
+function outcomeOf(delivery: DeliveryDetail, extra?: DeliveryAttempt[]): DeliveryOutcome {
+  return deliveryOutcome(delivery, extra ?? delivery.attempts);
+}
+
+function Diagnosis({
+  delivery,
+  outcome,
+}: {
+  delivery: DeliveryDetail;
+  outcome: DeliveryOutcome;
+}) {
+  const diagnosis = diagnoseDelivery(outcome);
 
   const tone = {
     ok: 'border-ok/30 bg-ok-soft/50',
@@ -212,7 +218,7 @@ function Diagnosis({ delivery }: { delivery: DeliveryDetail }) {
       <div className="flex flex-wrap items-center gap-2">
         <h2 className="text-sm font-semibold text-ink">{diagnosis.headline}</h2>
         {diagnosis.kind !== 'none' && (
-          <FailureBadge kind={diagnosis.kind} code={delivery.last_status_code} />
+          <FailureBadge kind={diagnosis.kind} code={outcome.last_status_code} />
         )}
       </div>
 
@@ -345,15 +351,21 @@ function EndpointHealthCheck({
  * both relatively (how long do I wait) and absolutely (what do I put in the
  * incident timeline).
  */
-function RetrySchedule({ delivery }: { delivery: DeliveryDetail }) {
-  const remaining = attemptsRemaining(delivery);
+function RetrySchedule({
+  delivery,
+  outcome,
+}: {
+  delivery: DeliveryDetail;
+  outcome: DeliveryOutcome;
+}) {
+  const remaining = attemptsRemaining(outcome);
   const nextAt = !delivery.terminal ? delivery.next_attempt_at : null;
 
   return (
     <dl className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
       <Meta
         label="Attempts"
-        value={attemptProgressLabel(delivery)}
+        value={attemptProgressLabel(outcome)}
         hint={
           delivery.terminal
             ? 'The chain has stopped.'
@@ -370,8 +382,8 @@ function RetrySchedule({ delivery }: { delivery: DeliveryDetail }) {
       <Meta
         label="Last response"
         value={
-          delivery.last_status_code
-            ? `HTTP ${delivery.last_status_code}`
+          outcome.last_status_code
+            ? `HTTP ${outcome.last_status_code}`
             : delivery.last_error
               ? 'No response'
               : '—'
@@ -440,7 +452,13 @@ function SiblingDeliveries({
   orgId: string;
   projectId: string;
 }) {
-  const siblings = useEventDeliveries(delivery.event_id);
+  const siblings = useEventDeliveries(projectId, delivery.event_id);
+  // A delivery row has no endpoint NAME. It is joined from the endpoint list,
+  // and a sibling whose endpoint is off the first page falls back to its id.
+  const endpoints = useEndpoints(projectId);
+  const endpointNames = new Map(
+    (endpoints.data?.rows ?? []).map((endpoint) => [endpoint.id, endpoint.name]),
+  );
 
   return (
     <div className="flex flex-col gap-3">
@@ -458,12 +476,12 @@ function SiblingDeliveries({
 
       <Async
         query={siblings}
-        isEmpty={(rows) => rows.length === 0}
+        isEmpty={(page) => page.rows.length === 0}
         empty={<EmptyState title="No sibling deliveries" />}
       >
-        {(rows) => (
+        {(page) => (
           <ul className="flex flex-col gap-1.5">
-            {rows.map((row) => {
+            {page.rows.map((row) => {
               const isThis = row.id === delivery.id;
               return (
                 <li key={row.id}>
@@ -477,7 +495,9 @@ function SiblingDeliveries({
                         : 'border-line bg-panel hover:border-line-strong',
                     )}
                   >
-                    <span className="text-xs font-medium text-ink">{row.endpoint_name}</span>
+                    <span className="text-xs font-medium text-ink">
+                      {endpointNames.get(row.endpoint_id) ?? truncateId(row.endpoint_id)}
+                    </span>
                     <DeliveryStatusBadge status={row.status} />
                     <span className="text-2xs text-ink-subtle">
                       {row.attempt_count}/{row.max_attempts} attempts
@@ -505,7 +525,8 @@ function SiblingDeliveries({
 
 function AttemptCard({ attempt, total }: { attempt: DeliveryAttempt; total: number }) {
   const outcome = attemptOutcome(attempt);
-  const kind = classifyFailure(attempt.status_code, attempt.error);
+  // `http_status` / `error_message`, not `status_code` / `error`.
+  const kind = classifyFailure(attempt.http_status, attempt.error_message);
 
   return (
     <Panel
@@ -522,27 +543,33 @@ function AttemptCard({ attempt, total }: { attempt: DeliveryAttempt; total: numb
             the KIND here instead and let the body carry the verbatim string.
           */}
           <Badge tone={outcome.tone} dot>
-            {attempt.status_code === null ? failureKindLabel(kind) : outcome.label}
+            {attempt.http_status === null ? failureKindLabel(kind) : outcome.label}
           </Badge>
           {kind === 'http_permanent' && <Badge tone="danger">not retried</Badge>}
         </span>
       }
       actions={
         <span className="flex items-center gap-3 text-2xs text-ink-subtle">
-          <span className="tabular">{formatDuration(attempt.duration_ms)}</span>
-          <span title={formatTimestamp(attempt.attempted_at)}>
-            {formatRelativeTime(attempt.attempted_at)}
+          <span className="tabular">
+            {/* Null while the attempt is still in flight — there is no duration yet. */}
+            {attempt.duration_ms === null ? 'in flight' : formatDuration(attempt.duration_ms)}
+          </span>
+          <span title={formatTimestamp(attempt.started_at)}>
+            {formatRelativeTime(attempt.started_at)}
           </span>
         </span>
       }
     >
       <div className="flex flex-col gap-2 p-3">
-        {attempt.error && (
+        {attempt.error_message && (
           <p className="overflow-x-auto rounded border border-danger/25 bg-danger-soft px-2.5 py-1.5 font-mono text-2xs text-danger">
-            {attempt.error}
+            {attempt.error_code && (
+              <span className="mr-1.5 font-semibold opacity-80">{attempt.error_code}</span>
+            )}
+            {attempt.error_message}
           </p>
         )}
-        {attempt.status_code === null && (
+        {attempt.http_status === null && (
           <p className="text-2xs leading-relaxed text-ink-subtle">
             No HTTP response was received, so there is no status code and no response body — the
             request failed before the endpoint could answer.
@@ -559,11 +586,137 @@ function AttemptCard({ attempt, total }: { attempt: DeliveryAttempt; total: numb
             maxHeight="12rem"
           />
         )}
-        {attempt.status_code !== null && !attempt.response_body && (
-          <p className="text-xs text-ink-subtle">No response body was returned.</p>
+        {/*
+          A body can be absent for two different reasons and the page must not
+          collapse them: nothing was returned, or the bytes were offloaded and
+          the row carries only a location. `response_size` is the count on the
+          wire, so a large body that is not inline still reports its size.
+        */}
+        {attempt.http_status !== null && !attempt.response_body && (
+          <p className="text-xs text-ink-subtle">
+            {attempt.response_body_location
+              ? `The response body was not returned inline. ${
+                  attempt.response_size === null
+                    ? 'It is held in object storage.'
+                    : `${attempt.response_size} bytes are held in object storage.`
+                }`
+              : 'No response body was returned.'}
+          </p>
         )}
       </div>
     </Panel>
+  );
+}
+
+/**
+ * The attempt history, embedded-first.
+ *
+ * `attempts_truncated` is read rather than assumed away. When it is true the
+ * paged route supplies the rest and the panel says the list was truncated
+ * before the extra page lands, so nobody reads a partial history as a whole one
+ * in the seconds between.
+ */
+function AttemptHistory({
+  embedded,
+  paged,
+  truncated,
+  total,
+}: {
+  embedded: DeliveryAttempt[];
+  paged?: DeliveryAttempt[];
+  truncated: boolean;
+  total: number;
+}) {
+  const rows = paged ?? embedded;
+
+  if (rows.length === 0) {
+    return (
+      <EmptyState
+        title="No attempts yet"
+        description="This delivery is queued and the first request has not been made. Attempts appear here as soon as a worker picks it up."
+      />
+    );
+  }
+
+  return (
+    <div className="flex flex-col gap-2">
+      {truncated && paged === undefined && (
+        <p className="rounded-md border border-warn/40 bg-warn-soft px-3 py-1.5 text-2xs text-warn">
+          This delivery has more attempts than the detail response carries. Loading the full
+          history — what is below is not all of it.
+        </p>
+      )}
+      <ol className="flex flex-col gap-2">
+        {/* Newest first: in an incident you want the last thing that happened. */}
+        {[...rows]
+          .sort((a, b) => b.attempt_number - a.attempt_number)
+          .map((attempt) => (
+            <li key={attempt.id}>
+              <AttemptCard attempt={attempt} total={total} />
+            </li>
+          ))}
+      </ol>
+    </div>
+  );
+}
+
+/**
+ * The request, as far as the API can describe it — and an honest statement of
+ * where it cannot.
+ *
+ * `DeliveryDetailDto` carries NEITHER the request headers NOR the payload. The
+ * page used to render `delivery.request_headers` and `delivery.payload`, and
+ * both were the mock's invention. What does exist is per-ATTEMPT
+ * `request_headers` (the signature changes every attempt, so this is the more
+ * accurate place for them anyway) and the payload on the EVENT, one link away.
+ */
+function RequestTab({
+  delivery,
+  orgId,
+  projectId,
+}: {
+  delivery: DeliveryDetail;
+  orgId: string;
+  projectId: string;
+}) {
+  const latest = [...delivery.attempts].sort(
+    (a, b) => b.attempt_number - a.attempt_number,
+  )[0];
+
+  return (
+    <div className="flex flex-col gap-3">
+      {latest?.request_headers ? (
+        <>
+          <p className="text-2xs leading-relaxed text-ink-subtle">
+            Headers sent on attempt #{latest.attempt_number}. The signature is recomputed per
+            attempt, so earlier attempts carry different <code className="font-mono">
+              Webhook-Signature
+            </code>{' '}
+            and <code className="font-mono">Webhook-Timestamp</code> values — open an attempt above
+            to see its own.
+          </p>
+          <CodeBlock value={latest.request_headers} label="request headers" />
+        </>
+      ) : (
+        <p className="rounded-md border border-line bg-raised px-3 py-2 text-xs text-ink-muted">
+          No attempt has recorded its request headers yet.
+        </p>
+      )}
+
+      <div className="rounded-md border border-line bg-raised px-3 py-2.5">
+        <h3 className="text-xs font-semibold text-ink">The body is on the event</h3>
+        <p className="mt-1 text-xs leading-relaxed text-ink-muted">
+          A delivery does not carry the payload — it is published once on the event and every
+          delivery for that event sends the same bytes, so it is stored once.{' '}
+          <Link
+            to={`/orgs/${orgId}/projects/${projectId}/events/${delivery.event.id}`}
+            className="font-medium text-accent hover:underline"
+          >
+            Open {delivery.event.event_type} →
+          </Link>
+        </p>
+      </div>
+    </div>
   );
 }
 

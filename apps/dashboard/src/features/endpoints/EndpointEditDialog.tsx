@@ -1,6 +1,6 @@
 import { useEffect, useRef } from 'react';
-import { useForm } from 'react-hook-form';
-import { Button, Dialog, Field, Input, WriteErrorNotice } from '../../components';
+import { useForm, type UseFormRegister } from 'react-hook-form';
+import { Button, Dialog, Field, Input, Select, WriteErrorNotice } from '../../components';
 import { classifyWriteError } from '../../lib/api-errors';
 import { cn } from '../../lib/cn';
 import {
@@ -11,6 +11,7 @@ import {
   type Endpoint,
   type UpdateEndpointBody,
 } from '../../types/api';
+import { describeRetryPolicy, useRetryPolicies } from '../retry-policies/api';
 import { useUpdateEndpoint } from './api';
 import { formatCustomHeaders, parseCustomHeaders } from './custom-headers';
 
@@ -90,8 +91,15 @@ function changedFields(before: FormValues, after: FormValues): UpdateEndpointBod
   }
   if (after.custom_headers !== before.custom_headers) {
     const parsed = parseCustomHeaders(after.custom_headers);
-    // Guarded by the field validator before submit; this is the type narrowing.
-    if (parsed.ok) body.custom_headers = parsed.headers;
+    /*
+     * `{}`, NOT `null`, to clear them.
+     *
+     * `rate_limit` and `retry_policy_id` are declared nullable in the schema
+     * and `custom_headers` is not, so null is not a value this property
+     * accepts. An empty map is stored as NULL by the service, which is what
+     * gives "unset" a single representation on the wire.
+     */
+    if (parsed.ok) body.custom_headers = parsed.headers ?? {};
   }
 
   return Object.keys(body).length === 0 ? null : body;
@@ -120,6 +128,7 @@ export function EndpointEditDialog({
   onClose: () => void;
 }) {
   const update = useUpdateEndpoint(projectId, endpoint.id);
+  const policies = useRetryPolicies(projectId);
   const initial = toFormValues(endpoint);
   const {
     register,
@@ -407,24 +416,13 @@ export function EndpointEditDialog({
           )}
         </Field>
 
-        <Field
-          label="Retry policy ID"
+        <RetryPolicyField
+          projectId={projectId}
+          policies={policies}
+          currentId={endpoint.retry_policy_id}
           error={errors.retry_policy_id?.message}
-          hint="A retry policy in THIS project. Leave blank to use the project default. There is no picker yet — an id from another project answers 404, because the tenant scope resolves it."
-        >
-          {({ id, describedBy, invalid }) => (
-            <Input
-              id={id}
-              mono
-              placeholder="none"
-              aria-describedby={describedBy}
-              aria-invalid={invalid}
-              {...register('retry_policy_id', {
-                maxLength: { value: 64, message: 'At most 64 characters.' },
-              })}
-            />
-          )}
-        </Field>
+          register={register}
+        />
 
         <p className="text-2xs leading-relaxed text-ink-subtle">
           Pausing and resuming are not on this form. They have their own routes because each has a
@@ -433,5 +431,131 @@ export function EndpointEditDialog({
         </p>
       </form>
     </Dialog>
+  );
+}
+
+/**
+ * The retry policy, as a picker over the policies THIS PROJECT owns.
+ *
+ * It was a free-text id box, and the obvious thing to type into it — an id
+ * copied from the project that already retries the way you want — answers 404,
+ * because `RetryPoliciesController` resolves the id through the tenant scope.
+ * The operator reads that as "the platform lost my policy" rather than "that id
+ * is not addressable from here", which is the worst kind of error message:
+ * accurate and useless.
+ *
+ * Three states, and the empty one is the one worth getting right.
+ *
+ *   - POLICIES EXIST: a select, with the strategy and attempt count spelled out
+ *     on each option, because "8 attempts, exponential ×2 from 1s" is the thing
+ *     being chosen and `rp_01JQ…` is not.
+ *   - NONE EXIST: NOT an empty dropdown. An empty `<select>` with a "None"
+ *     option is indistinguishable from one that failed to load, and it offers
+ *     no way forward. It says so and links to where policies are made.
+ *   - THE CURRENT ID IS NOT IN THE LIST: kept as an explicit option rather than
+ *     silently dropped, because a select that quietly does not contain the
+ *     saved value will send `null` on the next save and unset a policy nobody
+ *     touched. The list is one page; a project past the page size is exactly
+ *     when this happens.
+ */
+function RetryPolicyField({
+  projectId,
+  policies,
+  currentId,
+  error,
+  register,
+}: {
+  projectId: string;
+  policies: ReturnType<typeof useRetryPolicies>;
+  currentId: string | null;
+  error?: string;
+  register: UseFormRegister<FormValues>;
+}) {
+  const rows = policies.data?.rows ?? [];
+
+  if (policies.isPending) {
+    return (
+      <Field label="Retry policy" hint="Loading this project’s retry policies…">
+        {({ id }) => (
+          <Select id={id} disabled options={[]} placeholder="Loading…" aria-busy="true" />
+        )}
+      </Field>
+    );
+  }
+
+  if (policies.isError) {
+    return (
+      <Field label="Retry policy" error="This project’s retry policies could not be loaded.">
+        {({ id, describedBy, invalid }) => (
+          <Input
+            id={id}
+            mono
+            placeholder="none"
+            aria-describedby={describedBy}
+            aria-invalid={invalid}
+            {...register('retry_policy_id', {
+              maxLength: { value: 64, message: 'At most 64 characters.' },
+            })}
+          />
+        )}
+      </Field>
+    );
+  }
+
+  if (rows.length === 0) {
+    return (
+      <Field
+        label="Retry policy"
+        hint={
+          <>
+            This project has no retry policies, so there is nothing to choose here — deliveries use
+            the platform default. There is no screen for creating one yet either; the route is{' '}
+            <code className="font-mono">POST /v1/projects/{projectId}/retry-policies</code>. Saying
+            so is the point: an empty dropdown is indistinguishable from one that failed to load,
+            and neither tells you what to do next.
+          </>
+        }
+      >
+        {({ id, describedBy }) => (
+          <Select
+            id={id}
+            disabled
+            aria-describedby={describedBy}
+            options={[]}
+            placeholder="No policies in this project"
+          />
+        )}
+      </Field>
+    );
+  }
+
+  const missing = currentId !== null && !rows.some((policy) => policy.id === currentId);
+
+  return (
+    <Field
+      label="Retry policy"
+      error={error}
+      hint="Only policies belonging to this project can be chosen — an id from another project is resolved through the tenant scope and answers 404."
+    >
+      {({ id, describedBy, invalid }) => (
+        <Select
+          id={id}
+          aria-describedby={describedBy}
+          aria-invalid={invalid}
+          placeholder="Project default"
+          options={[
+            ...rows.map((policy) => ({
+              value: policy.id,
+              label: `${policy.name}${policy.is_default ? ' (default)' : ''} — ${describeRetryPolicy(policy)}`,
+            })),
+            // The saved value, kept visible so saving cannot silently unset it.
+            ...(missing
+              ? [{ value: currentId, label: `${currentId} — not on this page` }]
+              : []),
+          ]}
+          {...register('retry_policy_id')}
+        />
+      )}
+    </Field>
   );
 }

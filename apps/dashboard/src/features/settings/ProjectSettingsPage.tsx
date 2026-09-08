@@ -95,11 +95,15 @@ export function ProjectSettingsPage() {
         )}
       </Async>
 
-      <Panel title="Not built yet" description="Reserved, with no route behind them.">
+      <Panel title="Not built yet" description="No screen here yet, whether or not a route exists.">
         <ul className="flex flex-col gap-1.5 text-xs text-ink-muted">
           {[
-            'Retry policy — max attempts, backoff strategy, jitter',
-            'Project-wide rate limit and per-endpoint overrides',
+            // The route EXISTS — projects/:projectId/retry-policies — and the
+            // endpoint edit form already reads it to offer a picker. What is
+            // missing is the create/edit screen, which is why an endpoint can
+            // choose a policy but nobody can make one from the dashboard.
+            'Retry policy — max attempts, backoff strategy, jitter (route exists; no editor)',
+            'Project-wide rate limit and per-endpoint overrides (route exists; no editor)',
             'Payload retention window',
             'Transfer to another organization, and delete',
           ].map((item) => (

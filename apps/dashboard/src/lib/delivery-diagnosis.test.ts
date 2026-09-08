@@ -6,17 +6,23 @@ import {
   explainFailure,
   failureKindLabel,
 } from './delivery-status';
-import type { Delivery, DeliveryStatus } from '../types/api';
+import type { DeliveryOutcome } from './delivery-status';
+import type { DeliveryStatus } from '../types/api';
 
 /**
  * The delivery detail page is the product's crown jewel, and these are the
  * cases the fixtures were built to break: a failure with NO status code, and a
  * 4xx that will never be retried no matter how many attempts remain.
  */
-type Diagnosable = Pick<
-  Delivery,
-  'status' | 'attempt_count' | 'max_attempts' | 'last_status_code' | 'last_error' | 'terminal'
->;
+/**
+ * `DeliveryOutcome`, not a `Pick<Delivery, …>`.
+ *
+ * `last_status_code` IS NOT ON `DeliveryDto` — the code lives only on an
+ * attempt, as `http_status` — so the diagnosis takes the row plus whatever the
+ * caller could learn from the attempts. `deliveryOutcome()` does that join;
+ * these cases test the reduction it feeds.
+ */
+type Diagnosable = DeliveryOutcome;
 
 const delivery = (over: Partial<Diagnosable>): Diagnosable => ({
   status: 'retrying',

@@ -1,57 +1,72 @@
 import { beforeEach, describe, expect, it } from 'vitest';
-import type { CursorPage, Delivery, EventDetail, Session, WebhookEvent } from '../../types/api';
+import type { Delivery, EventDetail, OffsetPage, Session, WebhookEvent } from '../../types/api';
 import * as db from './data';
 import { MockHttpError, mockRequest, resetMockState } from './server';
 
 /**
  * The mock is a stand-in for the control API, so it is worth holding to the
- * contract: the documented paths resolve, pagination is shaped like the real
- * `Page<T>`, and failures carry the same error envelope with a `request_id`.
- * These also catch the fixture generator failing at module load.
+ * contract: the published paths resolve, pagination is the one offset envelope
+ * the schema declares, and failures carry the same error envelope with a
+ * `request_id`. These also catch the fixture generator failing at module load.
  */
 describe('mock control API', () => {
   beforeEach(() => resetMockState());
 
-  it('serves a session with organizations', async () => {
+  /**
+   * `SessionResponseDto` is `{ user }` and NOTHING ELSE. It does not carry an
+   * organization list, though the login redirect and the landing route both
+   * read `session.organizations[0]` until the generated types said otherwise.
+   */
+  it('serves a session that is the user and nothing else', async () => {
     const session = await mockRequest<Session>('GET', '/v1/auth/session');
     expect(session.user.email).toContain('@');
-    expect(session.organizations.length).toBeGreaterThan(0);
+    expect(session.user.email_verified).toBe(true);
+    expect(session).not.toHaveProperty('organizations');
   });
 
-  it('paginates events with an opaque cursor', async () => {
-    const first = await mockRequest<CursorPage<WebhookEvent>>(
+  it('paginates events by OFFSET — `next_cursor` does not exist anywhere', async () => {
+    const first = await mockRequest<OffsetPage<WebhookEvent>>(
       'GET',
       `/v1/projects/${db.projects[0].id}/events?limit=10`,
     );
     expect(first.data).toHaveLength(10);
     expect(first.has_more).toBe(true);
-    expect(first.next_cursor).not.toBeNull();
+    expect(first.next_offset).toBe(10);
+    expect(first).not.toHaveProperty('next_cursor');
 
-    const second = await mockRequest<CursorPage<WebhookEvent>>(
+    const second = await mockRequest<OffsetPage<WebhookEvent>>(
       'GET',
-      `/v1/projects/${db.projects[0].id}/events?limit=10&cursor=${first.next_cursor}`,
+      `/v1/projects/${db.projects[0].id}/events?limit=10&offset=${first.next_offset}`,
     );
     expect(second.data[0]?.id).not.toBe(first.data[0]?.id);
   });
 
-  it('omits the payload from list rows and includes it on the detail route', async () => {
-    const page = await mockRequest<CursorPage<WebhookEvent>>(
+  it('omits the payload from list rows and returns it as an ENVELOPE on the detail route', async () => {
+    const page = await mockRequest<OffsetPage<WebhookEvent>>(
       'GET',
       `/v1/projects/${db.projects[0].id}/events?limit=1`,
     );
     expect(page.data[0]).not.toHaveProperty('payload');
 
-    const detail = await mockRequest<EventDetail>('GET', `/v1/events/${page.data[0].id}`);
-    expect(detail.payload).toBeDefined();
+    // NESTED under the project — `/v1/events/:id` does not exist.
+    const detail = await mockRequest<EventDetail>(
+      'GET',
+      `/v1/projects/${db.projects[0].id}/events/${page.data[0].id}`,
+    );
+    // `EventPayloadDto`: where the bytes came from, not the bytes alone. An
+    // offloaded payload must not render as an empty code block.
+    expect(detail.payload.source).toBeDefined();
+    expect(detail.payload.sha256).toBeTruthy();
+    expect(db.events.some((event) => event.payload.source === 'object_storage')).toBe(true);
   });
 
   it('materialises fan-out: one event, one delivery per matching subscription', async () => {
     const event = db.events.find((candidate) => candidate.event_type === 'payment.settled');
     expect(event).toBeDefined();
 
-    const { data } = await mockRequest<{ data: Delivery[] }>(
+    const { data } = await mockRequest<OffsetPage<Delivery>>(
       'GET',
-      `/v1/events/${event!.id}/deliveries`,
+      `/v1/projects/${db.projects[0].id}/events/${event!.id}/deliveries`,
     );
     expect(data.length).toBeGreaterThan(1);
     // Each delivery is an independent chain against a distinct endpoint.
@@ -70,18 +85,18 @@ describe('mock control API', () => {
     expect(
       Object.values(db.attempts)
         .flat()
-        .some((attempt) => attempt.status_code === null && attempt.error !== null),
+        .some((attempt) => attempt.http_status === null && attempt.error_message !== null),
     ).toBe(true);
 
     // And a payload large enough to exercise the scrollable viewer.
-    expect(Math.max(...db.events.map((event) => event.payload_size_bytes))).toBeGreaterThan(50_000);
+    expect(Math.max(...db.events.map((event) => event.payload_size))).toBeGreaterThan(50_000);
   });
 
   it('returns the documented error envelope with a request_id', async () => {
-    await expect(mockRequest('GET', '/v1/events/evt_missing')).rejects.toBeInstanceOf(MockHttpError);
+    await expect(mockRequest('GET', `/v1/projects/${db.projects[0].id}/events/evt_missing`)).rejects.toBeInstanceOf(MockHttpError);
 
     try {
-      await mockRequest('GET', '/v1/events/evt_missing');
+      await mockRequest('GET', `/v1/projects/${db.projects[0].id}/events/evt_missing`);
     } catch (error) {
       const body = (error as MockHttpError).body;
       expect(body.error.code).toBe('not_found');

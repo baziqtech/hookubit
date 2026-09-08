@@ -1,5 +1,14 @@
 import { useParams } from 'react-router-dom';
-import { Async, Badge, EmptyState, PageHeader, Panel, Stat } from '../../components';
+import {
+  Async,
+  Badge,
+  EmptyState,
+  NoBackendRoute,
+  PageHeader,
+  Panel,
+  Stat,
+} from '../../components';
+import { usingMockApi } from '../../lib/api';
 import { formatCount, formatDuration, formatPercent, formatTimestamp } from '../../lib/format';
 import type { AnalyticsPoint, ProjectAnalytics } from '../../types/api';
 import { useAnalytics } from '../projects/api';
@@ -7,11 +16,12 @@ import { useAnalytics } from '../projects/api';
 /**
  * Delivery volume, outcome mix and latency over the last 24 hours.
  *
- * This was a "not built yet" stub, but `GET /v1/projects/:id/analytics` is
- * served by the mock transport with real shaped data, so the honest thing is to
- * build the screen against it rather than leave a dead route. It is still
- * SPECULATIVE — no analytics module exists in the control API — which is why
- * the page says so rather than letting someone plan around it.
+ * `GET /v1/projects/:id/analytics` IS NOT IN THE OPENAPI DOCUMENT. Not "a
+ * module whose shape drifted" — there is no analytics module at all, and none
+ * of the 42 published paths would answer this. Under the real transport the
+ * page therefore refuses to run the query and says so; under the mock it
+ * renders, because the screen itself is finished and worth keeping ready for
+ * the route that lands.
  *
  * Charted with inline SVG and no charting dependency. The data is 24 points
  * with three series; a library would be more bundle than the whole feature, and
@@ -21,6 +31,24 @@ import { useAnalytics } from '../projects/api';
 export function AnalyticsPage() {
   const { projectId = '' } = useParams();
   const analytics = useAnalytics(projectId);
+
+  if (!usingMockApi) {
+    return (
+      <div className="flex flex-col gap-4">
+        <PageHeader
+          title="Analytics"
+          description="Delivery volume, outcome mix and latency over the last 24 hours."
+        />
+        <Panel>
+          <NoBackendRoute
+            title="Analytics"
+            path="GET /v1/projects/:projectId/analytics"
+            purpose="It would need bucketed delivery counts by outcome and a p95 latency per bucket — derivable from delivery_attempts, but not something the dashboard can compute from a paged list."
+          />
+        </Panel>
+      </div>
+    );
+  }
 
   return (
     <div className="flex flex-col gap-4">

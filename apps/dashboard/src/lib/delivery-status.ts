@@ -1,6 +1,58 @@
 import type { Delivery, DeliveryAttempt, DeliveryStatus, EventStatus } from '../types/api';
 
 /**
+ * What the "what happened?" functions below need, as ONE explicit input.
+ *
+ * `last_status_code` IS NOT ON `DeliveryDto`. The hand-written type claimed it
+ * and every function here read it; the real row carries `last_error` only, and
+ * the status code exists solely on an attempt, as `http_status`. So the code is
+ * now supplied by the caller — from the attempt history where there is one, and
+ * as `null` where there is not — instead of being read off a field that does
+ * not exist.
+ *
+ * That `null` is not a shrug. `classifyFailure` already treats a null code with
+ * an error as a TRANSPORT failure, which is the honest reading of "we know it
+ * failed and we have no HTTP response to show for it", and it is exactly the
+ * state a list row is in: the deliveries list has no attempts, so it cannot say
+ * more than the status and the error text. See HANDOFF.md — a `last_status_code`
+ * on `DeliveryDto` would let the list say "HTTP 500" again.
+ */
+export interface DeliveryOutcome {
+  status: DeliveryStatus;
+  attempt_count: number;
+  max_attempts: number;
+  last_error: string | null;
+  /** The final attempt's `http_status`, or null when no attempt is in hand. */
+  last_status_code: number | null;
+  terminal?: boolean;
+}
+
+/**
+ * Build one from a delivery row plus whatever attempts the caller holds.
+ *
+ * The code comes from the LAST attempt by number, not by array position: the
+ * attempts route pages, and nothing promises the order the caller assembled
+ * them in.
+ */
+export function deliveryOutcome(
+  delivery: Pick<Delivery, 'status' | 'attempt_count' | 'max_attempts' | 'last_error' | 'terminal'>,
+  attempts: readonly DeliveryAttempt[] = [],
+): DeliveryOutcome {
+  const last = attempts.reduce<DeliveryAttempt | null>(
+    (best, attempt) => (best === null || attempt.attempt_number > best.attempt_number ? attempt : best),
+    null,
+  );
+  return {
+    status: delivery.status,
+    attempt_count: delivery.attempt_count,
+    max_attempts: delivery.max_attempts,
+    last_error: delivery.last_error,
+    last_status_code: last?.http_status ?? null,
+    terminal: delivery.terminal,
+  };
+}
+
+/**
  * Delivery status derivation.
  *
  * The nine delivery states (ARCHITECTURE.md 19) are what the data plane
@@ -67,7 +119,7 @@ export function canReplay(delivery: Pick<Delivery, 'status'>): boolean {
 
 /** Attempts remaining in the chain; never negative, even on bad data. */
 export function attemptsRemaining(
-  delivery: Pick<Delivery, 'status' | 'attempt_count' | 'max_attempts'>,
+  delivery: Pick<DeliveryOutcome, 'status' | 'attempt_count' | 'max_attempts'>,
 ): number {
   if (isTerminal(delivery.status)) return 0;
   return Math.max(0, delivery.max_attempts - delivery.attempt_count);
@@ -75,7 +127,7 @@ export function attemptsRemaining(
 
 /** "Attempt 3 of 8" — reads the same everywhere it appears. */
 export function attemptProgressLabel(
-  delivery: Pick<Delivery, 'attempt_count' | 'max_attempts'>,
+  delivery: Pick<DeliveryOutcome, 'attempt_count' | 'max_attempts'>,
 ): string {
   return `Attempt ${delivery.attempt_count} of ${delivery.max_attempts}`;
 }
@@ -84,12 +136,7 @@ export function attemptProgressLabel(
  * The one-line answer to "what happened to this delivery?", which is the
  * question the operator surface exists to answer (CLAUDE.md, "The hard part").
  */
-export function describeDelivery(
-  delivery: Pick<
-    Delivery,
-    'status' | 'attempt_count' | 'max_attempts' | 'last_status_code' | 'last_error'
-  >,
-): string {
+export function describeDelivery(delivery: DeliveryOutcome): string {
   const { status, last_status_code: code, last_error: error } = delivery;
 
   switch (status) {
@@ -137,19 +184,25 @@ export function isRetryableStatusCode(code: number | null): boolean {
   return code === 408 || code === 429;
 }
 
+/**
+ * `http_status`, `error_message` — NOT `status_code` and `error`, which is what
+ * this read until the generated types said otherwise. An attempt also has its
+ * own `status` (`success | failure | timeout | error`), which is the data plane's
+ * own verdict and is what distinguishes a timeout from a refused connection.
+ */
 export function attemptOutcome(attempt: DeliveryAttempt): {
   label: string;
   tone: StatusTone;
 } {
-  if (attempt.status_code === null) {
-    return { label: attempt.error ?? 'No response', tone: 'danger' };
+  if (attempt.http_status === null) {
+    return { label: attempt.error_message ?? attempt.status, tone: 'danger' };
   }
-  if (attempt.status_code >= 200 && attempt.status_code < 300) {
-    return { label: `${attempt.status_code}`, tone: 'ok' };
+  if (attempt.http_status >= 200 && attempt.http_status < 300) {
+    return { label: `${attempt.http_status}`, tone: 'ok' };
   }
   return {
-    label: `${attempt.status_code}`,
-    tone: isRetryableStatusCode(attempt.status_code) ? 'warn' : 'danger',
+    label: `${attempt.http_status}`,
+    tone: isRetryableStatusCode(attempt.http_status) ? 'warn' : 'danger',
   };
 }
 
@@ -282,12 +335,7 @@ export interface DeliveryDiagnosis {
  * once, here, rather than assembled out of conditionals in JSX where the
  * exhausted case and the permanent-4xx case would inevitably drift apart.
  */
-export function diagnoseDelivery(
-  delivery: Pick<
-    Delivery,
-    'status' | 'attempt_count' | 'max_attempts' | 'last_status_code' | 'last_error' | 'terminal'
-  >,
-): DeliveryDiagnosis {
+export function diagnoseDelivery(delivery: DeliveryOutcome): DeliveryDiagnosis {
   const kind = classifyFailure(delivery.last_status_code, delivery.last_error);
   const meta = deliveryStatusMeta(delivery.status);
   const explanation = explainFailure(kind, delivery.last_status_code);

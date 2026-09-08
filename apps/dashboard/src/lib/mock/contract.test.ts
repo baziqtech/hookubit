@@ -1,16 +1,19 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 import type {
   ApiKey,
-  CountedOffsetPage,
+  AuditLogEntry,
   CreatedApiKey,
   CreatedEndpoint,
+  Delivery,
+  DeliveryDetail,
   Endpoint,
   EndpointSecret,
   Member,
   OffsetPage,
   Organization,
   Project,
-  TotalPage,
+  RetryPolicy,
+  Subscription,
 } from '../../types/api';
 import * as db from './data';
 import { MockHttpError, mockRequest, resetMockState } from './server';
@@ -20,9 +23,11 @@ import { MockHttpError, mockRequest, resetMockState } from './server';
  * document, so these assertions are about SHAPE, not about behaviour the mock
  * invented. Each one mirrors a DTO class in apps/control-api.
  *
- * The three envelopes are deliberately kept apart. Collapsing them into one
- * optional-everything type is exactly how a missing `has_more` becomes
- * `undefined` and a truncated list renders as a complete one.
+ * THERE IS NOW ONE ENVELOPE, not three. `{ data, has_more, next_offset }` on
+ * every list route. The `count` on projects/API keys and the
+ * `{ total, limit, offset }` on organizations/members are both gone from the
+ * published schema, so they are gone from the mock — a mock that serves a field
+ * the API does not is how a screen ships broken.
  */
 const ORG = 'org_01JQSHAQ';
 const PROJECT = 'proj_01JQPAYPROD';
@@ -33,24 +38,26 @@ const PROJECT = 'proj_01JQPAYPROD';
 beforeEach(() => resetMockState());
 
 describe('list envelopes', () => {
-  it('projects return { data, count, has_more, next_offset } — ProjectListDto', async () => {
-    const page = await mockRequest<CountedOffsetPage<Project>>(
+  it('projects return { data, has_more, next_offset } and NO count — ProjectListDto', async () => {
+    const page = await mockRequest<OffsetPage<Project>>(
       'GET',
       `/v1/organizations/${ORG}/projects?limit=2`,
     );
 
     expect(Array.isArray(page.data)).toBe(true);
-    expect(page.count).toBe(page.data.length);
+    // `count` was removed from the schema. Serving it here would keep alive a
+    // field the dashboard could start reading again.
+    expect(page).not.toHaveProperty('count');
     expect(page).toHaveProperty('has_more');
     expect(page).toHaveProperty('next_offset');
   });
 
-  it('api keys return the counted envelope too — ApiKeyListDto', async () => {
-    const page = await mockRequest<CountedOffsetPage<ApiKey>>(
+  it('api keys return the same envelope — ApiKeyListDto', async () => {
+    const page = await mockRequest<OffsetPage<ApiKey>>(
       'GET',
       `/v1/projects/${PROJECT}/api-keys`,
     );
-    expect(page.count).toBe(page.data.length);
+    expect(page).not.toHaveProperty('count');
     expect(page.has_more).toBe(false);
     // `key_prefix`, never `masked_key`, and never anything key-shaped.
     expect(page.data[0]).toHaveProperty('key_prefix');
@@ -70,20 +77,22 @@ describe('list envelopes', () => {
     expect(page).toHaveProperty('has_more');
   });
 
-  it('organizations and members return { data, total, limit, offset } with NO has_more', async () => {
-    const orgs = await mockRequest<TotalPage<Organization>>('GET', '/v1/organizations');
-    expect(orgs).not.toHaveProperty('has_more');
-    expect(orgs).not.toHaveProperty('next_offset');
-    expect(orgs.total).toBe(orgs.data.length);
-    expect(orgs.offset).toBe(0);
+  it('organizations and members use the SAME envelope — no total, no limit, no offset', async () => {
+    const orgs = await mockRequest<OffsetPage<Organization>>('GET', '/v1/organizations');
+    expect(orgs).toHaveProperty('has_more');
+    expect(orgs).toHaveProperty('next_offset');
+    // These three were the old envelope and are not in the schema any more.
+    expect(orgs).not.toHaveProperty('total');
+    expect(orgs).not.toHaveProperty('limit');
+    expect(orgs).not.toHaveProperty('offset');
 
-    const members = await mockRequest<TotalPage<Member>>(
+    const members = await mockRequest<OffsetPage<Member>>(
       'GET',
       `/v1/organizations/${ORG}/members?limit=2`,
     );
     expect(members.data).toHaveLength(2);
-    expect(members.total).toBeGreaterThan(2);
-    expect(members.limit).toBe(2);
+    expect(members.has_more).toBe(true);
+    expect(members).not.toHaveProperty('total');
     // Flat, nullable identity — MemberDto has no nested `user` and no `status`.
     expect(members.data[0]).toHaveProperty('user_id');
     expect(members.data[0]).not.toHaveProperty('user');
@@ -186,7 +195,7 @@ describe('one-time credentials', () => {
     );
     expect(created.key).toMatch(/^wk_live_/);
 
-    const page = await mockRequest<CountedOffsetPage<ApiKey>>(
+    const page = await mockRequest<OffsetPage<ApiKey>>(
       'GET',
       `/v1/projects/${PROJECT}/api-keys`,
     );
@@ -293,5 +302,127 @@ describe('write limits are reachable and distinguishable', () => {
       expect((error as MockHttpError).status).toBe(409);
       expect((error as MockHttpError).body.error.code).toBe('conflict');
     }
+  });
+});
+
+/**
+ * The modules that had no control-plane implementation when the mock was
+ * written, and now do. Every route below is NESTED and offset paged; the mock
+ * used to serve top-level `/v1/events/:id` and `/v1/deliveries/:id`, which
+ * simply do not exist and would have 404'd the day the transport flipped.
+ */
+describe('modules that were speculative and are now real', () => {
+  it('subscriptions page like every other list, and carry no endpoint_name', async () => {
+    const page = await mockRequest<OffsetPage<Subscription>>(
+      'GET',
+      `/v1/projects/${PROJECT}/subscriptions?limit=2`,
+    );
+    expect(page).toHaveProperty('has_more');
+    expect(page.data[0]).toHaveProperty('endpoint_id');
+    expect(page.data[0]).not.toHaveProperty('endpoint_name');
+    // `payload_filter`, never `filter`.
+    expect(page.data[0]).toHaveProperty('payload_filter');
+    expect(page.data[0]).not.toHaveProperty('filter');
+  });
+
+  it('retry policies are scoped to their project, which is why the id box became a picker', async () => {
+    const mine = await mockRequest<OffsetPage<RetryPolicy>>(
+      'GET',
+      `/v1/projects/${PROJECT}/retry-policies`,
+    );
+    expect(mine.data.length).toBeGreaterThan(0);
+    expect(mine.data.every((policy) => policy.project_id === PROJECT)).toBe(true);
+    expect(mine.data.filter((policy) => policy.is_default)).toHaveLength(1);
+
+    // Another project owns none of them, which is exactly why pasting an id
+    // from elsewhere used to 404 and why the empty state has to be honest.
+    const other = await mockRequest<OffsetPage<RetryPolicy>>(
+      'GET',
+      `/v1/projects/${db.projects[1].id}/retry-policies`,
+    );
+    expect(other.data).toHaveLength(0);
+  });
+
+  it('a delivery row carries IDs, never an event type or an endpoint name', async () => {
+    const page = await mockRequest<OffsetPage<Delivery>>(
+      'GET',
+      `/v1/projects/${PROJECT}/deliveries?limit=1`,
+    );
+    const row = page.data[0];
+    expect(row).toHaveProperty('endpoint_id');
+    expect(row).not.toHaveProperty('event_type');
+    expect(row).not.toHaveProperty('endpoint_name');
+    expect(row).not.toHaveProperty('endpoint_url');
+    // The status code lives on an ATTEMPT, as `http_status`.
+    expect(row).not.toHaveProperty('last_status_code');
+  });
+
+  it('refuses status and failing_now together, as the API does', async () => {
+    await expect(
+      mockRequest(
+        'GET',
+        `/v1/projects/${PROJECT}/deliveries?status=succeeded&failing_now=true`,
+      ),
+    ).rejects.toMatchObject({ status: 400 });
+  });
+
+  it('the delivery detail nests event and endpoint and embeds the attempts', async () => {
+    const exhausted = db.deliveries.find((delivery) => delivery.status === 'exhausted');
+    const detail = await mockRequest<DeliveryDetail>(
+      'GET',
+      `/v1/projects/${PROJECT}/deliveries/${exhausted!.id}`,
+    );
+
+    expect(detail.event.event_type).toBeTruthy();
+    expect(detail.endpoint.name).toBeTruthy();
+    expect(Array.isArray(detail.attempts)).toBe(true);
+    // An 8-attempt chain exceeds the embedded cap, so the flag must be true —
+    // a flag that is never true is a UI branch that never runs.
+    expect(detail.attempts_truncated).toBe(true);
+    // Neither of these is on a delivery: the payload is on the event and the
+    // request headers are per attempt.
+    expect(detail).not.toHaveProperty('payload');
+    expect(detail).not.toHaveProperty('request_headers');
+    expect(detail.attempts[0]).toHaveProperty('request_headers');
+  });
+
+  it('a replay creates a NEW delivery row that points back at the original', async () => {
+    const original = db.deliveries.find((delivery) => delivery.status === 'exhausted');
+    const replay = await mockRequest<Delivery>(
+      'POST',
+      `/v1/projects/${PROJECT}/deliveries/${original!.id}/replay`,
+      {},
+    );
+
+    expect(replay.id).not.toBe(original!.id);
+    expect(replay.is_replay).toBe(true);
+    expect(replay.replay_of_delivery_id).toBe(original!.id);
+  });
+
+  it('audit rows carry ids and a resource, never a nested actor or a target string', async () => {
+    const page = await mockRequest<OffsetPage<AuditLogEntry>>(
+      'GET',
+      `/v1/organizations/${ORG}/audit-logs`,
+    );
+    const row = page.data[0];
+    expect(row).not.toHaveProperty('actor');
+    expect(row).not.toHaveProperty('target');
+    expect(row).not.toHaveProperty('ip');
+    expect(row).toHaveProperty('resource_type');
+    expect(row).toHaveProperty('ip_address');
+
+    /*
+     * The reason an operator typed when pausing an endpoint has to be readable
+     * back. It is the only thing that explains the delivery gap afterwards, and
+     * until this page read the real route it could not be read at all.
+     */
+    const paused = page.data.find((entry) => entry.action === 'endpoint.disabled');
+    expect(paused?.metadata?.reason).toBe('warehouse migration');
+  });
+
+  it('a viewer is refused with 403, not with a broken page', async () => {
+    await expect(
+      mockRequest('GET', `/v1/organizations/${ORG}/audit-logs?as=viewer`),
+    ).rejects.toMatchObject({ status: 403 });
   });
 });

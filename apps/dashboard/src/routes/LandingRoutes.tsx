@@ -1,17 +1,24 @@
 import { Navigate, useParams } from 'react-router-dom';
 import { Async, Button, EmptyState } from '../components';
-import { useSession } from '../features/auth/api';
+import { useOrganizations } from '../features/organizations/api';
 import { useProjects } from '../features/projects/api';
 
-/** `/` and `/orgs` — send the operator to their first organization. */
+/**
+ * `/` and `/orgs` — send the operator to their first organization.
+ *
+ * The list comes from `GET /v1/organizations`. It used to be read off the
+ * session, which `SessionResponseDto` does not carry: the session is `{ user }`
+ * and nothing else, so `data.organizations.length` would have thrown on the
+ * first real response.
+ */
 export function RootRedirect() {
-  const session = useSession();
+  const organizations = useOrganizations();
 
   return (
-    <Async query={session}>
-      {(data) =>
-        data.organizations.length > 0 ? (
-          <Navigate to={`/orgs/${data.organizations[0].id}`} replace />
+    <Async query={organizations}>
+      {(page) =>
+        page.rows.length > 0 ? (
+          <Navigate to={`/orgs/${page.rows[0].id}`} replace />
         ) : (
           <EmptyState
             title="No organizations"

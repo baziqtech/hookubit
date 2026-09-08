@@ -1,10 +1,10 @@
 import { Link, useParams, useSearchParams } from 'react-router-dom';
 import {
   Async,
-  Badge,
   EmptyState,
   EventStatusBadge,
   Input,
+  Pager,
   PageHeader,
   Panel,
   Select,
@@ -12,37 +12,50 @@ import {
   type Column,
 } from '../../components';
 import { formatBytes, formatRelativeTime, truncateId } from '../../lib/format';
-import type { WebhookEvent } from '../../types/api';
-import { useEvents } from './api';
-
-const EVENT_TYPES = [
-  'payment.settled',
-  'payment.failed',
-  'payment.refunded',
-  'payout.completed',
-  'order.created',
-];
+import { DEFAULT_PAGE_SIZE, type EventStatus, type WebhookEvent } from '../../types/api';
+import { useEvents, type EventFilters } from './api';
 
 /**
  * Filter state lives in the URL, not in component state: an operator's next
  * move after finding a bad window is to paste the link into an incident
  * channel, and that only works if the filters travel with it.
+ *
+ * TWO THINGS CHANGED WITH THE REAL CONTRACT.
+ *
+ * The event-type dropdown was a HARD-CODED list of five payment types. There is
+ * no route that enumerates the event types a project has seen, and a project
+ * that publishes `shipment.dispatched` could not filter for it at all. It is a
+ * text box, and `event_type` is an exact match.
+ *
+ * The general search box is gone. `EventsController` has no `search` parameter.
+ * What it has is `idempotency_key` — a case-insensitive SUBSTRING of the
+ * producer's own key, which is the "the producer says they sent order 41f9, did
+ * we get it?" question the box was really being used for.
  */
 export function EventsPage() {
   const { orgId = '', projectId = '' } = useParams();
   const [searchParams, setSearchParams] = useSearchParams();
 
-  const filters = {
-    search: searchParams.get('search') ?? '',
+  const offset = Number(searchParams.get('offset') ?? 0) || 0;
+  const filters: EventFilters = {
     event_type: searchParams.get('event_type') ?? '',
-    status: searchParams.get('status') ?? '',
+    status: (searchParams.get('status') ?? '') as EventStatus | '',
+    idempotency_key: searchParams.get('idempotency_key') ?? '',
   };
-  const events = useEvents(projectId, filters);
+  const events = useEvents(projectId, filters, offset);
 
   const setFilter = (key: string, value: string) => {
     const next = new URLSearchParams(searchParams);
     if (value) next.set(key, value);
     else next.delete(key);
+    next.delete('offset');
+    setSearchParams(next, { replace: true });
+  };
+
+  const setOffset = (value: number) => {
+    const next = new URLSearchParams(searchParams);
+    if (value > 0) next.set('offset', String(value));
+    else next.delete('offset');
     setSearchParams(next, { replace: true });
   };
 
@@ -56,24 +69,23 @@ export function EventsPage() {
       <Panel flush>
         <div className="flex flex-wrap items-end gap-2 border-b border-line px-3 py-2.5">
           <Input
-            aria-label="Search events"
-            placeholder="Search by event ID or type…"
-            value={filters.search}
-            onChange={(event) => setFilter('search', event.target.value)}
+            aria-label="Filter by event type"
+            placeholder="Event type (exact), e.g. payment.settled"
+            value={filters.event_type ?? ''}
+            onChange={(event) => setFilter('event_type', event.target.value)}
             className="w-64"
           />
-          <Select
-            aria-label="Filter by event type"
-            placeholder="All event types"
-            value={filters.event_type}
-            onChange={(event) => setFilter('event_type', event.target.value)}
-            options={EVENT_TYPES.map((type) => ({ value: type, label: type }))}
-            className="w-48"
+          <Input
+            aria-label="Find by idempotency key"
+            placeholder="Idempotency key contains… (3+ chars)"
+            value={filters.idempotency_key ?? ''}
+            onChange={(event) => setFilter('idempotency_key', event.target.value)}
+            className="w-64"
           />
           <Select
             aria-label="Filter by status"
             placeholder="All statuses"
-            value={filters.status}
+            value={filters.status ?? ''}
             onChange={(event) => setFilter('status', event.target.value)}
             options={[
               { value: 'received', label: 'Received' },
@@ -87,7 +99,7 @@ export function EventsPage() {
 
         <Async
           query={events}
-          isEmpty={(page) => page.data.length === 0}
+          isEmpty={(page) => page.rows.length === 0}
           empty={
             <EmptyState
               title="No events match"
@@ -100,14 +112,16 @@ export function EventsPage() {
               <Table
                 caption="Events"
                 columns={eventColumns(orgId, projectId)}
-                rows={page.data}
+                rows={page.rows}
                 rowKey={(row) => row.id}
               />
-              {page.has_more && (
-                <p className="border-t border-line px-3 py-2 text-2xs text-ink-subtle">
-                  Showing {page.data.length} events. Cursor pagination lands with the real API.
-                </p>
-              )}
+              <Pager
+                page={page}
+                offset={offset}
+                onOffsetChange={setOffset}
+                limit={DEFAULT_PAGE_SIZE}
+                label="events"
+              />
             </>
           )}
         </Async>
@@ -132,21 +146,28 @@ function eventColumns(orgId: string, projectId: string): Column<WebhookEvent>[] 
       ),
     },
     { key: 'status', header: 'Status', render: (row) => <EventStatusBadge status={row.status} /> },
+    /*
+     * THE FAN-OUT COLUMN IS GONE, and its absence is deliberate.
+     *
+     * `EventDto` has no `delivery_counts` — the "3 ok / 1 exhausted" roll-up
+     * this column rendered was invented, and there is no route that returns
+     * per-event delivery counts in a list. Deriving it would mean one
+     * `…/events/:id/deliveries` request per visible row, which is fifty
+     * requests to paint one page.
+     *
+     * The event's own `status` is what the list can honestly report — it is the
+     * INGEST state, not a delivery outcome — and the fan-out is one click away
+     * on the detail page, where the deliveries are already fetched and the
+     * counts are derived from the rows themselves. See HANDOFF.md: a
+     * `delivery_counts` object on `EventDto` puts this column back.
+     */
     {
-      key: 'fanout',
-      header: 'Fan-out',
+      key: 'idempotency',
+      header: 'Idempotency key',
+      secondary: true,
       render: (row) => (
-        <span className="flex flex-wrap items-center gap-1">
-          <Badge tone="ok">{row.delivery_counts.succeeded} ok</Badge>
-          {row.delivery_counts.failed > 0 && (
-            <Badge tone="warn">{row.delivery_counts.failed} failing</Badge>
-          )}
-          {row.delivery_counts.exhausted > 0 && (
-            <Badge tone="danger">{row.delivery_counts.exhausted} exhausted</Badge>
-          )}
-          {row.delivery_counts.pending > 0 && (
-            <Badge>{row.delivery_counts.pending} pending</Badge>
-          )}
+        <span className="font-mono text-2xs text-ink-subtle">
+          {row.idempotency_key ?? '—'}
         </span>
       ),
     },
@@ -156,7 +177,14 @@ function eventColumns(orgId: string, projectId: string): Column<WebhookEvent>[] 
       align: 'right',
       secondary: true,
       render: (row) => (
-        <span className="text-xs text-ink-subtle">{formatBytes(row.payload_size_bytes)}</span>
+        <span className="text-xs text-ink-subtle">
+          {formatBytes(row.payload_size)}
+          {!row.payload_inline && (
+            <span className="ml-1 text-2xs text-ink-subtle" title="Held in object storage">
+              · offloaded
+            </span>
+          )}
+        </span>
       ),
     },
     {
