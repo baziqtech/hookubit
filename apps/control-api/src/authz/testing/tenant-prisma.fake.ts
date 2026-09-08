@@ -154,19 +154,17 @@ export class FakeTenantPrisma {
           if (row[key] === operator.not) return false;
           continue;
         }
-        // Ordering comparisons, string-compared the way PostgreSQL compares the
-        // text primary keys these tables use. `forEachPage` walks a keyset
-        // (`WHERE id > <last seen>`), so without these the exhaustive paging
-        // tests would be testing nothing.
+        // Ordering comparisons. `forEachPage` walks a keyset (`WHERE id > <last
+        // seen>`) over text primary keys, so without these the exhaustive paging
+        // tests would be testing nothing - and `expires_at > now()`, the live-
+        // secret predicate, is the same operator over a timestamp.
         const comparisons = ['gt', 'gte', 'lt', 'lte'] as const;
         if (comparisons.some((name) => name in operator)) {
           const actual = row[key];
           if (actual === null || actual === undefined) return false;
-          const left = String(actual);
           for (const name of comparisons) {
             if (!(name in operator)) continue;
-            const right = String(operator[name]);
-            const sign = left < right ? -1 : left > right ? 1 : 0;
+            const sign = FakeTenantPrisma.compare(actual, operator[name]);
             if (name === 'gt' && sign <= 0) return false;
             if (name === 'gte' && sign < 0) return false;
             if (name === 'lt' && sign >= 0) return false;
@@ -180,6 +178,41 @@ export class FakeTenantPrisma {
       if (row[key] !== value) return false;
     }
     return true;
+  }
+
+  /**
+   * Orders two values the way PostgreSQL orders that column's type.
+   *
+   * Timestamps are compared as instants, NOT as strings. `String(new Date())`
+   * is `'Tue Sep 08 2026 ...'`, so a lexical comparison of two of those orders
+   * by weekday and then by MONTH NAME - `'Apr' < 'Jan'` - and a filter like
+   * `expires_at > now()` came out right or wrong depending on the calendar. A
+   * test asserting an expired secret is not live would have passed in December
+   * and failed in April, or worse, passed for the wrong reason.
+   *
+   * Everything else stays a string comparison, which is what the text primary
+   * keys `forEachPage` pages over need.
+   */
+  private static compare(left: unknown, right: unknown): number {
+    const order = (a: number, b: number): number => (a < b ? -1 : a > b ? 1 : 0);
+    if (left instanceof Date || right instanceof Date) {
+      const at = FakeTenantPrisma.instant(left);
+      const bt = FakeTenantPrisma.instant(right);
+      if (Number.isNaN(at) || Number.isNaN(bt)) {
+        throw new Error('FakeTenantPrisma: cannot compare a Date against a non-date value');
+      }
+      return order(at, bt);
+    }
+    if (typeof left === 'number' && typeof right === 'number') return order(left, right);
+    const a = String(left);
+    const b = String(right);
+    return a < b ? -1 : a > b ? 1 : 0;
+  }
+
+  private static instant(value: unknown): number {
+    if (value instanceof Date) return value.getTime();
+    if (typeof value === 'string' || typeof value === 'number') return new Date(value).getTime();
+    return Number.NaN;
   }
 
   /** Projects a row through Prisma's `select`, recursing into relations. */

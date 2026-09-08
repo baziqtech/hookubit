@@ -2979,3 +2979,39 @@ raise `limit_exceeded` with `details: { limit, current, resource }`. See
 that list are both closed; item 3 (`Retry-After` reachable from the browser) is
 closed by the section above; item 4 (`resend-verification`) is closed by the
 section above that.
+
+## `EndpointDto.has_live_secret`
+
+The dashboard added a "Resume deliveries" action on paused endpoints. `EndpointDto`
+exposed nothing about signing secrets, and `POST /enable` refuses with 409 when
+there is no live one — so the button was offered where it was **guaranteed to
+fail**, and the operator found out by clicking.
+
+That is not an edge case. `endpoints.write` is a `developer` permission and
+`endpoint-secrets.*` is owner/admin, so an endpoint a developer creates is
+deliberately left **paused with `secret_pending`** — the common path, and exactly
+where the button 409s.
+
+**The field means what `enable` checks**, because it is now literally the same
+query: `active = true AND (expires_at IS NULL OR expires_at > now())`, the pair
+the data plane's secret loader uses (`isEffectivelyActive`).
+`EndpointSecretsService.hasLiveSecret` is one case of the new
+`liveSecretEndpointIds`, so the answer the dashboard reads and the answer
+`enable` refuses on cannot drift.
+
+**Not `active` alone.** The control plane flips `active` off lazily after a
+rotation, so between a secret expiring and the sweep running, `active` says
+signable and the data plane has already stopped emitting it — the window an
+operator is most likely to be staring at.
+
+**No N+1.** `ScopedRepository.groupBy` (`by: ['endpointId']`, the live predicate,
+`endpointId IN (<page>)`) answers the whole page in ONE statement, on the
+existing `@@index([endpointId, active])`. The count is asserted constant across
+page sizes rather than merely small, so it cannot decay back into a loop. The
+scope needed nothing new — `groupBy` was already there, and `PrismaService` (which
+is eslint-banned here) was never reached for.
+
+**It is a boolean and nothing else.** No id, version, prefix or expiry:
+`endpoints.read` includes `viewer`, `endpoint-secrets.read` is owner/admin. A
+test pins the DTO's complete key set so a future secret-derived field fails
+there rather than shipping quietly.

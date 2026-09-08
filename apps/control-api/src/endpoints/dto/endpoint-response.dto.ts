@@ -9,6 +9,16 @@ import { Endpoint, EndpointStatus } from '@prisma/client';
  * because nobody thought about it. `endpoints` has no secret column today; the
  * signing secrets live in `endpoint_secrets` behind `endpoint-secrets.read`,
  * which is owner/admin only and deliberately NOT implied by `endpoints.read`.
+ *
+ * `has_live_secret` is the one thing about those secrets this shape carries, and
+ * it is a bare boolean for that reason. Without it the dashboard offered
+ * "Resume deliveries" on every paused endpoint, including the ones a developer
+ * had just created - which is the COMMON case, since `endpoint-secrets.*` is
+ * owner/admin only, so a developer's endpoint is deliberately left paused with
+ * `secret_pending` - and `POST /enable` answered 409 every time. The operator
+ * learned that by clicking. Nothing about the secret ITSELF widens: no id, no
+ * version, no prefix, no expiry timestamp, because a `viewer` holds
+ * `endpoints.read` and holds nothing at all on `endpoint_secrets`.
  */
 export class EndpointDto {
   @ApiProperty() id!: string;
@@ -29,6 +39,21 @@ export class EndpointDto {
   @ApiPropertyOptional({ nullable: true }) retry_policy_id!: string | null;
   @ApiPropertyOptional({ type: 'object', additionalProperties: { type: 'string' }, nullable: true })
   custom_headers!: Record<string, string> | null;
+  @ApiProperty({
+    description:
+      'Whether this endpoint has at least one signing secret that is signing RIGHT NOW - ' +
+      '`active = true AND (expires_at IS NULL OR expires_at > now())`, the same pair the data ' +
+      "plane's secret loader uses. False means `POST /enable` will refuse with 409: an enabled " +
+      'endpoint with nothing to sign with delivers nothing, because `signing.Header` fails ' +
+      'closed. Read `active` alone and the two answers disagree for the window between a ' +
+      'secret expiring and the sweep flipping its column, which is exactly when an operator ' +
+      'is looking.\n\n' +
+      'A BOOLEAN, deliberately: no id, version, prefix or expiry. This field is visible to ' +
+      'anyone with `endpoints.read` (a viewer included), and reading signing secrets is ' +
+      '`endpoint-secrets.read` - owner and admin only.',
+    example: true,
+  })
+  has_live_secret!: boolean;
   @ApiProperty() created_at!: string;
   @ApiProperty() updated_at!: string;
 }
@@ -95,7 +120,15 @@ function customHeaders(value: Endpoint['customHeaders']): Record<string, string>
   return Object.keys(out).length === 0 ? null : out;
 }
 
-export function toEndpointDto(endpoint: Endpoint): EndpointDto {
+/**
+ * `hasLiveSecret` is a REQUIRED second argument rather than an optional one.
+ *
+ * The secret state lives in another table, so this mapper cannot derive it, and
+ * a default would silently answer for every caller who did not think about it -
+ * on a field the dashboard uses to decide whether to offer "Resume deliveries".
+ * Stating it forces each call site to say where its answer came from.
+ */
+export function toEndpointDto(endpoint: Endpoint, hasLiveSecret: boolean): EndpointDto {
   return {
     id: endpoint.id,
     project_id: endpoint.projectId,
@@ -112,6 +145,7 @@ export function toEndpointDto(endpoint: Endpoint): EndpointDto {
     rate_limit_window_seconds: endpoint.rateLimitWindowSeconds,
     retry_policy_id: endpoint.retryPolicyId ?? null,
     custom_headers: customHeaders(endpoint.customHeaders),
+    has_live_secret: hasLiveSecret,
     created_at: new Date(endpoint.createdAt).toISOString(),
     updated_at: new Date(endpoint.updatedAt).toISOString(),
   };

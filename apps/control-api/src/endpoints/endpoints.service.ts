@@ -103,8 +103,16 @@ export class EndpointsService {
       take: query.limit,
       skip: query.offset,
     });
+
+    // ONE grouped read for the whole page, not one per row. `has_live_secret`
+    // is on every endpoint in the busiest listing in the operator UI; asked per
+    // endpoint, a page of MAX_PAGE_SIZE would be 200 extra round trips.
+    const live = await this.secrets.liveSecretEndpointIds(
+      context,
+      page.rows.map((endpoint) => endpoint.id),
+    );
     return {
-      data: page.rows.map(toEndpointDto),
+      data: page.rows.map((endpoint) => toEndpointDto(endpoint, live.has(endpoint.id))),
       has_more: page.hasMore,
       next_offset: page.nextSkip,
     };
@@ -119,7 +127,8 @@ export class EndpointsService {
    * unreadable.
    */
   async get(context: RequestContext, endpointId: string): Promise<EndpointDto> {
-    return toEndpointDto(await this.require(this.scopes.for(context), endpointId));
+    const endpoint = await this.require(this.scopes.for(context), endpointId);
+    return toEndpointDto(endpoint, await this.secrets.hasLiveSecret(context, endpointId));
   }
 
   /**
@@ -221,7 +230,12 @@ export class EndpointsService {
     });
 
     return {
-      ...toEndpointDto(live),
+      // `mintInitial` has just committed a version 1 secret: active, no expiry.
+      // Both branches above reach here with it, so this is true even for the
+      // developer whose endpoint stays paused awaiting the key handover - which
+      // is the point, since `has_live_secret` is what tells the dashboard that
+      // enabling it would now succeed.
+      ...toEndpointDto(live, true),
       // Withheld from a caller who may create endpoints but not read their
       // secrets. The secret exists either way; only this response varies.
       secret: mayReceiveSecret ? minted.secret : null,
@@ -244,7 +258,10 @@ export class EndpointsService {
     if (dto.name !== undefined) data.name = dto.name;
     if (dto.url !== undefined) data.url = normaliseEndpointUrl(dto.url);
 
-    if (Object.keys(data).length === 0) return toEndpointDto(current);
+    // Nothing here touches `endpoint_secrets`, but the response shape carries
+    // the flag, so it is read rather than assumed. One row, one statement.
+    const live = await this.secrets.hasLiveSecret(context, endpointId);
+    if (Object.keys(data).length === 0) return toEndpointDto(current, live);
 
     const updated = await scope.endpoints.updateById(endpointId, data);
     await this.audit.recordFor(context, {
@@ -260,7 +277,7 @@ export class EndpointsService {
           : {}),
       },
     });
-    return toEndpointDto(updated);
+    return toEndpointDto(updated, live);
   }
 
   /**
@@ -299,7 +316,8 @@ export class EndpointsService {
       resourceId: endpointId,
       metadata: { previous_status: current.status },
     });
-    return toEndpointDto(updated);
+    // Proved live a few lines up, by the check that would have refused.
+    return toEndpointDto(updated, true);
   }
 
   /**
@@ -329,7 +347,10 @@ export class EndpointsService {
       resourceId: endpointId,
       metadata: { previous_status: current.status, reason: reason ?? null },
     });
-    return toEndpointDto(updated);
+    // Pausing leaves the secrets alone, so this is read rather than assumed -
+    // and it is the field the dashboard reads next, to decide whether the
+    // "Resume deliveries" button it is about to render would actually work.
+    return toEndpointDto(updated, await this.secrets.hasLiveSecret(context, endpointId));
   }
 
   /**

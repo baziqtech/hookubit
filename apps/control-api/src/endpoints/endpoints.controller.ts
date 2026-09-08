@@ -65,7 +65,10 @@ export class EndpointsController {
     description:
       'Soft-deleted endpoints are hidden unless asked for; they are never erased. Paged with ' +
       'the canonical envelope `{ data, has_more, next_offset }`; `next_offset` is null on the ' +
-      'last page.',
+      'last page.\n\n' +
+      'Every row carries `has_live_secret`, answered for the whole page in one grouped read - ' +
+      'so a UI can tell which paused endpoints can actually be resumed without asking per ' +
+      'endpoint.',
   })
   @ApiOkResponse({ type: EndpointListDto })
   list(
@@ -114,7 +117,8 @@ export class EndpointsController {
     summary: 'Fetch one endpoint',
     description:
       'Returns soft-deleted endpoints too, with `status: "deleted"`, so a delivery in the ' +
-      'ledger that points at a removed endpoint is still readable.',
+      'ledger that points at a removed endpoint is still readable. `has_live_secret` is the ' +
+      'same answer the listing gives for this endpoint.',
   })
   @ApiOkResponse({ type: EndpointDto })
   get(
@@ -149,10 +153,18 @@ export class EndpointsController {
     summary: 'Resume deliveries to an endpoint',
     description:
       'Refused when the endpoint has no active signing secret: the data plane fails closed ' +
-      'rather than delivering unsigned, so enabling would only queue failures.',
+      'rather than delivering unsigned, so enabling would only queue failures.\n\n' +
+      '**Check `has_live_secret` before offering this.** It is the same condition, evaluated ' +
+      'the same way, and it is false on a normal, expected state - an endpoint created by a ' +
+      '`developer` stays paused with `secret_pending` because `endpoint-secrets.*` is ' +
+      'owner/admin only. Offering the action there is offering a guaranteed 409; the operator ' +
+      'wants "rotate a secret first", not a refusal after the click.',
   })
   @ApiOkResponse({ type: EndpointDto })
-  @ApiConflictResponse({ description: 'Deleted, or no active signing secret.' })
+  @ApiConflictResponse({
+    description:
+      'Deleted, or no active signing secret - the latter is exactly `has_live_secret: false`.',
+  })
   enable(
     @Tenant() context: RequestContext,
     @Param('endpointId') endpointId: string,
