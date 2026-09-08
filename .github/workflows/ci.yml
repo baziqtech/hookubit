@@ -2,8 +2,12 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, staging, dev]
   pull_request:
+    branches: [main, staging, dev]
+  # Lets a branch be re-verified without an empty commit - useful when a run
+  # failed on infrastructure rather than on the code.
+  workflow_dispatch:
 
 concurrency:
   group: ci-${{ github.ref }}
@@ -327,6 +331,10 @@ jobs:
         run: gitleaks detect --source . --config .github/gitleaks.toml --no-git --no-banner --redact --verbose
 
   images:
+    # Skipped on a direct push to dev only. Every PR builds them, so nothing
+    # reaches staging or main without the Dockerfiles having been exercised.
+    if: >-
+      github.event_name != 'push' || github.ref != 'refs/heads/dev'
     name: Container images
     runs-on: ubuntu-latest
     strategy:
