@@ -167,6 +167,38 @@ dashboard:
     repository: webhook-dashboard
     tag: ''
     pullPolicy: IfNotPresent
+
+  # ── BUILD-TIME ONLY. THIS CHART CANNOT SET THESE. ─────────────────────────
+  # The dashboard is a STATIC bundle. Vite inlines every VITE_* variable into
+  # the JavaScript when the image is built, and the runtime stage is nginx
+  # serving files - it reads no environment at all. A ConfigMap, a Secret or an
+  # `env:` entry added here would be read by nothing.
+  #
+  # So these two keys are NOT settings, they are ASSERTIONS about the image in
+  # dashboard.image: what it was built with. They are rendered as annotations
+  # on the Deployment (`kubectl describe deploy ...-dashboard`) so an operator
+  # debugging a wrong `curl` can see the baked value without unpacking the
+  # image, and NOTES.txt warns when ingestBaseUrl is empty or disagrees with
+  # ingress.ingestHost. Changing them rolls nothing and rebuilds nothing.
+  #
+  # To actually change the values, rebuild the image:
+  #   docker build -f deployments/docker/dashboard.Dockerfile \
+  #     --build-arg VITE_INGEST_BASE_URL=https://ingest.example.com \
+  #     --build-arg VITE_API_TRANSPORT=http .
+  build:
+    # Base URL of the INGEST service, which is a different service on a
+    # different host from the control API (Go :8080 vs NestJS :3000). It is the
+    # host in the publish `curl` on the dashboard's get-started page. Leave
+    # empty ONLY if the image was built without the build arg, in which case
+    # that page hands every operator http://localhost:8080 - their own laptop.
+    # Normally this is "https://<ingress.ingestHost>".
+    ingestBaseUrl: ''
+    # `mock` or `http`. The image default is still `mock` (the control API is
+    # not feature-complete; see the Dockerfile), and a mock build shows a
+    # permanent "Demo data - not connected to an API" banner. Record here what
+    # you built, so a demo image is not mistaken for a broken deployment.
+    apiTransport: 'mock'
+
   replicaCount: 2
   resources:
     requests: { cpu: 10m, memory: 32Mi }

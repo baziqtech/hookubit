@@ -2855,3 +2855,127 @@ Rules the Go side must hold, which are the same ones `effective-scopes.ts` holds
 
 `ApiKeyDto.effective_scopes` is the same derivation over HTTP, so an operator and
 the data plane read one answer.
+
+---
+
+# Onboarding state, resend-verification, and the headers a browser could not read
+
+Three gaps the dashboard work surfaced. All three are in `src/auth` and
+`src/config`; nothing outside auth changed.
+
+## `users.onboarding_completed_at`
+
+The dashboard's product tour kept "has this person seen it?" in `localStorage`
+(`hookubit.tour.v1`). That is per-browser, so the tour replayed on a second
+device, in a private window and after a site-data clear — including for someone
+who had deliberately *skipped* it — and support could not answer "was this user
+ever onboarded?" at all.
+
+**One nullable timestamp on `users`**, added by
+`prisma/migrations/20260908000000_user_onboarding_completed_at`. Nullable with
+no default and no backfill, so the migration writes a catalog row and does not
+rewrite the table, and `DROP COLUMN` is a complete rollback. NULL means "has not
+seen it", which is the safe direction: the tour is skippable and re-openable, so
+showing it once more costs a keystroke while wrongly suppressing it leaves a new
+user with no orientation. Backfilling `now()` over existing rows would have done
+exactly that.
+
+Deliberately **not** a boolean — a boolean cannot answer *when*, which is the
+question asked when a cohort churns — and **not** a per-step progress blob,
+which would make the tour's own layout a schema migration.
+
+**Read it** on `user.onboarding_completed_at`, an ISO-8601 string or `null`,
+carried on **every** response that returns a user: `GET /v1/auth/session`,
+`POST /v1/auth/login`, `POST /v1/auth/verify-email`. The client decides whether
+to show the tour without a second request.
+
+**Write it** with:
+
+```
+POST /v1/auth/onboarding-completed   →  204 No Content
+```
+
+Exactly the shape `apps/dashboard/HANDOFF.md` asked for, and it is right.
+
+- **Idempotent by SQL, not by read-then-write.** A conditional
+  `UPDATE ... WHERE id = $1 AND onboarding_completed_at IS NULL`. Two tabs, or
+  a retried request, race inside PostgreSQL and exactly one writes — so the
+  recorded instant is the **first** completion and never drifts forward on a
+  replay. A second call is 204, not 409: the client's question is "is this
+  person onboarded", and after either call the answer is yes.
+- **The user id comes off the verified session and from nowhere else.** No
+  body, no path parameter, no field naming a user — so one account cannot
+  complete another's, and that is a property of the signature as much as of the
+  query. `auth.http.spec.ts` pins it by posting `{ user_id: <someone else> }`
+  and asserting the other row is untouched (the validation pipe's
+  `forbidNonWhitelisted` makes it a 400, which is also fine — what must never
+  happen is the other row moving).
+- **Audited once**, on the transition only (`user.onboarding_completed`), so a
+  retrying client cannot flood `audit_logs`. It uses `AuthService.audit()`, not
+  `AuditService.recordFor` — `recordFor` derives the organization from a
+  resolved tenant context and an auth route has no tenant in its path;
+  `audit()` resolves the user's own first membership, which is what every other
+  user-level event in this class already does.
+
+## `POST /v1/auth/resend-verification`
+
+Registration ended on "check your email" with no way to ask for another link.
+
+**Always 202, with an identical body**, whether or not the address is
+registered, whether or not it is already verified, whether or not the account is
+disabled, and **whether or not the mail transport is up**. That last clause is
+the one that costs something: a failure escaping from here would answer 500 for
+an unverified registered address and 202 for an unknown one — an enumeration
+oracle assembled out of an error handler, which is precisely the bug that was
+found and fixed in forgot-password. The try/catch covers the token writes either
+side of the send, not just the mailer, because a transient database error on the
+token write leaks the same bit.
+
+Reuses the existing machinery rather than inventing any: `UserToken` of type
+`email_verification` (hashed, single-use, 24h) via `TokenService`, and
+`@Throttle` on the existing `ThrottleGuard`. Requesting a link **revokes the
+previous one**, so the newest email is the one that works.
+
+Throttled at **5/hour per IP and 5/hour per address, both enforced** — the same
+numbers as forgot-password, the other mail-sending route reachable without
+credentials. Unlike `verify-email`, the per-IP bucket here *refuses*: this route
+sends mail to an address the caller typed, so an unlimited version is a
+mail-bomb relay pointed at any unverified account and a way to burn the
+deployment's sending reputation.
+
+## `Access-Control-Expose-Headers`
+
+`main.ts` set `origin` and `credentials` and nothing else, so a cross-origin
+browser could read neither header this API relies on. Nothing errored — a
+browser drops every response header that is not CORS-safelisted or on that list,
+silently — which is why it went unnoticed.
+
+CORS config moved to `src/config/cors.ts` (`corsOptions`, with `cors.spec.ts`)
+and now exposes:
+
+- **`Retry-After`**, set by `ThrottleGuard` on every 429. Without it the
+  dashboard could only read `details.retry_after_seconds` out of the error body,
+  so a 429 raised by anything that is *not* this guard — an ingress limit, a
+  WAF, a load balancer — arrived with no usable "try again in N" at all.
+- **`x-request-id`**, minted or accepted per request in `app.module.ts` and
+  repeated in every error body as `request_id`. The header is the only way to
+  get it off a **successful** response, which is what an operator needs when a
+  request went through and did the wrong thing.
+
+Nothing else is missing. The only other header this API sets is `Set-Cookie`,
+which browsers refuse to expose to script whatever the list says. `origin` still
+fails **closed** (`false`, never a reflected origin) when `CORS_ORIGINS` is
+unset — this API is credentialed.
+
+## Correction to `apps/dashboard/HANDOFF.md`
+
+That document's "Still needed from the control API" list, item 2, says
+**"Endpoints (`endpoints.service.ts:401`) and organizations
+(`organizations.service.ts:134`) attach nothing but prose"**. That was true when
+it was written and **is not true now**. All four ceilings — organizations per
+user, projects per organization, API keys per project, endpoints per project —
+raise `limit_exceeded` with `details: { limit, current, resource }`. See
+`endpoints.service.ts:407` and `organizations.service.ts:140`. Items 1 and 2 of
+that list are both closed; item 3 (`Retry-After` reachable from the browser) is
+closed by the section above; item 4 (`resend-verification`) is closed by the
+section above that.

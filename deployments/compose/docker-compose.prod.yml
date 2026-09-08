@@ -129,6 +129,11 @@ services:
     restart: unless-stopped
 
   dashboard:
+    # Static bundle: VITE_INGEST_BASE_URL and VITE_API_TRANSPORT are inlined
+    # when the IMAGE is built, and nginx reads no environment - there is
+    # nothing to set here. If the get-started page's publish `curl` points at
+    # http://localhost:8080, the image was built without
+    # --build-arg VITE_INGEST_BASE_URL=... (deployments/docker/dashboard.Dockerfile).
     image: ${IMAGE_DASHBOARD:-ghcr.io/shaq/webhook-dashboard:latest}
     ports:
       - '${DASHBOARD_BIND:-127.0.0.1:8088}:8080'

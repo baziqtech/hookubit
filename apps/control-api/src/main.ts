@@ -9,6 +9,7 @@ import { Logger } from 'nestjs-pino';
 import { AppModule } from './app.module';
 import { assertRoutesAreGuarded } from './authz';
 import { AppExceptionFilter } from './common/errors';
+import { corsOptions } from './config/cors';
 import { applyTrustProxy } from './config/trust-proxy';
 
 async function bootstrap(): Promise<void> {
@@ -36,8 +37,11 @@ async function bootstrap(): Promise<void> {
   );
   app.useGlobalFilters(new AppExceptionFilter());
 
-  const origins = (process.env.CORS_ORIGINS ?? '').split(',').filter(Boolean);
-  app.enableCors({ origin: origins.length ? origins : false, credentials: true });
+  // exposedHeaders matters as much as origin here: a browser drops every
+  // response header that is not CORS-safelisted or on that list, silently, so
+  // `Retry-After` and `x-request-id` were being set and then discarded before
+  // any cross-origin client could read them. See config/cors.ts.
+  app.enableCors(corsOptions(process.env.CORS_ORIGINS));
 
   // Never in production (FIX 4). /docs served the full route inventory, every
   // DTO shape and every validation constraint of the production control plane

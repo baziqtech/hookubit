@@ -871,3 +871,138 @@ are in modules, not the standard library, and no toolchain can reach them.**
 
     and then say so in go.mod's header, because the header currently argues the
     opposite and every contributor on an older toolchain will hit it.
+
+---
+
+## Dashboard build-time configuration (this pass)
+
+### The gap
+
+The get-started page renders a real publish `curl`. That request goes to the
+**ingest** service (Go, `:8080`), not to the control API the dashboard itself
+talks to (NestJS, `:3000`) — different service, different host in every real
+deployment. `ingestBaseUrl()` in
+`apps/dashboard/src/features/onboarding/publish-request.ts` reads
+`VITE_INGEST_BASE_URL` and falls back to `http://localhost:8080`. **Nothing on
+the deployment side passed it**, so a deployed dashboard handed every operator a
+curl aimed at their own laptop.
+
+`deployments/docker/dashboard.Dockerfile` now takes `ARG VITE_INGEST_BASE_URL`,
+plumbed exactly like `VITE_API_TRANSPORT`: declared as an `ARG` and passed on the
+`RUN` line rather than through `ENV FOO=${FOO}` (self-referential `ENV` is
+hadolint DL3044, and the `dockerfile-lint` job fails at `warning`).
+
+### The default is empty, and empty means *not passed at all*
+
+Not `http://localhost:8080`. A localhost default is plausible-looking and wrong
+in every deployment; an unset one lets the bundle use its own documented
+fallback and lets the page keep saying so.
+
+The subtlety that decides the implementation: `ingestBaseUrl()` is
+
+```ts
+import.meta.env.VITE_INGEST_BASE_URL ?? 'http://localhost:8080'
+```
+
+and `??` only fires on `undefined`. Vite's `loadEnv` **keeps an empty-string
+env var as `""`** — verified on this machine:
+
+```
+VITE_INGEST_BASE_URL='' -> ""        (inlined; `??` does NOT fire)
+unset                   -> undefined (fallback fires)
+```
+
+So exporting an empty value would defeat the fallback and produce a host-less
+`curl POST /v1/events` — a worse failure than localhost, because nothing in the
+UI explains it. The `RUN` line therefore passes the variable **only when it is
+non-empty**:
+
+```dockerfile
+RUN echo "..." \
+ && env VITE_API_TRANSPORT="${VITE_API_TRANSPORT}" \
+        ${VITE_INGEST_BASE_URL:+VITE_INGEST_BASE_URL="${VITE_INGEST_BASE_URL}"} \
+        pnpm --filter @webhook/dashboard build
+```
+
+`env` rather than a bare command prefix on purpose: a `NAME=value` prefix
+produced by expansion is not recognised as an assignment — `sh` would treat it
+as the command name. Verified under `/bin/sh`: unset stays unset in the build
+environment, set is passed through.
+
+### What the dashboard would have to change for a true "not configured" state
+
+**This is the dashboard's call, not the deployment's, and it needs one change
+there before an empty default can be made honest.** Today the empty case
+degrades to `http://localhost:8080` plus the existing hint on the page
+("Ingest is a separate service … Set `VITE_INGEST_BASE_URL` at build time if
+yours is elsewhere"), which is truthful but easy to copy past. To get a real
+*not configured* state, the dashboard would need to:
+
+1. treat an empty string as unset —
+   `import.meta.env.VITE_INGEST_BASE_URL || undefined` rather than `?? `, so a
+   build that passes an empty value cannot produce a host-less URL; and
+2. distinguish *fell back* from *configured* — e.g. have `ingestBaseUrl()`
+   return `{ url, configured: boolean }`, and when `configured` is false render
+   the snippet with an obvious placeholder host (`https://<your-ingest-host>`)
+   plus a warning line, instead of a localhost URL that looks runnable.
+
+With (1) and (2) in place, the Dockerfile's `ARG` default can pass the empty
+string straight through and the UI becomes self-explaining. Until then, leaving
+the variable unset is the honest behaviour and is what the Dockerfile does.
+
+### Why the Helm chart cannot set this — and what it does instead
+
+The dashboard is a **static build**. Vite inlines `VITE_*` at image build time
+and the runtime container is nginx serving files, which reads no environment. A
+ConfigMap key, a `--set`, or an `env:` entry on the Deployment would configure
+**nothing** while looking like it did. The same is true of `VITE_API_TRANSPORT`
+— checked as part of this pass; the chart never claimed to set it, and now says
+explicitly that it cannot.
+
+So the chart does not ship a value that silently has no effect. It ships two
+values that are **assertions about the image**, clearly labelled as such:
+
+```yaml
+dashboard:
+  build:
+    ingestBaseUrl: ''      # what the image was built with; NOT a setting
+    apiTransport: 'mock'
+```
+
+They do exactly three things, all documentation:
+
+- render as annotations on the dashboard Deployment
+  (`webhook-platform.shaq.io/built-with-ingest-base-url` and
+  `…-api-transport`), so `kubectl describe deploy …-dashboard` answers "why
+  does the curl point at localhost" without unpacking the image;
+- drive three `NOTES.txt` warnings — empty `ingestBaseUrl`, an `ingestBaseUrl`
+  that disagrees with `ingress.ingestHost`, and an `apiTransport` still on
+  `mock`;
+- print the exact `docker build --build-arg …` command, with the release's own
+  `ingress.ingestHost` substituted in.
+
+`deployments/kubernetes/21-dashboard.yaml` carries the same annotations and a
+comment saying why the Deployment has no `envFrom`, and
+`deployments/compose/docker-compose.prod.yml` says the same in three lines.
+
+### Verified / not verified
+
+- Vite's empty-vs-unset behaviour: **run**, via `loadEnv` from the repo's own
+  Vite (output above).
+- The `${VAR:+…}` guard: **run** under `/bin/sh`, both branches.
+- `NOTES.txt` and `templates/dashboard.yaml`: parsed and rendered with a
+  `text/template` harness stubbing the sprig helpers (`dig`, `default`, `quote`,
+  `include`, `nindent`, `dict`), exercising the empty, mismatched and matching
+  branches. `values.yaml`, `21-dashboard.yaml` and the compose file parse as
+  YAML.
+- **`helm lint`, `helm template` and `kubeconform` were NOT run — neither binary
+  is installed on this machine** (searched; `which helm kubeconform` finds
+  nothing). CI's `manifests` job installs both and is the real check.
+- **No image was built: Docker's daemon is down.** The `--build-arg` plumbing
+  itself is therefore untested end to end; what is tested is the shell semantics
+  it relies on and the Vite behaviour it is designed around.
+- hadolint was not run (it segfaults on this machine). The new lines avoid
+  `ENV`, which is the rule that constrained the existing pattern.
+- Helm value references use `dig "build" … .Values.dashboard`, so an operator
+  who overrides `dashboard:` wholesale gets the documented default rather than a
+  nil-pointer render error.

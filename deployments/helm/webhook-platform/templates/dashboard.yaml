@@ -5,6 +5,14 @@ metadata:
   labels:
     {{- include "webhook-platform.labels" . | nindent 4 }}
     app.kubernetes.io/component: dashboard
+  annotations:
+    # WHAT THE IMAGE WAS BUILT WITH, not what this chart configures. The bundle
+    # is static and Vite inlined these at image build time; nginx reads no
+    # environment, so nothing at deploy time can change them (values.yaml,
+    # dashboard.build). Recorded here so `kubectl describe` answers "why does
+    # the get-started curl point at localhost" without unpacking the image.
+    webhook-platform.shaq.io/built-with-ingest-base-url: {{ dig "build" "ingestBaseUrl" "" .Values.dashboard | default "<unset: bundle falls back to http://localhost:8080>" | quote }}
+    webhook-platform.shaq.io/built-with-api-transport: {{ dig "build" "apiTransport" "" .Values.dashboard | default "<unset: bundle default is mock>" | quote }}
 spec:
   replicas: {{ .Values.dashboard.replicaCount }}
   revisionHistoryLimit: 5

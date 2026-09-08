@@ -56,6 +56,14 @@ model User {
   emailVerifiedAt DateTime? @map("email_verified_at")
   lastLoginAt     DateTime? @map("last_login_at")
   disabledAt      DateTime? @map("disabled_at")
+  /// When this person finished OR skipped the product tour. NULL means "never
+  /// seen it", which is the safe direction: the tour is skippable and
+  /// re-openable, so showing it once more costs a keystroke while wrongly
+  /// suppressing it leaves a new user with no orientation at all. Deliberately
+  /// a nullable timestamp and not a boolean - a boolean cannot answer "when",
+  /// which is the question asked when a cohort churns - and not a per-step
+  /// blob, which would make the tour's own layout a schema migration.
+  onboardingCompletedAt DateTime? @map("onboarding_completed_at")
   createdAt       DateTime  @default(now()) @map("created_at")
   updatedAt       DateTime  @updatedAt @map("updated_at")
 

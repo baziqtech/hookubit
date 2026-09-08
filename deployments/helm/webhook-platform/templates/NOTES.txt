@@ -61,6 +61,23 @@ THE SIX-STEP INSTALL (ARCHITECTURE.md 38)
    Event ingest            : https://{{ .Values.ingress.ingestHost }}
 {{- end }}
 
+   THE DASHBOARD IS A STATIC BUILD - CONFIGURE IT IN THE IMAGE, NOT HERE.
+   Vite inlines every VITE_* value into the JavaScript at image build time and
+   the container is nginx serving files, so no value, ConfigMap or env var in
+   this release can change what the bundle talks to. In particular the publish
+   `curl` on the get-started page targets the INGEST service, which is a
+   different host from this dashboard - if it was not baked in, that curl says
+   http://localhost:8080 and points every operator at their own laptop.
+
+     docker build -f deployments/docker/dashboard.Dockerfile \
+       --build-arg VITE_INGEST_BASE_URL={{ if .Values.ingress.enabled }}https://{{ .Values.ingress.ingestHost }}{{ else }}https://ingest.example.com{{ end }} \
+       --build-arg VITE_API_TRANSPORT=http \
+       -t {{ .Values.dashboard.image.repository }}:{{ .Values.dashboard.image.tag | default .Chart.AppVersion }} .
+
+   Then record what you built in dashboard.build.{ingestBaseUrl,apiTransport};
+   those values only annotate the Deployment so `kubectl describe` can answer
+   this question later. They configure nothing.
+
    Create the first owner explicitly - there is no default account (ADR-0006).
 
    bootstrap.js reads BOOTSTRAP_EMAIL, BOOTSTRAP_PASSWORD and BOOTSTRAP_ORG from
@@ -147,4 +164,27 @@ raising either number.
 ⚠  Secrets were rendered from values and are visible in the Helm release
    history. For anything beyond a demo, use secrets.existingSecret with
    External Secrets Operator, Vault or SOPS.
+{{- end }}
+{{- $ingestBuilt := dig "build" "ingestBaseUrl" "" .Values.dashboard }}
+{{- $transportBuilt := dig "build" "apiTransport" "" .Values.dashboard }}
+{{- if not $ingestBuilt }}
+
+⚠  dashboard.build.ingestBaseUrl is empty, so either the dashboard image was
+   built without --build-arg VITE_INGEST_BASE_URL - in which case its
+   get-started page hands every operator a publish `curl` aimed at
+   http://localhost:8080, their own machine - or it was built correctly and
+   nobody wrote it down. Rebuild or record it; see the build-time note above.
+{{- else if and .Values.ingress.enabled (ne $ingestBuilt (printf "https://%s" .Values.ingress.ingestHost)) }}
+
+⚠  dashboard.build.ingestBaseUrl is "{{ $ingestBuilt }}" but this release
+   serves ingest at https://{{ .Values.ingress.ingestHost }}. If the image really was built with
+   that URL, the get-started `curl` points somewhere else. A value cannot fix
+   it - rebuild the image with the right --build-arg.
+{{- end }}
+{{- if eq $transportBuilt "mock" }}
+
+⚠  dashboard.build.apiTransport is "mock": that image serves demo data and
+   shows a permanent "Demo data - not connected to an API" banner. It is the
+   Dockerfile default. Rebuild with --build-arg VITE_API_TRANSPORT=http once
+   the control API is feature-complete.
 {{- end }}
