@@ -2,26 +2,19 @@ import { CROSS_TENANT_MESSAGE } from '../authz';
 import { AppError } from '../common/errors';
 
 /**
- * One 404 vocabulary, not two.
+ * Normalise any `not_found` raised inside this module to the ONE 404 string the
+ * whole control plane speaks.
  *
- * `ScopedRepository.notFound()` says "Project not found."; `TenantResolver` says
- * `CROSS_TENANT_MESSAGE` ("Resource not found."). Neither string is an oracle on
- * its own - a per-resource message is only ever emitted for an id inside an
- * already-resolved tenant, where "absent" and "belongs to someone else" produce
- * the identical string - but two vocabularies in one API is a trap for the eight
- * modules still to be written: the first person to add a message that IS
- * specific to "exists but is not yours" will not notice they have broken the
- * invariant, because the codebase already reads as if per-resource messages are
- * fine.
+ * `ScopedRepository.notFound()` now emits `CROSS_TENANT_MESSAGE` itself, so the
+ * repository path no longer needs this. It stays as the module's fence for the
+ * `not_found`s a SERVICE raises - a lookup that misses after its own read, a
+ * helper that predates the alignment - so there is one place to look when
+ * someone asks why every miss in this module reads the same.
  *
- * `endpoints` and `endpoint-secrets` already answer with `CROSS_TENANT_MESSAGE`
- * throughout. This aligns projects with them.
- *
- * Nothing is lost by the alignment: the only distinction the repository message
- * carried was the resource TYPE, which the route the caller just addressed
- * already states. A distinction that is genuinely useful inside the tenant - a
- * conflict, a validation failure, a rule the caller can act on - is a different
- * error code and is untouched here; only `not_found` is rewritten.
+ * Only `not_found` is rewritten. The distinctions that are genuinely useful
+ * inside the tenant - an expiry in the past, a scope the caller does not hold,
+ * a ceiling reached, a conflict - are different codes with their own messages
+ * and all survive untouched.
  */
 export async function withCrossTenantNotFound<T>(work: Promise<T>): Promise<T> {
   try {

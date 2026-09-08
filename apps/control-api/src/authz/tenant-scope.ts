@@ -1,6 +1,7 @@
 import { Prisma } from '@prisma/client';
 import { AppError } from '../common/errors';
 import { RequestContext } from './tenant-context';
+import { CROSS_TENANT_MESSAGE } from './tenant-resolver.service';
 
 /**
  * How a table is tied back to a tenant.
@@ -817,7 +818,30 @@ export class ScopedRepository<
     return Math.max(0, Math.floor(skip));
   }
 
+  /**
+   * ONE 404 VOCABULARY FOR THE WHOLE CONTROL PLANE.
+   *
+   * This used to say `"<Resource> not found."` while `TenantResolver` said
+   * `CROSS_TENANT_MESSAGE` ("Resource not found."), so the API had two 404
+   * dialects and modules picked whichever they met first - `endpoints` and
+   * `endpoint-secrets` the resolver's, `members` and `api-keys` this one's.
+   * Neither string was an oracle (a per-resource message is only ever reached
+   * for an id inside an ALREADY-RESOLVED tenant, where absent and foreign
+   * produce the identical string), but two dialects is a trap for the modules
+   * still to be written: the first author to add a message that IS specific to
+   * "exists but is not yours" will not notice they have broken the invariant,
+   * because the codebase already reads as though per-resource 404 text is fine.
+   *
+   * Nothing useful is lost. The only distinction this message carried was the
+   * resource TYPE, which the route the caller just addressed already states, and
+   * which `resourceName` still puts into every other error this class raises
+   * (`invalid_request`, `internal_error`) - those are programming and validation
+   * errors, not existence answers, and they stay specific. Distinctions that are
+   * genuinely useful INSIDE a tenant - a conflict, a ceiling, a rule the caller
+   * can act on - are different codes with their own messages and are untouched:
+   * only `not_found` is spoken in one voice.
+   */
   private notFound(): AppError {
-    return new AppError('not_found', `${this.resourceName} not found.`);
+    return new AppError('not_found', CROSS_TENANT_MESSAGE);
   }
 }

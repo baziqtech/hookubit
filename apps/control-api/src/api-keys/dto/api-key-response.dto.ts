@@ -1,6 +1,7 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
-import { ApiKey, Environment } from '@prisma/client';
+import { ApiKey, Environment, MemberRole } from '@prisma/client';
 import { ApiKeyState, apiKeyState } from '../api-key-state';
+import { effectiveScopes } from '../effective-scopes';
 
 /**
  * An API key as it can safely be shown, forever.
@@ -47,11 +48,53 @@ export class ApiKeyDto {
   @ApiProperty({
     type: [String],
     description:
-      'Control-plane permissions this key may exercise if and when key-authenticated control ' +
-      'routes exist. The ingest path does NOT consult scopes today - it authenticates on the ' +
-      'key, its project and its environment - so an empty list is a normal ingest key.',
+      'The scopes this key was MINTED with: a snapshot of its issuer\'s authority at that ' +
+      'instant, which nothing re-checks. Read `effective_scopes` to find out what the key may ' +
+      'do now. The ingest path does NOT consult scopes today - it authenticates on the key, ' +
+      'its project and its environment - so an empty list is a normal ingest key.',
   })
   scopes!: string[];
+
+  @ApiProperty({
+    type: [String],
+    description:
+      'WHAT THIS KEY MAY ACTUALLY DO: `scopes` intersected with the permissions its issuer ' +
+      'holds RIGHT NOW. A key minted by a developer who has since been demoted to viewer, or ' +
+      'removed from the organization, reports fewer scopes here than it was minted with - and ' +
+      'an EMPTY list once the issuer is gone entirely. This is the authoritative list for any ' +
+      'authorization decision; `scopes` is history.',
+  })
+  effective_scopes!: string[];
+
+  @ApiPropertyOptional({
+    nullable: true,
+    example: 'usr_01J8ZK...',
+    description:
+      'WHO MINTED THIS KEY. Taken from the resolved session at creation, never from the ' +
+      'request body. Null for a key minted before the column existed, or whose user row has ' +
+      'been deleted.',
+  })
+  created_by_user_id!: string | null;
+
+  @ApiPropertyOptional({
+    nullable: true,
+    example: 'mem_01J8ZK...',
+    description:
+      "The issuer's membership, which is what the effective-scope derivation joins to. It goes " +
+      'NULL when the membership is removed, and that going NULL is itself the signal that the ' +
+      'issuer has left - at which point `effective_scopes` is empty.',
+  })
+  created_by_membership_id!: string | null;
+
+  @ApiPropertyOptional({
+    enum: MemberRole,
+    enumName: 'MemberRole',
+    nullable: true,
+    description:
+      "The issuer's role AS IT IS NOW, not as it was at mint time. Null when the issuer is no " +
+      'longer a member. This is the role `effective_scopes` was derived from.',
+  })
+  created_by_role!: MemberRole | null;
 
   @ApiPropertyOptional({ format: 'date-time', nullable: true })
   expires_at!: string | null;
@@ -93,7 +136,18 @@ function iso(value: Date | null): string | null {
   return value === null ? null : value.toISOString();
 }
 
-export function toApiKeyDto(key: ApiKey, now: Date = new Date()): ApiKeyDto {
+/**
+ * `issuerRole` is the CURRENT role of `key.createdByMembershipId`, or null when
+ * that membership is gone (or was never recorded). It is a required argument
+ * rather than an optional one on purpose: defaulting it would silently mean
+ * "issuer gone", and a caller who simply forgot to look the role up would ship a
+ * response claiming every key in the project has no authority left.
+ */
+export function toApiKeyDto(
+  key: ApiKey,
+  now: Date,
+  issuerRole: MemberRole | null,
+): ApiKeyDto {
   return {
     id: key.id,
     project_id: key.projectId,
@@ -102,6 +156,10 @@ export function toApiKeyDto(key: ApiKey, now: Date = new Date()): ApiKeyDto {
     environment: key.environment,
     status: apiKeyState(key, now),
     scopes: key.scopes,
+    effective_scopes: effectiveScopes(key.scopes, issuerRole),
+    created_by_user_id: key.createdByUserId,
+    created_by_membership_id: key.createdByMembershipId,
+    created_by_role: issuerRole,
     expires_at: iso(key.expiresAt),
     last_used_at: iso(key.lastUsedAt),
     revoked_at: iso(key.revokedAt),

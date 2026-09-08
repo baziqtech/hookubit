@@ -1,6 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { ApiKey } from '@prisma/client';
+import { ApiKey, MemberRole } from '@prisma/client';
 import {
   AuditService,
   Permission,
@@ -79,8 +79,12 @@ export class ApiKeysService {
       skip: query.offset,
     });
     const now = new Date();
+    // One membership read for the whole page, not one per row: the page is
+    // bounded by MAX_PAGE_SIZE and the ids are deduplicated, so this is a single
+    // indexed `id IN (...)` however many keys one person minted.
+    const roles = await this.issuerRoles(context, page.rows);
     return {
-      data: page.rows.map((key) => toApiKeyDto(key, now)),
+      data: page.rows.map((key) => toApiKeyDto(key, now, ApiKeysService.roleOf(key, roles))),
       has_more: page.hasMore,
       next_offset: page.nextSkip,
     };
@@ -106,6 +110,16 @@ export class ApiKeysService {
       environment: generated.environment,
       scopes,
       expiresAt,
+      // PROVENANCE, off the resolved tenant context and never off the body.
+      // `scopes` above is a snapshot of THIS caller's authority; these two
+      // columns are what make that snapshot re-derivable afterwards, and
+      // `effectiveScopes` intersects the stored scopes with whatever role the
+      // membership carries at the time the key is used. There is no DTO field
+      // that could set them, deliberately: a caller who could name the issuer
+      // could mint a key attributed to an owner and keep owner authority
+      // forever.
+      createdByUserId: context.user.userId,
+      createdByMembershipId: context.membershipId,
     });
 
     await this.audit.recordFor(context, {
@@ -121,22 +135,19 @@ export class ApiKeysService {
         environment: key.environment,
         expires_at: expiresAt ? expiresAt.toISOString() : null,
         scopes,
-        // WHO minted it and WITH WHAT AUTHORITY. `api_keys` has no
-        // `created_by_user_id` column yet (HANDOFF.md carries the migration), so
-        // until it does this audit row is the only record tying a credential's
-        // scopes back to a human and to the role those scopes were copied from.
-        // The actor columns already carry the user id; the ROLE is not recorded
-        // anywhere else, and it is precisely what a later re-derivation
-        // (`key.scopes INTERSECT permissionsForRole(current role)`) has to
-        // compare against to notice that the issuer has since been demoted.
+        // WHO minted it and WITH WHAT AUTHORITY. The columns now carry the first
+        // two; the ROLE AT MINT TIME is recorded nowhere else, and it is what an
+        // operator compares against to see that the issuer has since been
+        // demoted - the derivation only ever reports the CURRENT role.
         created_by_user_id: context.user.userId,
         created_by_membership_id: context.membershipId,
         created_by_role: context.role,
       },
     });
 
-    // The one and only time the plaintext crosses a boundary.
-    return { ...toApiKeyDto(key), key: generated.key };
+    // The one and only time the plaintext crosses a boundary. The issuer is the
+    // caller, so no lookup is needed: their role is on the resolved context.
+    return { ...toApiKeyDto(key, new Date(), context.role), key: generated.key };
   }
 
   /**
@@ -155,7 +166,7 @@ export class ApiKeysService {
   async revoke(context: RequestContext, apiKeyId: string): Promise<ApiKeyDto> {
     const scope = this.scopes.for(context).apiKeys;
     const existing = await withCrossTenantNotFound(scope.requireById(apiKeyId));
-    if (existing.revokedAt !== null) return toApiKeyDto(existing);
+    if (existing.revokedAt !== null) return this.present(context, existing);
 
     const revokedAt = new Date();
     let key: ApiKey;
@@ -165,7 +176,7 @@ export class ApiKeysService {
       // A concurrent revoke is the only realistic way the row stops matching
       // between the read and the write. Report the outcome the caller wanted.
       const raced = await scope.findById(apiKeyId);
-      if (raced?.revokedAt) return toApiKeyDto(raced);
+      if (raced?.revokedAt) return this.present(context, raced);
       throw err;
     }
 
@@ -180,7 +191,58 @@ export class ApiKeysService {
         revoked_at: revokedAt.toISOString(),
       },
     });
-    return toApiKeyDto(key);
+    return this.present(context, key);
+  }
+
+  /**
+   * One key, with its issuer's CURRENT role resolved.
+   *
+   * Kept separate from `toApiKeyDto` so the role lookup is a database read the
+   * service owns rather than something a mapper does implicitly - and so the
+   * mapper stays synchronous and total.
+   */
+  private async present(context: RequestContext, key: ApiKey): Promise<ApiKeyDto> {
+    const roles = await this.issuerRoles(context, [key]);
+    return toApiKeyDto(key, new Date(), ApiKeysService.roleOf(key, roles));
+  }
+
+  /**
+   * `created_by_membership_id` -> the role that membership holds NOW.
+   *
+   * The read goes through the organization-scoped `members` repository, so a key
+   * whose issuer membership somehow named another organization resolves to
+   * nothing and the key reports no effective scopes - the fail-closed direction.
+   *
+   * Absent from the map means "issuer gone" and is NOT the same as an empty
+   * scope list on the key: `effectiveScopes` turns it into the empty set, which
+   * is exactly what the ON DELETE SET NULL on `api_keys.created_by_membership_id`
+   * is there to signal.
+   */
+  private async issuerRoles(
+    context: RequestContext,
+    keys: readonly ApiKey[],
+  ): Promise<ReadonlyMap<string, MemberRole>> {
+    const ids = [
+      ...new Set(
+        keys
+          .map((key) => key.createdByMembershipId)
+          .filter((id): id is string => typeof id === 'string' && id.length > 0),
+      ),
+    ];
+    if (ids.length === 0) return new Map();
+
+    const members = await this.scopes.for(context).members.findMany({
+      where: { id: { in: ids } },
+      // Explicit, because `findMany` refuses an unbounded read - and bounded by
+      // the page that produced these ids, so it cannot silently truncate.
+      take: ids.length,
+    });
+    return new Map(members.map((member) => [member.id, member.role]));
+  }
+
+  private static roleOf(key: ApiKey, roles: ReadonlyMap<string, MemberRole>): MemberRole | null {
+    if (!key.createdByMembershipId) return null;
+    return roles.get(key.createdByMembershipId) ?? null;
   }
 
   /**
@@ -244,18 +306,22 @@ export class ApiKeysService {
    * `billing.write` and hand it to whoever they liked. The permission answers
    * "may you create keys"; this answers "carrying what".
    *
-   * KNOWN LIMIT, and the reason `created_by_*` is in the audit metadata above:
-   * this is a SNAPSHOT of the issuer's authority at one instant, and nothing
-   * re-checks it afterwards. A developer who mints a key carrying
-   * `endpoints.write` and `events.replay`, and is then demoted to viewer or
-   * removed from the organization entirely, leaves behind a credential that
-   * still carries developer authority - because the key is bound to a project,
-   * not to a human, and `api_keys` has no `created_by_user_id` column to bind it
-   * to one. It is latent rather than live only because the ingest path does not
-   * consult `scopes` at all today (`internal/ingest/handler.go` authenticates on
-   * the key, its project and its environment); the first key-authenticated
-   * control route makes it real. HANDOFF.md carries the migration and the
-   * enforcement this needs, and closing it requires that schema change.
+   * This is still only a SNAPSHOT of the issuer's authority at one instant, and
+   * a snapshot on its own was the security finding: a developer who minted a key
+   * carrying `endpoints.write` and `events.replay`, and was then demoted to
+   * viewer or removed from the organization entirely, left behind a credential
+   * that still carried developer authority, because the key is bound to a
+   * project and not to a human.
+   *
+   * What closes it is `effective-scopes.ts`: the key now records WHO minted it
+   * (`created_by_user_id` / `created_by_membership_id`, written from the resolved
+   * context in `create`), and every read intersects the stored scopes with the
+   * permissions that membership holds NOW - the empty set once the membership is
+   * gone. This function stays as the mint-time refusal: it keeps a key from ever
+   * being BORN above its issuer, which the intersection alone would not, since a
+   * scope that was never legitimately granted would come back the moment its
+   * issuer was promoted. See HANDOFF.md, "API key effective scopes", for the
+   * contract the Go ingest path adopts when it starts consulting scopes.
    */
   private static resolveScopes(context: RequestContext, requested?: string[]): Permission[] {
     if (!requested || requested.length === 0) return [];

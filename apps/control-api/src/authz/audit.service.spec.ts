@@ -1,6 +1,6 @@
 import { Prisma } from '@prisma/client';
 import { DEFAULT_TENANT_SPEC, RequestContext } from './tenant-context';
-import { AuditService } from './audit.service';
+import { AuditService, REDACTED, isCredentialKey } from './audit.service';
 import { TenantResolver } from './tenant-resolver.service';
 import { IDS, requestWith, seedWorld, sessionUser } from './testing/fixtures';
 import { FakeTenantPrisma } from './testing/tenant-prisma.fake';
@@ -130,6 +130,96 @@ describe('AuditService', () => {
       password: '[redacted]',
       reset_token: '[redacted]',
       version: 2,
+    });
+  });
+
+  /**
+   * THE RULE, both directions, on the keys that actually bit.
+   *
+   * The old filter was a bare substring match, so every key CONTAINING one of
+   * the credential words was redacted: `previous_secrets_expire_at` - a
+   * timestamp, and the only fact the `endpoint_secret.rotated` row is opened to
+   * answer - came back `[redacted]`, and the workaround was to rename the key.
+   * The same trap then caught the next key that module added. These two tables
+   * are the fix: a rule about the key's terminal word, not a list of names
+   * somebody remembered to exempt.
+   */
+  describe('the credential-key rule', () => {
+    it.each([
+      'secret',
+      'secrets',
+      'api_key',
+      'apiKey',
+      'x-api-key',
+      'key',
+      'authorization',
+      'signing_secret',
+      'signingSecret',
+      'password',
+      'reset_token',
+      'rawToken',
+      'client_credentials',
+      'private_key',
+      'key_hash',
+      'signature',
+      // Ambiguous on purpose: a false negative writes a live secret into a
+      // table every `audit.read` holder can query, so these still go.
+      'secret_value',
+      'signature_algorithm',
+    ])('redacts %s', (key) => {
+      expect(isCredentialKey(key)).toBe(true);
+    });
+
+    it.each([
+      // The one that bit first: a timestamp, not a secret.
+      'previous_secrets_expire_at',
+      // ...and the one that bit the same author immediately afterwards.
+      'awaiting_key_handover',
+      'secret_version',
+      'key_prefix',
+      'endpoint_secret_id',
+      'api_key_id',
+      'apiKeyId',
+      'endpoint_ids',
+      'token_count',
+      'created_by_user_id',
+      'name',
+      'url',
+    ])('keeps %s', (key) => {
+      expect(isCredentialKey(key)).toBe(false);
+    });
+  });
+
+  it('keeps the credential-shaped metadata the audit log is read for', async () => {
+    const { db, audit, context } = await build();
+    await audit.recordFor(context, {
+      action: 'endpoint_secret.rotated',
+      resourceType: 'endpoint_secret',
+      metadata: {
+        // Every one of these was destroyed by the old substring rule, or was
+        // one rename away from being destroyed by it.
+        previous_secrets_expire_at: '2026-03-01T00:00:00.000Z',
+        secret_version: 4,
+        key_prefix: 'wk_test_seed',
+        awaiting_key_handover: false,
+        endpoint_secret_id: 'eps_1',
+        // ...and the things that must still go.
+        signing_secret: 'whsec_live_plaintext',
+        api_key: 'wk_live_plaintext',
+        authorization: 'Bearer abc',
+      },
+    });
+
+    expect(metadataOf(db)).toEqual({
+      project_id: IDS.projectA1,
+      previous_secrets_expire_at: '2026-03-01T00:00:00.000Z',
+      secret_version: 4,
+      key_prefix: 'wk_test_seed',
+      awaiting_key_handover: false,
+      endpoint_secret_id: 'eps_1',
+      signing_secret: REDACTED,
+      api_key: REDACTED,
+      authorization: REDACTED,
     });
   });
 

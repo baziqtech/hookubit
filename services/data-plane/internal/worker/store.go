@@ -327,12 +327,30 @@ func (s *PostgresStore) Load(ctx context.Context, deliveryID string) (*Job, erro
 //
 // next_attempt_at is computed from the SERVER's now(), so the ready predicate
 // in internal/queue compares two values produced by the same clock.
+//
+// WHY A TERMINAL DELIVERY STILL GETS A next_attempt_at. Someone will read a
+// succeeded row, see a next_attempt_at, and assume the platform intends to
+// deliver it again. It does not: the claim predicate in internal/queue only
+// considers status IN ('pending','scheduled','queued','retrying','processing'),
+// so for a terminal row the column carries no scheduling meaning at all.
+//
+// It is written as now() rather than left NULL because the column is on its way
+// to NOT NULL (see HANDOFF.md). The claim query orders by
+// `next_attempt_at NULLS FIRST`, so NULL is not a neutral value - it is the
+// FRONT of the queue. A nullable column means any single write of NULL silently
+// promotes that row ahead of retries that are actually due; making it NOT NULL
+// turns that latent ordering hazard into a constraint violation at the moment
+// the mistake is made, and this ELSE branch is the one write that stood in the
+// way. now() is the harmless representation: it sorts the completed row among
+// the other work finishing at the same instant, in an ordering nothing consults
+// for it, and it needs no prior value - so a legacy row that is still NULL is
+// repaired the moment it goes terminal.
 const advanceSQL = `
 UPDATE deliveries
 SET status          = $3::text::"DeliveryStatus",
     attempt_count   = CASE WHEN $4::int > 0 THEN $4::int ELSE attempt_count END,
     last_attempt_at = CASE WHEN $4::int > 0 THEN now() ELSE last_attempt_at END,
-    next_attempt_at = CASE WHEN $5::bool THEN now() + $6::interval ELSE NULL END,
+    next_attempt_at = CASE WHEN $5::bool THEN now() + $6::interval ELSE now() END,
     completed_at    = CASE WHEN $7::bool THEN now() ELSE completed_at END,
     last_error      = $8,
     locked_by       = NULL,

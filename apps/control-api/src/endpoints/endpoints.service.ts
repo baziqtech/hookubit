@@ -215,9 +215,7 @@ export class EndpointsService {
         secret_version: minted.version,
         status: live.status,
         // Why it is paused, for whoever asks later why this endpoint never
-        // delivered anything. NOT named `awaiting_secret_handover`: AuditService
-        // redacts any key matching /secret/i that does not end in `_id`, and a
-        // redacted boolean is a fact lost for no reason.
+        // delivered anything.
         awaiting_key_handover: !mayReceiveSecret,
       },
     });

@@ -329,3 +329,51 @@ func TestTenantFairClaimIsNotSelfThrottlingWithOneTenant(t *testing.T) {
 			"the cap must be derived (K=1 => cap=limit), never constant", len(leases))
 	}
 }
+
+// TestTerminalDeliveriesAreNeverClaimed is the safety proof behind the choice
+// internal/worker's advanceSQL makes: a terminal delivery now keeps a non-NULL
+// next_attempt_at (now()) instead of writing NULL, so that the column can
+// become NOT NULL and a stray NULL can no longer jump the `NULLS FIRST`
+// ordering.
+//
+// The obvious worry about that choice is "does a succeeded delivery with a
+// next_attempt_at in the past get delivered a second time?". It cannot: status
+// decides claimability, and none of the terminal states is in claimStatuses.
+// These rows are seeded an hour overdue - the most claimable a timestamp can
+// make a row - under both strategies.
+func TestTerminalDeliveriesAreNeverClaimed(t *testing.T) {
+	pool := requirePool(t)
+	f := seed(t, pool, 1)
+	ctx := context.Background()
+
+	terminal := map[string]string{}
+	for _, status := range []string{"succeeded", "failed", "exhausted", "cancelled"} {
+		terminal[status] = f.insertDelivery(t, f.projects[0], status, "", nil, -time.Hour)
+	}
+	// One genuinely due row, so a claim of zero cannot pass this test by
+	// accident (a broken predicate, an empty table, a bad fixture).
+	due := f.insertDelivery(t, f.projects[0], "pending", "", nil, -time.Minute)
+
+	for _, strategy := range []Strategy{StrategyFIFO, StrategyTenantFair} {
+		q := NewPostgresQueue(pool, strategy)
+		leases, err := q.Claim(ctx, "wrk_"+string(strategy), 50, time.Minute)
+		if err != nil {
+			t.Fatalf("Claim (%s): %v", strategy, err)
+		}
+		for status, id := range terminal {
+			if contains(leases, id) {
+				t.Fatalf("%s claimed a %s delivery; a completed webhook would be re-sent to the customer",
+					strategy, status)
+			}
+		}
+		if strategy == StrategyFIFO && !contains(leases, due) {
+			t.Fatal("the due delivery was not claimed, so this test proves nothing about the terminal rows")
+		}
+		// Put it back for the next strategy.
+		if _, err := pool.Exec(ctx,
+			`UPDATE deliveries SET status = 'pending', locked_by = NULL, locked_until = NULL WHERE id = $1`,
+			due); err != nil {
+			t.Fatalf("reset due delivery: %v", err)
+		}
+	}
+}

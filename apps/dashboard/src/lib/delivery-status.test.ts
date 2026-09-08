@@ -28,6 +28,7 @@ const ALL_STATUSES: DeliveryStatus[] = [
 function delivery(overrides: Partial<Delivery> = {}): Delivery {
   return {
     id: 'del_1',
+    terminal: false,
     project_id: 'proj_1',
     event_id: 'evt_1',
     event_type: 'payment.settled',

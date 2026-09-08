@@ -436,14 +436,16 @@ describe('sanity: the harness really enforces the parent check on create', () =>
 });
 
 /**
- * FIX 4. `AuditService` redacts any metadata key matching /secret/i that does
- * not end in `_id`. `previous_secrets_expire_at` contains "secrets" and ends in
- * `_at`, so the audit row for a rotation lost the single fact it is ever opened
- * to answer: when did the old secret stop signing? The key is now
- * `previous_expire_at`. The redaction policy itself is correct and untouched.
+ * FIX 4, now fixed at the rule rather than at this call site. The audit
+ * redaction used to match any key CONTAINING "secret", so
+ * `previous_secrets_expire_at` - a timestamp, and the single fact this row is
+ * ever opened to answer - came back `[redacted]`, and the workaround was to
+ * rename the key to `previous_expire_at`. `AuditService.isCredentialKey` now
+ * decides on whole words and exempts a terminal `_at`, so the field carries its
+ * real name again and the next author does not have to know the trap exists.
  */
 describe('the rotation audit row keeps the one fact it is read for', () => {
-  it('records when the previous secrets stop signing, unredacted', async () => {
+  it('records when the previous secrets stop signing, unredacted, under its own name', async () => {
     const { harness, endpointId } = await withEndpoint();
 
     const rotated = await harness.secrets.rotate(harness.context, endpointId, 3_600);
@@ -451,14 +453,12 @@ describe('the rotation audit row keeps the one fact it is read for', () => {
     const entry = harness.db.all('auditLog').find((row) => row.action === 'endpoint_secret.rotated');
     const metadata = entry?.metadata as Record<string, unknown>;
 
-    expect(metadata.previous_expire_at).toBe(rotated.previous_secrets_expire_at);
-    expect(metadata.previous_expire_at).not.toBe(REDACTED);
-    expect(String(metadata.previous_expire_at)).toMatch(/^\d{4}-\d{2}-\d{2}T/);
+    expect(metadata.previous_secrets_expire_at).toBe(rotated.previous_secrets_expire_at);
+    expect(metadata.previous_secrets_expire_at).not.toBe(REDACTED);
+    expect(String(metadata.previous_secrets_expire_at)).toMatch(/^\d{4}-\d{2}-\d{2}T/);
     expect(metadata.previous_versions).toEqual([1]);
-    // The policy still bites where it should: nothing named like a secret,
-    // and no plaintext, anywhere in the row.
+    // The policy still bites where it should: no plaintext anywhere in the row.
     expect(JSON.stringify(entry)).not.toContain(rotated.secret);
-    expect(Object.keys(metadata)).not.toContain('previous_secrets_expire_at');
   });
 });
 

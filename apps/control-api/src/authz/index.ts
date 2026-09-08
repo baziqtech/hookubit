@@ -31,6 +31,9 @@ export {
 } from './tenant-scope';
 export {
   AuditService,
+  REDACTED,
+  TRUNCATED,
+  isCredentialKey,
   type AuditAction,
   type AuditActor,
   type AuditEntry,

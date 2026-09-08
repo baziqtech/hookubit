@@ -236,11 +236,9 @@ export class EndpointSecretsService {
           version: created.row.version,
           overlap_seconds: overlapSeconds,
           previous_versions: stillSigning.versions,
-          // NOT `previous_secrets_expire_at`: AuditService redacts any key
-          // matching /secret/i that does not end in `_id`, so that name made
-          // the audit row lose the single fact it is consulted for - when the
-          // old secret stopped signing.
-          previous_expire_at: stillSigning.until?.toISOString() ?? null,
+          // The single fact this row is consulted for: when the old secret
+          // stopped signing. It carries the same name as the response field.
+          previous_secrets_expire_at: stillSigning.until?.toISOString() ?? null,
         },
       });
 

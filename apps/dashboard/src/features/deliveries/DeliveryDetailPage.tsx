@@ -81,8 +81,8 @@ export function DeliveryDetailPage() {
               />
               <Meta
                 label="Next attempt"
-                value={data.next_attempt_at ? formatRelativeTime(data.next_attempt_at) : '—'}
-                hint={data.next_attempt_at ? formatTimestamp(data.next_attempt_at) : undefined}
+                value={!data.terminal && data.next_attempt_at ? formatRelativeTime(data.next_attempt_at) : '—'}
+                hint={!data.terminal && data.next_attempt_at ? formatTimestamp(data.next_attempt_at) : undefined}
               />
               <Meta
                 label="Event"

@@ -236,30 +236,52 @@ jobs:
       - run: pnpm install --frozen-lockfile
 
       # ── The gate ──────────────────────────────────────────────────────────
-      # PRODUCTION tree only, and `critical` only. Both narrowings are
-      # deliberate and both are measured, not guessed:
+      # PRODUCTION tree, gated on `high`.
       #
-      #   * --prod, because the one CRITICAL advisory in this repo today is
-      #     vitest's dev-server file read (GHSA-5xrq-8626-4rwp). It ships in no
-      #     image, it is not reachable from anything that runs in production,
-      #     and blocking every merge on it teaches people to ignore this job.
-      #   * --audit-level=critical, because the production tree ALREADY carries
-      #     seven `high` advisories on the day this job was written - four in
-      #     multer (all DoS, via @nestjs/platform-express), two in js-yaml (both
-      #     quadratic-CPU, via @nestjs/swagger) and one in lodash. Gating on
-      #     `high` would have merged this workflow permanently red, and a
-      #     permanently red check is a check nobody reads.
+      # This job used to gate on `critical` because the production tree carried
+      # seven `high` advisories that no direct bump could reach - four multer
+      # (DoS, via @nestjs/platform-express), two js-yaml (quadratic CPU, via
+      # @nestjs/swagger) and one lodash (`_.template` code injection, via
+      # @nestjs/config and @nestjs/swagger). All seven are transitive, and each
+      # of those three packages is pinned to an EXACT version by its NestJS
+      # parent, so no `pnpm update` in apps/control-api could ever have moved
+      # them. That is why they sat there.
       #
-      # ═══ TIGHTEN THIS TO `high` ═══ once those seven are cleared - the fix is
-      # a dependency bump in apps/control-api and apps/dashboard, not a change
-      # here. See deployments/HANDOFF.md, "Dependency audit".
+      # They are cleared now, by pnpm `overrides` in the root package.json
+      # (multer ^2.3.0, js-yaml ^4.3.2, lodash ^4.18.1). Each override stays
+      # inside its package's current major, so the NestJS parents keep the API
+      # they were built against. Verified, not assumed: `pnpm -r build`, the
+      # 1327-test control-api suite, and a runtime check that multer still
+      # exposes memoryStorage/diskStorage/MulterError to FileInterceptor, that
+      # js-yaml still round-trips dump/load for the OpenAPI document, and that
+      # lodash still provides the set/get/has @nestjs/config merges config with.
+      #
+      # IF YOU REMOVE AN OVERRIDE, this step goes red. That is the point.
+      #
+      # `--prod` is still deliberate and still measured: the one CRITICAL
+      # advisory in this repo is vitest's dev-server file read
+      # (GHSA-5xrq-8626-4rwp). It ships in no image, nothing in production
+      # reaches it, and blocking every merge on it teaches people to ignore
+      # this job. It stays visible in the advisory report below.
+      #
+      # `high` is as tight as this tree honestly goes. 8 moderate and 1 low
+      # remain, all transitive through express 4 / body-parser / qs under
+      # @nestjs/platform-express 10 - only a NestJS major moves those. Gating
+      # on `moderate` would put this check straight back to permanently red,
+      # which is where it started.
+      #
+      # There is deliberately NO ignore list: every advisory at or above the
+      # threshold is genuinely fixed, so the next new `high` fails the build
+      # instead of landing in a tree that was already red. If this step goes
+      # red, fix or override the advisory - do not lower the threshold.
       - name: Audit production dependencies (gate)
-        run: pnpm audit --prod --audit-level=critical
+        run: pnpm audit --prod --audit-level=high
 
       # ── The report ────────────────────────────────────────────────────────
       # Everything, dev included, never blocking. This is what makes the
-      # narrowed gate above honest: the highs are visible on every run rather
-      # than silently excluded.
+      # `--prod` narrowing above honest: the dev-only critical and the moderates
+      # the gate does not block on are visible on every run rather than
+      # silently excluded.
       - name: Full audit (advisory, never blocks)
         if: always()
         continue-on-error: true

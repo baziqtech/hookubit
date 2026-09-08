@@ -2312,10 +2312,12 @@ column goes NOT NULL.
    `event_outbox_ready_idx`'s siblings) already exist.
 4. **A `projects_count` / `api_keys_count` counter column.** Hypothetical in the
    source HANDOFF ("if a hard limit is ever needed"), not requested.
-5. **The `api_keys` enforcement itself** — scope re-derivation at authentication,
-   and auto-revoke in `MembersService.remove`. The columns exist now; the
-   behaviour is `src/`-owned and was explicitly out of scope here.
-   `ApiKeyDto` should also gain `created_by_user_id`.
+5. ~~**The `api_keys` enforcement itself**~~ **DONE (2026-09-08)** — the columns
+   are written from the resolved context and read back as
+   `ApiKeyDto.effective_scopes` / `created_by_*`. Re-derivation at use time was
+   chosen over auto-revoke in `MembersService.remove`; see "API key effective
+   scopes" at the end of this file for the reasoning and the contract the Go
+   ingest path adopts when it starts consulting scopes.
 
 ### Safety on a non-empty database
 
@@ -2741,11 +2743,115 @@ here:
   constants, not `ConfigService`-driven. Worth aligning with
   `MAX_PROJECTS_PER_ORGANIZATION` if an operator ever needs to raise one without
   a deploy.
-- `ScopedRepository.notFound()` still says `${resourceName} not found.`, so this
-  is the **fifth** module to hand-roll `crossTenantNotFound()` rather than use
-  `requireById`. Changing `notFound()` to the constant would let the next one
-  stop.
+- ~~`ScopedRepository.notFound()` still says `${resourceName} not found.`~~
+  **DONE (2026-09-08).** `notFound()` now returns `CROSS_TENANT_MESSAGE`, so the
+  repository and `TenantResolver` speak one 404 vocabulary and a new module gets
+  it for free from `requireById`. The per-module `withCrossTenantNotFound`
+  helpers remain as the fence for `not_found`s a SERVICE raises;
+  `authz/not-found-vocabulary.spec.ts` fails if a second dialect appears.
 - The `origin` filter (`original` / `replay`) uses `replay_of_delivery_id IS
   NULL` / `IS NOT NULL`, which has no index. It is a refinement of an already
   narrowed set today; if a "replays only" dashboard becomes a real screen it
   wants a partial index.
+
+---
+
+## API key effective scopes (2026-09-08) — `src/api-keys`, and a contract for the data plane
+
+The columns from migration `20260907000000` are now **written and read**. Before
+this, `api_keys.created_by_user_id` / `created_by_membership_id` existed with
+their indexes and FKs and nothing populated or consulted them.
+
+### What changed
+
+- `ApiKeysService.create` writes both columns from the **resolved
+  `RequestContext`** (`context.user.userId`, `context.membershipId`). There is no
+  DTO field that could set them; `ValidationPipe` runs `forbidNonWhitelisted`, so
+  a body naming an issuer is a 400. A caller who could name the issuer could mint
+  a key attributed to an owner and keep owner authority forever.
+- `src/api-keys/effective-scopes.ts` is the derivation, and `ApiKeyDto` now
+  carries `effective_scopes`, `created_by_user_id`, `created_by_membership_id`
+  and `created_by_role` (the issuer's role **now**, not at mint time). `scopes`
+  is unchanged and is explicitly documented as history.
+
+### The enforcement chosen: re-derive at use time (HANDOFF option 1), not auto-revoke
+
+    effective = key.scopes ∩ permissionsForRole(current role of created_by_membership_id)
+    created_by_membership_id IS NULL  ⇒  effective = ∅
+
+Why this one rather than auto-revoking a key when its issuer's membership is
+removed:
+
+- **A key is bound to a project, not to a person.** Auto-revoke takes a
+  production ingest credential offline on an HR event that has nothing to do with
+  the integration it serves. The first time it happens it is an outage nobody can
+  explain from the key's own history.
+- **It fails closed with no sweep to miss.** Auto-revoke is a write that must
+  happen on every path that can remove a membership — this API, a CLI, a
+  migration, a backfill, another service, or PostgreSQL's own FK enforcement. A
+  missed sweep fails **open**, and silently. The derivation reads current state on
+  every use, so there is no window and nothing to replay.
+- **It handles demotion, which revocation cannot.** A developer demoted to viewer
+  keeps a membership; auto-revoke never fires and the key keeps developer
+  authority. This is the larger half of the original finding.
+- **It degrades rather than destroys.** The key keeps exactly the scopes the
+  issuer still holds, which is the answer an operator would give by hand.
+
+Revocation stays the operator's tool for "this credential must die", and remains
+the only thing that frees a slot against the per-project ceiling. Auto-revoke can
+still be added later in `MembersService.remove` — the two compose, and this
+choice is the one that is safe *without* the other.
+
+Verified against PostgreSQL 16 (`hookubit_test`): deleting an
+`organization_members` row leaves `api_keys.created_by_membership_id` NULL and
+`created_by_user_id` intact, so the derivation yields ∅ and the operator can
+still see who minted the key.
+
+### The contract for `services/data-plane`
+
+The ingest path does **not** consult `scopes` today — `internal/ingest/handler.go`
+authenticates on the key, its project and its environment — so nothing in Go has
+to change now. When it does start consulting scopes, the rule is:
+
+> **Never authorize on `api_keys.scopes`. Authorize on the intersection of
+> `api_keys.scopes` with the permissions of the role held *right now* by
+> `api_keys.created_by_membership_id`, and treat a NULL
+> `created_by_membership_id` as the empty set.**
+
+It is one join on the key lookup already being issued, and both columns are
+indexed for it:
+
+```sql
+SELECT k.id,
+       k.project_id,
+       k.environment,
+       k.scopes                              AS minted_scopes,
+       m.role                                AS issuer_role   -- NULL ⇒ no authority
+  FROM api_keys k
+  LEFT JOIN organization_members m
+         ON m.id = k.created_by_membership_id
+ WHERE k.key_hash   = $1
+   AND k.revoked_at IS NULL
+   AND (k.expires_at IS NULL OR k.expires_at > now());
+```
+
+Rules the Go side must hold, which are the same ones `effective-scopes.ts` holds:
+
+1. `issuer_role IS NULL` ⇒ **empty** effective scopes. Never fall back to
+   `minted_scopes`; "we no longer know whose authority this was" must not mean
+   "all of it".
+2. The intersection is computed **per request**. Cache the role lookup within a
+   request if you like, never across requests — the point is that a demotion
+   takes effect immediately.
+3. A stored scope that is not a permission the build knows is **dropped**, not
+   passed through.
+4. The role→permission matrix is `apps/control-api/src/authz/permissions.ts`. If
+   Go grows its own copy it is a second source of truth for authorization; prefer
+   having the control plane expose the effective list, or generate the table from
+   the same source.
+5. Ingest authentication itself is unaffected by all of this. A key whose issuer
+   is gone still authenticates and still ingests; it simply carries no
+   control-plane authority.
+
+`ApiKeyDto.effective_scopes` is the same derivation over HTTP, so an operator and
+the data plane read one answer.

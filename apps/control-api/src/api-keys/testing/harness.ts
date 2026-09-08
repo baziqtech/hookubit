@@ -70,10 +70,12 @@ const PAST = new Date('2026-01-01T00:00:00.000Z');
 
 /**
  * Prisma column defaults the fake does not implement (`scopes []`, the three
- * nullable timestamps, `created_at`/`updated_at`). Without them a freshly
- * created row has `revokedAt: undefined`, which is not a state the real column
- * can be in, and every status derivation downstream would be tested against a
- * shape production cannot produce.
+ * nullable timestamps, `created_at`/`updated_at`, and the two nullable
+ * `created_by_*` provenance columns). Without them a freshly created row has
+ * `revokedAt: undefined`, which is not a state the real column can be in, and
+ * every status derivation downstream would be tested against a shape production
+ * cannot produce. `createdBy*` defaults to NULL for the same reason: that is
+ * what a pre-migration row and a row whose issuer was deleted both look like.
  */
 export function enforceApiKeySchema(db: FakeTenantPrisma): void {
   const create = db.apiKey.create;
@@ -84,6 +86,8 @@ export function enforceApiKeySchema(db: FakeTenantPrisma): void {
         expiresAt: null,
         lastUsedAt: null,
         revokedAt: null,
+        createdByUserId: null,
+        createdByMembershipId: null,
         createdAt: new Date(),
         updatedAt: new Date(),
         ...args.data,
@@ -97,6 +101,10 @@ function seedKeys(db: FakeTenantPrisma): void {
     expiresAt: null,
     lastUsedAt: null,
     revokedAt: null,
+    // Seeded keys predate the provenance columns, exactly like the rows the
+    // migration's backfill could not recover an issuer for.
+    createdByUserId: null,
+    createdByMembershipId: null,
     createdAt: PAST,
     updatedAt: PAST,
   };

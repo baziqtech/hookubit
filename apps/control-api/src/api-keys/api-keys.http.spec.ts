@@ -639,12 +639,124 @@ describe('api keys over HTTP', () => {
   // -------------------------------------------------------------------------
 
   describe('issuer provenance', () => {
+    const DEV_MEMBERSHIP = `mem_${IDS.developerA}_${IDS.orgA}`;
+
+    /** Mint a key as the developer, carrying scopes only a developer holds. */
+    async function mintAsDeveloper(): Promise<CreatedApiKeyDto> {
+      const created = await h.call<CreatedApiKeyDto>('POST', keysOf(IDS.projectA1), {
+        as: IDS.developerA,
+        body: { name: 'developer key', scopes: ['endpoints.write', 'endpoints.read'] },
+      });
+      expect(created.status).toBe(201);
+      return created.body;
+    }
+
+    const listed = async (id: string): Promise<ApiKeyDto | undefined> => {
+      const list = await h.call<ApiKeyListDto>('GET', keysOf(IDS.projectA1), { as: IDS.ownerA });
+      return list.body.data.find((key) => key.id === id);
+    };
+
+    it('writes both provenance columns from the resolved context', async () => {
+      const key = await mintAsDeveloper();
+
+      const row = h.db.rows('apiKey').get(key.id);
+      expect(row?.createdByUserId).toBe(IDS.developerA);
+      expect(row?.createdByMembershipId).toBe(DEV_MEMBERSHIP);
+    });
+
+    it('surfaces the issuer on the response, so an operator can see who minted a key', async () => {
+      const key = await mintAsDeveloper();
+
+      expect(key.created_by_user_id).toBe(IDS.developerA);
+      expect(key.created_by_membership_id).toBe(DEV_MEMBERSHIP);
+      expect(key.created_by_role).toBe('developer');
+      expect(await listed(key.id)).toMatchObject({
+        created_by_user_id: IDS.developerA,
+        created_by_role: 'developer',
+      });
+    });
+
+    it('cannot be told who minted the key', async () => {
+      // The provenance is the point; a body that could name the issuer would let
+      // a developer attribute a key to an owner and keep owner authority forever.
+      const res = await h.call('POST', keysOf(IDS.projectA1), {
+        as: IDS.developerA,
+        body: { name: 'forged', created_by_user_id: IDS.ownerA },
+      });
+
+      expect(res.status).toBe(400);
+      expect(h.db.all('apiKey').some((row) => row.name === 'forged')).toBe(false);
+    });
+
+    /**
+     * THE FINDING. The scopes on the row are a snapshot of the issuer's
+     * authority; the enforcement is re-derivation at read time, so a demotion
+     * takes effect without anyone having to remember to sweep.
+     */
+    it('narrows effective_scopes when the issuer is demoted, without touching the row', async () => {
+      const key = await mintAsDeveloper();
+      expect(key.effective_scopes).toEqual(['endpoints.write', 'endpoints.read']);
+
+      const membership = h.db.rows('organizationMember').get(DEV_MEMBERSHIP);
+      expect(membership).toBeDefined();
+      membership!.role = 'viewer';
+
+      const after = await listed(key.id);
+      // The stored snapshot is untouched - it is history, and the audit trail
+      // has to keep matching it...
+      expect(after?.scopes).toEqual(['endpoints.write', 'endpoints.read']);
+      expect(h.db.rows('apiKey').get(key.id)?.scopes).toEqual([
+        'endpoints.write',
+        'endpoints.read',
+      ]);
+      // ...and the authority it actually carries is now the viewer's.
+      expect(after?.effective_scopes).toEqual(['endpoints.read']);
+      expect(after?.created_by_role).toBe('viewer');
+    });
+
+    it('empties effective_scopes when the issuer leaves the organization', async () => {
+      const key = await mintAsDeveloper();
+
+      // What ON DELETE SET NULL leaves behind: the key survives (its delivery
+      // history stays attributable) and its issuer does not.
+      h.db.rows('organizationMember').delete(DEV_MEMBERSHIP);
+
+      const after = await listed(key.id);
+      expect(after?.effective_scopes).toEqual([]);
+      expect(after?.created_by_role).toBeNull();
+      // The credential still authenticates for ingest, which does not consult
+      // scopes - it has simply lost every control-plane scope it carried.
+      expect(after?.status).toBe('active');
+    });
+
+    it('reports no effective scopes for a key that predates the provenance columns', async () => {
+      // The migration's backfill cannot recover an issuer for every old row.
+      // Unknown issuer must fail closed, not fall back to the stored scopes.
+      const seeded = await listed(KEY_IDS.activeA);
+
+      expect(seeded?.created_by_user_id).toBeNull();
+      expect(seeded?.created_by_membership_id).toBeNull();
+      expect(seeded?.effective_scopes).toEqual([]);
+    });
+
+    it('carries the issuer through revocation, which is the forensic read', async () => {
+      const key = await mintAsDeveloper();
+
+      const revoked = await h.call<ApiKeyDto>(
+        'POST',
+        `${keysOf(IDS.projectA1)}/${key.id}/revoke`,
+        { as: IDS.ownerA },
+      );
+
+      expect(revoked.status).toBe(200);
+      expect(revoked.body.created_by_user_id).toBe(IDS.developerA);
+      expect(revoked.body.created_by_role).toBe('developer');
+    });
+
     it('records the issuer and the role their scopes were copied from', async () => {
-      // `api_keys` has no created_by column yet (HANDOFF.md carries the
-      // migration). Until it does, this audit row is the ONLY thing tying a
-      // credential's scopes back to a human and to the role that authorised
-      // them - and the role is what a later re-derivation has to compare the
-      // stored scopes against.
+      // The columns carry the issuer; the audit row additionally carries the
+      // role AT MINT TIME, which is recorded nowhere else and is what an
+      // operator compares against to see that the issuer has since been demoted.
       const created = await h.call<CreatedApiKeyDto>('POST', keysOf(IDS.projectA1), {
         as: IDS.developerA,
         body: { name: 'developer key', scopes: ['events.read'] },

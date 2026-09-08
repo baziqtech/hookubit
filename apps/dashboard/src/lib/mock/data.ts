@@ -654,6 +654,7 @@ function buildFixture(index: number): Fixture {
       endpoint_name: endpoint.name,
       endpoint_url: endpoint.url,
       status,
+      terminal: status === 'succeeded' || status === 'failed' || status === 'exhausted' || status === 'cancelled',
       attempt_count: attemptCount,
       max_attempts: maxAttempts,
       last_status_code: last?.status_code ?? null,

@@ -41,14 +41,146 @@ interface AuditLogWriter {
 }
 
 /**
- * Keys whose values must never reach the audit table. Matched case-insensitively
- * against the key name. `*_id`/`*Id` are exempt because `api_key_id` and
- * `endpoint_secret_id` are references, not secrets, and losing them would make
- * the log useless for the thing it exists to answer.
+ * WHAT COUNTS AS A CREDENTIAL KEY - the rule, not a list of exceptions.
+ *
+ * This was a bare substring match
+ * (`/(secret|password|token|credential|authorization|signature|api[-_]?key)/i`
+ * minus a `_id`/`Id` escape hatch) and it over-redacted every key that merely
+ * CONTAINED one of those words. `previous_secrets_expire_at` - a timestamp, and
+ * the single fact the `endpoint_secret.rotated` row is consulted for ("when did
+ * the old secret stop signing?") - came back as `[redacted]`. The author worked
+ * around it by renaming the key, and the same trap caught the next key they
+ * added. A rule that has to be worked around one key at a time is the bug.
+ *
+ * So the question the rule asks is "could this key's VALUE be a credential?",
+ * answered on whole words rather than substrings:
+ *
+ *  1. The key is split into words (`_`, `-`, `.`, and camelCase boundaries), so
+ *     `signingSecret`, `signing_secret` and `x-api-key` are one shape.
+ *  2. A TERMINAL word that marks the value as non-secret metadata - `_at`,
+ *     `_id`/`Id`, `_ids`, `_count`, `_version`, `_prefix` - wins outright. A
+ *     timestamp, a row reference, a tally, a version number and a displayable
+ *     prefix are none of them credentials, whatever the rest of the name says.
+ *     This is what keeps `previous_secrets_expire_at`, `secret_version`,
+ *     `key_prefix` and `endpoint_secret_id` readable.
+ *  3. Otherwise: a credential WORD anywhere (`secret`, `password`, `token`,
+ *     `credential`, `authorization`, `signature`, ...) redacts; so does a
+ *     terminal `key`/`keys` (the bare `key` field IS the plaintext), and a
+ *     qualified key such as `api_key`, `private_key`, `signing_key_hash`.
+ *
+ * Note what stays readable and what does not: `awaiting_key_handover` is a flag
+ * whose name happens to mention a key and is kept; `api_key` is the key and is
+ * not. A false negative here writes a live secret into a table every
+ * `audit.read` holder can query, so anything genuinely ambiguous still redacts -
+ * `signature_algorithm` and `secret_value` both go, and that is the intended
+ * direction.
+ *
+ * This is still a key-name filter and therefore still a backstop, not a licence:
+ * a secret stored under an innocent name is not caught by anything here.
  */
-const SENSITIVE_KEY =
-  /(secret|password|passwd|token|credential|authorization|signature|api[-_]?key)/i;
-const REFERENCE_KEY = /(_id|Id)$/;
+const CREDENTIAL_WORDS: ReadonlySet<string> = new Set([
+  'secret',
+  'secrets',
+  'password',
+  'passwords',
+  'passwd',
+  'passphrase',
+  'pwd',
+  'token',
+  'tokens',
+  'credential',
+  'credentials',
+  'authorization',
+  'authorisation',
+  'signature',
+  'signatures',
+  'apikey',
+  'apikeys',
+  'bearer',
+  'otp',
+]);
+
+/**
+ * Words that, as the LAST word of a key, say the value is metadata about a
+ * credential rather than one. Deliberately short: every entry is a shape that
+ * cannot hold key material, and a longer list is how a real secret gets through.
+ */
+const NON_SECRET_TERMINAL: ReadonlySet<string> = new Set([
+  'at', // *_at - a timestamp
+  'id', // *_id / *Id - a row reference
+  'ids',
+  'count',
+  'version',
+  'prefix', // api_keys.key_prefix, displayable by design
+]);
+
+/**
+ * Words that describe a DERIVATION of the value rather than a different kind of
+ * value, and are stripped before the rule is applied: `key_hash` is decided as
+ * `key`, `secret_value` as `secret`. Without this a stored `key_hash` - which is
+ * the exact value the ingest path authenticates by - reads as innocuous.
+ */
+const TRANSPARENT_SUFFIX: ReadonlySet<string> = new Set([
+  'hash',
+  'hashes',
+  'digest',
+  'value',
+  'values',
+  'plaintext',
+  'raw',
+]);
+
+/** Qualifiers that turn a following `key`/`keys` word into a credential. */
+const KEY_QUALIFIERS: ReadonlySet<string> = new Set([
+  'api',
+  'private',
+  'public',
+  'secret',
+  'signing',
+  'access',
+  'encryption',
+  'session',
+  'client',
+  'master',
+  'shared',
+  'webhook',
+]);
+
+/** `signingSecret` -> ['signing', 'secret']; `x-api-key` -> ['x','api','key']. */
+function keyWords(key: string): string[] {
+  return key
+    .replace(/([a-z0-9])([A-Z])/g, '$1 $2')
+    .replace(/([A-Z]+)([A-Z][a-z])/g, '$1 $2')
+    .split(/[^A-Za-z0-9]+/)
+    .filter((word) => word.length > 0)
+    .map((word) => word.toLowerCase());
+}
+
+/**
+ * True when this metadata key's value could plausibly BE a credential.
+ *
+ * Exported so the rule can be tested in both directions directly, and so a
+ * module that is about to name a metadata field can check it rather than
+ * discovering the answer in a redacted audit row weeks later.
+ */
+export function isCredentialKey(key: string): boolean {
+  const words = keyWords(key);
+  if (words.length === 0) return false;
+
+  // `key_hash` is a key; `secret_value` is a secret. Never strip the last word
+  // standing, or a field literally called `hash` would decide on nothing.
+  while (words.length > 1 && TRANSPARENT_SUFFIX.has(words[words.length - 1])) words.pop();
+
+  const last = words[words.length - 1];
+  if (NON_SECRET_TERMINAL.has(last)) return false;
+
+  if (words.some((word) => CREDENTIAL_WORDS.has(word))) return true;
+  if (last === 'key' || last === 'keys') return true;
+  return words.some(
+    (word, index) =>
+      KEY_QUALIFIERS.has(word) && (words[index + 1] === 'key' || words[index + 1] === 'keys'),
+  );
+}
 
 export const REDACTED = '[redacted]';
 export const TRUNCATED = '[truncated]';
@@ -178,10 +310,9 @@ export class AuditService {
   private static redactObject(value: Record<string, unknown>, depth: number): unknown {
     const safe: Record<string, unknown> = {};
     for (const [key, nested] of Object.entries(value)) {
-      safe[key] =
-        SENSITIVE_KEY.test(key) && !REFERENCE_KEY.test(key)
-          ? REDACTED
-          : AuditService.redactValue(nested, depth + 1);
+      safe[key] = isCredentialKey(key)
+        ? REDACTED
+        : AuditService.redactValue(nested, depth + 1);
     }
     return safe;
   }

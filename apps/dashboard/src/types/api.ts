@@ -431,6 +431,14 @@ export interface Delivery {
   endpoint_name: string;
   endpoint_url: string;
   status: DeliveryStatus;
+  /**
+   * Whether the delivery has finished, from the server. Do NOT re-derive it by
+   * testing next_attempt_at for null: a terminal delivery now carries a
+   * timestamp there rather than NULL, because the column is becoming NOT NULL -
+   * the claim query orders NULLS FIRST, so any row written NULL silently jumps
+   * ahead of work that is actually due.
+   */
+  terminal: boolean;
   attempt_count: number;
   max_attempts: number;
   last_status_code: number | null;

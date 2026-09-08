@@ -439,9 +439,32 @@ func TestStoreCompleteMarksTerminalStates(t *testing.T) {
 		if completedAt == nil {
 			t.Fatalf("%s is terminal and must stamp completed_at", state)
 		}
-		if nextAttempt != nil {
-			t.Fatalf("%s is terminal but next_attempt_at = %v, so the claim query would pick it up again", state, nextAttempt)
+		// A terminal delivery still carries a next_attempt_at, and that is
+		// deliberate - see advanceSQL. The column is on its way to NOT NULL,
+		// and NULL is not a neutral value in a claim ordered by
+		// `next_attempt_at NULLS FIRST`: it is the front of the queue. Nothing
+		// re-attempts this row (its status is outside the ready set, which
+		// TestTerminalDeliveriesAreNeverClaimed in internal/queue proves), so
+		// the value is inert; what it must never be is absent.
+		if nextAttempt == nil {
+			t.Fatalf("%s left next_attempt_at NULL; the pending NOT NULL constraint would reject this transition", state)
 		}
+		if nextAttempt.After(time.Now().Add(time.Second)) {
+			t.Fatalf("%s wrote a FUTURE next_attempt_at (%v); a terminal row must not look scheduled to an operator", state, nextAttempt)
+		}
+	}
+
+	// The constraint is table-wide, not per-transition: assert it over every
+	// row this fixture touched, so a future write site that reintroduces a NULL
+	// fails here rather than during the migration.
+	var nulls int
+	if err := pool.QueryRow(ctx,
+		`SELECT count(*) FROM deliveries WHERE organization_id = $1 AND next_attempt_at IS NULL`, f.orgID).
+		Scan(&nulls); err != nil {
+		t.Fatalf("count null next_attempt_at: %v", err)
+	}
+	if nulls != 0 {
+		t.Fatalf("%d deliveries have a NULL next_attempt_at; ALTER COLUMN ... SET NOT NULL would fail", nulls)
 	}
 }
 

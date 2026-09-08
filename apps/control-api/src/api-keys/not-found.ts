@@ -2,22 +2,19 @@ import { CROSS_TENANT_MESSAGE } from '../authz';
 import { AppError } from '../common/errors';
 
 /**
- * One 404 vocabulary, not two. See `projects/not-found.ts` for the argument;
- * this is the same three lines because the alternative is one module importing
- * another module's internals to save them, which is a worse dependency than a
- * duplicated try/catch.
+ * Normalise any `not_found` raised inside this module to the ONE 404 string the
+ * whole control plane speaks.
  *
- * `ScopedRepository.notFound()` for this table says "API key not found." That is
- * not an oracle - it is only ever reached for a key id inside an
- * already-resolved project, where absent and foreign produce the identical
- * string - but it is a SECOND vocabulary, and `endpoints`/`endpoint-secrets`
- * already answer with `CROSS_TENANT_MESSAGE`. Eight modules are still to be
- * written against whatever idiom they find here.
+ * `ScopedRepository.notFound()` now emits `CROSS_TENANT_MESSAGE` itself, so the
+ * repository path no longer needs this. It stays as the module's fence for the
+ * `not_found`s a SERVICE raises - a lookup that misses after its own read, a
+ * helper that predates the alignment - so there is one place to look when
+ * someone asks why every miss in this module reads the same.
  *
  * Only `not_found` is rewritten. The distinctions that are genuinely useful
  * inside the tenant - an expiry in the past, a scope the caller does not hold,
- * a ceiling reached - are different codes and different messages, and they all
- * survive untouched.
+ * a ceiling reached, a conflict - are different codes with their own messages
+ * and all survive untouched.
  */
 export async function withCrossTenantNotFound<T>(work: Promise<T>): Promise<T> {
   try {

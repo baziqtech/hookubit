@@ -8,6 +8,7 @@ export {
   maxApiKeysPerProject,
 } from './api-key-limits';
 export { withCrossTenantNotFound } from './not-found';
+export { effectiveScopes } from './effective-scopes';
 export {
   ApiKeyDto,
   ApiKeyListDto,
