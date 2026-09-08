@@ -637,9 +637,13 @@ looking. The only path entries are `dist/`, `node_modules/`, `.pnpm-store/` and
 
 ## Known issues and follow-ups, in priority order
 
-1. ~~**`services/data-plane/go.mod` still says `go 1.21`.**~~ **DONE** — it is
-   `go 1.23`, matching `GO_VERSION` and both Dockerfiles. Build, vet and the
-   full test suite pass under go1.23.4.
+1. ~~**`services/data-plane/go.mod` still says `go 1.21`.**~~ **REVERTED, and
+   correctly so.** The file says `go 1.21` again and its header explains why:
+   the directive is a minimum language version, not a pin, and raising it broke
+   local builds on a 1.21.4 toolchain. CI and the Dockerfiles now build with
+   **1.27** and the module minimum stays 1.21 — the two numbers are allowed to
+   differ. See "CI first-run fixes" at the end of this document. The one thing
+   that would force the minimum up is the pgx advisory, item 16.
 2. **`prisma` is still a devDependency of `apps/control-api`, and that is the
    root cause of two of the fixes above.** It forces the second
    `prisma generate` in the Dockerfile, the whole `migrate` target, its CI
@@ -725,3 +729,145 @@ looking. The only path entries are `dist/`, `node_modules/`, `.pnpm-store/` and
     egress to `169.254.169.254` and to an internal HTTP service is actually
     dropped from a worker pod, and that the control API still reaches its
     database — then promote.
+
+
+---
+
+## CI first-run fixes (this pass)
+
+The first real run of `ci.yml` on `main` failed five jobs with four distinct
+causes. Three are fixed in files this pass owns; the fourth needs a change in
+`services/data-plane/go.mod`, which it does not.
+
+### pnpm version: one file, not two
+
+`pnpm/action-setup@v4` now **refuses** to run when a `version:` is passed AND
+the root `package.json` sets `packageManager` — "Multiple versions of pnpm
+specified" — which killed `control-plane`, `schema-drift` and `supply-chain`
+before they installed anything. The `version:` input is gone from all three
+steps and the workflow-level `PNPM_VERSION` is deleted. `packageManager`
+(`pnpm@9.12.3`) is now the only place the pnpm version appears; corepack in the
+Dockerfiles already read it. `package.json` itself was **not** modified.
+
+### Go toolchain: 1.23 → 1.27 (build only)
+
+`GO_VERSION` in `ci.yml` and the builder image in `data-plane.Dockerfile` are
+now **1.27**. `services/data-plane/go.mod` is untouched and still says
+`go 1.21`.
+
+Go 1.23 is out of support, so `1.23` resolved to go1.23.12 and govulncheck found
+ten standard-library advisories reachable from this code — `GO-2026-6218`,
+`-6090`, `-6089`, `-6088`, `-5972`, `-5856`, `-5039`, `-5037`, `-5026`, `-4971`
+(quadratic `net/url` parsing, post-handshake `crypto/tls` flooding, `net/http`
+h2c `ReadHeaderTimeout`, `encoding/xml` and `encoding/asn1` recursion, ECH
+privacy leak, and so on), all reached through `egress.Client.Do`,
+`ingest.Serve` and pgx. Every one of them is fixed at **1.27.0-rc.3 or
+earlier**, checked against the fixed-version ranges in `vuln.go.dev` rather
+than taken from the scanner's suggested patch. 1.26.6+ would also have cleared
+them; 1.27 was chosen because it is the current stable branch and has the
+longer support runway — being stuck on an EOL branch is what produced the list.
+
+### The `data-plane` job now has a database
+
+Not one of the three diagnosed causes, and worth reading before it is "fixed"
+again. The `Test` step failed on ten connection-refused errors, not on
+govulncheck. The Go integration tests in `internal/db`, `internal/ingest`,
+`internal/queue`, `internal/router` and `internal/worker` `t.Skip` when
+`DATABASE_URL` is unset — but the workflow-level `env:` sets it for **every**
+job, so in a job with no `postgres` service they did not skip, they dialled
+nothing.
+
+Unsetting `DATABASE_URL` for that job would also be green, and would be wrong:
+those tests are the only place drift between the hand-written pgx SQL and
+Prisma's schema is caught, because the Go side never runs migrations
+(ADR-0002). The job now starts `postgres:16-alpine`, installs dependencies,
+runs `prisma migrate deploy`, and then runs the suite with `-p 1`.
+
+It carries **two spellings of the same URL**, deliberately: pgx forwards unknown
+URL query parameters to the server as runtime parameters, so Prisma's
+`?schema=public` makes every `pgxpool.New` in the suite fail with
+`FATAL: unrecognized configuration parameter "schema"`. Verified locally against
+PostgreSQL. The migration step gets Prisma's spelling; the job env gives the
+tests `?sslmode=disable`. The same split already exists in the root
+`package.json` (`test:db:migrate` vs `go:test:db`).
+
+### Prisma engine binary targets — `control-api` image
+
+The `control-api` image build failed with
+`Unable to require(.../.prisma/client/libquery_engine-linux-musl.so.node)`.
+The engine was not missing; it was the **wrong** engine. The build log shows
+`prisma:warn Prisma failed to detect the libssl/openssl version to use ...
+Defaulting to "openssl-1.1.x"` three times — at `@prisma/engines` postinstall,
+at `@prisma/client` postinstall, and at `prisma generate`. `node:22-alpine`
+ships no openssl, so Prisma 5.22 fell back to the OpenSSL 1.1 build,
+`linux-musl`, and Alpine has only OpenSSL 3, so that `.so` cannot be
+`dlopen`'d.
+
+The fix in `control-api.Dockerfile` is `apk add --no-cache openssl` in **both**
+the builder and the runtime stage (builder before `pnpm install`, so the right
+engine is downloaded rather than only requested). Both stages must agree, or
+the mismatch reappears at pod start instead of at build time. It costs roughly
+5 MB and keeps the Alpine base — moving to `node:22-slim` would also fix
+detection, but it swaps a musl base for a Debian one with a larger package
+surface to patch, which is not a trade worth making for a variable that
+installing openssl removes outright.
+
+**Belt-and-braces, and it needs a file this pass does not own.** Make the target
+explicit rather than detected, in `apps/control-api/prisma/schema.prisma`:
+
+```prisma
+generator client {
+  provider      = "prisma-client-js"
+  binaryTargets = ["native", "linux-musl-openssl-3.0.x"]
+}
+```
+
+With that in place the engine the image needs is generated whatever the probe
+decides, and the `node --eval` guard in the Dockerfile keeps proving it. This is
+the same category as item 2 (`prisma` as a devDependency): a one-line change in
+the control-api owner's tree that removes a workaround from `deployments/`.
+
+### Outstanding: Go module advisories — `security` job stays red
+
+Item 16 below. The 1.27 bump clears ten of twelve findings. **The remaining two
+are in modules, not the standard library, and no toolchain can reach them.**
+
+---
+
+## Known issues and follow-ups — added this pass
+
+16. **`govulncheck` still fails on two module advisories, and fixing them forces
+    the data plane's `go` directive from 1.21 to 1.25.**
+
+    ```
+    GO-2026-5004  github.com/jackc/pgx/v5  v5.7.1 -> v5.9.2
+                  SQL injection via placeholder confusion with dollar-quoted
+                  string literals. Reachable: queue.PostgresQueue.Renew ->
+                  pgxpool.Pool.Query -> sanitize.SanitizeSQL.
+    GO-2026-5970  golang.org/x/text        v0.18.0 -> v0.39.0
+                  Infinite loop on invalid input. Reachable:
+                  db.Open -> pgxpool.NewWithConfig -> norm.Form.
+    ```
+
+    Both fixed versions declare `go 1.25.0` in their own `go.mod`, so taking
+    them raises this module's minimum to 1.25 — the exact change go.mod's
+    header argues against, because it breaks anyone building on an older
+    toolchain and, with `GOTOOLCHAIN=auto`, triggers a toolchain download that
+    fails on a restricted network. There is no earlier fixed version of either
+    advisory to take instead; this was checked, not assumed.
+
+    **This is the module owner's call, not CI's**, which is why the
+    `Vulnerability scan` step was left blocking and red rather than given an
+    ignore list. The SQL-injection advisory is the one that matters — it is
+    reachable from the worker's lease-renewal path. If the decision is to take
+    it:
+
+    ```bash
+    cd services/data-plane
+    # This will also rewrite the `go 1.21` directive to `go 1.25.0`.
+    go get github.com/jackc/pgx/v5@v5.9.2 golang.org/x/text@v0.39.0
+    go mod tidy && go build ./... && go vet ./... && go test ./...
+    ```
+
+    and then say so in go.mod's header, because the header currently argues the
+    opposite and every contributor on an older toolchain will hit it.

@@ -24,12 +24,30 @@ permissions:
   contents: read
 
 env:
-  # One place for the toolchain version. Keep it in step with the `go` directive
-  # in services/data-plane/go.mod (1.23) and with the builder image in
-  # deployments/docker/data-plane.Dockerfile.
-  GO_VERSION: '1.23'
+  # The Go version CI BUILDS and TESTS with. It is deliberately NOT the `go`
+  # directive in services/data-plane/go.mod, which is 1.21 and stays 1.21: that
+  # directive is a MINIMUM language version, not a pin. A module declaring 1.21
+  # compiles fine under 1.27, and raising it only excludes contributors on an
+  # older toolchain (it was tried, and broke local builds on 1.21.4). Keep this
+  # in step with the builder image in deployments/docker/data-plane.Dockerfile.
+  #
+  # Bumped 1.23 -> 1.27 because 1.23 is out of support and receives no further
+  # standard-library security fixes. Under the go1.23.12 that `1.23` resolved
+  # to, govulncheck found ten stdlib advisories reachable from this code
+  # (GO-2026-6218, -6090, -6089, -6088, -5972, -5856, -5039, -5037, -5026,
+  # -4971). Every one of them is fixed at 1.27.0-rc.3 or earlier - checked
+  # against the fixed-version ranges in vuln.go.dev, not guessed from the
+  # scanner's suggestion. When this is bumped again, pick a release that is
+  # still supported; sitting on an EOL branch is what produced that list.
+  GO_VERSION: '1.27'
   NODE_VERSION: '22'
-  PNPM_VERSION: '9'
+  # There is deliberately no PNPM_VERSION. pnpm/action-setup refuses to run when
+  # a `version:` is given here AND `packageManager` is set in the root
+  # package.json - "Multiple versions of pnpm specified" - which is what took
+  # every pnpm job down on the first run of this workflow. `packageManager`
+  # (pnpm@9.12.3) is the single source of truth; corepack in the Dockerfiles
+  # already reads it, so these steps pass no `version:` at all and there is
+  # exactly one file to edit when pnpm moves.
 
   # CI-only values. Real secrets never live in a workflow file.
   DATABASE_URL: postgresql://webhook:webhook@localhost:5432/webhook_platform_test?schema=public
@@ -43,12 +61,61 @@ jobs:
   data-plane:
     name: Go data plane
     runs-on: ubuntu-latest
+    # WHY THIS JOB HAS A DATABASE:
+    #
+    # internal/db, internal/ingest, internal/queue, internal/router and
+    # internal/worker carry integration tests that run the REAL SQL against a
+    # migrated schema. They `t.Skip` when DATABASE_URL is unset - but the
+    # workflow-level `env:` above sets it for every job, so on the first run of
+    # this workflow they did not skip: they dialled a database this job never
+    # started and the job went red on ten connection-refused failures.
+    #
+    # Deleting DATABASE_URL from this job would also make it green, and would be
+    # the wrong fix. Those tests are the only place drift between the
+    # hand-written pgx SQL and Prisma's schema is caught (the Go side never runs
+    # migrations - ADR-0002). Skipping them everywhere means the first time
+    # anyone learns a column was renamed is in production.
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: webhook
+          POSTGRES_PASSWORD: webhook
+          POSTGRES_DB: webhook_platform_test
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U webhook"
+          --health-interval 5s --health-timeout 3s --health-retries 10
+    env:
+      # Same database, two spellings. pgx forwards unknown URL query parameters
+      # to the server as runtime parameters, so Prisma's `?schema=public` makes
+      # every pgxpool.New in the test suite fail with
+      # `FATAL: unrecognized configuration parameter "schema"` - verified, not
+      # assumed. The Go side therefore overrides the workflow-level value with
+      # its own URL, and the migration step below restores Prisma's. The same
+      # split already exists in the root package.json (`test:db:migrate` uses
+      # ?schema=, `go:test:db` uses ?sslmode=).
+      DATABASE_URL: postgresql://webhook:webhook@localhost:5432/webhook_platform_test?sslmode=disable
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
           go-version: ${{ env.GO_VERSION }}
           cache-dependency-path: services/data-plane/go.sum
+      # Node is here only to run the migrations. Prisma owns all DDL; the Go
+      # tests read and write, they never migrate.
+      # No `version:` - it comes from `packageManager` in the root package.json.
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Apply migrations
+        env:
+          DATABASE_URL: postgresql://webhook:webhook@localhost:5432/webhook_platform_test?schema=public
+          DIRECT_DATABASE_URL: postgresql://webhook:webhook@localhost:5432/webhook_platform_test?schema=public
+        run: pnpm --filter @webhook/control-api prisma:deploy
       - name: Verify modules are tidy
         working-directory: services/data-plane
         run: |
@@ -57,9 +124,12 @@ jobs:
       - name: Vet
         working-directory: services/data-plane
         run: go vet ./...
+      # -p 1 because every integration package seeds and deletes rows in the
+      # one database; running packages in parallel makes them race each other,
+      # not the code. Same flag as `go:test:db` in the root package.json.
       - name: Test
         working-directory: services/data-plane
-        run: go test -race -count=1 ./...
+        run: go test -race -p 1 -count=1 ./...
 
   control-plane:
     name: Control plane and dashboard
@@ -83,9 +153,8 @@ jobs:
           --health-interval 5s --health-timeout 3s --health-retries 10
     steps:
       - uses: actions/checkout@v4
+      # No `version:` - it comes from `packageManager` in the root package.json.
       - uses: pnpm/action-setup@v4
-        with:
-          version: ${{ env.PNPM_VERSION }}
       - uses: actions/setup-node@v4
         with:
           node-version: ${{ env.NODE_VERSION }}
@@ -118,8 +187,8 @@ jobs:
           --health-interval 5s --health-timeout 3s --health-retries 10
     steps:
       - uses: actions/checkout@v4
+      # No `version:` - it comes from `packageManager` in the root package.json.
       - uses: pnpm/action-setup@v4
-        with: { version: '${{ env.PNPM_VERSION }}' }
       - uses: actions/setup-node@v4
         with: { node-version: '${{ env.NODE_VERSION }}', cache: pnpm }
       - run: pnpm install --frozen-lockfile
@@ -217,6 +286,30 @@ jobs:
       - name: Egress / SSRF suite
         working-directory: services/data-plane
         run: go test -race -count=1 -v ./internal/egress/ ./internal/signing/
+      # govulncheck reports only what is REACHABLE from this code, and it
+      # reports against the toolchain that built it - so the GO_VERSION at the
+      # top of this file is half of this check. Ten standard-library advisories
+      # were found under go1.23.12 and are cleared by the 1.27 bump.
+      #
+      # TWO ARE NOT, and no toolchain bump can reach them, because they are in
+      # modules rather than the standard library:
+      #
+      #   GO-2026-5004  github.com/jackc/pgx/v5 v5.7.1 -> v5.9.2
+      #                 SQL injection via placeholder confusion with dollar-
+      #                 quoted string literals. Reachable:
+      #                 queue.PostgresQueue.Renew -> pgxpool.Pool.Query ->
+      #                 sanitize.SanitizeSQL.
+      #   GO-2026-5970  golang.org/x/text v0.18.0 -> v0.39.0
+      #                 Infinite loop on invalid input, reachable through
+      #                 pgxpool.NewWithConfig -> norm.Form.
+      #
+      # Both fixed versions declare `go 1.25.0` in their own go.mod, so taking
+      # them forces the data plane's module minimum from 1.21 to 1.25 - the
+      # exact change go.mod's header argues against, because it breaks anyone
+      # building on an older toolchain. That is a call for the module's owner,
+      # not for CI: see deployments/HANDOFF.md, "Outstanding: Go module
+      # advisories". Until it is made, this step stays RED and it is telling
+      # the truth. Do not add an ignore list and do not make it non-blocking.
       - name: Vulnerability scan
         working-directory: services/data-plane
         run: |
@@ -233,8 +326,8 @@ jobs:
           # credential that was committed and then "removed" in a later commit
           # would pass. The whole point of scanning is to find that.
           fetch-depth: 0
+      # No `version:` - it comes from `packageManager` in the root package.json.
       - uses: pnpm/action-setup@v4
-        with: { version: '${{ env.PNPM_VERSION }}' }
       - uses: actions/setup-node@v4
         with: { node-version: '${{ env.NODE_VERSION }}', cache: pnpm }
       - run: pnpm install --frozen-lockfile

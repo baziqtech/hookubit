@@ -1,7 +1,32 @@
 # syntax=docker/dockerfile:1
 FROM node:22-alpine AS builder
 WORKDIR /app
-RUN corepack enable
+
+# WHY openssl IS INSTALLED (and why it must be in the runtime stage too):
+#
+# Prisma picks its query engine by probing for libssl. node:22-alpine ships no
+# openssl at all, so 5.22 logs
+#   "Prisma failed to detect the libssl/openssl version to use ...
+#    Defaulting to openssl-1.1.x"
+# and downloads/copies libquery_engine-linux-musl.so.node - the OpenSSL 1.1
+# build. Alpine has only OpenSSL 3, so that .so cannot be dlopen'd and the
+# `node --eval` guard below dies with
+#   "Unable to require(.../.prisma/client/libquery_engine-linux-musl.so.node)".
+# The engine was not missing; it was the wrong one.
+#
+# Installing openssl makes detection return linux-musl-openssl-3.0.x, and it
+# must be installed BEFORE `pnpm install` so @prisma/engines' postinstall
+# downloads that engine rather than the 1.1 one. The runtime stage installs it
+# as well, so the engine that gets generated is the engine that gets loaded -
+# the two stages must agree, or this comes back in production instead of here.
+#
+# The durable belt-and-braces is one line in a file this Dockerfile does not
+# own: `binaryTargets` in apps/control-api/prisma/schema.prisma. See
+# deployments/HANDOFF.md, "Prisma engine binary targets".
+#
+# hadolint ignore=DL3018
+RUN apk add --no-cache openssl \
+ && corepack enable
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
 COPY apps/control-api/package.json apps/control-api/
 RUN pnpm install --frozen-lockfile --filter @webhook/control-api...
@@ -60,6 +85,10 @@ CMD ["npx", "--no-install", "prisma", "migrate", "deploy"]
 FROM node:22-alpine AS runtime
 WORKDIR /app
 ENV NODE_ENV=production
+# Same reason as the builder stage: without openssl, Prisma's runtime detection
+# falls back to openssl-1.1.x and looks for an engine that was never generated.
+# hadolint ignore=DL3018
+RUN apk add --no-cache openssl
 COPY --from=builder /app/deploy/node_modules ./node_modules
 COPY --from=builder /app/apps/control-api/dist ./dist
 COPY --from=builder /app/apps/control-api/prisma ./prisma
