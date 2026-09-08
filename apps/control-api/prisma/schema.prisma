@@ -602,6 +602,14 @@ model Delivery {
   @@index([eventId])
   @@index([endpointId, createdAt(sort: Desc)])
   @@index([projectId, status, createdAt(sort: Desc)])
+  /// The analytics window index (20260908010000_analytics_delivery_window_index).
+  /// `status` sits between the two columns an "everything in this project over
+  /// this window" query constrains, so the index above cannot serve one:
+  /// created_at can never be a boundary condition and the rows never come back
+  /// in created_at order. Measured on 1M rows, the difference for the latency
+  /// sample at the 30-day ceiling is a 226 ms parallel sequential scan versus a
+  /// 0.35 ms index scan that stops at the LIMIT.
+  @@index([projectId, createdAt(sort: Desc)])
   /// NOTE: `deliveries_ready_idx` and `deliveries_ready_fifo_idx` - partial
   /// indexes over the claim's ready set - are created by hand in
   /// 20260907000000_handoff_schema_requests. Prisma has no partial-index

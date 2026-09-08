@@ -1,0 +1,77 @@
+-- ---------------------------------------------------------------------------
+-- deliveries: (project_id, created_at DESC) - the analytics window index
+--
+-- ONE index. It is here because a plan on the live server said so, not because
+-- a new module wanted one.
+--
+-- THE QUERY IT EXISTS FOR is the latency sample in
+-- src/analytics/analytics.service.ts:
+--
+--     SELECT id FROM deliveries
+--      WHERE project_id = $1 AND created_at >= $2 AND created_at < $3
+--      ORDER BY created_at DESC
+--      LIMIT 201;
+--
+-- Every existing index refuses it:
+--
+--   deliveries_project_id_status_created_at_idx (project_id, status, created_at)
+--       `status` sits BETWEEN the two columns the query constrains, so
+--       created_at can never be a boundary condition and the index cannot
+--       return rows in created_at order. Measured: the planner ignores it and
+--       falls to a Parallel Seq Scan.
+--   deliveries_endpoint_id_created_at_idx (endpoint_id, created_at)
+--       Serves "one endpoint, newest first". A project-wide query has to fan
+--       out over every endpoint in the project and then top-N sort the union,
+--       which is O(rows in window), not O(limit).
+--   deliveries_ready_idx / _ready_fifo_idx
+--       Partial, over the ready set only. Terminal deliveries - which is what
+--       analytics counts - are not in them at all.
+--
+-- MEASURED, PostgreSQL 16.2, 1,000,000 deliveries (800,000 in the project
+-- under test, spread over 90 days), EXPLAIN (ANALYZE, BUFFERS):
+--
+--   720h window, latency sample     WITHOUT: 226.6 ms   WITH: 0.35 ms
+--     without -> Parallel Seq Scan on deliveries (266k rows) + top-N heapsort
+--     with    -> Index Scan, 201 index tuples read, then it stops.
+--   24h window, latency sample      WITHOUT:   8.9 ms   WITH: 2.3 ms
+--   168h window, status roll-up     WITHOUT:  48.4 ms   WITH: 22.7 ms
+--     (Bitmap Index Scan on this index, replacing a bitmap fan-out over every
+--      endpoint in the project.)
+--
+-- The 720h row is the one that matters, and not because 226 ms is slow: without
+-- the index the cost of the sample grows with the WINDOW, so the response gets
+-- slower every day the table grows. With it the cost is fixed at the LIMIT and
+-- does not grow at all.
+--
+-- WHY NOT `INCLUDE (status, endpoint_id)`. Tried, measured, rejected. It did
+-- not produce an index-only scan for the status roll-up (the heap is visited
+-- for the tenant predicate either way) and the covering variant was SLOWER on
+-- the 168h roll-up (48.4 ms vs 22.7 ms) for a larger index. Lean wins.
+--
+-- COST. 27 MB against a 118 MB table at 1M rows, i.e. ~23%, and it is written
+-- on every delivery INSERT - one more btree descent on the hottest write path
+-- in the product. That is the trade being made: a bounded write cost so that
+-- the operator surface does not sequentially scan the largest table in the
+-- system.
+--
+-- SAFE ON A NON-EMPTY DATABASE, with one caveat that matters at scale:
+-- `CREATE INDEX IF NOT EXISTS`, NOT CONCURRENTLY, because Prisma wraps a
+-- migration file in a transaction and CREATE INDEX CONCURRENTLY cannot run
+-- inside one. This takes a SHARE lock on `deliveries` for the duration of the
+-- build, which BLOCKS WRITES - i.e. it blocks the fan-out router and every
+-- worker. On a large populated deliveries table, build it by hand first:
+--
+--     CREATE INDEX CONCURRENTLY "deliveries_project_id_created_at_idx"
+--         ON "deliveries" ("project_id", "created_at" DESC);
+--
+-- and this migration then finds it and does nothing. The name and definition
+-- above are exact; they must match or the IF NOT EXISTS will not match it.
+--
+-- This one IS expressible in schema.prisma (@@index([projectId, createdAt(sort:
+-- Desc)]) on model Delivery) and has been added there, so unlike the partial
+-- indexes in 20260906010000 and 20260907000000 it is NOT drift and needs no
+-- entry in deployments/ci/expected-schema-drift.txt.
+-- ---------------------------------------------------------------------------
+
+CREATE INDEX IF NOT EXISTS "deliveries_project_id_created_at_idx"
+    ON "deliveries" ("project_id", "created_at" DESC);

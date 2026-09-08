@@ -3015,3 +3015,274 @@ is eslint-banned here) was never reached for.
 `endpoints.read` includes `viewer`, `endpoint-secrets.read` is owner/admin. A
 test pins the DTO's complete key set so a future secret-derived field fails
 there rather than shipping quietly.
+
+## Analytics (2026-09-08) — `src/analytics`
+
+Read-only operator analytics. Nothing in this module writes, and nothing caches:
+every number is read from the delivery ledger at request time through
+`ScopedRepository`, so it cannot disagree with `GET /deliveries`. That is the
+property that matters at 2am, when someone reads a failure count here and then
+goes looking for the rows behind it.
+
+### Module registration — the line I could not add myself
+
+`src/app.module.ts`:
+
+```ts
+import { AnalyticsModule } from './analytics';
+// ...
+imports: [ /* ... */, AnalyticsModule ],
+```
+
+It imports nothing and provides one service. `AuthzModule` is `@Global`, so
+`TenantScopeFactory` is already injectable; there is no transaction runner
+(nothing is written) and no audit call (reading an aggregate of rows the caller
+may already list one by one is not an auditable event).
+
+### Routes
+
+All under `/v1/projects/:projectId/analytics`, all `GET`, all taking
+`window_hours` (integer, 1..720, default 24).
+
+| Route | Permission | Answers |
+|---|---|---|
+| `/deliveries` | `deliveries.read` | Outcome mix over the window **and the window before it** |
+| `/endpoints` | `deliveries.read` | Which endpoints are failing, ranked worst first (`limit`, 1..50, default 10) |
+| `/latency` | `deliveries.read` | p50/p95/p99 of `delivery_attempts.duration_ms` |
+| `/events` | `events.read` | Event volume and the busiest event types (`limit`, 1..50, default 10) |
+
+Shapes are in `src/analytics/dto/analytics-response.dto.ts` and every field
+carries an `@ApiProperty` description, because the dashboard client is generated
+from that document. The three that are worth knowing before reading a response:
+
+- **`success_rate` is `null`, never `0`, when nothing settled.** Zero is a real
+  and alarming value — everything we tried failed — and using it for "we have
+  not tried anything" is the difference between a quiet night and a pager. Same
+  rule for `success_rate_delta`: a change from unknown is not a change.
+- **`by_status` always carries all nine statuses.** `GROUP BY` returns no row
+  for a status with no deliveries, and a response that omitted `exhausted`
+  because there were none is indistinguishable, to a client, from one that
+  omitted it because this build does not report it.
+- **`latency.exact`.** See "the one dishonest number, made honest" below.
+
+### The permission choice: `deliveries.read` and `events.read`, no new row
+
+No permission was added to the matrix. Three reasons, in order of weight:
+
+1. **An aggregate is strictly weaker than the rows it aggregates.** Everything
+   `/analytics/deliveries` returns is derivable by a caller who can already page
+   `GET /deliveries`. A new permission would gate a summary of data the holder
+   of `deliveries.read` can already read one row at a time, which is theatre.
+2. **Per-TABLE, not per-module.** `/events` uses `events.read` and the other
+   three use `deliveries.read`, even though the two grants are identical in
+   today's matrix. That is the point: the day they diverge, each route moves
+   with the table it reads rather than with the module it happens to live in.
+3. The matrix's own comment about `billing` — "sees no events and no
+   deliveries" — settles the interesting case. `billing` gets a **403** on all
+   four routes: it is in the tenant, so the answer is forbidden, not not-found.
+   `viewer` gets **200** on all four.
+
+`TENANT_SCOPE_PERMISSIONS` needed no change; this module adds no `TenantScope`
+accessor.
+
+### The window: refused, never clamped
+
+`window_hours` is `1..720` (30 days), default 24. Above the ceiling is a **400**,
+not a shortened window. This is the one design decision in the module I would
+argue for hardest: a clamp answers a question the caller did not ask and labels
+the answer with the period they asked for. "Deliveries in the last 90 days:
+4,102" as a 30-day number wearing a 90-day label is worse than an error,
+because the person reading it is deciding whether something is getting worse.
+
+The ceiling is enforced twice, deliberately: `@Max` on the DTO (the HTTP edge)
+and again inside `resolveWindow` (the function another module would call). A
+validation rule that only exists on a decorator is one non-HTTP caller away from
+being absent.
+
+`ValidationPipe` runs with `forbidNonWhitelisted`, so `?window=30d` — the
+dashboard's current shorthand — is a **400** rather than a silently ignored
+parameter that returns the 24h default under a 30-day label.
+
+### EXPLAIN — run against live PostgreSQL 16.2, not guessed
+
+Plans were captured on a copy of the real migrated schema seeded to **1,000,000
+deliveries (800,000 in the project under test, over 90 days), 800,000
+delivery_attempts, 600,000 events, 3 projects across 2 organizations**. The dev
+database has ten deliveries in it; every plan there is a sequential scan of one
+page and proves nothing, so a scratch database (`hookubit_explain`) built from
+the same four migration files was used instead. `EXPLAIN (ANALYZE, BUFFERS)`
+output for each query is summarised in the docblock above the method that issues
+it.
+
+| Query | Window | Plan | Time |
+|---|---|---|---|
+| status roll-up | 24h | Nested Loop over the project's endpoints → Bitmap Index Scan `deliveries_endpoint_id_created_at_idx` → HashAggregate, 8,874 rows | 13.7 ms |
+| status roll-up | 168h | Bitmap Index Scan `deliveries_project_id_created_at_idx`, 62k rows | 22.7 ms |
+| status roll-up | 720h | **Parallel Seq Scan**, 266k rows (33% of the table) | 207 ms |
+| endpoint ranking | 24h | Bitmap Index Scan `deliveries_project_id_status_created_at_idx` → GroupAggregate → top-N | 9.8 ms |
+| latency: delivery sample | 720h | Index Scan `deliveries_project_id_created_at_idx`, 201 tuples, stops | **0.35 ms** |
+| latency: attempts | 24h | 200 × Index Scan `delivery_attempts_delivery_id_idx` | 37 ms |
+| event count | 24h | Index Scan `events_organization_id_created_at_idx`, 4,431 rows | 24.5 ms |
+| event count | 720h | Parallel Bitmap Heap Scan `events_project_id_created_at_idx`, 133k rows | 209 ms |
+| events by type | 24h | same index → HashAggregate | 2.9 ms |
+
+Three findings worth carrying forward:
+
+**1. One index was missing and is now added.**
+`20260908010000_analytics_delivery_window_index` creates
+`deliveries (project_id, created_at DESC)`. `deliveries_project_id_status_created_at_idx`
+cannot serve "everything in this project over this window" — `status` sits
+*between* the two constrained columns, so `created_at` can never be a boundary
+condition and rows never come back in `created_at` order. Measured, the latency
+sample at the 720h ceiling is **226.6 ms (Parallel Seq Scan + top-N heapsort)
+without it and 0.35 ms with it**, and — the part that actually matters — without
+it the cost grows with the *window*, so the response gets slower every day the
+table grows; with it the cost is fixed at the LIMIT and does not grow at all.
+`INCLUDE (status, endpoint_id)` was tried and rejected: no index-only scan
+resulted and the covering variant was *slower* on the 168h roll-up (48.4 ms vs
+22.7 ms) for a larger index. Cost: 27 MB against a 118 MB table at 1M rows, plus
+one more btree write on the hottest INSERT path in the product. **On a large
+populated `deliveries` table, build it `CONCURRENTLY` by hand first** — the
+migration is `IF NOT EXISTS` and will then skip it; the exact statement is in the
+migration's header comment. It is also in `schema.prisma`, so unlike the partial
+indexes it is **not** drift and needs no entry in
+`deployments/ci/expected-schema-drift.txt`.
+
+**2. The 720h ceiling is a sequential scan, and that is the correct plan.**
+A third of the table matches; no index beats a scan at that selectivity. This is
+why 720h is a hard ceiling with a 24h default rather than an open parameter, and
+why the routes are throttled.
+
+**3. `events` may not use the index you expect.** The `projectAndOrganization`
+scope puts *both* columns in the predicate, and at 24h the planner chose
+`events_organization_id_created_at_idx` and filtered by project (1,108 rows
+removed, ~20% waste). Cheap for an organization with a handful of projects; it
+degrades linearly with the number of sibling projects. Not "fixed" with a hint,
+because the fix is a planner-statistics question, not a code one.
+
+### The one dishonest number, made honest
+
+**p50/p95/p99 are computed over a bounded SAMPLE, and the response says so.**
+
+An exact percentile is `percentile_cont`, which is raw SQL, which is
+`PrismaService` — banned outside the allowlist, for the reason that makes this
+whole layer worth having. `ScopedRepository` exposes `aggregate` and `groupBy`;
+neither can express an ordered-set aggregate, and grouping by `duration_ms`
+itself would produce thousands of groups and be refused by the repository's own
+ceiling, correctly.
+
+So: the most recent 200 deliveries in the window, and up to 200 of their measured
+attempts. `exact` is `true` only when neither bound was reached — the common case
+for a normal project on a 24h window, always the case for a quiet one. When it is
+`false`, **the percentiles describe the most recent traffic in the window rather
+than the whole of it**, and `sample_size` / `sampled_deliveries` say how much was
+measured. That recency bias is real. Hiding it would be worse than having it.
+
+Nearest-rank, not linear interpolation: every value returned is a duration that
+was actually observed. An interpolated p95 of 412.5 ms is a number no request
+ever took, and someone will go looking for the attempt that produced it.
+
+The fix, when it is worth doing, is one of: a `percentile_cont` escape hatch on
+`ScopedRepository` (a `rawAggregate` that still builds the tenant predicate); a
+`duration_bucket` column on `delivery_attempts` written by the data plane, which
+makes an exact histogram a plain `groupBy`; or the rollup below.
+
+### Where this stops scaling, and what comes next
+
+Stated as row counts, because "it depends" is not an answer anyone can act on.
+
+| Table | Comfortable | Degraded | Unusable |
+|---|---|---|---|
+| `deliveries` (per project) | < 1M in the window | 1M–5M — the 720h roll-up is already a 200 ms+ parallel scan at 266k | > 5M: every wide-window request occupies a worker for seconds; concurrent dashboards exhaust the pool |
+| `delivery_attempts` | any, while the sample stays at 200 | — | the sample is O(1); this table never becomes the bottleneck for *this* module |
+| `events` (per project) | < 500k in the window | 500k–2M | > 2M |
+
+The first thing to break is **not** latency — it is the 720h status roll-up
+under concurrency. One 200 ms parallel scan is fine; ten dashboards refreshing
+on a 30-second timer is a third of the connection pool permanently occupied
+scanning the same 266k rows.
+
+Three steps, in the order I would take them:
+
+1. **Cache the wide windows, not the narrow ones.** 168h and 720h roll-ups
+   change by fractions of a percent per minute. A 60-second cache keyed by
+   (project, window) removes the whole problem for a year, and the honesty cost
+   is bounded and expressible: return the timestamp the numbers were computed
+   at. 24h stays live — that is the window someone is staring at during an
+   incident.
+2. **Write `usage_records`.** The table exists, is organization-scoped, is
+   already mapped in `TenantScope` (`billing.read`), and **nothing writes to
+   it**. An hourly rollup of (project, hour, status) → count is exactly what a
+   time series needs and what this module could not build, and it makes the
+   90-day question a hundred-row read instead of a million-row scan. It also
+   gives the dashboard back the hourly chart this module declined to fake.
+3. **Only then, a materialised view.** It is the tempting first move and it is
+   the wrong one: `REFRESH MATERIALIZED VIEW CONCURRENTLY` over a table this
+   size is its own operational problem, and it buys nothing that (2) does not,
+   at the cost of a refresh schedule nobody owns.
+
+### Divergence from the dashboard's speculative shape — and what it needs to change
+
+`apps/dashboard/src/features/analytics/AnalyticsPage.tsx` was built against a
+mock `GET /v1/projects/:id/analytics` returning
+`{ window: '24h'|'7d'|'30d', points: AnalyticsPoint[], totals, p95_latency_ms,
+success_rate }`. It says on itself that it is provisional. It was read as a hint,
+not a specification, and it diverges in three places:
+
+1. **Four routes, not one payload.** The four questions cost different amounts.
+   One combined route makes the cheapest tile on the page wait for the dearest
+   query and blanks the whole panel when one is slow. Four requests render as
+   they land, are throttled separately, and can be cached separately (see step 1
+   above). Call all four in parallel.
+2. **No hourly `points[]`.** Bucketing a timestamp needs `date_trunc` → raw SQL
+   → `PrismaService`. The alternative, one grouped query per bucket, is 24 index
+   range scans of the same range to answer one question. **What replaced it is
+   better for the actual question:** every count is returned for the window *and*
+   the immediately preceding window of equal length, with the delta. "Is it
+   getting worse?" is a comparison, and this answers it in a number rather than
+   asking a human to eyeball the slope of a bar chart — for the cost of two index
+   range scans instead of twenty-four. The chart comes back with `usage_records`.
+3. **`window: '24h'` → `window_hours: 24`.** An enum cannot express a ceiling,
+   and the ceiling is the interesting part. Map the shorthands 24 / 168 / 720.
+   Note that `?window=30d` is now a **400**, not an ignored parameter.
+
+Also: `totals.pending` on the page is labelled "In retry". Those are different
+things and the new response separates them — `in_flight` is the roll-up (pending,
+scheduled, queued, processing, retrying), `by_status.retrying` is the real one.
+
+### Verified
+
+`prisma:generate`, `lint`, `build`, `test` all pass — **1497 tests, 64 suites**
+(was 1417/62). Two new suites:
+
+- `analytics.service.spec.ts` (27) — every count asserted as an **exact
+  integer** against a fixture whose numbers are written down by hand in
+  `EXPECTED`, with decoys one step outside every boundary: the previous window,
+  rows older than both, a sibling project in the same organization, and another
+  organization entirely. A shape assertion would pass on a response carrying the
+  whole platform's totals. Also: the window ceiling refused rather than clamped,
+  an empty project returning zeroes and `null` rather than erroring, an
+  unmeasured (`duration_ms IS NULL`) attempt not counting as zero milliseconds.
+- `analytics.http.spec.ts` (53) — a real Nest app on a real port with the real
+  guards. Cross-tenant is **404 with `CROSS_TENANT_MESSAGE`** on all four routes,
+  identical for an absent project id and a foreign one, and the 404 body is
+  asserted to carry none of the other tenant's numbers. `viewer` 200, `billing`
+  403 (in the tenant, so forbidden, not not-found), `developer` 200. The ceiling
+  is 200 at exactly 720 and 400 at 721, with no `window` in the failed body.
+  Every route asserted to carry `@Throttle`.
+
+Both run against `FakeTenantPrisma` like every other module, wrapped by
+`src/analytics/testing/aggregate-fake.ts`. That wrapper exists for one honest
+reason: the shared fake **ignores `orderBy` and `take` on `groupBy`** — nothing
+before this module passed either. The endpoint ranking is `ORDER BY count DESC
+LIMIT n` *in PostgreSQL*, and against a fake that ignored both, "the worst
+endpoint is first" would pass because the fixture happened to be inserted
+worst-first. The wrapper applies exactly the two argument shapes this service
+sends and **throws on anything else**, so a query it cannot model faithfully
+fails the suite rather than being quietly mis-answered.
+
+**Not covered by the suite**, and worth knowing: the fake's `findMany` sorts
+dates as strings, so the *recency* of the latency sample (`ORDER BY created_at
+DESC LIMIT 200`) is not asserted — the fixture is small enough that the sample is
+the whole window. The ordering itself is what the new index makes cheap and is
+verified by the EXPLAIN above, not by a test.

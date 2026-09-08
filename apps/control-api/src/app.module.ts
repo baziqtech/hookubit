@@ -4,6 +4,7 @@ import { LoggerModule } from 'nestjs-pino';
 import { AuthModule } from './auth/auth.module';
 import { AuditModule } from './audit/audit.module';
 import { AuthzModule } from './authz/authz.module';
+import { AnalyticsModule } from './analytics/analytics.module';
 import { ApiKeysModule } from './api-keys/api-keys.module';
 import { CommonModule } from './common/common.module';
 import { resolveRequestId } from './common/request-id';
@@ -83,6 +84,7 @@ import { WebhookSubscriptionsModule } from './webhook-subscriptions/webhook-subs
     EventsModule,
     DeliveriesModule,
     AuditModule,
+    AnalyticsModule,
     // Still to come: admin (platform staff, above organization owner - it needs
     // an authorization concept the tenant matrix deliberately does not have).
   ],
