@@ -905,6 +905,86 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/projects/{projectId}/outbox": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List outbox entries, including PARKED ones
+         * @description The outbox is the router's record of what it still owes an accepted event. Filter by `status=failed` for the entries that matter: those are PARKED - the router gave up, and the event will never be delivered until someone requeues it, even though the publisher was told `202 Accepted`. `last_error` says why, `attempts` versus `unaccounted_attempts` says whether the row was killing the router or the database was failing under it, and a non-null `fan_out_cursor` says the fan-out is partly done. Ordered newest first.
+         */
+        get: operations["OutboxController_list"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/projects/{projectId}/outbox/requeue": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Requeue parked outbox entries
+         * @description Returns up to 100 PARKED entries to the router's queue, oldest first, so the fan-out that never ran gets to run. Read `has_more` and call again until it is false; the bound is per request, not per incident. **This is not a replay.** A parked event has no delivery rows for a replay to work from, so the router runs the subscription match it never got to run. That match is bounded to the subscriptions that existed when the event was ACCEPTED - an endpoint subscribed after that will not receive it - but their current configuration applies, and a subscription deleted since is gone. The router's `last_error` is preserved, `attempts` keeps counting from where it was, and a partly-completed fan-out resumes from its cursor rather than re-sending to endpoints it already reached.
+         */
+        post: operations["OutboxController_requeueParked"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/projects/{projectId}/outbox/{outboxId}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Fetch one outbox entry
+         * @description The full router-side state of one entry, for the detail view behind a parked row. Nothing here is derived: every field is what the data plane wrote.
+         */
+        get: operations["OutboxController_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/projects/{projectId}/outbox/{outboxId}/requeue": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Requeue one parked outbox entry
+         * @description The single-entry form of the bulk requeue above; see it for what a requeue does and how it differs from a replay. Only a PARKED entry (`status: failed`) can be requeued.
+         */
+        post: operations["OutboxController_requeue"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/organizations/{orgId}/audit-logs": {
         parameters: {
             query?: never;
@@ -2066,6 +2146,73 @@ export interface components {
         };
         ReplayDeliveryDto: {
             /** @description Recorded on the audit entry for this replay. Not stored on the delivery. */
+            reason?: string;
+        };
+        OutboxEntryDto: {
+            /** @description Outbox row id (`obx_...`). */
+            id: string;
+            /** @description The event this row fans out. */
+            event_id: string;
+            /** @description What the row asks the router to do. `event.created` is the only type the router handles; anything else is parked on sight rather than re-claimed forever. */
+            type: string;
+            /**
+             * @description `pending` is queued (possibly mid-fan-out, see `fan_out_cursor`); `processing` is leased by a router right now; `processed` is done; **`failed` is PARKED** - the router gave up, the event will never be delivered, and it stays that way until someone requeues it.
+             * @enum {string}
+             */
+            status: "pending" | "processing" | "processed" | "failed";
+            /** @description Total times a router has picked this row up. Monotonic, and NOT the bound that parks it - see `unaccounted_attempts`. A high number here with a low one there is a row that keeps failing in ways the router understood and recorded, which is a database or configuration problem rather than a poisoned event. */
+            attempts: number;
+            /** @description Claims that ended with the router writing nothing at all - a crash, an OOM, a lease left to lapse. THIS is the bound that parks a row (`ROUTER_MAX_OUTBOX_ATTEMPTS`), because it is the only counter that means "this row keeps killing the process". A failure the router observed and recorded hands its increment back. */
+            unaccounted_attempts: number;
+            /** @description The last error the router recorded, verbatim and truncated to 1000 characters. On a parked row this is why it was parked, and it is preserved through a requeue so the history is not erased by the recovery. */
+            last_error: string | null;
+            /**
+             * Format: date-time
+             * @description When the current run of recorded failures began; null when the row is not failing. Recorded failures are bounded by elapsed TIME rather than by a count, because no count distinguishes "the database was unavailable for twenty minutes" from "this row errors every time".
+             */
+            failing_since: string | null;
+            /** @description Resume point for a fan-out too wide for one transaction: the subscription id the last committed batch stopped at. Non-null on a `pending` row means the fan-out is PARTLY done - some endpoints already have their delivery, the rest are still owed one. It is kept through a requeue, so recovery resumes rather than re-walking work that already committed. */
+            fan_out_cursor: string | null;
+            /**
+             * Format: date-time
+             * @description When this row next becomes claimable. In the future while it is backing off.
+             */
+            available_at: string;
+            /** @description The router replica holding the lease, if any. Useful when one replica misbehaves. */
+            locked_by: string | null;
+            /** Format: date-time */
+            locked_until: string | null;
+            /**
+             * Format: date-time
+             * @description When the row left the queue, whether it succeeded or was parked.
+             */
+            processed_at: string | null;
+            /** Format: date-time */
+            created_at: string;
+        };
+        OutboxEntryListDto: {
+            data: components["schemas"]["OutboxEntryDto"][];
+            /** @description More rows match than this page carries. */
+            has_more: boolean;
+            /** @description `offset` for the next page. */
+            next_offset: number | null;
+        };
+        RequeueParkedDto: {
+            /** @description Recorded on the audit entry for this requeue. Not written to the outbox row - `last_error` belongs to the router and is preserved. */
+            reason?: string;
+            /** @description Limit the requeue to one event. Omit to requeue every parked row in the project, up to the per-request bound. */
+            event_id?: string;
+        };
+        RequeueResultDto: {
+            /** @description Parked rows returned to the queue by this request. */
+            requeued: number;
+            /** @description More parked rows matched than this request was allowed to requeue. Call again until it is false; the bound is per request, not per incident. */
+            has_more: boolean;
+            /** @description The rows as they now stand, back in the queue. */
+            data: components["schemas"]["OutboxEntryDto"][];
+        };
+        RequeueOutboxDto: {
+            /** @description Recorded on the audit entry for this requeue. Not written to the outbox row - `last_error` belongs to the router and is preserved. */
             reason?: string;
         };
         AuditLogDto: {
@@ -4975,6 +5122,192 @@ export interface operations {
                 };
             };
             /** @description The endpoint is deleted or disabled, or the replay would exceed 50 deliveries. (error.code: `conflict`, `limit_exceeded`, `idempotency_key_reused`) */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorResponse"];
+                };
+            };
+        };
+    };
+    OutboxController_list: {
+        parameters: {
+            query?: {
+                /** @description Exact status. **`failed` is the one to ask for**: those are the PARKED rows - events that were accepted and will never be delivered until someone requeues them. INDEX-SUPPORTED (`event_outbox_attention_idx` for `failed`/`pending`). */
+                status?: "pending" | "processing" | "processed" | "failed";
+                /** @description One event. INDEX-SUPPORTED: `event_outbox_event_id_idx`. */
+                event_id?: string;
+                limit?: number;
+                offset?: number;
+            };
+            header?: never;
+            path: {
+                /** @description The project the events belong to. Resolved from the project row, never trusted. */
+                projectId: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["OutboxEntryListDto"];
+                };
+            };
+            /** @description You are in this tenant but your role does not allow it. (error.code: `forbidden`, `email_not_verified`) */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorResponse"];
+                };
+            };
+            /** @description The project, outbox entry or event does not exist, or belongs to another tenant. One answer with one message for all of them, on purpose: these routes take an outbox id in the path AND an event id in the query or body, so distinguishable 404s would say which KIND of resource an id names - which confirms it is live infrastructure belonging to another customer. (error.code: `not_found`) */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorResponse"];
+                };
+            };
+        };
+    };
+    OutboxController_requeueParked: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description The project the events belong to. Resolved from the project row, never trusted. */
+                projectId: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["RequeueParkedDto"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RequeueResultDto"];
+                };
+            };
+            /** @description You are in this tenant but your role does not allow it. (error.code: `forbidden`, `email_not_verified`) */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorResponse"];
+                };
+            };
+            /** @description The project, outbox entry or event does not exist, or belongs to another tenant. One answer with one message for all of them, on purpose: these routes take an outbox id in the path AND an event id in the query or body, so distinguishable 404s would say which KIND of resource an id names - which confirms it is live infrastructure belonging to another customer. (error.code: `not_found`) */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorResponse"];
+                };
+            };
+        };
+    };
+    OutboxController_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                outboxId: string;
+                /** @description The project the events belong to. Resolved from the project row, never trusted. */
+                projectId: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["OutboxEntryDto"];
+                };
+            };
+            /** @description You are in this tenant but your role does not allow it. (error.code: `forbidden`, `email_not_verified`) */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorResponse"];
+                };
+            };
+            /** @description The project, outbox entry or event does not exist, or belongs to another tenant. One answer with one message for all of them, on purpose: these routes take an outbox id in the path AND an event id in the query or body, so distinguishable 404s would say which KIND of resource an id names - which confirms it is live infrastructure belonging to another customer. (error.code: `not_found`) */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorResponse"];
+                };
+            };
+        };
+    };
+    OutboxController_requeue: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                outboxId: string;
+                /** @description The project the events belong to. Resolved from the project row, never trusted. */
+                projectId: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["RequeueOutboxDto"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["OutboxEntryDto"];
+                };
+            };
+            /** @description You are in this tenant but your role does not allow it. (error.code: `forbidden`, `email_not_verified`) */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorResponse"];
+                };
+            };
+            /** @description The project, outbox entry or event does not exist, or belongs to another tenant. One answer with one message for all of them, on purpose: these routes take an outbox id in the path AND an event id in the query or body, so distinguishable 404s would say which KIND of resource an id names - which confirms it is live infrastructure belonging to another customer. (error.code: `not_found`) */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorResponse"];
+                };
+            };
+            /** @description The entry is not parked: `pending`/`processing` means a router is already working on it, `processed` means the fan-out completed and the route you want is event replay. (error.code: `conflict`, `limit_exceeded`, `idempotency_key_reused`) */
             409: {
                 headers: {
                     [name: string]: unknown;
