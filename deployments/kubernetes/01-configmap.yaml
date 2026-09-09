@@ -30,7 +30,7 @@ data:
   WORKER_CLAIM_BATCH_SIZE: '100'
   DELIVERY_LEASE_SECONDS: '120'
   OUTBOX_POLL_INTERVAL_MS: '250'
-  OUTBOX_BATCH_SIZE: '200'
+  ROUTER_MAX_OUTBOX_RETRY_DURATION_MS: '3600000'
 
   # Tenant fairness ceilings (ARCHITECTURE.md 24)
   MAX_CONCURRENCY_GLOBAL: '512'
@@ -39,6 +39,12 @@ data:
   MAX_CONCURRENCY_PER_ENDPOINT: '16'
 
   # Outbound HTTP limits (ARCHITECTURE.md 31) - never unbounded
+  #
+  # DNS is bounded on its own, separately from the connect. Keep it below
+  # EGRESS_CONNECT_TIMEOUT_MS to shed slow lookups without shortening the
+  # connect; set it to 0 to go back to one shared budget, in which case a
+  # resolver that is slow rather than absent can consume the entire connect
+  # allowance and hold the worker slot behind it for all of it.
   EGRESS_DNS_TIMEOUT_MS: '2000'
   EGRESS_CONNECT_TIMEOUT_MS: '3000'
   EGRESS_TLS_TIMEOUT_MS: '3000'
@@ -46,6 +52,17 @@ data:
   EGRESS_TOTAL_TIMEOUT_MS: '30000'
   EGRESS_MAX_RESPONSE_BYTES: '65536'
   EGRESS_MAX_REDIRECTS: '0'
+
+  # Concurrent connections to ONE destination host:port, across every endpoint
+  # and every tenant resolving there. net/http blocks anything over it, so a
+  # value below WORKER_CONCURRENCY silently outranks MAX_CONCURRENCY_PER_ENDPOINT
+  # and the delivery gate for any customer whose endpoints share a hostname.
+  # It was hard-coded at 16 and measured as a 7x latency penalty on the load
+  # suite's isolation scenario (docs/LOAD_TESTING.md).
+  #
+  # Keep this at or above WORKER_CONCURRENCY unless you mean to be gentler with
+  # a consumer than the pool is. Omit the key to default to WORKER_CONCURRENCY.
+  EGRESS_MAX_CONNS_PER_HOST: '64'
 
   # SSRF guard (ARCHITECTURE.md 30).
   #

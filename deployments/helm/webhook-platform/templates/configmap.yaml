@@ -5,6 +5,11 @@ metadata:
   name: {{ include "webhook-platform.fullname" . }}-config
   labels:
     {{- include "webhook-platform.labels" . | nindent 4 }}
+# Integer knobs go through `int64` before `quote`. Helm parses YAML numbers as
+# float64, so a bare `| quote` renders 1048576 as "1.048576e+06" - which Go's
+# strconv.Atoi rejects, so envInt silently falls back to its DEFAULT. The
+# ConfigMap then shows the operator the value they set while the process runs on
+# a different one. PAYLOAD_MAX_BYTES shipped that way.
 data:
   APP_ENV: {{ .Values.app.env | quote }}
   LOG_LEVEL: {{ .Values.app.logLevel | quote }}
@@ -16,32 +21,38 @@ data:
   CONTROL_API_PORT: "3000"
   INGEST_PORT: "8080"
   DATA_PLANE_METRICS_PORT: "9090"
-  DATABASE_MAX_CONNECTIONS: {{ .Values.externalDatabase.maxConnections | quote }}
+  DATABASE_MAX_CONNECTIONS: {{ .Values.externalDatabase.maxConnections | int64 | quote }}
 
-  WORKER_CONCURRENCY: {{ .Values.dataPlane.worker.concurrency | quote }}
-  WORKER_POLL_INTERVAL_MS: {{ .Values.dataPlane.worker.pollIntervalMs | quote }}
-  WORKER_CLAIM_BATCH_SIZE: {{ .Values.dataPlane.worker.claimBatchSize | quote }}
-  DELIVERY_LEASE_SECONDS: {{ .Values.dataPlane.worker.leaseSeconds | quote }}
-  OUTBOX_POLL_INTERVAL_MS: {{ .Values.dataPlane.outbox.pollIntervalMs | quote }}
-  OUTBOX_BATCH_SIZE: {{ .Values.dataPlane.outbox.batchSize | quote }}
+  WORKER_CONCURRENCY: {{ .Values.dataPlane.worker.concurrency | int64 | quote }}
+  WORKER_POLL_INTERVAL_MS: {{ .Values.dataPlane.worker.pollIntervalMs | int64 | quote }}
+  WORKER_CLAIM_BATCH_SIZE: {{ .Values.dataPlane.worker.claimBatchSize | int64 | quote }}
+  DELIVERY_LEASE_SECONDS: {{ .Values.dataPlane.worker.leaseSeconds | int64 | quote }}
+  OUTBOX_POLL_INTERVAL_MS: {{ .Values.dataPlane.outbox.pollIntervalMs | int64 | quote }}
+  ROUTER_MAX_OUTBOX_RETRY_DURATION_MS: {{ .Values.dataPlane.outbox.maxRetryDurationMs | int64 | quote }}
 
-  MAX_CONCURRENCY_GLOBAL: {{ .Values.concurrency.global | quote }}
-  MAX_CONCURRENCY_PER_ORG: {{ .Values.concurrency.perOrg | quote }}
-  MAX_CONCURRENCY_PER_PROJECT: {{ .Values.concurrency.perProject | quote }}
-  MAX_CONCURRENCY_PER_ENDPOINT: {{ .Values.concurrency.perEndpoint | quote }}
+  MAX_CONCURRENCY_GLOBAL: {{ .Values.concurrency.global | int64 | quote }}
+  MAX_CONCURRENCY_PER_ORG: {{ .Values.concurrency.perOrg | int64 | quote }}
+  MAX_CONCURRENCY_PER_PROJECT: {{ .Values.concurrency.perProject | int64 | quote }}
+  MAX_CONCURRENCY_PER_ENDPOINT: {{ .Values.concurrency.perEndpoint | int64 | quote }}
 
-  EGRESS_DNS_TIMEOUT_MS: {{ .Values.egress.dnsTimeoutMs | quote }}
-  EGRESS_CONNECT_TIMEOUT_MS: {{ .Values.egress.connectTimeoutMs | quote }}
-  EGRESS_TLS_TIMEOUT_MS: {{ .Values.egress.tlsTimeoutMs | quote }}
-  EGRESS_RESPONSE_HEADER_TIMEOUT_MS: {{ .Values.egress.responseHeaderTimeoutMs | quote }}
-  EGRESS_TOTAL_TIMEOUT_MS: {{ .Values.egress.totalTimeoutMs | quote }}
-  EGRESS_MAX_RESPONSE_BYTES: {{ .Values.egress.maxResponseBytes | quote }}
-  EGRESS_MAX_REDIRECTS: {{ .Values.egress.maxRedirects | quote }}
+  EGRESS_DNS_TIMEOUT_MS: {{ .Values.egress.dnsTimeoutMs | int64 | quote }}
+  EGRESS_CONNECT_TIMEOUT_MS: {{ .Values.egress.connectTimeoutMs | int64 | quote }}
+  EGRESS_TLS_TIMEOUT_MS: {{ .Values.egress.tlsTimeoutMs | int64 | quote }}
+  EGRESS_RESPONSE_HEADER_TIMEOUT_MS: {{ .Values.egress.responseHeaderTimeoutMs | int64 | quote }}
+  EGRESS_TOTAL_TIMEOUT_MS: {{ .Values.egress.totalTimeoutMs | int64 | quote }}
+  EGRESS_MAX_RESPONSE_BYTES: {{ .Values.egress.maxResponseBytes | int64 | quote }}
+  EGRESS_MAX_REDIRECTS: {{ .Values.egress.maxRedirects | int64 | quote }}
+  # Concurrent connections to ONE destination host:port, shared by every
+  # endpoint and tenant resolving there. Unset it and it follows the worker
+  # pool, so raising dataPlane.worker.concurrency cannot leave a transport
+  # ceiling underneath it silently overriding the concurrency gate - which is
+  # what a hard-coded 16 did, at a measured 7x cost (docs/LOAD_TESTING.md).
+  EGRESS_MAX_CONNS_PER_HOST: {{ .Values.egress.maxConnsPerHost | default .Values.dataPlane.worker.concurrency | int64 | quote }}
   EGRESS_ALLOW_PRIVATE_NETWORKS: {{ .Values.egress.allowPrivateNetworks | quote }}
   EGRESS_PRIVATE_ALLOWLIST: {{ .Values.egress.privateAllowlist | quote }}
 
-  PAYLOAD_INLINE_MAX_BYTES: {{ .Values.payload.inlineMaxBytes | quote }}
-  PAYLOAD_MAX_BYTES: {{ .Values.payload.maxBytes | quote }}
+  PAYLOAD_INLINE_MAX_BYTES: {{ .Values.payload.inlineMaxBytes | int64 | quote }}
+  PAYLOAD_MAX_BYTES: {{ .Values.payload.maxBytes | int64 | quote }}
 
   S3_ENDPOINT: {{ .Values.objectStorage.endpoint | quote }}
   S3_BUCKET: {{ .Values.objectStorage.bucket | quote }}

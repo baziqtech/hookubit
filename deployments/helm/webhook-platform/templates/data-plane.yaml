@@ -84,6 +84,35 @@ spec:
           # place in the system to hold the session-forgery key.
           envFrom:
             {{- include "webhook-platform.dataPlaneEnvFrom" $root | nindent 12 }}
+          {{- if $root.Values.dataPlane.startupProbe.enabled }}
+          # ── STARTUP ────────────────────────────────────────────────────────
+          # The third probe, and the one that was missing. While it is running,
+          # the liveness probe is suspended, so a pod that is slow to bind - a
+          # cold node, a throttled CPU limit, an image just pulled - is given
+          # failureThreshold x periodSeconds to get there instead of being
+          # restarted by a liveness check that started counting at 5 seconds.
+          #
+          # It targets /health/live, NOT /health/ready, and that is deliberate:
+          # startup is "did this process bind its port", never "can it reach
+          # PostgreSQL". Pointing it at readiness would make a database outage
+          # exhaust the threshold and kill every pod - reinventing, at startup,
+          # exactly the fleet-wide restart that ARCHITECTURE.md 46 keeps
+          # liveness off the database to avoid.
+          #
+          # This is one half of the boot-outage fix. The other half is in Go and
+          # has landed: webhookd binds the probe server BEFORE opening the pool
+          # and waits for PostgreSQL with backoff (db.OpenWithRetry), instead of
+          # pinging first and exiting 1 without ever binding :9090. A probe
+          # cannot rescue a container that has already exited, so neither half
+          # works alone - and a process that stays up retrying would be killed
+          # by liveness without this probe. Readiness reports "starting" through
+          # the wait, so no traffic is sent until the pool is usable.
+          startupProbe:
+            httpGet: { path: /health/live, port: probes }
+            periodSeconds: {{ $root.Values.dataPlane.startupProbe.periodSeconds }}
+            timeoutSeconds: {{ $root.Values.dataPlane.startupProbe.timeoutSeconds }}
+            failureThreshold: {{ $root.Values.dataPlane.startupProbe.failureThreshold }}
+          {{- end }}
           # Liveness never touches PostgreSQL (ARCHITECTURE.md 46).
           livenessProbe:
             httpGet: { path: /health/live, port: probes }
@@ -93,6 +122,10 @@ spec:
             failureThreshold: 3
           # Readiness does check PostgreSQL, and flips to draining on SIGTERM so
           # work stops arriving before the process winds down.
+          #
+          # Only ingest is behind a Service, so for the other three roles this
+          # is a status signal rather than a traffic one - which is why it is
+          # allowed to depend on the database and liveness is not.
           readinessProbe:
             httpGet: { path: /health/ready, port: probes }
             initialDelaySeconds: 3

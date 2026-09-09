@@ -1047,3 +1047,89 @@ stage carrying only the prisma CLI, the engine binary and `prisma/`. Do NOT do
 that speculatively: the two bugs above both came from a deploy tree that was
 missing something it needed, and this image's size is the reason it has never
 had that class of failure.
+
+---
+
+## Startup probes and observability — 2026-09-09
+
+Two findings from the failure-injection audit landed in `deployments/`.
+
+### 1. The data plane had no startup probe
+
+**Symptom the audit named:** a PostgreSQL outage at boot becomes fleet-wide
+`CrashLoopBackOff`, and recovery is then gated on kubelet's exponential backoff
+(up to 5 minutes) rather than on the database coming back.
+
+All four Go roles now carry a `startupProbe` on `/health/live` — in the chart
+(`dataPlane.startupProbe`, on by default, with `values.schema.json` entries) and
+in the raw manifests. While it runs, liveness is suspended, so a pod that is
+slow to bind (cold node, throttled CPU limit, freshly pulled image) is given
+150s at the defaults instead of being restarted by a liveness check that starts
+counting at five seconds.
+
+It targets **liveness, not readiness**, on purpose. A startup probe that waited
+for PostgreSQL would exhaust its threshold during an outage and kill every pod —
+which is the fleet-wide restart ARCHITECTURE.md 46 keeps liveness off the
+database to avoid, reintroduced at a different point in the lifecycle.
+
+**The Go half has since landed**, which is what makes this probe load-bearing
+rather than merely correct. `cmd/webhookd/main.go` used to call `db.Open` —
+which pings — *before* starting the probe server, so with PostgreSQL down the
+process exited 1 having never bound `:9090`, and no probe can rescue a container
+that has already exited. All three changes are now in:
+
+- the probe server binds **before** the pool is opened,
+- `db.OpenWithRetry` waits out an unreachable database with capped backoff
+  (250ms doubling to 10s), cancellable, so SIGTERM mid-wait still exits
+  promptly — while a malformed `DATABASE_URL` still fails on the first attempt,
+  because retrying a configuration error looks identical from outside to
+  waiting out an outage and those need telling apart,
+- readiness stays false through the wait and reports `starting` rather than
+  `draining`, so the two 503s are distinguishable to an operator.
+
+Neither half works alone: without the Go change the container exits before any
+probe runs, and without this probe a process that stays up retrying is killed by
+liveness at five seconds. Verified by running `webhookd router` against a closed
+port — `/health/live` served 200 throughout while the process retried and stayed
+up; `internal/db/retry_test.go` and `internal/httpx/health_lifecycle_test.go`
+pin the semantics.
+
+The liveness/readiness split itself is right and was left alone. Readiness
+checking PostgreSQL is correct — only ingest is behind a Service, so for the
+other three roles it is a status signal, not a traffic one.
+
+### 2. Prometheus and Grafana (ARCHITECTURE.md Phase 6)
+
+New: `deployments/observability/` (scrape config, alert rules, README) and
+`deployments/helm/webhook-platform/dashboards/webhook-platform.json`, rendered as
+a ConfigMap for the Grafana sidecar when
+`observability.grafanaDashboard.enabled=true` (off by default — it is inert
+without a sidecar and invisible if the label does not match the one your Grafana
+watches).
+
+The dashboard JSON lives inside the chart because `.Files.Get` cannot read above
+the chart directory, and one copy that both install paths share beats two that
+drift.
+
+Every panel and every rule is backed by a series the data plane actually writes.
+Two absences are deliberate:
+
+- **No "breakers currently open" panel.** `circuit_breaker_open_total` counts
+  transitions *into* open; no gauge of live breaker state exists, and a panel for
+  one would be a flat zero forever.
+- **`queue_depth` needs a collector running.** `metrics.NewQueueDepthCollector`
+  refreshes it; until a role starts one the gauge is absent, and the
+  `WebhookQueueDepthNotExported` rule fires to say so — because a backlog gauge
+  reading a confident, permanent zero is indistinguishable from a healthy queue.
+
+Nothing installs Prometheus or Grafana, for the same reason nothing installs
+PostgreSQL.
+
+### Verified
+
+`helm lint` and `helm template` (3.16.3), `kubeconform -strict` 0.6.7 against
+Kubernetes 1.29 on both the rendered chart (29 resources) and the raw manifests,
+and the four CI guardrail greps (missing-database lint, no bundled database in
+rendered output or sources, no empty optional keys). Not verified: anything
+requiring a cluster — probe behaviour under a real database outage, and whether
+the Grafana sidecar picks the ConfigMap up.

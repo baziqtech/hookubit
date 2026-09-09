@@ -56,10 +56,25 @@
     },
     "egress": {
       "type": "object",
+      "description": "Outbound HTTP limits. Every phase is bounded separately; nothing here may be left unbounded (ARCHITECTURE.md 31).",
       "properties": {
+        "dnsTimeoutMs": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 30000,
+          "description": "Bounds name resolution ALONE. 0 disables the split and hands resolution back to connectTimeoutMs, which is the pre-0.1.1 behaviour: one budget shared between the lookup and the TCP connect, so a slow resolver could consume the whole connect allowance and stall the worker slot behind it. Set this below connectTimeoutMs to shed slow lookups without shortening the connect."
+        },
+        "connectTimeoutMs": { "type": "integer", "minimum": 100, "maximum": 60000 },
+        "tlsTimeoutMs": { "type": "integer", "minimum": 100, "maximum": 60000 },
+        "responseHeaderTimeoutMs": { "type": "integer", "minimum": 100, "maximum": 120000 },
         "totalTimeoutMs": { "type": "integer", "minimum": 1000, "maximum": 120000 },
         "maxResponseBytes": { "type": "integer", "minimum": 1024 },
         "maxRedirects": { "type": "integer", "minimum": 0, "maximum": 5 },
+        "maxConnsPerHost": {
+          "type": ["integer", "null"],
+          "minimum": 1,
+          "description": "Concurrent connections to ONE destination host:port, shared by every endpoint and every tenant that resolves there. net/http BLOCKS requests over this ceiling, so a value below dataPlane.worker.concurrency silently overrides concurrency.perEndpoint, concurrency.perProject and the delivery gate. null follows the worker pool size, which is the largest number the pool can use."
+        },
         "allowPrivateNetworks": {
           "type": "boolean",
           "description": "Disables the SSRF guard's private-range refusal. Prefer privateAllowlist."
@@ -70,6 +85,21 @@
     "dataPlane": {
       "type": "object",
       "properties": {
+        "startupProbe": {
+          "type": "object",
+          "description": "Startup probe for the four Go roles. It suspends liveness while a pod is still binding :9090, and it targets /health/live rather than /health/ready on purpose - a startup probe that waited for PostgreSQL would kill every pod during a database outage.",
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "periodSeconds": { "type": "integer", "minimum": 1, "maximum": 60 },
+            "timeoutSeconds": { "type": "integer", "minimum": 1, "maximum": 30 },
+            "failureThreshold": {
+              "type": "integer",
+              "minimum": 6,
+              "maximum": 300,
+              "description": "periodSeconds x failureThreshold is the whole budget a pod has to bind its port. The floor is deliberate: a budget under ~30s turns a cold node or a throttled CPU limit into a restart loop that looks like a broken image."
+            }
+          }
+        },
         "scheduler": {
           "type": "object",
           "properties": {
@@ -100,6 +130,25 @@
                 "targetCPUUtilizationPercentage": { "type": "integer", "minimum": 1, "maximum": 100 }
               }
             }
+          }
+        }
+      }
+    },
+    "observability": {
+      "type": "object",
+      "properties": {
+        "otlpEndpoint": { "type": "string" },
+        "serviceNamespace": { "type": "string" },
+        "prometheusAnnotations": { "type": "boolean" },
+        "grafanaDashboard": {
+          "type": "object",
+          "description": "Renders dashboards/webhook-platform.json as a ConfigMap for the Grafana sidecar to pick up. Off by default: without a sidecar watching for the label it is an inert object, and with the wrong label it is an invisible one.",
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "label": { "type": "string", "minLength": 1 },
+            "labelValue": { "type": "string", "minLength": 1 },
+            "folderAnnotation": { "type": "string" },
+            "folder": { "type": "string" }
           }
         }
       }

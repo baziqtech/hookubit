@@ -64,6 +64,30 @@ spec:
             # into a role that makes outbound HTTP to customer-controlled URLs.
             - configMapRef: { name: webhook-platform-config }
             - secretRef: { name: webhook-platform-data-plane }
+          # ── STARTUP ────────────────────────────────────────────────────
+          # Suspends liveness until the process has bound :9090, so a cold node,
+          # a throttled CPU limit or a just-pulled image cannot be mistaken for a
+          # dead process by a liveness check that starts counting at 5s.
+          #
+          # It targets /health/live, NOT /health/ready. Startup means "the port
+          # is bound", never "PostgreSQL is reachable": a startup probe waiting
+          # on the database would exhaust its threshold during an outage and
+          # restart every pod, which is the fleet-wide restart ARCHITECTURE.md 46
+          # keeps liveness off the database to avoid.
+          #
+          # Read this before an incident: with PostgreSQL down these pods are
+          # UP, not crash-looping. webhookd binds the probe server before it
+          # opens the pool and then waits for the database with backoff
+          # (db.OpenWithRetry), so liveness serves 200 throughout while
+          # readiness reports "starting" and no traffic is sent. Before that
+          # landed, db.Open pinged first and the process exited 1 having never
+          # bound - and no probe can rescue a container that has already exited,
+          # which is why neither half of this fix works without the other.
+          startupProbe:
+            httpGet: { path: /health/live, port: probes }
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 30   # 150s
           # Liveness never touches PostgreSQL (ARCHITECTURE.md 46).
           livenessProbe:
             httpGet: { path: /health/live, port: probes }

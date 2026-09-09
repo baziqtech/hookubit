@@ -97,6 +97,11 @@ app:
 
 # Outbound HTTP limits (ARCHITECTURE.md 31). Never unbounded.
 egress:
+  # Bounds name resolution ALONE. Keep it below connectTimeoutMs to shed slow
+  # lookups without shortening the connect. 0 disables the split and hands
+  # resolution back to connectTimeoutMs - one budget shared between the lookup
+  # and the TCP connect, where a resolver that is slow rather than absent can
+  # consume the whole allowance and stall the worker slot behind it.
   dnsTimeoutMs: 2000
   connectTimeoutMs: 3000
   tlsTimeoutMs: 3000
@@ -104,6 +109,21 @@ egress:
   totalTimeoutMs: 30000
   maxResponseBytes: 65536
   maxRedirects: 0
+  # The hard ceiling on CONCURRENT connections one data-plane process opens to
+  # one destination host:port - shared by every endpoint and every tenant that
+  # resolves there, so a customer with api.customer.com/webhooks/orders and
+  # /webhooks/refunds shares it across both, and so does everyone else on that
+  # host. net/http BLOCKS requests over the ceiling rather than failing them, so
+  # a value below the worker pool silently overrides concurrency.perEndpoint,
+  # concurrency.perProject and the delivery gate: configured policy becomes a
+  # number nobody is enforcing. It was hard-coded at 16 and the load suite
+  # measured a 7x latency penalty from it (docs/LOAD_TESTING.md).
+  #
+  # null (the default) means "follow dataPlane.worker.concurrency", which is
+  # exactly the number of connections the pool can use and not one more. Set it
+  # explicitly only to be gentler with a consumer than the pool is - the
+  # queueing then happens in the transport, on purpose.
+  maxConnsPerHost: null
   # SSRF guard (ARCHITECTURE.md 30).
   #
   # THIS CANNOT BE ENABLED IN PRODUCTION. The data plane refuses to start when
@@ -133,6 +153,25 @@ observability:
   serviceNamespace: webhook-platform
   # Adds prometheus.io/scrape annotations to data-plane pods.
   prometheusAnnotations: true
+
+  # Ships dashboards/webhook-platform.json as a ConfigMap for the Grafana
+  # sidecar (kiwigrid/k8s-sidecar, which the kube-prometheus-stack and Grafana
+  # charts both run) to load. Off by default because it is inert without that
+  # sidecar and invisible if the label does not match the one your Grafana
+  # watches - check `dashboards.sidecar.dashboards.label` in your Grafana values
+  # before turning this on.
+  #
+  # Every panel is backed by a series this platform actually exports. The
+  # Prometheus scrape config and alert rules that go with it live in
+  # deployments/observability/.
+  grafanaDashboard:
+    enabled: false
+    label: grafana_dashboard
+    labelValue: '1'
+    # Sidecar annotation that files the dashboard into a folder. Leave the
+    # folder empty to drop it in Grafana's default one.
+    folderAnnotation: grafana_folder
+    folder: ''
 
 # Free-form extra environment for every workload. Anything sensitive belongs in
 # a Secret, not here - this map becomes a ConfigMap.
@@ -225,6 +264,28 @@ dataPlane:
   # go back to the single shared Secret.
   separateSecret: true
 
+  # Startup probe for all four Go roles.
+  #
+  # While it is running, liveness is suspended - so this is the budget a pod has
+  # to bind :9090 before anything is allowed to restart it. Raise
+  # failureThreshold on clusters where cold starts are slow (image pulls, tight
+  # CPU limits, node autoscaling); lowering it below ~30s only makes a slow node
+  # look like a broken build.
+  #
+  # It targets /health/live, never /health/ready: startup means "the process
+  # bound its port", and a probe that waited for PostgreSQL would kill every pod
+  # during a database outage - the fleet-wide restart ARCHITECTURE.md 46 exists
+  # to prevent.
+  #
+  # NOTE: this is one half of the boot-outage fix; the Go half (bind probes
+  # first, then wait for PostgreSQL with backoff) has landed alongside it.
+  # Neither half works alone - see the comment in templates/data-plane.yaml.
+  startupProbe:
+    enabled: true
+    periodSeconds: 5
+    failureThreshold: 30   # 150s
+    timeoutSeconds: 3
+
   ingest:
     replicaCount: 2
     resources:
@@ -289,7 +350,11 @@ dataPlane:
 
   outbox:
     pollIntervalMs: 250
-    batchSize: 200
+    # Bounds RECORDED outbox failure by elapsed time rather than a count: a
+    # count cannot separate a database brownout from a row that fails every
+    # time. Batch size is ROUTER_BATCH_SIZE (dataPlane.router), not here - the
+    # OUTBOX_BATCH_SIZE that used to live at this key was never read.
+    maxRetryDurationMs: 3600000
 
 # --- Ingress ----------------------------------------------------------------
 ingress:
