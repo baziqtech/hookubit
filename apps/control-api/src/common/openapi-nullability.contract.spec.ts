@@ -10,6 +10,7 @@ import * as endpoints from '../endpoints/dto';
 import * as events from '../events/dto';
 import * as members from '../members/dto';
 import * as organizations from '../organizations/dto';
+import * as outbox from '../outbox/dto';
 import * as projects from '../projects/dto';
 import * as rateLimits from '../rate-limits/dto';
 import * as retryPolicies from '../retry-policies/dto';
@@ -64,6 +65,7 @@ const BARRELS: Array<[string, Record<string, unknown>]> = [
   ['events', events],
   ['members', members],
   ['organizations', organizations],
+  ['outbox', outbox],
   ['projects', projects],
   ['rate-limits', rateLimits],
   ['retry-policies', retryPolicies],

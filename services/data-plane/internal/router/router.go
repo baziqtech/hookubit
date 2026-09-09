@@ -31,17 +31,38 @@ const (
 	// crashed router's rows are stuck, so it should be a small multiple of the
 	// worst-case fan-out transaction, not of the poll interval.
 	DefaultLease = 60 * time.Second
-	// DefaultMaxSubscriptionsPerEvent bounds both the subscriptions examined
-	// and the deliveries created for one event. Materialised fan-out is cheap
-	// at 10 subscribers and expensive at 10,000; this is the ceiling that keeps
-	// one misconfigured project from writing an unbounded batch inside a single
-	// transaction.
-	DefaultMaxSubscriptionsPerEvent = 2000
-	// DefaultMaxOutboxAttempts is the poison bound. A row that has been claimed
-	// this many times without ever committing is parked rather than left to
-	// cycle: a queue that a single bad row can block forever is a queue that
-	// stops during exactly the incident you need it for.
+	// DefaultFanOutBatch bounds ONE FAN-OUT TRANSACTION: the subscriptions
+	// examined and the deliveries created by a single Route call. Materialised
+	// fan-out is cheap at 10 subscribers and expensive at 10,000; this is the
+	// ceiling that keeps one misconfigured project from writing an unbounded
+	// batch inside a single transaction.
+	//
+	// It does NOT bound the event. An event with more subscriptions than this
+	// is fanned out over several batches, resuming from a durable cursor, and
+	// is only marked `processed` once the last one commits. It used to bound
+	// the total, and everything past it was dropped, committed as `processed`
+	// and unreachable by replay - see the comment on RouteRequest.FanOutBatch.
+	DefaultFanOutBatch = 2000
+	// DefaultMaxOutboxAttempts is the poison bound, and it is counted against
+	// UNACCOUNTED claims - claims that ended with this router writing nothing at
+	// all. A row that kills the process this many times is parked rather than
+	// left to cycle: a queue that a single bad row can block forever is a queue
+	// that stops during exactly the incident you need it for.
+	//
+	// A claim that observed its failure and recorded it does not count here. It
+	// is bounded by DefaultMaxOutboxRetryDuration instead.
 	DefaultMaxOutboxAttempts = 5
+	// DefaultMaxOutboxRetryDuration bounds RECORDED transient failure, by time
+	// rather than by count.
+	//
+	// The failures on this path are database-side - a lock wait, a failover, an
+	// exhausted pool - and no count can distinguish "PostgreSQL was degraded for
+	// twenty minutes" from "this row errors every time"; both produce N failures
+	// in a row. Elapsed time can: an incident ends, a broken row does not. An
+	// hour rides out a real incident without parking a single accepted event,
+	// and still surfaces a genuinely stuck row within the same working day, with
+	// its whole error history recorded on the row.
+	DefaultMaxOutboxRetryDuration = time.Hour
 	// DefaultLagInterval throttles the outbox-lag gauge. The poll interval is
 	// 250ms by default and the lag query is an aggregate; refreshing it every
 	// poll would cost more than the work it measures.
@@ -54,16 +75,25 @@ type Options struct {
 	RouterID string
 	Logger   *slog.Logger
 
-	BatchSize                int
-	Concurrency              int
-	Lease                    time.Duration
+	BatchSize   int
+	Concurrency int
+	Lease       time.Duration
+	// MaxSubscriptionsPerEvent is the fan-out BATCH size. The name is kept
+	// because ROUTER_MAX_SUBSCRIPTIONS_PER_EVENT configures it; what changed is
+	// that it now bounds one transaction rather than one event. See
+	// DefaultFanOutBatch.
 	MaxSubscriptionsPerEvent int
-	MaxOutboxAttempts        int
-	LagInterval              time.Duration
+	// MaxOutboxAttempts bounds UNACCOUNTED claims. See DefaultMaxOutboxAttempts.
+	MaxOutboxAttempts int
+	// MaxOutboxRetryDuration bounds recorded transient failure. See
+	// DefaultMaxOutboxRetryDuration.
+	MaxOutboxRetryDuration time.Duration
+	LagInterval            time.Duration
 
 	// RetryBackoff schedules a released row's next attempt. It reuses
 	// retry.Policy so the outbox and the delivery loop back off the same way,
-	// including the overflow clamping that policy already got right.
+	// including the overflow clamping that policy already got right - but its
+	// MaxDelay is clamped to the outbox ceiling; see New.
 	RetryBackoff retry.Policy
 }
 
@@ -104,16 +134,42 @@ func New(opts Options) (*Router, error) {
 		opts.Lease = DefaultLease
 	}
 	if opts.MaxSubscriptionsPerEvent <= 0 {
-		opts.MaxSubscriptionsPerEvent = DefaultMaxSubscriptionsPerEvent
+		opts.MaxSubscriptionsPerEvent = DefaultFanOutBatch
 	}
 	if opts.MaxOutboxAttempts <= 0 {
 		opts.MaxOutboxAttempts = DefaultMaxOutboxAttempts
+	}
+	if opts.MaxOutboxRetryDuration <= 0 {
+		opts.MaxOutboxRetryDuration = DefaultMaxOutboxRetryDuration
 	}
 	if opts.LagInterval <= 0 {
 		opts.LagInterval = DefaultLagInterval
 	}
 	if opts.RetryBackoff.MaxAttempts == 0 && opts.RetryBackoff.InitialDelay == 0 {
 		opts.RetryBackoff = DefaultOutboxBackoff()
+	}
+	// THE OUTBOX BACKS OFF ON ITS OWN SCHEDULE, NOT THE DELIVERY SCHEDULE.
+	//
+	// The substitution above only fires on a wholly zero-valued policy, and
+	// cmd/webhookd/roles.go passes retry.DefaultPolicy() - the DELIVERY policy,
+	// whose MaxDelay is one hour - so in production DefaultOutboxBackoff never
+	// applied and a released row could wait an hour. That is wrong twice over:
+	// the failures this backs off from are database-side and resolve in seconds,
+	// and an hour-long backoff against a one-hour MaxOutboxRetryDuration would
+	// park an accepted event after one or two retries.
+	//
+	// The right fix is one line in roles.go (pass router.DefaultOutboxBackoff(),
+	// or nothing at all). Until that lands, a caller's ceiling is clamped rather
+	// than honoured, and said out loud - refusing to start would take the data
+	// plane down over a misconfiguration, and honouring it silently is what
+	// caused this.
+	if ceiling := DefaultOutboxBackoff().MaxDelay; opts.RetryBackoff.MaxDelay > ceiling {
+		opts.Logger.Warn("outbox retry backoff exceeds the outbox ceiling; clamping",
+			"configured_max_delay", opts.RetryBackoff.MaxDelay.String(),
+			"clamped_to", ceiling.String(),
+			"reason", "the outbox retries database-side failures, not customer endpoints",
+			"remedy", "pass router.DefaultOutboxBackoff() as Options.RetryBackoff")
+		opts.RetryBackoff.MaxDelay = ceiling
 	}
 	return &Router{
 		opts: opts,
@@ -125,6 +181,11 @@ func New(opts Options) (*Router, error) {
 // row: seconds, not the hours a delivery retry may wait. The failures this
 // backs off from are database-side (a lock wait, a failover, an exhausted
 // pool), and they resolve on a human-visible timescale.
+//
+// MaxAttempts is not consulted by the router - the two bounds are
+// MaxOutboxAttempts (unaccounted claims) and MaxOutboxRetryDuration (elapsed
+// recorded failure) - but it is set so the policy is internally coherent if it
+// is ever read as one.
 func DefaultOutboxBackoff() retry.Policy {
 	return retry.Policy{
 		Strategy:     "exponential",
@@ -151,8 +212,9 @@ func (r *Router) Run(ctx context.Context, interval time.Duration) error {
 		"batch_size", r.opts.BatchSize,
 		"concurrency", r.opts.Concurrency,
 		"lease", r.opts.Lease.String(),
-		"max_subscriptions_per_event", r.opts.MaxSubscriptionsPerEvent,
-		"max_outbox_attempts", r.opts.MaxOutboxAttempts)
+		"fan_out_batch", r.opts.MaxSubscriptionsPerEvent,
+		"max_outbox_attempts", r.opts.MaxOutboxAttempts,
+		"max_outbox_retry_duration", r.opts.MaxOutboxRetryDuration.String())
 
 	for {
 		select {
@@ -210,6 +272,7 @@ func (r *Router) process(ctx context.Context, row OutboxRow) {
 		"outbox_id", row.ID,
 		"event_id", row.EventID,
 		"attempts", row.Attempts,
+		"unaccounted_attempts", row.UnaccountedAttempts,
 	)
 
 	if row.Type != OutboxTypeEventCreated {
@@ -222,24 +285,52 @@ func (r *Router) process(ctx context.Context, row OutboxRow) {
 		return
 	}
 
-	if row.Attempts > r.opts.MaxOutboxAttempts {
-		// The poison bound. attempts was incremented by the committed claim, so
-		// this fires even for a row that crashes the process before any failure
-		// handler runs.
-		log.Error("outbox row exceeded its attempt bound; parking",
+	// THE POISON BOUND, and it is counted against UNACCOUNTED claims.
+	//
+	// Both counters are incremented by the committed claim, so this still fires
+	// for a row that crashes the process before any failure handler runs - that
+	// is what the increment-on-claim is for and it is unchanged. What no longer
+	// fires is the other case: a degraded-Postgres window in which fan-out was
+	// never even attempted burned the whole budget on rows that were never at
+	// fault, and parked events that had already been answered 202 Accepted. A
+	// claim that observes and records its failure hands the increment back
+	// (releaseOutboxSQL), so only a claim that vanished silently spends it.
+	if row.UnaccountedAttempts > r.opts.MaxOutboxAttempts {
+		log.Error("outbox row exceeded its unaccounted-claim bound; parking",
 			"max_outbox_attempts", r.opts.MaxOutboxAttempts,
-			"consequence", "this event will not be delivered until an operator replays it")
+			"meaning", "claimed this many times without the router recording any outcome, which is what a row that kills the process looks like",
+			"consequence", "this event will not be delivered until an operator requeues it")
 		r.park(ctx, row, "attempts_exhausted",
-			fmt.Sprintf("claimed %d times without completing (bound %d)",
-				row.Attempts, r.opts.MaxOutboxAttempts), log)
+			fmt.Sprintf("claimed %d times (%d of them leaving no recorded outcome, bound %d)",
+				row.Attempts, row.UnaccountedAttempts, r.opts.MaxOutboxAttempts), log)
 		return
+	}
+
+	// THE TRANSIENT BOUND, by elapsed time rather than by count.
+	//
+	// failing_since is set by the first recorded failure and cleared by any
+	// progress, so this is "how long has this row been failing in a way we
+	// understood and wrote down". A count here would be indistinguishable
+	// between an outage and a broken row; the clock is not.
+	if row.FailingSince != nil {
+		if failing := time.Since(*row.FailingSince); failing > r.opts.MaxOutboxRetryDuration {
+			log.Error("outbox row has been failing for longer than its retry duration; parking",
+				"failing_for", failing.Round(time.Second).String(),
+				"max_outbox_retry_duration", r.opts.MaxOutboxRetryDuration.String(),
+				"consequence", "this event will not be delivered until an operator requeues it")
+			r.park(ctx, row, "retry_duration_exceeded",
+				fmt.Sprintf("failing since %s (%s, bound %s)",
+					row.FailingSince.UTC().Format(time.RFC3339),
+					failing.Round(time.Second), r.opts.MaxOutboxRetryDuration), log)
+			return
+		}
 	}
 
 	started := time.Now()
 	res, err := r.opts.Store.Route(ctx, RouteRequest{
-		RouterID:  r.opts.RouterID,
-		Row:       row,
-		FanOutCap: r.opts.MaxSubscriptionsPerEvent,
+		RouterID:    r.opts.RouterID,
+		Row:         row,
+		FanOutBatch: r.opts.MaxSubscriptionsPerEvent,
 	})
 	RouteDuration.Observe(time.Since(started).Seconds())
 
@@ -282,6 +373,23 @@ func (r *Router) process(ctx context.Context, row OutboxRow) {
 			"candidates_considered", candidateCount(res.Plan),
 			"skipped", res.Plan.Skipped)
 
+	case OutcomeFanOutContinued:
+		// A wide fan-out, mid-walk. Not an error and not a failure: this batch
+		// committed, the cursor advanced, and the row is already back in the
+		// ready set. The event stays `processing` until the last batch lands,
+		// which is why it is honest to say nothing was lost here.
+		EventsRouted.WithLabelValues(string(OutcomeFanOutContinued)).Inc()
+		FanOutBatches.Inc()
+		metrics.DeliveriesCreated.Add(float64(res.Created))
+		FanOutSize.Observe(float64(res.Created))
+		r.recordSkips(res.Plan)
+		log.Info("fan-out batch committed; more subscriptions remain",
+			"event_type", res.Event.EventType,
+			"project_id", res.Event.ProjectID,
+			"deliveries_created", res.Created,
+			"batch_size", r.opts.MaxSubscriptionsPerEvent,
+			"resume_after_subscription_id", res.FanOutCursor)
+
 	case OutcomeRouted:
 		EventsRouted.WithLabelValues(string(OutcomeRouted)).Inc()
 		metrics.DeliveriesCreated.Add(float64(res.Created))
@@ -298,18 +406,8 @@ func (r *Router) process(ctx context.Context, row OutboxRow) {
 		log.Debug("event routed",
 			"event_type", res.Event.EventType,
 			"deliveries_created", res.Created,
-			"planned", len(res.Plan.Targets))
-	}
-
-	if res.Plan.Truncated > 0 || res.CandidatesTruncated {
-		// Loud on purpose. Some endpoints did NOT receive this event and never
-		// will without a replay.
-		log.Error("subscription fan-out cap exceeded; some subscriptions did not receive this event",
-			"cap", r.opts.MaxSubscriptionsPerEvent,
-			"dropped", res.Plan.Truncated,
-			"candidates_truncated", res.CandidatesTruncated,
-			"project_id", res.Event.ProjectID,
-			"remedy", "raise MaxSubscriptionsPerEvent or split the project")
+			"planned", len(res.Plan.Targets),
+			"resumed_from_subscription_id", row.FanOutCursor)
 	}
 }
 
@@ -332,10 +430,18 @@ func (r *Router) park(ctx context.Context, row OutboxRow, reason, detail string,
 func (r *Router) release(ctx context.Context, row OutboxRow, cause error, log *slog.Logger) {
 	backoff := r.backoff(row.Attempts)
 	EventsRouted.WithLabelValues("retried").Inc()
+	// The deadline, not an attempt count. A recorded failure refunds the claim
+	// (releaseOutboxSQL), so what actually decides whether this row survives is
+	// how long it has been failing - and that is the number an operator watching
+	// an incident needs.
+	deadline := "now + " + r.opts.MaxOutboxRetryDuration.String()
+	if row.FailingSince != nil {
+		deadline = row.FailingSince.Add(r.opts.MaxOutboxRetryDuration).UTC().Format(time.RFC3339)
+	}
 	log.Warn("fan-out failed; returning outbox row to the queue",
 		"error", cause,
 		"retry_in", backoff.String(),
-		"attempts_remaining", r.opts.MaxOutboxAttempts-row.Attempts)
+		"parks_after", deadline)
 
 	if err := r.opts.Store.ReleaseOutbox(ctx, r.opts.RouterID, row.ID, cause.Error(), backoff); err != nil {
 		if errors.Is(err, ErrLeaseLost) {

@@ -5,6 +5,7 @@ import { EndpointSecretListDto } from '../endpoint-secrets/dto';
 import { EndpointListDto } from '../endpoints/dto';
 import { MemberListDto } from '../members/dto';
 import { OrganizationListDto } from '../organizations/dto';
+import { OutboxEntryListDto } from '../outbox/dto';
 import { ProjectListDto } from '../projects/dto';
 import { RateLimitListDto } from '../rate-limits/dto';
 import { RetryPolicyListDto } from '../retry-policies/dto';
@@ -81,6 +82,7 @@ const LIST_DTOS: Array<[string, ListDto, string]> = [
   ['events', EventListDto, 'was already canonical'],
   ['deliveries', DeliveryListDto, 'was already canonical'],
   ['deliveries/attempts', DeliveryAttemptListDto, 'was already canonical'],
+  ['outbox', OutboxEntryListDto, 'new with the parked-row recovery routes'],
 ];
 
 function documentedProperties(dto: ListDto): string[] {

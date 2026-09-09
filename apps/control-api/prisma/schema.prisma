@@ -513,7 +513,47 @@ model EventOutbox {
   /// event.created | event.replay
   type        String
   status      OutboxStatus @default(pending)
+  /// Total claims, MONOTONIC. Incremented by the router's claim, never lowered.
+  /// This is the honest "how many times has this been picked up?" for the
+  /// operator UI; it is NOT the poison bound. See `unaccountedAttempts`.
+  ///
+  /// "Never lowered" includes the operator requeue in `src/outbox`, which
+  /// resets the two BUDGETS (`unaccountedAttempts`, `failingSince`) and leaves
+  /// this column alone. A requeue that zeroed it would make the operator UI's
+  /// claim count restart at zero, and the number quoted in the next park
+  /// message with it - erasing exactly the history that distinguishes a row
+  /// requeued four times that keeps dying from one being tried for the first
+  /// time.
   attempts    Int          @default(0)
+  /// THE POISON BOUND (`ROUTER_MAX_OUTBOX_ATTEMPTS`), and a different number
+  /// from `attempts` on purpose.
+  ///
+  /// Incremented by the same claim - a row whose event kills the process never
+  /// reaches a failure handler, so an increment on the failure path would let it
+  /// be reclaimed and re-run forever - but DECREMENTED by every write the lease
+  /// holder commits: a recorded release, or a fan-out batch that made progress.
+  /// What survives is exactly "claims that ended with the router writing nothing
+  /// at all", which is the crash signal and nothing else. Before the split, a
+  /// degraded-Postgres window burned the whole budget on rows whose fan-out was
+  /// never attempted and parked events that had already been answered 202.
+  unaccountedAttempts Int   @default(0) @map("unaccounted_attempts")
+  /// When this row's first RECORDED failure since the last progress happened;
+  /// null when it is not currently failing. Recorded failures are bounded by
+  /// ELAPSED TIME (`MaxOutboxRetryDuration`, 1h) rather than by a count, because
+  /// no count distinguishes "the database was unavailable for twenty minutes"
+  /// from "this row errors every time" - and time does.
+  failingSince DateTime?   @map("failing_since")
+  /// Resume point for a fan-out wider than one transaction: the
+  /// `webhook_subscriptions.id` the last committed batch stopped at. Null means
+  /// the fan-out has not started.
+  ///
+  /// This column is what makes `ROUTER_MAX_SUBSCRIPTIONS_PER_EVENT` a BATCH
+  /// bound rather than a ceiling on the event. It used to be a ceiling: every
+  /// subscription past it was dropped, the event was marked `processed` anyway,
+  /// and - because ids are ULIDs and the walk is `ORDER BY s.id` - the endpoints
+  /// dropped were always the newest, permanently, with no replay path (replay is
+  /// built on delivery rows and they had none).
+  fanOutCursor String?     @map("fan_out_cursor")
   availableAt DateTime     @default(now()) @map("available_at")
   lockedBy    String?      @map("locked_by")
   lockedUntil DateTime?    @map("locked_until")
@@ -524,6 +564,13 @@ model EventOutbox {
   event Event @relation(fields: [eventId], references: [id], onDelete: Cascade)
 
   @@index([status, availableAt])
+  /// The tenant path for the control plane's parked-row listing and requeue
+  /// (`src/outbox`). `event_outbox` carries no organization_id/project_id and
+  /// must not - the router claims globally, and a denormalised tenant column on
+  /// a queue table is a column that can disagree with the row it points at - so
+  /// the tenancy is reached through the event, and PostgreSQL does not index a
+  /// foreign key for you.
+  @@index([eventId])
   /// NOTE: `event_outbox_ready_idx` - (available_at, created_at) WHERE status IN
   /// ('pending', 'processing') - is created by hand in
   /// 20260907000000_handoff_schema_requests. It covers the router's
@@ -531,6 +578,12 @@ model EventOutbox {
   /// neither of which the index above serves without a sort or a full scan.
   /// `processing` is in the predicate deliberately: a leased row IS processing,
   /// and a crashed router's rows must be reclaimable cheaply.
+  ///
+  /// NOTE: `event_outbox_attention_idx` - (status, created_at DESC) WHERE status
+  /// IN ('failed', 'pending') - is created by hand in
+  /// 20260909000000_outbox_fan_out_resume_and_recovery. Prisma has no
+  /// partial-index syntax. It serves the operator's "what is stuck in this
+  /// project?" page.
   @@map("event_outbox")
 }
 
@@ -618,9 +671,29 @@ model Delivery {
   /// excluding it would put an abandoned delivery outside the index and make a
   /// dead worker's rows recoverable only by a sequential scan.
   ///
-  /// `next_attempt_at` stays NULLABLE. internal/worker's advanceSQL writes NULL
-  /// on every TERMINAL transition; NOT NULL would fail every succeed/exhaust/
-  /// cancel write. See apps/control-api/HANDOFF.md.
+  /// `next_attempt_at` stays NULLABLE, but NOT for the reason recorded here
+  /// until 2026-09-09. This said internal/worker's `advanceSQL` writes NULL on
+  /// every TERMINAL transition, so NOT NULL would fail every succeed/exhaust/
+  /// cancel write. It does not: `services/data-plane/internal/worker/store.go`
+  /// writes `now()` on the terminal branch, and has done since that ELSE branch
+  /// was changed precisely to clear the way for NOT NULL. Someone weighing the
+  /// constraint would have read this and concluded the Go change was still
+  /// outstanding when it had already landed.
+  ///
+  /// What actually stands in the way now is the EXISTING ROWS. The column is
+  /// nullable today, so any row written before that change - and any row written
+  /// by an older data-plane build - may still hold NULL, and `SET NOT NULL`
+  /// validates the whole table. Making it NOT NULL therefore needs a backfill
+  /// (`UPDATE deliveries SET next_attempt_at = COALESCE(next_attempt_at,
+  /// completed_at, created_at) WHERE next_attempt_at IS NULL`) followed by
+  /// `ADD CONSTRAINT ... NOT VALID` + `VALIDATE CONSTRAINT`, so the largest
+  /// table in the system is not locked for a full scan. That is the migration to
+  /// write; the Go side is ready. See apps/control-api/HANDOFF.md.
+  ///
+  /// Why it is worth doing at all: the claim query orders by
+  /// `next_attempt_at NULLS FIRST`, so NULL is not a neutral value - it is the
+  /// FRONT of the queue. One stray NULL silently promotes that row ahead of
+  /// retries that are actually due.
   @@map("deliveries")
 }
 

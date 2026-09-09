@@ -5,9 +5,12 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"strings"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/shaq/webhook-platform/services/data-plane/internal/retry"
 )
 
 func quietLogger() *slog.Logger {
@@ -110,7 +113,8 @@ func TestNewFillsBounds(t *testing.T) {
 		t.Fatal(err)
 	}
 	if r.opts.BatchSize <= 0 || r.opts.Concurrency <= 0 || r.opts.Lease <= 0 ||
-		r.opts.MaxSubscriptionsPerEvent <= 0 || r.opts.MaxOutboxAttempts <= 0 {
+		r.opts.MaxSubscriptionsPerEvent <= 0 || r.opts.MaxOutboxAttempts <= 0 ||
+		r.opts.MaxOutboxRetryDuration <= 0 {
 		t.Fatalf("a bound was left unset: %+v", r.opts)
 	}
 	if r.opts.RetryBackoff.InitialDelay <= 0 {
@@ -118,10 +122,45 @@ func TestNewFillsBounds(t *testing.T) {
 	}
 }
 
+// The dead-default bug: cmd/webhookd/roles.go passes retry.DefaultPolicy(), the
+// DELIVERY policy, whose MaxDelay is an hour - so DefaultOutboxBackoff never
+// applied in production and a released outbox row could wait an hour to be
+// retried, against a one-hour MaxOutboxRetryDuration that would then park it.
+// The outbox retries database-side failures, which resolve in seconds.
+func TestNewClampsADeliveryScaleBackoffToTheOutboxCeiling(t *testing.T) {
+	r, err := New(Options{
+		Store:        &fakeStore{},
+		RouterID:     "rtr",
+		Logger:       quietLogger(),
+		RetryBackoff: retry.DefaultPolicy(), // MaxDelay: 1 hour
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ceiling := DefaultOutboxBackoff().MaxDelay
+	if r.opts.RetryBackoff.MaxDelay != ceiling {
+		t.Fatalf("RetryBackoff.MaxDelay = %s, want it clamped to the outbox ceiling %s",
+			r.opts.RetryBackoff.MaxDelay, ceiling)
+	}
+	// A policy already inside the ceiling is honoured untouched.
+	tight := DefaultOutboxBackoff()
+	tight.MaxDelay = 5 * time.Second
+	r2, err := New(Options{Store: &fakeStore{}, RouterID: "rtr", Logger: quietLogger(), RetryBackoff: tight})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r2.opts.RetryBackoff.MaxDelay != 5*time.Second {
+		t.Fatalf("MaxDelay = %s, want the caller's 5s left alone", r2.opts.RetryBackoff.MaxDelay)
+	}
+}
+
+// The poison bound is UNACCOUNTED claims - claims that ended with the router
+// writing nothing at all, which is what a row that kills the process looks like.
+// That protection is unchanged; what changed is the counter it reads.
 func TestRunOnceParksAPoisonedRow(t *testing.T) {
 	store := &fakeStore{claim: []OutboxRow{
-		{ID: "obx_ok", EventID: "evt_ok", Type: OutboxTypeEventCreated, Attempts: 3},
-		{ID: "obx_poison", EventID: "evt_poison", Type: OutboxTypeEventCreated, Attempts: 4},
+		{ID: "obx_ok", EventID: "evt_ok", Type: OutboxTypeEventCreated, Attempts: 3, UnaccountedAttempts: 3},
+		{ID: "obx_poison", EventID: "evt_poison", Type: OutboxTypeEventCreated, Attempts: 4, UnaccountedAttempts: 4},
 	}}
 	r := newTestRouter(t, store, nil) // MaxOutboxAttempts = 3
 
@@ -140,6 +179,63 @@ func TestRunOnceParksAPoisonedRow(t *testing.T) {
 	}
 	if store.parked[0].reason == "" {
 		t.Fatal("a parked row must record why; an unexplained park is unactionable at 2am")
+	}
+}
+
+// The FALSE-PARKING regression, stated directly.
+//
+// A degraded-Postgres window claims a row, fails before fan-out is attempted,
+// records the failure and releases - over and over. Every one of those claims
+// increments `attempts`, so under the old single-counter bound the row parked
+// and its event was marked `failed`, having already been answered 202 Accepted.
+// The claims were accounted for, so the poison budget is untouched and the row
+// stays in the queue to be retried when the database comes back.
+func TestRunOnceDoesNotParkARowWhoseFailuresWereAllRecorded(t *testing.T) {
+	store := &fakeStore{claim: []OutboxRow{{
+		ID: "obx_brownout", EventID: "evt_brownout", Type: OutboxTypeEventCreated,
+		// Claimed far past the bound, but every one of those claims released
+		// with a recorded reason and handed its increment back.
+		Attempts:            40,
+		UnaccountedAttempts: 0,
+	}}}
+	r := newTestRouter(t, store, nil) // MaxOutboxAttempts = 3
+
+	if _, err := r.RunOnce(context.Background()); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	if len(store.parked) != 0 {
+		t.Fatalf("parked = %+v; a row whose every failure was observed and recorded is a "+
+			"database problem, not a poisoned row, and parking it strands an accepted event",
+			store.parked)
+	}
+	if len(store.routed) != 1 || store.routed[0] != "obx_brownout" {
+		t.Fatalf("routed = %v, want the row to be tried again", store.routed)
+	}
+}
+
+// Recorded failure is bounded by TIME, not by count: a row that has genuinely
+// been failing for longer than the retry duration is parked, so a broken row
+// still cannot cycle forever.
+func TestRunOnceParksARowThatHasBeenFailingTooLong(t *testing.T) {
+	stale := time.Now().Add(-2 * time.Hour)
+	fresh := time.Now().Add(-time.Minute)
+	store := &fakeStore{claim: []OutboxRow{
+		{ID: "obx_fresh", EventID: "evt_fresh", Type: OutboxTypeEventCreated, Attempts: 9, FailingSince: &fresh},
+		{ID: "obx_stale", EventID: "evt_stale", Type: OutboxTypeEventCreated, Attempts: 9, FailingSince: &stale},
+	}}
+	r := newTestRouter(t, store, func(o *Options) { o.MaxOutboxRetryDuration = time.Hour })
+
+	if _, err := r.RunOnce(context.Background()); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	if len(store.parked) != 1 || store.parked[0].outboxID != "obx_stale" {
+		t.Fatalf("parked = %+v, want only the row that has been failing for two hours", store.parked)
+	}
+	if len(store.routed) != 1 || store.routed[0] != "obx_fresh" {
+		t.Fatalf("routed = %v; a row a minute into an incident must still be retried", store.routed)
+	}
+	if !strings.Contains(store.parked[0].reason, "failing since") {
+		t.Fatalf("park reason = %q; it must say what the operator is looking at", store.parked[0].reason)
 	}
 }
 

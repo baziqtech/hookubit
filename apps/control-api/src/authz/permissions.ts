@@ -374,6 +374,12 @@ export const TENANT_SCOPE_PERMISSIONS: Readonly<Record<string, readonly Permissi
     // being written; they carry no data of their own beyond a stored response.
     idempotencyKeys: ['events.read'],
     events: ['events.read'],
+    // The router's work queue for an event. Reading it is reading the event's
+    // own processing state - "why has nothing arrived?" - so it rides on
+    // `events.read`. WRITING it (requeue) does not: that route demands
+    // `events.replay` AND `deliveries.replay`, because a requeue puts real
+    // outbound HTTP on a customer's endpoints.
+    eventOutbox: ['events.read'],
     deliveries: ['deliveries.read'],
     endpointSecrets: ['endpoint-secrets.read'],
     // Health is an endpoint's delivery record, not its credential.

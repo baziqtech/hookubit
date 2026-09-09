@@ -1,6 +1,8 @@
 package router
 
 import (
+	"time"
+
 	"github.com/shaq/webhook-platform/services/data-plane/internal/retry"
 )
 
@@ -14,6 +16,13 @@ type Event struct {
 	EventType      string
 	// OrderingKey is stored on the delivery but NOT enforced (ADR-0004).
 	OrderingKey string
+	// CreatedAt is when the event was ACCEPTED, and it is what pins the
+	// subscription set - see loadCandidatesSQL. A fan-out wider than one batch
+	// spans several transactions and therefore several snapshots, so without a
+	// pin the answer to "do I receive events published before I subscribed?"
+	// would be "only if the project is wider than ROUTER_MAX_SUBSCRIPTIONS_PER_EVENT",
+	// which is not a rule a customer can reason about.
+	CreatedAt time.Time
 }
 
 // Candidate is one webhook_subscriptions row joined to everything that decides

@@ -17,6 +17,7 @@ import { HealthModule } from './health/health.module';
 import { PrismaModule } from './infrastructure/prisma/prisma.module';
 import { MembersModule } from './members/members.module';
 import { OrganizationsModule } from './organizations/organizations.module';
+import { OutboxModule } from './outbox/outbox.module';
 import { ProjectsModule } from './projects/projects.module';
 import { RateLimitsModule } from './rate-limits/rate-limits.module';
 import { RetryPoliciesModule } from './retry-policies/retry-policies.module';
@@ -83,6 +84,10 @@ import { WebhookSubscriptionsModule } from './webhook-subscriptions/webhook-subs
     // psql. It reads the rows the Go router and worker write.
     EventsModule,
     DeliveriesModule,
+    // The recovery surface for events the router could not fan out. Without it
+    // a parked outbox row - an event already answered 202 Accepted - is
+    // invisible to this API and recoverable only by hand-written SQL.
+    OutboxModule,
     AuditModule,
     AnalyticsModule,
     // Still to come: admin (platform staff, above organization owner - it needs

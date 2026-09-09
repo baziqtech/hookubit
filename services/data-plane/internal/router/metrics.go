@@ -31,14 +31,28 @@ var (
 	EventsRouted = promauto.NewCounterVec(prometheus.CounterOpts{
 		Name: "router_events_routed_total",
 		Help: "Outbox rows resolved by the router, by outcome.",
-	}, []string{"outcome"}) // routed | no_subscriptions | event_missing | lease_lost | parked | retried
+	}, []string{"outcome"}) // routed | fan_out_continued | no_subscriptions | event_missing | lease_lost | parked | retried
 
-	// FanOutSize is deliveries created per event. The p99 is what turns
-	// materialised fan-out from cheap into expensive: at 10 subscribers this
-	// is free, at 10,000 it is the dominant write on the system.
+	// FanOutBatches counts fan-out batches that committed with subscriptions
+	// still to walk - i.e. events wider than ROUTER_MAX_SUBSCRIPTIONS_PER_EVENT.
+	//
+	// This is the metric that used to be an ERROR log saying endpoints had been
+	// dropped. Nothing is dropped now; a non-zero rate simply means some events
+	// take several transactions to fan out, which is a capacity signal (raise
+	// the batch, or expect the outbox to carry those events for a few extra
+	// polls), not a data-loss one.
+	FanOutBatches = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "router_fan_out_batches_total",
+		Help: "Fan-out batches that committed with more subscriptions still to walk.",
+	})
+
+	// FanOutSize is deliveries created per fan-out BATCH - which for any event
+	// within the batch size is the same thing as per event. The p99 is what
+	// turns materialised fan-out from cheap into expensive: at 10 subscribers
+	// this is free, at 10,000 it is the dominant write on the system.
 	FanOutSize = promauto.NewHistogram(prometheus.HistogramOpts{
 		Name:    "router_fan_out_size",
-		Help:    "Delivery rows created for one event.",
+		Help:    "Delivery rows created by one fan-out batch.",
 		Buckets: []float64{0, 1, 2, 5, 10, 25, 50, 100, 250, 500, 1000, 2500},
 	})
 
@@ -53,9 +67,15 @@ var (
 	// OutboxParked counts rows removed from the queue without being routed.
 	// Every increment is an event that will never be delivered until a human
 	// intervenes, so this should alert at any non-zero rate.
+	//
+	// The intervention is now an API call, not a psql session: parked rows are
+	// listed and requeued through
+	// GET/POST /v1/projects/:projectId/outbox (apps/control-api/src/outbox).
 	OutboxParked = promauto.NewCounterVec(prometheus.CounterOpts{
 		Name: "router_outbox_parked_total",
 		Help: "Outbox rows parked as failed and removed from the queue, by reason.",
+		// unknown_outbox_type | attempts_exhausted | retry_duration_exceeded |
+		// event_missing
 	}, []string{"reason"})
 
 	// RouteDuration is the cost of one event's fan-out transaction: load,

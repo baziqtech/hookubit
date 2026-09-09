@@ -50,6 +50,7 @@ const SCHEMA: Record<string, Record<string, Relation>> = {
     project: { table: 'project', fk: 'projectId' },
     organization: { table: 'organization', fk: 'organizationId' },
   },
+  eventOutbox: { event: { table: 'event', fk: 'eventId' } },
   delivery: {
     endpoint: { table: 'endpoint', fk: 'endpointId' },
     project: { table: 'project', fk: 'projectId' },
@@ -284,10 +285,17 @@ export class FakeTenantPrisma {
     let found = this.all(table).filter((row) => this.matches(table, row, where));
     if (args.orderBy) {
       const [[field, direction]] = Object.entries(args.orderBy);
+      // `compare`, not localeCompare over String(...). Every listing in this API
+      // orders by `created_at DESC`, and `String(new Date(...))` is
+      // 'Sun Mar 01 2026 ...' - so a lexical sort ordered by WEEKDAY and then by
+      // MONTH NAME ('Apr' < 'Jan'). The same trap the `compare` docblock below
+      // describes for filters, in the sort. A test asserting "newest first" came
+      // out right or wrong depending on the calendar, which is worse than not
+      // asserting it: the fixture dates happened to agree often enough that the
+      // ordering looked verified.
       found = [...found].sort((a, b) => {
-        const left = String(a[field] ?? '');
-        const right = String(b[field] ?? '');
-        return direction === 'desc' ? right.localeCompare(left) : left.localeCompare(right);
+        const sign = FakeTenantPrisma.compare(a[field] ?? '', b[field] ?? '');
+        return direction === 'desc' ? -sign : sign;
       });
     }
     if (args.skip) found = found.slice(args.skip);
@@ -373,6 +381,7 @@ export class FakeTenantPrisma {
   readonly rateLimitPolicy = this.delegate('rateLimitPolicy');
   readonly idempotencyKey = this.delegate('idempotencyKey');
   readonly event = this.delegate('event');
+  readonly eventOutbox = this.delegate('eventOutbox');
   readonly delivery = this.delegate('delivery');
   readonly deliveryAttempt = this.delegate('deliveryAttempt');
   readonly auditLog = this.delegate('auditLog');

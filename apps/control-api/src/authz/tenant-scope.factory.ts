@@ -9,6 +9,7 @@ import {
   EndpointHealth,
   EndpointSecret,
   Event,
+  EventOutbox,
   IdempotencyKey,
   Organization,
   OrganizationMember,
@@ -64,6 +65,7 @@ export type TenantRepositoryName =
   | 'rateLimitPolicies'
   | 'idempotencyKeys'
   | 'events'
+  | 'eventOutbox'
   | 'deliveries'
   | 'deliveryAttempts';
 
@@ -84,6 +86,7 @@ type DelegateKey =
   | 'rateLimitPolicy'
   | 'idempotencyKey'
   | 'event'
+  | 'eventOutbox'
   | 'delivery'
   | 'deliveryAttempt'
   | 'auditLog'
@@ -103,10 +106,20 @@ type DelegateKey =
  * gets written through `PrismaService` instead, and `PrismaService` is
  * `@Global()`, so reaching for it costs an author nothing.
  *
- * Not covered here, on purpose: `users`, `sessions`, `user_tokens`, `plans` and
- * the outbox. They are not tenant-owned - they belong to the auth layer, to the
- * platform, or to the data plane - and pretending otherwise by inventing a
- * scope for them would be worse than leaving them out.
+ * Not covered here, on purpose: `users`, `sessions`, `user_tokens` and `plans`.
+ * They are not tenant-owned - they belong to the auth layer or to the platform -
+ * and pretending otherwise by inventing a scope for them would be worse than
+ * leaving them out.
+ *
+ * `event_outbox` USED TO BE ON THAT LIST, as "the data plane's". That reading
+ * was right about who WRITES the table and wrong about who the rows are about,
+ * and the gap it left was a data-loss path with no recovery: when the router
+ * parks a row - a poisoned event, or one that outlived a degraded-database
+ * window - the event stops dead, having already been answered `202 Accepted`,
+ * and there was nothing in this API that could see it or put it back. The only
+ * remedy was hand-written SQL against production. A parked row is a
+ * customer-visible fact about a customer's event, so it is reachable here,
+ * scoped through that event (`viaEvent`) because that is where the tenancy is.
  */
 export class TenantScope implements OwnershipVerifier {
   constructor(
@@ -301,6 +314,28 @@ export class TenantScope implements OwnershipVerifier {
     Event
   > {
     return this.repo('event', 'projectAndOrganization', 'Event');
+  }
+
+  /**
+   * The router's queue, scoped `event_outbox -> events -> project`.
+   *
+   * Read-mostly from here: the data plane owns the lifecycle, and the one write
+   * the control plane makes is an operator REQUEUE of a parked row (see
+   * `src/outbox`). It is deliberately not a general-purpose handle on the
+   * queue - there is no `create`, because ingest writes the row in the same
+   * transaction as the event and an outbox row without one would be a delivery
+   * for an event that does not exist.
+   */
+  get eventOutbox(): Repo<
+    Prisma.EventOutboxWhereInput,
+    Prisma.EventOutboxOrderByWithRelationInput,
+    Prisma.EventOutboxCreateManyInput,
+    Prisma.EventOutboxUncheckedUpdateManyInput,
+    EventOutbox
+  > {
+    return this.repo('eventOutbox', 'viaEvent', 'Outbox entry', {
+      foreignKeys: { eventId: 'events' },
+    });
   }
 
   /**
