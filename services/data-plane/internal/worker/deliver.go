@@ -41,8 +41,13 @@ func (w *Worker) handle(ctx context.Context, lease queue.Lease) {
 	releaseTenant, scope, ok := w.gate.AcquireTenant(job.OrganizationID, job.ProjectID)
 	if !ok {
 		metrics.RateLimitHits.WithLabelValues(scope).Inc()
-		w.deferDelivery(ctx, job.DeliveryID, ReasonConcurrencyLimited, w.spread(deferBaseDelay), log,
-			slog.String("scope", scope))
+		// unknownBudget: the row has not been read yet, so there is no policy to
+		// judge against. Deliberate - a tenant concurrency ceiling is a
+		// momentary condition that clears on its own, not a state a delivery can
+		// be stuck in indefinitely, and reading the row here would put a join
+		// and a decrypt in front of every refusal.
+		w.deferDelivery(ctx, job.DeliveryID, unknownBudget, ReasonConcurrencyLimited,
+			w.spread(deferBaseDelay), log, slog.String("scope", scope))
 		return
 	}
 	defer releaseTenant()
@@ -75,7 +80,10 @@ func (w *Worker) deliver(ctx context.Context, j queue.DeliveryJob, log *slog.Log
 		// spinning on it: without a delay the next poll re-claims it
 		// immediately and a database blip becomes a hot loop.
 		log.Error("load delivery failed", "error", err)
-		w.deferDelivery(ctx, j.DeliveryID, ReasonRetryScheduled, w.spread(deferBaseDelay), log)
+		// unknownBudget for the same reason as above, and a sharper one: the
+		// read that would tell us the budget is the read that just failed.
+		w.deferDelivery(ctx, j.DeliveryID, unknownBudget, ReasonRetryScheduled,
+			w.spread(deferBaseDelay), log)
 		return
 	}
 	log = log.With("endpoint_url_host", hostOf(job.Endpoint.URL))
@@ -91,17 +99,40 @@ func (w *Worker) deliver(ctx context.Context, j queue.DeliveryJob, log *slog.Log
 	releaseEndpoint, ok := w.gate.AcquireEndpoint(job.Endpoint.ID, job.Endpoint.MaxConcurrency, w.endpointCeiling)
 	if !ok {
 		metrics.RateLimitHits.WithLabelValues("endpoint_concurrency").Inc()
-		w.deferDelivery(ctx, job.DeliveryID, ReasonConcurrencyLimited, w.spread(deferBaseDelay), log)
+		w.deferDelivery(ctx, job.DeliveryID, budgetOf(job), ReasonConcurrencyLimited,
+			w.spread(deferBaseDelay), log)
 		return
 	}
 	defer releaseEndpoint()
 
-	// Resolve the payload HERE, after the endpoint concurrency gate and before
-	// the breaker, and the position is deliberate on both sides.
+	// The endpoint's own rate limit is checked HERE: after the cheap
+	// concurrency gate, and before both the payload fetch and the breaker.
 	//
-	// After the gate, because an object storage fetch for a delivery that a
-	// concurrency ceiling is about to turn away is wasted bandwidth on the one
-	// path that is already saturated.
+	// It used to sit between the breaker and the request, and that was a bug
+	// rather than an ordering preference. breaker.Allow CLAIMS the half-open
+	// probe slot, so a recovering endpoint that also had endpoints.rate_limit
+	// set could have its one probe consumed by a delivery that then deferred
+	// here and never reached the network - delaying recovery by a whole
+	// HalfOpenTTL each time, indefinitely if the bucket stayed saturated. The
+	// rule the comment below states for the payload fetch applies to every
+	// gate: nothing that can defer may sit between claiming the probe and
+	// making the request.
+	if job.Endpoint.RateLimit > 0 {
+		allowed, wait := w.limiter.Allow(ctx, "endpoint:"+job.Endpoint.ID,
+			job.Endpoint.RateLimit, job.Endpoint.RateLimitWindow)
+		if !allowed {
+			metrics.RateLimitHits.WithLabelValues("endpoint").Inc()
+			w.deferDelivery(ctx, job.DeliveryID, budgetOf(job), ReasonRateLimited, w.spread(wait), log)
+			return
+		}
+	}
+
+	// Resolve the payload HERE, after both cheap gates and before the breaker,
+	// and the position is deliberate on both sides.
+	//
+	// After the gates, because an object storage fetch for a delivery that a
+	// concurrency ceiling or a rate limit is about to turn away is wasted
+	// bandwidth on the one path that is already saturated.
 	//
 	// Before the breaker, because Allow CLAIMS the half-open probe slot for a
 	// recovering endpoint. Claiming that slot and then deferring because OUR
@@ -116,7 +147,8 @@ func (w *Worker) deliver(ctx context.Context, j queue.DeliveryJob, log *slog.Log
 			// the retry budget, and the delivery drains on its own once the
 			// bucket comes back.
 			log.Error("payload could not be fetched from object storage; deferring", "error", err)
-			w.deferDelivery(ctx, job.DeliveryID, ReasonPayloadUnavailable, w.spread(deferBaseDelay), log)
+			w.deferDelivery(ctx, job.DeliveryID, budgetOf(job), ReasonPayloadUnavailable,
+				w.spread(deferBaseDelay), log)
 			return
 		}
 		// ErrPayloadGone / ErrPayloadCorrupt / ErrNoPayload: definitive, and
@@ -137,20 +169,22 @@ func (w *Worker) deliver(ctx context.Context, j queue.DeliveryJob, log *slog.Log
 		if delay < time.Second {
 			delay = time.Second
 		}
-		w.deferDelivery(ctx, job.DeliveryID, verdict.Reason, delay, log,
+		w.deferDelivery(ctx, job.DeliveryID, budgetOf(job), verdict.Reason, delay, log,
 			slog.String("breaker_state", string(verdict.State)))
 		return
 	}
 
-	if job.Endpoint.RateLimit > 0 {
-		allowed, wait := w.limiter.Allow(ctx, "endpoint:"+job.Endpoint.ID, job.Endpoint.RateLimit, job.Endpoint.RateLimitWindow)
-		if !allowed {
-			metrics.RateLimitHits.WithLabelValues("endpoint").Inc()
-			w.deferDelivery(ctx, job.DeliveryID, ReasonRateLimited, w.spread(wait), log)
-			return
-		}
-	}
-
+	// From here to w.client.Do, nothing may defer for a reason attributable to
+	// the ENDPOINT or to this platform's load: the probe slot is already
+	// claimed, and spending it on a request that is never made costs the
+	// endpoint a whole cooldown of recovery. That is why the rate-limit and
+	// payload-fetch gates sit above breaker.Allow rather than here.
+	//
+	// The one exemption is worker shutdown (attempt() checks it before the
+	// request), and it costs nothing: on an already-cancelled context
+	// w.client.Do returns immediately and lands in the identical shutdown defer
+	// on the far side, so the probe is spent either way. The early check only
+	// saves a futile syscall.
 	w.attempt(ctx, job, verdict, log)
 }
 
@@ -194,6 +228,14 @@ func (w *Worker) attempt(ctx context.Context, job *Job, verdict Verdict, log *sl
 		metrics.LeasesLost.WithLabelValues("attempt").Inc()
 		return
 	}
+	// And the same for our own shutdown. The drain window has closed, so this
+	// request would be cancelled the moment it started; sending it anyway costs
+	// the endpoint a duplicate and costs the delivery an attempt.
+	if errors.Is(context.Cause(ctx), ErrWorkerShutdown) {
+		w.deferDelivery(ctx, job.DeliveryID, budgetOf(job), ReasonWorkerShutdown,
+			w.spread(deferBaseDelay), log)
+		return
+	}
 
 	// endpoints.timeout_ms can only SHORTEN the attempt: the egress client
 	// applies EGRESS_TOTAL_TIMEOUT_MS of its own, and letting a customer's
@@ -222,16 +264,41 @@ func (w *Worker) attempt(ctx context.Context, job *Job, verdict Verdict, log *sl
 		return
 	}
 
+	// The OTHER reason this request may have died with nothing to show for it:
+	// we cancelled it. A graceful shutdown whose drain window expired must not
+	// be recorded as the endpoint failing to answer - that writes `context
+	// canceled` into the customer's ledger, advances attempt_count, and moves
+	// their circuit breaker one failure closer to open, for a restart of ours.
+	//
+	// Only when the request actually failed. A response that arrived before the
+	// cancellation landed is a real outcome and is recorded as one; throwing it
+	// away would guarantee the duplicate that deferring only risks.
+	if doErr != nil && errors.Is(context.Cause(ctx), ErrWorkerShutdown) {
+		log.Warn("attempt cancelled by worker shutdown; putting the delivery back unattempted",
+			"reason", "our drain window closed, so this is not the endpoint's failure and is not charged to it")
+		w.deferDelivery(ctx, job.DeliveryID, budgetOf(job), ReasonWorkerShutdown,
+			w.spread(deferBaseDelay), log)
+		return
+	}
+
 	status := 0
 	if resp != nil {
 		status = resp.StatusCode
+	}
+	outcome := Outcome{HTTPStatus: status, Err: doErr}
+	if resp != nil {
+		// The endpoint's own answer to "when should we come back". Parsed here
+		// rather than in Decide so the state machine stays free of HTTP.
+		if wait, ok := ParseRetryAfter(resp.Headers.Get("Retry-After"), finished); ok {
+			outcome.RetryAfter, outcome.HasRetryAfter = wait, true
+		}
 	}
 	decision := w.rng.decide(DecisionInput{
 		Attempt:        job.AttemptNumber,
 		Policy:         job.Policy,
 		FirstAttemptAt: job.FirstAttemptAt,
 		Now:            finished,
-		Outcome:        Outcome{HTTPStatus: status, Err: doErr},
+		Outcome:        outcome,
 	})
 
 	attempt := &AttemptRecord{
@@ -410,6 +477,10 @@ func (w *Worker) finish(ctx context.Context, job *Job, attempt *AttemptRecord, d
 			"http_status", attemptStatusCode(attempt),
 			"error_code", decision.ErrorCode,
 			"retry_in", next.Delay.String(),
+			// Which schedule produced retry_in. Without it an operator staring
+			// at a 3600s gap under a 60s policy has no way to tell an honoured
+			// Retry-After from a broken backoff calculation.
+			"retry_after_honoured", decision.RetryAfterHonoured,
 			"reason", string(decision.Reason))
 	default:
 		metrics.DeliveriesCompleted.WithLabelValues(string(decision.State)).Inc()
@@ -421,6 +492,33 @@ func (w *Worker) finish(ctx context.Context, job *Job, attempt *AttemptRecord, d
 	}
 }
 
+// deferBudget is the wall-clock half of a delivery's retry budget, carried into
+// deferDelivery so that a delivery which is only ever DEFERRED can still end.
+//
+// The zero value means "not known here" - see unknownBudget.
+type deferBudget struct {
+	policy         retry.Policy
+	firstAttemptAt time.Time
+}
+
+// budgetOf reads the budget off a loaded delivery.
+func budgetOf(job *Job) deferBudget {
+	return deferBudget{policy: job.Policy, firstAttemptAt: job.FirstAttemptAt}
+}
+
+// unknownBudget is used by the two defer paths that run before the delivery row
+// has been read: the tenant concurrency gate (which runs before any database
+// work by design) and the load failure itself. Neither can be stuck forever -
+// a tenant ceiling clears as work drains, and a database that never answers is
+// not a state in which anything is being delivered - so neither is worth
+// putting a query in front of.
+var unknownBudget = deferBudget{}
+
+// expired reports whether the delivery's wall-clock budget has run out.
+func (b deferBudget) expired(now time.Time) bool {
+	return b.policy.DurationExhausted(b.firstAttemptAt, now)
+}
+
 // deferDelivery puts a delivery back WITHOUT recording an attempt, because
 // none was made. The retry budget is for endpoints that answered badly, not for
 // moments when this process declined to ask.
@@ -429,9 +527,44 @@ func (w *Worker) finish(ctx context.Context, job *Job, attempt *AttemptRecord, d
 // column is the only free-text field the operator UI has, and "why is this
 // delivery not moving" is the question it exists to answer; the alternative is
 // a delivery sitting in `scheduled` with no explanation anywhere a human looks.
+//
+// WHY THE BUDGET CHECK LIVES HERE rather than at the call sites. The two halves
+// of the retry budget are spent by different things, and a defer spends exactly
+// one of them:
+//
+//   - attempt_count is spent by a REQUEST. A defer makes none, so it charges
+//     none. That is deliberate and is preserved: this function never writes a
+//     positive AttemptCount.
+//   - MaxRetryDuration is spent by the CLOCK, which runs whether or not we
+//     asked. A delivery that is deferred and re-claimed forever is a delivery
+//     whose wall-clock budget is running down with nothing ever consulting it.
+//
+// retry.Policy.Exhausted was reachable from exactly one place - Decide, on a
+// COMPLETED attempt - so a delivery behind a permanently open breaker never
+// reached any budget check at all. It was re-claimed every cooldown forever,
+// and under the default FIFO claim (a strict global ordering, no tenant
+// predicate) those ever-older rows sort AHEAD of live traffic: one dead
+// endpoint degrades the whole queue. There is no reaper in either plane to
+// catch it later.
+//
+// Putting the check in this function rather than at each `if !ok` means a
+// future defer path cannot forget it - the budget is a parameter it has to
+// think about, not a call it can omit.
 func (w *Worker) deferDelivery(
-	ctx context.Context, deliveryID string, reason Reason, delay time.Duration, log *slog.Logger, extra ...slog.Attr,
+	ctx context.Context, deliveryID string, budget deferBudget, reason Reason,
+	delay time.Duration, log *slog.Logger, extra ...slog.Attr,
 ) {
+	if budget.expired(w.now()) {
+		w.expireDelivery(ctx, deliveryID, reason, log, extra...)
+		return
+	}
+	// A defer that happened because WE are going away is named as such,
+	// whatever the proximate reason was. A payload fetch cancelled by the drain
+	// window is not an object-storage outage, and last_error must not send an
+	// operator looking for one.
+	if errors.Is(context.Cause(ctx), ErrWorkerShutdown) {
+		reason = ReasonWorkerShutdown
+	}
 	if delay <= 0 {
 		delay = time.Second
 	}
@@ -457,6 +590,43 @@ func (w *Worker) deferDelivery(
 		return
 	}
 	log.LogAttrs(writeCtx, slog.LevelDebug, "delivery deferred without an attempt", attrs...)
+}
+
+// expireDelivery ends a delivery whose wall-clock retry budget ran out while it
+// was being deferred, rather than deferring it again.
+//
+// It writes a TERMINAL transition with no attempt row and no attempt count.
+// That combination is the honest one: `exhausted` because we gave up rather
+// than the endpoint rejecting us, reason `retry_duration_exhausted` because it
+// was the clock and not the attempt count that ran out (which is the difference
+// between an operator raising max_attempts and raising max_retry_duration), and
+// no delivery_attempts row because no request was ever made. `deferred_for`
+// records what had been holding it up, so the answer to "why did this never go
+// out" is one query rather than a reconstruction.
+func (w *Worker) expireDelivery(
+	ctx context.Context, deliveryID string, deferredFor Reason, log *slog.Logger, extra ...slog.Attr,
+) {
+	writeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), w.dbTimeout)
+	defer cancel()
+
+	next := Transition{State: StateExhausted, Reason: ReasonBudgetExhausted}
+	attrs := append([]slog.Attr{
+		slog.String("reason", string(ReasonBudgetExhausted)),
+		slog.String("deferred_for", string(deferredFor)),
+	}, extra...)
+
+	if err := w.store.Complete(writeCtx, w.workerID, deliveryID, nil, next); err != nil {
+		if errors.Is(err, ErrLeaseNotHeld) {
+			metrics.LeasesLost.WithLabelValues("defer").Inc()
+			return
+		}
+		log.LogAttrs(writeCtx, slog.LevelError, "expiring an out-of-budget delivery failed",
+			append(attrs, slog.String("error", err.Error()))...)
+		return
+	}
+	metrics.DeliveriesCompleted.WithLabelValues(string(StateExhausted)).Inc()
+	log.LogAttrs(writeCtx, slog.LevelWarn,
+		"delivery exhausted its retry duration without ever being attempted", attrs...)
 }
 
 // spread jitters a delay so deliveries turned away together do not return

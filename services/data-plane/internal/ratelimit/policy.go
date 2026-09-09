@@ -175,6 +175,42 @@ func ResolveDelivery(rows []Row, t Target) []Bucket {
 	return buckets
 }
 
+// BucketFor builds a chargeable bucket from a limit and a window that did not
+// come from a rate_limit_policies row.
+//
+// The delivery path needs it because endpoints.rate_limit is a COLUMN on the
+// endpoint, not a policy row: the control plane lets a customer set a per
+// endpoint ceiling directly, and internal/worker already has it loaded by the
+// time it needs to charge it.
+//
+// `key` is expected to be namespaced by the caller (the worker uses
+// "endpoint:<id>"), and the result is keyed under `rl:delivery:` so these
+// buckets can never collide with an endpoint-scope policy row charged through
+// ResolveDelivery. Two ceilings that an operator configured separately must be
+// charged separately, or the tighter one silently absorbs the other.
+func BucketFor(scope Scope, key string, limit int, window time.Duration) Bucket {
+	if window <= 0 {
+		window = time.Second
+	}
+	// The key carries whole seconds, so a bucket whose window is edited from 1s
+	// to 60s gets a new key rather than inheriting the old one's tokens.
+	windowSeconds := int(window.Round(time.Second) / time.Second)
+	if windowSeconds < 1 {
+		windowSeconds = 1
+	}
+	if limit < 0 {
+		limit = 0
+	}
+	return Bucket{
+		Scope:      scope,
+		Key:        fmt.Sprintf("rl:delivery:%s:%ds", key, windowSeconds),
+		Capacity:   float64(limit),
+		RatePerSec: float64(limit) / window.Seconds(),
+		Limit:      limit,
+		Window:     window,
+	}
+}
+
 // ingestResource keys a wildcard ingest row by the PROJECT, not by the key.
 //
 // `scope='ingest' AND resource_id IS NULL` means "every credential in this

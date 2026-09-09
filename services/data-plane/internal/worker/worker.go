@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/shaq/webhook-platform/services/data-plane/internal/egress"
+	"github.com/shaq/webhook-platform/services/data-plane/internal/payloadstore"
 	"github.com/shaq/webhook-platform/services/data-plane/internal/queue"
 )
 
@@ -63,6 +64,13 @@ type Options struct {
 	PollInterval time.Duration
 	Lease        time.Duration
 	DBTimeout    time.Duration
+	// PayloadTimeout bounds ONE object-storage fetch, including the store's own
+	// internal retries. It is SEPARATE from DBTimeout on purpose: the two are
+	// configured by different knobs (PAYLOAD_DOWNLOAD_TIMEOUT_MS and
+	// INGEST_DB_TIMEOUT_MS) and bound different resources, and running the
+	// object fetch on the database budget silently truncated any download
+	// timeout an operator set above it.
+	PayloadTimeout time.Duration
 
 	MaxStoredResponseBytes int
 
@@ -105,6 +113,7 @@ type Worker struct {
 	pollInterval    time.Duration
 	lease           time.Duration
 	dbTimeout       time.Duration
+	payloadTimeout  time.Duration
 	endpointCeiling int
 	maxStoredBody   int
 
@@ -166,6 +175,10 @@ func New(opts Options) (*Worker, error) {
 	if dbTimeout <= 0 {
 		dbTimeout = 10 * time.Second
 	}
+	payloadTimeout := opts.PayloadTimeout
+	if payloadTimeout <= 0 {
+		payloadTimeout = payloadstore.DefaultDownloadTimeout
+	}
 	maxBody := opts.MaxStoredResponseBytes
 	if maxBody <= 0 {
 		maxBody = DefaultMaxStoredResponseBytes
@@ -205,6 +218,7 @@ func New(opts Options) (*Worker, error) {
 		pollInterval:    pollInterval,
 		lease:           lease,
 		dbTimeout:       dbTimeout,
+		payloadTimeout:  payloadTimeout,
 		endpointCeiling: limits.Endpoint,
 		maxStoredBody:   maxBody,
 		log:             log,
@@ -228,8 +242,15 @@ func (w *Worker) Run(ctx context.Context) error {
 	// flight. The keeper runs on it too: it must keep renewing during the
 	// drain, or the leases of the deliveries we are finishing lapse underneath
 	// us and another pod re-delivers them.
-	attemptRoot, cancelAttempts := context.WithCancel(context.WithoutCancel(ctx))
-	defer cancelAttempts()
+	//
+	// The cancellation carries a CAUSE (ErrWorkerShutdown). Without one an
+	// attempt cut short by the drain window closing fails with a bare
+	// context.Canceled, which is indistinguishable from any other transport
+	// fault: it is classified as a retryable network error, written to
+	// delivery_attempts with the message "context canceled", and charged to the
+	// customer's endpoint as a failed attempt. Our restart is not their outage.
+	attemptRoot, cancelAttempts := context.WithCancelCause(context.WithoutCancel(ctx))
+	defer cancelAttempts(ErrWorkerShutdown)
 
 	var keeperWG sync.WaitGroup
 	keeperWG.Add(1)
@@ -298,10 +319,10 @@ func (w *Worker) poll(claimCtx, attemptRoot context.Context, wg *sync.WaitGroup)
 }
 
 // drain waits for in-flight attempts, then cancels whatever is left.
-func (w *Worker) drain(wg *sync.WaitGroup, cancelAttempts context.CancelFunc) {
+func (w *Worker) drain(wg *sync.WaitGroup, cancelAttempts context.CancelCauseFunc) {
 	inFlight := int(w.inFlight.Load())
 	if inFlight == 0 {
-		cancelAttempts()
+		cancelAttempts(ErrWorkerShutdown)
 		return
 	}
 	w.log.Info("draining in-flight deliveries",
@@ -322,9 +343,9 @@ func (w *Worker) drain(wg *sync.WaitGroup, cancelAttempts context.CancelFunc) {
 		w.log.Warn("drain window expired; cancelling in-flight attempts",
 			"worker_id", w.workerID,
 			"in_flight", w.inFlight.Load(),
-			"reason", "their results are still recorded on a detached context; the endpoint may see a duplicate")
+			"reason", "they are put back for another worker without being charged an attempt; the endpoint may see a duplicate")
 	}
-	cancelAttempts()
+	cancelAttempts(ErrWorkerShutdown)
 	<-done
 }
 

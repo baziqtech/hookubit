@@ -58,7 +58,12 @@ func (w *Worker) resolvePayload(ctx context.Context, job *Job) ([]byte, error) {
 		return nil, fmt.Errorf("%w: no object storage client is configured", ErrPayloadStoreUnavailable)
 	}
 
-	fetchCtx, cancel := w.dbContext(ctx)
+	// The object fetch gets its OWN budget, not the database one. They are set
+	// by different knobs and bound different resources, and running this on
+	// w.dbTimeout meant an operator who raised PAYLOAD_DOWNLOAD_TIMEOUT_MS above
+	// INGEST_DB_TIMEOUT_MS got the smaller of the two with nothing said about
+	// it - the delivery failed on a deadline they had explicitly moved.
+	fetchCtx, cancel := context.WithTimeout(ctx, w.payloadTimeout)
 	defer cancel()
 
 	body, err := w.payloads.Get(fetchCtx, job.PayloadLocation)

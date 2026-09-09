@@ -488,11 +488,13 @@ func (q *PostgresQueue) Release(ctx context.Context, workerID, deliveryID string
 // the ready-set predicate rather than leaving them as `processing` outliers
 // that every index and every operator query has to special-case.
 //
-// One coupling to keep in view: ADR-0007's `deliveries_ready_idx` is partial on
-// a status list that excludes `processing`. Until that predicate is widened to
-// include it (recorded in HANDOFF.md), expired leases are outside the index and
-// the indexed claim path will not find them cheaply. That makes this sweep the
-// efficient route back into the ready set, not a UI nicety.
+// The coupling this comment used to describe is gone: `deliveries_ready_idx`
+// and `deliveries_ready_fifo_idx` both now include `processing` in their
+// partial predicate (migration 20260907000000), so an expired lease IS inside
+// the index and the indexed claim path finds it cheaply. This sweep is
+// therefore a convenience - it normalises abandoned rows back to `pending` so
+// they stop being `processing` outliers that every operator query special-cases
+// - and not the only efficient route back into the ready set.
 const reclaimSQL = `
 UPDATE deliveries
 SET status       = 'pending',

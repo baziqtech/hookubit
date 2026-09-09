@@ -254,3 +254,119 @@ func TestConcurrentRequestsCannotExceedThePolicy(t *testing.T) {
 		t.Fatalf("%d of %d concurrent requests admitted, want exactly %d", admitted, callers, capacity)
 	}
 }
+
+// --- the delivery path's bucket -------------------------------------------
+
+// BucketFor is how endpoints.rate_limit - a COLUMN on the endpoint, not a
+// rate_limit_policies row - becomes a chargeable bucket.
+func TestBucketFor(t *testing.T) {
+	b := BucketFor(ScopeEndpoint, "endpoint:ep_01", 120, time.Minute)
+
+	if b.Scope != ScopeEndpoint {
+		t.Fatalf("scope = %s, want %s", b.Scope, ScopeEndpoint)
+	}
+	if b.Capacity != 120 {
+		t.Fatalf("capacity = %v, want 120", b.Capacity)
+	}
+	if b.RatePerSec != 2 {
+		t.Fatalf("rate = %v/s, want 2 (120 per minute)", b.RatePerSec)
+	}
+	// Keyed under rl:delivery: so it cannot collide with an endpoint-scope
+	// policy row charged through ResolveDelivery. Two ceilings an operator
+	// configured separately must be charged separately, or the tighter one
+	// silently absorbs the other.
+	if b.Key != "rl:delivery:endpoint:ep_01:60s" {
+		t.Fatalf("key = %q", b.Key)
+	}
+	policyRow := bucketOf(Row{Scope: ScopeEndpoint, Limit: 120, WindowSeconds: 60}, "ep_01")
+	if b.Key == policyRow.Key {
+		t.Fatalf("the endpoint COLUMN and an endpoint-scope policy ROW share the key %q; charging one "+
+			"would spend the other's tokens", b.Key)
+	}
+
+	// The window is part of the key, so editing it starts a new bucket rather
+	// than inheriting the old one's tokens at a different rate.
+	if BucketFor(ScopeEndpoint, "endpoint:ep_01", 120, time.Second).Key == b.Key {
+		t.Fatal("two windows produced the same bucket key")
+	}
+	// A window smaller than a second must not divide by a zero seconds count.
+	if got := BucketFor(ScopeEndpoint, "endpoint:ep_01", 10, 10*time.Millisecond); got.RatePerSec <= 0 {
+		t.Fatalf("sub-second window produced rate %v", got.RatePerSec)
+	}
+	if got := BucketFor(ScopeEndpoint, "endpoint:ep_01", 10, 0); got.Window != time.Second {
+		t.Fatalf("zero window = %s, want a second", got.Window)
+	}
+}
+
+// AllowBucket is the delivery path's entry point. It must charge ONE shared
+// bucket through Redis - that is what stops N worker replicas each granting a
+// customer's configured limit - and it must degrade to the in-process bucket
+// rather than refusing when Redis is gone.
+func TestAllowBucketIsFleetWideAndFailsOpen(t *testing.T) {
+	now := time.Now()
+	clock := func() time.Time { return now }
+	redis := newFakeRedis(clock)
+
+	// Two limiters, as two worker replicas would be. They share only Redis.
+	replicaA := New(Options{Redis: redis, Local: NewLocal(clock, 0), Now: clock, Logger: quietLogger()})
+	replicaB := New(Options{Redis: redis, Local: NewLocal(clock, 0), Now: clock, Logger: quietLogger()})
+
+	bucket := BucketFor(ScopeEndpoint, "endpoint:ep_01", 2, time.Minute)
+	ctx := context.Background()
+
+	if ok, _ := replicaA.AllowBucket(ctx, bucket); !ok {
+		t.Fatal("the first delivery was refused by a bucket of two")
+	}
+	if ok, _ := replicaB.AllowBucket(ctx, bucket); !ok {
+		t.Fatal("the second delivery was refused by a bucket of two")
+	}
+	// The third must be refused, and the fact that it is refused on the OTHER
+	// replica is the whole point: an endpoint configured for 2 gets 2, not 2
+	// per pod.
+	ok, wait := replicaB.AllowBucket(ctx, bucket)
+	if ok {
+		t.Fatal("a per-endpoint limit of 2 admitted a third delivery; the bucket is not shared between " +
+			"replicas, so a customer's configured limit is multiplied by the pod count")
+	}
+	if wait <= 0 {
+		t.Fatal("a refusal with no wait invites an immediate retry")
+	}
+
+	// Redis dies. Delivery must NOT stop: the ceiling degrades to per replica,
+	// which is a smaller error than converting a cache outage into a delivery
+	// outage (ARCHITECTURE.md 14).
+	redis.fail(errors.New("dial tcp: connection refused"))
+	if ok, _ := replicaA.AllowBucket(ctx, BucketFor(ScopeEndpoint, "endpoint:ep_02", 5, time.Minute)); !ok {
+		t.Fatal("a delivery was refused because Redis was unreachable; the limiter failed CLOSED")
+	}
+}
+
+// The degrade breaker applies to the delivery path too: a black-holed Redis
+// must not add its timeout to every single delivery.
+func TestAllowBucketStopsCallingADeadRedis(t *testing.T) {
+	now := time.Now()
+	clock := func() time.Time { return now }
+	redis := newFakeRedis(clock)
+	redis.fail(errors.New("i/o timeout"))
+
+	limiter := New(Options{
+		Redis: redis, Local: NewLocal(clock, 0), Now: clock, Logger: quietLogger(),
+		DegradeAfter: 3, DegradeCooldown: time.Minute,
+	})
+	bucket := BucketFor(ScopeEndpoint, "endpoint:ep_01", 1000, time.Second)
+	ctx := context.Background()
+
+	for i := 0; i < 20; i++ {
+		if ok, _ := limiter.AllowBucket(ctx, bucket); !ok {
+			t.Fatalf("delivery %d was refused while Redis was down", i)
+		}
+	}
+	if calls := redis.callCount(); calls > 6 {
+		t.Fatalf("the limiter made %d Redis calls across 20 deliveries with DegradeAfter=3; it is not "+
+			"backing off, so a black-holed Redis adds its timeout to every delivery", calls)
+	}
+}
+
+func quietLogger() *slog.Logger {
+	return slog.New(slog.NewTextHandler(&bytes.Buffer{}, &slog.HandlerOptions{Level: slog.LevelError + 1}))
+}

@@ -62,3 +62,19 @@ type permanentPayloadError struct{ msg string }
 func (e *permanentPayloadError) Error() string { return e.msg }
 
 func (*permanentPayloadError) PermanentDeliveryError() bool { return true }
+
+// ErrWorkerShutdown is the cancellation CAUSE attached to in-flight attempts
+// when the drain window closes on shutdown (ARCHITECTURE.md 47).
+//
+// It exists so that "we cancelled this" is distinguishable from "the endpoint
+// did not answer". Without a cause the abort surfaces as a bare
+// context.Canceled, which retry.IsRetryableNetworkError - correctly, given what
+// it can see - treats as an ordinary transient transport fault. The result was
+// an attempt row reading `context canceled` against the customer's endpoint,
+// attempt_count advanced, and the endpoint's circuit breaker moved one failure
+// closer to open, all for a deploy of ours.
+//
+// A delivery cut short this way is DEFERRED instead: no attempt row, no retry
+// budget spent, the lease released immediately so another worker can take it
+// rather than waiting for the lease to lapse.
+var ErrWorkerShutdown = errors.New("worker: shutting down")

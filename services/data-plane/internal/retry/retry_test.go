@@ -184,3 +184,87 @@ func TestPermanentTransportFailuresAreNotRetried(t *testing.T) {
 		t.Error("a nil error is not a retryable failure")
 	}
 }
+
+// DurationExhausted is the half of the budget a DEFERRED delivery spends.
+//
+// Regression it guards: the wall-clock cap used to be reachable only through
+// Exhausted, which is only consulted when an attempt COMPLETES. A delivery that
+// is refused before every attempt - a permanently open circuit breaker, a
+// saturated rate limit - never completed one, so it was re-claimed and
+// re-deferred forever with nothing ever asking whether its 24 hours were up.
+func TestDurationExhausted(t *testing.T) {
+	now := time.Date(2026, 9, 9, 12, 0, 0, 0, time.UTC)
+	p := Policy{MaxAttempts: 8, MaxRetryDuration: 24 * time.Hour}
+
+	cases := []struct {
+		name  string
+		first time.Time
+		p     Policy
+		want  bool
+	}{
+		{name: "fresh", first: now, p: p, want: false},
+		{name: "most of the budget spent", first: now.Add(-23 * time.Hour), p: p, want: false},
+		{name: "exactly at the boundary", first: now.Add(-24 * time.Hour), p: p, want: true},
+		{name: "well past", first: now.Add(-72 * time.Hour), p: p, want: true},
+		{
+			// Nothing to measure against. A delivery with no origin must not be
+			// terminated on a guess.
+			name: "no first attempt time", first: time.Time{}, p: p, want: false,
+		},
+		{
+			name: "no duration cap configured", first: now.Add(-1000 * time.Hour),
+			p: Policy{MaxAttempts: 8}, want: false,
+		},
+		{
+			// The attempt count is deliberately NOT consulted: a defer makes no
+			// request, so it may not spend an attempt.
+			name: "attempts are irrelevant here", first: now,
+			p: Policy{MaxAttempts: 1, MaxRetryDuration: 24 * time.Hour}, want: false,
+		},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			if got := tc.p.DurationExhausted(tc.first, now); got != tc.want {
+				t.Fatalf("DurationExhausted = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// Exhausted must keep agreeing with its two halves, or an operator reading
+// `attempts_exhausted` when the clock ran out chases the wrong knob.
+func TestExhaustedStillCoversBothBudgets(t *testing.T) {
+	now := time.Date(2026, 9, 9, 12, 0, 0, 0, time.UTC)
+	p := Policy{MaxAttempts: 3, MaxRetryDuration: time.Hour}
+
+	if !p.Exhausted(3, now, now) {
+		t.Fatal("the last allowed attempt did not exhaust the attempt budget")
+	}
+	if p.Exhausted(1, now, now) {
+		t.Fatal("a first attempt inside both budgets was reported exhausted")
+	}
+	if !p.Exhausted(1, now.Add(-2*time.Hour), now) {
+		t.Fatal("the wall-clock budget was not consulted by Exhausted")
+	}
+}
+
+func TestRemaining(t *testing.T) {
+	now := time.Date(2026, 9, 9, 12, 0, 0, 0, time.UTC)
+	p := Policy{MaxRetryDuration: time.Hour}
+
+	if got := p.Remaining(now.Add(-20*time.Minute), now); got != 40*time.Minute {
+		t.Fatalf("Remaining = %s, want 40m", got)
+	}
+	if got := p.Remaining(now.Add(-2*time.Hour), now); got != 0 {
+		t.Fatalf("Remaining on a spent budget = %s, want 0", got)
+	}
+	// "No cap" must not read as "no time left": callers use this as a ceiling,
+	// and a zero would clamp every honoured Retry-After to nothing.
+	if got := (Policy{}).Remaining(now, now); got < 100*365*24*time.Hour {
+		t.Fatalf("Remaining with no duration cap = %s, want effectively unbounded", got)
+	}
+	if got := p.Remaining(time.Time{}, now); got < 100*365*24*time.Hour {
+		t.Fatalf("Remaining with no origin = %s, want effectively unbounded", got)
+	}
+}

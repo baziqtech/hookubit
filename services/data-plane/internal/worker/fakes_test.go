@@ -173,6 +173,16 @@ func (f *fakeHealth) RecordOutcome(
 	return prev, next, nil
 }
 
+// probeClaims reports how many times a probe slot was CLAIMED - the conditional
+// UPDATE that admits exactly one delivery to a recovering endpoint. It is the
+// only way to prove a probe was not spent by a delivery that never reached the
+// network.
+func (f *fakeHealth) probeClaims() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.calls
+}
+
 func (f *fakeHealth) set(id string, h Health) {
 	f.mu.Lock()
 	defer f.mu.Unlock()

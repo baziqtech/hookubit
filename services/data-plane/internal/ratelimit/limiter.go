@@ -115,11 +115,36 @@ func (l *Limiter) AllowIngest(ctx context.Context, t Target) Decision {
 	return l.charge(ctx, ResolveIngest(rows, t, l.def))
 }
 
-// AllowDelivery is the same for the outbound chain. Nothing wires it yet; see
-// ResolveDelivery.
+// AllowDelivery is the same for the outbound chain, for the buckets that come
+// from rate_limit_policies rows; see ResolveDelivery.
+//
+// The delivery path in internal/worker does NOT go through here, and the reason
+// is a shape mismatch rather than an oversight: the ceiling it enforces is
+// endpoints.rate_limit, a column already loaded onto the delivery row, and its
+// seam (worker.RateLimiter) is handed a key, a limit and a window rather than a
+// tenant identity. AllowBucket is that entry point. Wiring the policy-row chain
+// onto the delivery path as well means widening that seam to carry the
+// organisation and project ids, which is a change to the worker's interface and
+// not to this one.
 func (l *Limiter) AllowDelivery(ctx context.Context, t Target) Decision {
 	rows := l.rows(ctx, t)
 	return l.charge(ctx, ResolveDelivery(rows, t))
+}
+
+// AllowBucket charges one already-resolved bucket and reports whether the
+// caller may proceed, and if not, how long until it could.
+//
+// This is what makes a per-endpoint delivery limit fleet-wide: it goes through
+// the same take() as every other bucket, which means the same Redis script, the
+// same degrade-after-N-faults breaker, and the same fall back to the in-process
+// bucket when Redis is unreachable. Redis is never authoritative here - losing
+// it costs the ceiling its fleet-wide scope, never a delivery (ARCHITECTURE.md
+// 14).
+//
+// It does NOT emit rate_limit_hits: the delivery path labels that metric with
+// its own scope, and counting the refusal in both places would double it.
+func (l *Limiter) AllowBucket(ctx context.Context, b Bucket) (bool, time.Duration) {
+	return l.take(ctx, b)
 }
 
 func (l *Limiter) rows(ctx context.Context, t Target) []Row {
