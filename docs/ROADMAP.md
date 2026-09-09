@@ -43,7 +43,11 @@ each written down in docs/FAILURE_RECOVERY.md · Kubernetes manifests and Helm
 chart · migration job.
 
 Outstanding: OpenTelemetry traces end to end · graceful shutdown verified under
-load · backup and restore documentation.
+load.
+
+Backup and restore is documented in docs/BACKUP_RESTORE.md, and ARCHITECTURE.md
+63's "destroyed and recreated against the same external PostgreSQL" line is
+verified there against a real SIGKILL mid-retry rather than reasoned about.
 
 Two load scenarios FAIL on purpose and are not yet green — `slow-endpoints` and
 `many-tenants`. Their thresholds encode the isolation claim ARCHITECTURE.md
