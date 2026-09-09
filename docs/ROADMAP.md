@@ -42,7 +42,11 @@ tests for all 20 scenarios in ARCHITECTURE.md 57, with the recovery strategy for
 each written down in docs/FAILURE_RECOVERY.md · Kubernetes manifests and Helm
 chart · migration job.
 
-Outstanding: OpenTelemetry traces end to end.
+Phase 6 is complete. OpenTelemetry traces cross all three asynchronous
+boundaries by carrying W3C context through PostgreSQL, with each stage a new
+root linked to its cause rather than a child - a delivery six hours later is not
+part of the ingest request, and parent-child would report six-hour traces for a
+service whose p99 ingest is single-digit milliseconds.
 
 Graceful shutdown is verified under load in docs/LOAD_TESTING.md 7b - 64
 deliveries in flight against 5s endpoints at the moment of SIGTERM, all 120
