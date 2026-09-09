@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/shaq/webhook-platform/services/data-plane/internal/egress"
+	"github.com/shaq/webhook-platform/services/data-plane/internal/metrics"
 	"github.com/shaq/webhook-platform/services/data-plane/internal/payloadstore"
 	"github.com/shaq/webhook-platform/services/data-plane/internal/queue"
 )
@@ -25,6 +26,19 @@ const DrainTimeout = 15 * time.Second
 // ledger. The egress client already caps what is read from the wire; this caps
 // what is kept forever.
 const DefaultMaxStoredResponseBytes = 8 << 10
+
+// occupancySampleInterval is how often the concurrency gauges are refreshed.
+//
+// A constant rather than a knob, for the same reason queueDepthInterval is one:
+// the cost is a handful of mutex acquisitions and is the same for every
+// deployment, and five seconds is well inside any useful scrape interval while
+// still being short enough to catch the burst the gauges exist to show.
+//
+// It is sampled on a ticker rather than written on the acquire path on purpose.
+// Setting a labelled gauge is a map lookup plus an atomic; doing that four
+// times per acquire and four times per release puts metric bookkeeping on the
+// hottest path in the process to gain resolution nothing scrapes.
+const occupancySampleInterval = 5 * time.Second
 
 // HTTPDoer is the egress client, as an interface so the delivery path can be
 // tested against an httptest server without the real transport, and so a future
@@ -116,6 +130,10 @@ type Worker struct {
 	payloadTimeout  time.Duration
 	endpointCeiling int
 	maxStoredBody   int
+
+	// gateWatch decides when a delivery that keeps losing at the tenant
+	// concurrency gate has earned a budget read. See tenantGateWatch.
+	gateWatch *tenantGateWatch
 
 	log *slog.Logger
 	now func() time.Time
@@ -221,6 +239,7 @@ func New(opts Options) (*Worker, error) {
 		payloadTimeout:  payloadTimeout,
 		endpointCeiling: limits.Endpoint,
 		maxStoredBody:   maxBody,
+		gateWatch:       newTenantGateWatch(tenantGateBudgetCheckAfter, tenantGateWatchCapacity),
 		log:             log,
 		now:             now,
 		rng:             rng,
@@ -252,6 +271,14 @@ func (w *Worker) Run(ctx context.Context) error {
 	attemptRoot, cancelAttempts := context.WithCancelCause(context.WithoutCancel(ctx))
 	defer cancelAttempts(ErrWorkerShutdown)
 
+	// The pool ceiling is published once and never changes: it is the REAL
+	// bound on in-flight attempts in this process, and at the shipped defaults
+	// it sits eight times BELOW MAX_CONCURRENCY_GLOBAL - so the gate that reads
+	// as the process ceiling can never bind and this is the number to alarm on.
+	// See docs/FAILURE_RECOVERY.md, G13.
+	metrics.WorkerPoolSlotsCapacity.Set(float64(w.concurrency))
+	w.publishOccupancy()
+
 	var keeperWG sync.WaitGroup
 	keeperWG.Add(1)
 	go func() {
@@ -273,16 +300,43 @@ func (w *Worker) Run(ctx context.Context) error {
 	var wg sync.WaitGroup
 	ticker := time.NewTicker(w.pollInterval)
 	defer ticker.Stop()
+	occupancy := time.NewTicker(occupancySampleInterval)
+	defer occupancy.Stop()
 
 	for {
 		select {
 		case <-ctx.Done():
 			w.drain(&wg, cancelAttempts)
 			keeperWG.Wait()
+			// One last reading, after the drain, so the gauges settle at the
+			// truth rather than freezing at whatever the last sample said and
+			// leaving a dashboard showing a dead pod holding slots.
+			w.publishOccupancy()
 			return ctx.Err()
+		case <-occupancy.C:
+			w.publishOccupancy()
 		case <-ticker.C:
 			w.poll(ctx, attemptRoot, &wg)
 		}
+	}
+}
+
+// publishOccupancy refreshes the pool and gate gauges (G13).
+//
+// This is the answer to "who is eating the pool", which nothing could answer
+// before: rate_limit_hits_total counts refusals, and a refusal tells you
+// something was turned away, not what was holding the capacity. The label set
+// is the four gate scopes and nothing else - no endpoint id, no project id, no
+// organisation id. An unbounded label set on a busy platform is its own
+// outage, and the per-key question is answered by the busiest-key gauge with
+// the key left out.
+func (w *Worker) publishOccupancy() {
+	metrics.WorkerPoolSlotsInUse.Set(float64(w.inFlight.Load()))
+	for scope, o := range w.gate.Occupancy() {
+		metrics.GateSlotsInUse.WithLabelValues(scope).Set(float64(o.InUse))
+		metrics.GateSlotsCapacity.WithLabelValues(scope).Set(float64(o.Capacity))
+		metrics.GateKeysActive.WithLabelValues(scope).Set(float64(o.Keys))
+		metrics.GateBusiestKeySlots.WithLabelValues(scope).Set(float64(o.BusiestKey))
 	}
 }
 

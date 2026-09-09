@@ -39,6 +39,12 @@ type fakeStore struct {
 	completions []completion
 	defers      []Transition
 	loads       int
+
+	// budgetLoads counts LoadBudget calls, and budgetErr makes it fail. Both
+	// exist for the tenant-gate budget path: the point of that path is that it
+	// reads RARELY, so the number of reads is part of what is asserted.
+	budgetLoads int
+	budgetErr   error
 }
 
 func (f *fakeStore) Load(_ context.Context, deliveryID string) (*Job, error) {
@@ -58,6 +64,33 @@ func (f *fakeStore) Load(_ context.Context, deliveryID string) (*Job, error) {
 	}
 	clone := *job
 	return &clone, nil
+}
+
+// LoadBudget serves the budget from the same Job Load would return, and is
+// counted separately so a test can prove the tenant gate did NOT read on every
+// refusal.
+func (f *fakeStore) LoadBudget(_ context.Context, deliveryID string) (Budget, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.budgetLoads++
+	if f.budgetErr != nil {
+		return Budget{}, f.budgetErr
+	}
+	job := f.job
+	if f.jobs != nil {
+		found, ok := f.jobs[deliveryID]
+		if !ok {
+			return Budget{}, ErrDeliveryGone
+		}
+		job = found
+	}
+	return Budget{Policy: job.Policy, FirstAttemptAt: job.FirstAttemptAt}, nil
+}
+
+func (f *fakeStore) budgetReads() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.budgetLoads
 }
 
 func (f *fakeStore) Complete(_ context.Context, _, _ string, a *AttemptRecord, next Transition) error {
@@ -98,6 +131,13 @@ func (f *fakeStore) lastDefer(t *testing.T) Transition {
 		t.Fatal("expected the delivery to be deferred, but nothing was recorded")
 	}
 	return f.defers[len(f.defers)-1]
+}
+
+// loadCount reports full Load calls, as opposed to the cheap budget-only read.
+func (f *fakeStore) loadCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.loads
 }
 
 func (f *fakeStore) counts() (completions, defers int) {

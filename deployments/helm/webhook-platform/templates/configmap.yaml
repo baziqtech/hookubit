@@ -26,6 +26,8 @@ data:
   WORKER_CONCURRENCY: {{ .Values.dataPlane.worker.concurrency | int64 | quote }}
   WORKER_POLL_INTERVAL_MS: {{ .Values.dataPlane.worker.pollIntervalMs | int64 | quote }}
   WORKER_CLAIM_BATCH_SIZE: {{ .Values.dataPlane.worker.claimBatchSize | int64 | quote }}
+  WORKER_DB_TIMEOUT_MS: {{ .Values.dataPlane.worker.dbTimeoutMs | int64 | quote }}
+  DELIVERY_RATE_LIMIT_ALLOW_PER_REPLICA: {{ .Values.dataPlane.worker.allowPerReplicaRateLimits | quote }}
   DELIVERY_LEASE_SECONDS: {{ .Values.dataPlane.worker.leaseSeconds | int64 | quote }}
   OUTBOX_POLL_INTERVAL_MS: {{ .Values.dataPlane.outbox.pollIntervalMs | int64 | quote }}
   ROUTER_MAX_OUTBOX_RETRY_DURATION_MS: {{ .Values.dataPlane.outbox.maxRetryDurationMs | int64 | quote }}

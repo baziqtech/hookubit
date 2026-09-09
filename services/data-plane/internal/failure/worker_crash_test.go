@@ -46,6 +46,10 @@ func (s *crashOnCompleteStore) Defer(
 	return s.inner.Defer(ctx, workerID, deliveryID, next)
 }
 
+func (s *crashOnCompleteStore) LoadBudget(ctx context.Context, deliveryID string) (worker.Budget, error) {
+	return s.inner.LoadBudget(ctx, deliveryID)
+}
+
 // claimOne polls until the given delivery becomes claimable by workerID, which
 // is how "the lease expired and somebody else picked it up" is observed without
 // any privileged database surgery.

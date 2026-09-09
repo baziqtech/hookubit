@@ -48,6 +48,21 @@ type Config struct {
 	DatabaseStatementTimeout time.Duration
 
 	RedisURL string
+	// DeliveryRateLimitAllowPerReplica acknowledges, explicitly, that endpoint
+	// delivery rate limits will be enforced PER WORKER REPLICA rather than
+	// fleet-wide, which is what happens when REDIS_URL is unset.
+	//
+	// It exists so that the downgrade is a decision somebody wrote down rather
+	// than an omission nobody noticed. In production the worker refuses to
+	// start without either REDIS_URL or this flag - the same treatment
+	// EGRESS_ALLOW_PRIVATE_NETWORKS gets, and for the same reason: a
+	// customer-visible guarantee quietly weaker than the configured one.
+	//
+	// It changes NO runtime behaviour. Delivery never depends on Redis being
+	// up: the limiter fails open, the worker keeps its in-process bucket as the
+	// fallback, and internal/failure/outage asserts the delivery path imports
+	// no Redis client at all. This is a configuration gate, not a dependency.
+	DeliveryRateLimitAllowPerReplica bool
 	// RedisTimeout bounds ONE rate-limiter round trip. It is deliberately tiny:
 	// the limiter is an optimisation on a path whose latency budget is already
 	// spoken for, and a limiter that blocks a request for seconds waiting on
@@ -127,6 +142,15 @@ type Config struct {
 	MetricsPort int
 	// IngestDBTimeout bounds the database work of one accepted request.
 	IngestDBTimeout time.Duration
+	// WorkerDBTimeout bounds ONE database call on the delivery path: the load,
+	// the breaker read, the attempt write, the deferral.
+	//
+	// It is separate from IngestDBTimeout because the two bound different work
+	// with different tolerances - an ingest call is on a request a client is
+	// waiting on, a delivery call is on a background loop that would rather
+	// wait than abandon a lease - and because sharing one knob meant tuning the
+	// ingest deadline silently retuned every database call the worker makes.
+	WorkerDBTimeout time.Duration
 
 	// ShutdownReadinessDelay is how long the process keeps accepting traffic
 	// after readiness has already flipped to draining on SIGTERM. It exists so
@@ -212,8 +236,9 @@ func Load() (*Config, error) {
 		DatabaseMaxConnections:   int32(envInt("DATABASE_MAX_CONNECTIONS", 20)),
 		DatabaseStatementTimeout: envDuration("DATABASE_STATEMENT_TIMEOUT_MS", 30*time.Second),
 
-		RedisURL:     os.Getenv("REDIS_URL"),
-		RedisTimeout: envDuration("REDIS_TIMEOUT_MS", 50*time.Millisecond),
+		RedisURL:                         os.Getenv("REDIS_URL"),
+		DeliveryRateLimitAllowPerReplica: envBool("DELIVERY_RATE_LIMIT_ALLOW_PER_REPLICA", false),
+		RedisTimeout:                     envDuration("REDIS_TIMEOUT_MS", 50*time.Millisecond),
 
 		RateLimitPolicyCacheTTL: envDuration("RATE_LIMIT_POLICY_CACHE_TTL_MS", ratelimit.DefaultCacheTTL),
 
@@ -251,6 +276,10 @@ func Load() (*Config, error) {
 		IngestPort:      envInt("INGEST_PORT", 8080),
 		MetricsPort:     envInt("DATA_PLANE_METRICS_PORT", 9090),
 		IngestDBTimeout: envDuration("INGEST_DB_TIMEOUT_MS", ingest.DefaultDBTimeout),
+		// Defaults to the same 5s the worker inherited from
+		// INGEST_DB_TIMEOUT_MS, so adding the knob changes no shipped
+		// behaviour - it only makes the two separately tunable.
+		WorkerDBTimeout: envDuration("WORKER_DB_TIMEOUT_MS", ingest.DefaultDBTimeout),
 
 		ShutdownReadinessDelay: envDuration("SHUTDOWN_READINESS_DELAY_MS", 5*time.Second),
 
@@ -365,6 +394,13 @@ func Load() (*Config, error) {
 	if c.DatabaseStatementTimeout > 0 && c.DatabaseStatementTimeout < c.IngestDBTimeout {
 		problems = append(problems,
 			"DATABASE_STATEMENT_TIMEOUT_MS must not be below INGEST_DB_TIMEOUT_MS; the server-side backstop would fire first and mask the request deadline")
+	}
+	if c.WorkerDBTimeout <= 0 {
+		problems = append(problems, "WORKER_DB_TIMEOUT_MS must be positive; an unbounded delivery query holds a pool connection and a lease")
+	}
+	if c.DatabaseStatementTimeout > 0 && c.DatabaseStatementTimeout < c.WorkerDBTimeout {
+		problems = append(problems,
+			"DATABASE_STATEMENT_TIMEOUT_MS must not be below WORKER_DB_TIMEOUT_MS; the server-side backstop would fire first and mask the delivery deadline")
 	}
 	if c.ShutdownReadinessDelay < 0 {
 		problems = append(problems, "SHUTDOWN_READINESS_DELAY_MS must not be negative")

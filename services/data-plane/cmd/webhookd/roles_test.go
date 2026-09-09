@@ -1,12 +1,15 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"io"
 	"log/slog"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
 	dto "github.com/prometheus/client_model/go"
 
 	"github.com/shaq/webhook-platform/services/data-plane/internal/config"
@@ -220,5 +223,183 @@ func TestEgressLimitsCarryTheConfiguredPerHostCeiling(t *testing.T) {
 	limits = egressLimits(&config.Config{EgressMaxConnsPerHost: 2})
 	if limits.MaxConnsPerHost != 2 || limits.IdleConnsPerHost != 2 {
 		t.Fatalf("limits = {max:%d idle:%d}, want both 2", limits.MaxConnsPerHost, limits.IdleConnsPerHost)
+	}
+}
+
+// G15. The worker ran every database call on INGEST_DB_TIMEOUT_MS, so tuning
+// the deadline of a request a client is waiting on silently retuned a
+// background loop that would rather wait than abandon a lease. The payload half
+// of the same defect was fixed earlier; this pins both halves at once, which is
+// the point of workerTimeouts existing as a function.
+func TestWorkerTimeoutsAreItsOwnAndNotTheIngestOne(t *testing.T) {
+	cfg := &config.Config{
+		IngestDBTimeout:        1500 * time.Millisecond,
+		WorkerDBTimeout:        9 * time.Second,
+		PayloadDownloadTimeout: 20 * time.Second,
+	}
+
+	db, payload := workerTimeouts(cfg)
+	if db != cfg.WorkerDBTimeout {
+		t.Fatalf("worker db timeout = %s, want WORKER_DB_TIMEOUT_MS (%s)", db, cfg.WorkerDBTimeout)
+	}
+	if db == cfg.IngestDBTimeout {
+		t.Fatal("the worker is still borrowing INGEST_DB_TIMEOUT_MS")
+	}
+	if payload != cfg.PayloadDownloadTimeout {
+		t.Fatalf("payload timeout = %s, want PAYLOAD_DOWNLOAD_TIMEOUT_MS (%s)", payload, cfg.PayloadDownloadTimeout)
+	}
+	// The object fetch must not be clamped by the database budget: that was the
+	// half of G10 that got fixed, and it is easy to re-break by passing one
+	// value to both.
+	if payload <= db {
+		t.Fatal("this fixture no longer proves the payload budget can exceed the database one")
+	}
+}
+
+// G17. Without REDIS_URL an endpoint's configured rate limit is enforced once
+// per worker replica, so the number a customer actually gets is their limit
+// times the replica count - and it changes whenever the Deployment is scaled.
+// It was logged once at WARN and refused by nothing, including in production.
+func TestBuildDeliveryLimiterRefusesPerReplicaLimitsInProduction(t *testing.T) {
+	cfg := &config.Config{AppEnv: "production"}
+
+	limiter, err := buildDeliveryLimiter(cfg, silentLogger())
+	if err == nil {
+		t.Fatal("a production worker started with customer rate limits silently multiplied by the replica count")
+	}
+	if limiter != nil {
+		t.Fatalf("a limiter was returned alongside the refusal: %#v", limiter)
+	}
+	if !strings.Contains(err.Error(), "DELIVERY_RATE_LIMIT_ALLOW_PER_REPLICA") {
+		t.Fatalf("the refusal does not name the escape hatch: %v", err)
+	}
+}
+
+// Refusing has to be escapable, or an operator with one worker replica and no
+// Redis cannot run at all. The escape is explicit and written down in
+// configuration, which is the entire difference from the silent downgrade.
+func TestBuildDeliveryLimiterAllowsAcknowledgedPerReplicaLimits(t *testing.T) {
+	cfg := &config.Config{AppEnv: "production", DeliveryRateLimitAllowPerReplica: true}
+
+	limiter, err := buildDeliveryLimiter(cfg, silentLogger())
+	if err != nil {
+		t.Fatalf("an acknowledged per-replica deployment was refused: %v", err)
+	}
+	// Still a genuinely nil interface, so worker.New installs its in-process
+	// bucket. The acknowledgement changes the CONFIGURATION gate and nothing
+	// about the runtime.
+	if limiter != nil {
+		t.Fatalf("limiter = %#v, want a nil interface", limiter)
+	}
+	if got := simpleGaugeValue(t, metrics.DeliveryRateLimitFleetWide); got != 0 {
+		t.Fatalf("delivery_rate_limit_fleet_wide = %v, want 0 while limits are per replica", got)
+	}
+}
+
+// And the gauge is the dashboard half of the same fact. An instrument that is
+// declared and never written reads as a confident zero; this one has to mean
+// something in BOTH directions.
+func TestDeliveryLimiterPublishesItsScope(t *testing.T) {
+	cfg := &config.Config{RedisURL: "redis://127.0.0.1:1/0", RedisTimeout: 50 * time.Millisecond}
+	if _, err := buildDeliveryLimiter(cfg, silentLogger()); err != nil {
+		t.Fatalf("buildDeliveryLimiter: %v", err)
+	}
+	if got := simpleGaugeValue(t, metrics.DeliveryRateLimitFleetWide); got != 1 {
+		t.Fatalf("delivery_rate_limit_fleet_wide = %v, want 1 with a shared store configured", got)
+	}
+
+	if _, err := buildDeliveryLimiter(&config.Config{}, silentLogger()); err != nil {
+		t.Fatalf("buildDeliveryLimiter: %v", err)
+	}
+	if got := simpleGaugeValue(t, metrics.DeliveryRateLimitFleetWide); got != 0 {
+		t.Fatalf("delivery_rate_limit_fleet_wide = %v, want 0 with no shared store", got)
+	}
+}
+
+// simpleGaugeValue reads an unlabelled gauge without a registry round trip.
+func simpleGaugeValue(t *testing.T, g prometheus.Gauge) float64 {
+	t.Helper()
+	var m dto.Metric
+	if err := g.Write(&m); err != nil {
+		t.Fatalf("read gauge: %v", err)
+	}
+	return m.GetGauge().GetValue()
+}
+
+// G13(a). The advisories are what converts an invisible failure into a known
+// one, so the worker role has to actually emit them - an advisory nothing logs
+// is the same discoverability defect it was written to close.
+func TestWorkerRoleWouldWarnAtTheShippedDefaults(t *testing.T) {
+	cfg, err := shippedDefaults(t)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	advisories := cfg.ConcurrencyAdvisories()
+	if len(advisories) == 0 {
+		t.Fatal("the shipped defaults produce no isolation advisory; nothing would be logged at worker startup")
+	}
+
+	var buf bytes.Buffer
+	log := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn}))
+	for _, a := range advisories {
+		log.Warn(a.Message, a.Fields...)
+	}
+	out := buf.String()
+	// The arithmetic has to be in the record, or an operator has to find
+	// docs/FAILURE_RECOVERY.md to act on it.
+	for _, want := range []string{"worker_concurrency=64", "max_concurrency_per_endpoint=16", "endpoints_to_fill_the_pool=4"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("the warning does not carry %q:\n%s", want, out)
+		}
+	}
+}
+
+// shippedDefaults loads a Config with nothing but the required variables set,
+// which is the configuration a deployment gets when it tunes none of this.
+func shippedDefaults(t *testing.T) (*config.Config, error) {
+	t.Helper()
+	t.Setenv("DATABASE_URL", "postgres://user:pass@db:5432/webhooks")
+	return config.Load()
+}
+
+// `all` mode must not survive the loss of one role.
+//
+// The state this guards against is the worst one available: the worker refuses
+// to start - in production without Redis, delivery rate limits would silently
+// become per-replica - while ingest keeps answering 202. Events are accepted
+// durably and nothing delivers them, and every probe stays green because
+// liveness does not know a role is missing.
+func TestRunAllStopsEveryRoleWhenOneFails(t *testing.T) {
+	// The pool FIRST: shippedDefaults calls t.Setenv on DATABASE_URL with a
+	// placeholder host, and testsupport.Pool reads that variable when it runs.
+	pool := testsupport.Pool(t)
+
+	cfg, err := shippedDefaults(t)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	// A worker that refuses: production, no Redis, downgrade not acknowledged.
+	cfg.AppEnv = "production"
+	cfg.RedisURL = ""
+	cfg.DeliveryRateLimitAllowPerReplica = false
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	done := make(chan error, 1)
+	go func() { done <- runAll(ctx, cfg, pool, silentLogger(), "wrk_all_test") }()
+
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("runAll returned nil after a role refused to start; the process would stay up " +
+				"accepting events with nothing delivering them")
+		}
+		if !strings.Contains(err.Error(), "worker") {
+			t.Fatalf("error does not name the failing role: %v", err)
+		}
+	case <-ctx.Done():
+		t.Fatal("runAll did not return after a role failed; the surviving roles were left running, " +
+			"which is the half-running state this test exists to prevent")
 	}
 }

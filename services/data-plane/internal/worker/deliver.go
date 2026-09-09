@@ -41,15 +41,35 @@ func (w *Worker) handle(ctx context.Context, lease queue.Lease) {
 	releaseTenant, scope, ok := w.gate.AcquireTenant(job.OrganizationID, job.ProjectID)
 	if !ok {
 		metrics.RateLimitHits.WithLabelValues(scope).Inc()
-		// unknownBudget: the row has not been read yet, so there is no policy to
-		// judge against. Deliberate - a tenant concurrency ceiling is a
-		// momentary condition that clears on its own, not a state a delivery can
-		// be stuck in indefinitely, and reading the row here would put a join
-		// and a decrypt in front of every refusal.
-		w.deferDelivery(ctx, job.DeliveryID, unknownBudget, ReasonConcurrencyLimited,
+		// The row has not been read yet, so ordinarily there is no policy to
+		// judge against, and that is deliberate: a tenant concurrency ceiling
+		// is a momentary condition that clears on its own, and putting a query
+		// in front of every refusal would put load on the one path that is
+		// already saturated.
+		//
+		// "Momentary" is a good argument for the common case and a weak one
+		// under sustained saturation - a project whose pool is held by slow
+		// endpoints can refuse the SAME delivery on every claim for hours, and
+		// with unknownBudget nothing ever consults its clock, so it is
+		// rescheduled forever and never reaches max_retry_duration. That is the
+		// exact hole the breaker path had, surviving on one path.
+		//
+		// So: cheap for the momentary case, correct for the sustained one. The
+		// first few refusals of a delivery cost nothing extra; once one has
+		// lost here repeatedly, ONE budget-only read decides whether it still
+		// has time left. See tenantGateWatch and Store.LoadBudget.
+		budget := unknownBudget
+		if w.gateWatch.persistent(job.DeliveryID) {
+			budget = w.tenantGateBudget(ctx, job.DeliveryID, log)
+		}
+		w.deferDelivery(ctx, job.DeliveryID, budget, ReasonConcurrencyLimited,
 			w.spread(deferBaseDelay), log, slog.String("scope", scope))
 		return
 	}
+	// It got in, so whatever streak it had at this gate is over. Forgetting is
+	// what keeps the tracker's memory proportional to deliveries that are
+	// actually stuck rather than to deliveries that have ever been refused.
+	w.gateWatch.forget(job.DeliveryID)
 	defer releaseTenant()
 
 	// From here on the attempt runs under the lease keeper's context. If the
@@ -492,31 +512,54 @@ func (w *Worker) finish(ctx context.Context, job *Job, attempt *AttemptRecord, d
 	}
 }
 
-// deferBudget is the wall-clock half of a delivery's retry budget, carried into
+// Budget is the wall-clock half of a delivery's retry budget, carried into
 // deferDelivery so that a delivery which is only ever DEFERRED can still end.
 //
 // The zero value means "not known here" - see unknownBudget.
-type deferBudget struct {
-	policy         retry.Policy
-	firstAttemptAt time.Time
+type Budget struct {
+	Policy         retry.Policy
+	FirstAttemptAt time.Time
 }
 
 // budgetOf reads the budget off a loaded delivery.
-func budgetOf(job *Job) deferBudget {
-	return deferBudget{policy: job.Policy, firstAttemptAt: job.FirstAttemptAt}
+func budgetOf(job *Job) Budget {
+	return Budget{Policy: job.Policy, FirstAttemptAt: job.FirstAttemptAt}
 }
 
-// unknownBudget is used by the two defer paths that run before the delivery row
-// has been read: the tenant concurrency gate (which runs before any database
-// work by design) and the load failure itself. Neither can be stuck forever -
-// a tenant ceiling clears as work drains, and a database that never answers is
-// not a state in which anything is being delivered - so neither is worth
-// putting a query in front of.
-var unknownBudget = deferBudget{}
+// unknownBudget is the budget of a delivery whose row has not been read.
+//
+// Two paths use it. The load failure genuinely cannot know: the read that would
+// tell us the budget is the read that just failed, and a database that never
+// answers is not a state in which anything is being delivered. The tenant
+// concurrency gate uses it only for the first few refusals of a given delivery;
+// see tenantGateWatch for why, and for what happens after that.
+var unknownBudget = Budget{}
 
 // expired reports whether the delivery's wall-clock budget has run out.
-func (b deferBudget) expired(now time.Time) bool {
-	return b.policy.DurationExhausted(b.firstAttemptAt, now)
+func (b Budget) expired(now time.Time) bool {
+	return b.Policy.DurationExhausted(b.FirstAttemptAt, now)
+}
+
+// tenantGateBudget reads the wall-clock budget of a delivery that keeps losing
+// at the tenant gate.
+//
+// Failure is not an error here, it is a return to the previous behaviour: an
+// unknown budget defers, which is what the gate did on every refusal before
+// this existed. A database blip must not terminate a delivery, and it must not
+// stop the deferral either.
+func (w *Worker) tenantGateBudget(ctx context.Context, deliveryID string, log *slog.Logger) Budget {
+	readCtx, cancel := w.dbContext(context.WithoutCancel(ctx))
+	defer cancel()
+
+	budget, err := w.store.LoadBudget(readCtx, deliveryID)
+	if err != nil {
+		if !errors.Is(err, ErrDeliveryGone) {
+			log.Warn("could not read the retry budget of a delivery stuck at the tenant gate; deferring it anyway",
+				"error", err)
+		}
+		return unknownBudget
+	}
+	return budget
 }
 
 // deferDelivery puts a delivery back WITHOUT recording an attempt, because
@@ -551,7 +594,7 @@ func (b deferBudget) expired(now time.Time) bool {
 // future defer path cannot forget it - the budget is a parameter it has to
 // think about, not a call it can omit.
 func (w *Worker) deferDelivery(
-	ctx context.Context, deliveryID string, budget deferBudget, reason Reason,
+	ctx context.Context, deliveryID string, budget Budget, reason Reason,
 	delay time.Duration, log *slog.Logger, extra ...slog.Attr,
 ) {
 	if budget.expired(w.now()) {

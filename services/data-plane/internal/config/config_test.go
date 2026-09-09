@@ -71,14 +71,18 @@ func TestIngestAndStatementTimeoutsHaveBoundedDefaults(t *testing.T) {
 		t.Fatal("the backstop must not fire before the request deadline")
 	}
 
+	// The backstop has to clear the LONGER of the two request deadlines it
+	// covers, which since WORKER_DB_TIMEOUT_MS exists is no longer the ingest
+	// one by default. 8s clears both; 4s would now be refused because it sits
+	// under the worker's 5s.
 	cfg, err = loadWith(t, map[string]string{
 		"INGEST_DB_TIMEOUT_MS":          "1500",
-		"DATABASE_STATEMENT_TIMEOUT_MS": "4000",
+		"DATABASE_STATEMENT_TIMEOUT_MS": "8000",
 	})
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	if cfg.IngestDBTimeout != 1500*time.Millisecond || cfg.DatabaseStatementTimeout != 4*time.Second {
+	if cfg.IngestDBTimeout != 1500*time.Millisecond || cfg.DatabaseStatementTimeout != 8*time.Second {
 		t.Fatalf("overrides not applied: %s / %s", cfg.IngestDBTimeout, cfg.DatabaseStatementTimeout)
 	}
 

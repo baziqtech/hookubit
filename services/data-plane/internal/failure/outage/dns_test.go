@@ -181,9 +181,18 @@ func TestScenario13_DNSResolutionFails_IsRecordedAndRetried(t *testing.T) {
 		Duration:     elapsed,
 		WorkerID:     workerID,
 	}, worker.Transition{
-		State:        decision.State,
-		Reason:       decision.Reason,
-		Delay:        time.Until(decision.NextAttemptAt),
+		State:  decision.State,
+		Reason: decision.Reason,
+		// The delay the POLICY chose, not time.Until(NextAttemptAt).
+		//
+		// NextAttemptAt is `now` plus the policy delay, and `now` was captured
+		// before the database setup above. Recomputing from it makes the
+		// recorded delay shrink by however long that setup took - and under a
+		// loaded machine that setup has exceeded the delay, making it negative,
+		// writing next_attempt_at into the past and failing the assertion below
+		// for a reason that has nothing to do with DNS. The scheduled delay is a
+		// property of the decision, so take it from the decision.
+		Delay:        decision.NextAttemptAt.Sub(now),
 		AttemptCount: 1,
 	})
 	if err != nil {

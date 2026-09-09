@@ -26,6 +26,12 @@ data:
   DATABASE_MAX_CONNECTIONS: '20'
 
   WORKER_CONCURRENCY: '64'
+  # The worker's own deadline; it used to borrow INGEST_DB_TIMEOUT_MS. Must stay
+  # at or below DATABASE_STATEMENT_TIMEOUT_MS.
+  WORKER_DB_TIMEOUT_MS: '5000'
+  # Delivery rate limits are fleet-wide via REDIS_URL. Without it they degrade to
+  # per-replica and the worker refuses to start in production; set true to accept.
+  DELIVERY_RATE_LIMIT_ALLOW_PER_REPLICA: 'false'
   WORKER_POLL_INTERVAL_MS: '250'
   WORKER_CLAIM_BATCH_SIZE: '100'
   DELIVERY_LEASE_SECONDS: '120'

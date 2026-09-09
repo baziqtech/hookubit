@@ -521,3 +521,196 @@ func TestPayloadFetchIsBoundedByItsOwnBudget(t *testing.T) {
 		t.Fatalf("reason = %s, want %s", got.Reason, ReasonPayloadUnavailable)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// the wall-clock budget at the TENANT gate (G16)
+// ---------------------------------------------------------------------------
+
+// saturateProject fills the project ceiling so the next handle() is refused at
+// the org/project gate - the one refusal that happens BEFORE the delivery row
+// has been read, and therefore the one that had no budget to judge against.
+func saturateProject(t *testing.T, h *harness) func() {
+	t.Helper()
+	rel, scope, ok := h.worker.gate.AcquireTenant(h.job.OrganizationID, h.job.ProjectID)
+	if !ok {
+		t.Fatalf("could not take the project's only slot; refused at %s", scope)
+	}
+	return rel
+}
+
+// The hole: `handle` refuses at the org/project gate before the delivery row is
+// read, so it defers with unknownBudget, and a zero budget never expires by
+// construction. A delivery that keeps losing there is rescheduled on every
+// claim and never consults max_retry_duration - the exact failure the breaker
+// path's wall-clock check closed, surviving on the one path that could not see
+// the row.
+//
+// It compounds with G13: the condition that keeps a delivery losing at the
+// project gate is a project saturated by slow endpoints, which is precisely
+// what an unreserved per-endpoint ceiling produces.
+func TestTenantGateEventuallyHonoursTheWallClockBudget(t *testing.T) {
+	srv := unreachableEndpoint(t)
+	now := time.Now()
+
+	h := newHarness(t, srv.URL,
+		func(o *Options) { o.Now = func() time.Time { return now } },
+		func(o *Options) { o.Limits = GateLimits{Global: 8, Org: 8, Project: 1, Endpoint: 4} },
+	)
+	// 24h of budget, first seen 25h ago. The clock ran out while the delivery
+	// was being turned away at a gate that never looked at it.
+	h.store.job.Policy.MaxRetryDuration = 24 * time.Hour
+	h.store.job.Policy.MaxAttempts = 8
+	h.store.job.FirstAttemptAt = now.Add(-25 * time.Hour)
+
+	release := saturateProject(t, h)
+	defer release()
+
+	// The refusals before the threshold cost nothing extra: no row read, and
+	// the delivery is deferred exactly as it always was.
+	for i := 1; i < tenantGateBudgetCheckAfter; i++ {
+		h.worker.handle(context.Background(), h.lease())
+		if got := h.store.budgetReads(); got != 0 {
+			t.Fatalf("refusal %d paid for %d budget reads; a momentary tenant ceiling must stay cheap", i, got)
+		}
+		if c, d := h.store.counts(); c != 0 || d != i {
+			t.Fatalf("after refusal %d: %d completions, %d deferrals; want 0 and %d", i, c, d, i)
+		}
+	}
+
+	// And then it stops being momentary, so the clock is finally consulted.
+	h.worker.handle(context.Background(), h.lease())
+
+	if got := h.store.budgetReads(); got != 1 {
+		t.Fatalf("budget reads = %d, want exactly 1 on the %dth consecutive refusal",
+			got, tenantGateBudgetCheckAfter)
+	}
+	if n := h.store.loadCount(); n != 0 {
+		t.Fatalf("the tenant gate ran the FULL delivery load %d times; the whole point of the cheap read "+
+			"is that a refusal never pays for the event join, the payload bytes and the secrets", n)
+	}
+	got := h.store.lastCompletion(t)
+	if got.Next.State != StateExhausted || got.Next.Reason != ReasonBudgetExhausted {
+		t.Fatalf("transition = (%s, %s), want (exhausted, %s): a delivery whose 24 hours are up must stop "+
+			"being re-claimed, whichever gate was turning it away",
+			got.Next.State, got.Next.Reason, ReasonBudgetExhausted)
+	}
+	if got.Attempt != nil {
+		t.Fatalf("an attempt row was written for a delivery that was never attempted: %+v", got.Attempt)
+	}
+	if got.Next.AttemptCount != 0 {
+		t.Fatalf("attempt_count was advanced to %d by a delivery that made no request", got.Next.AttemptCount)
+	}
+}
+
+// The common case must be unchanged. A tenant ceiling really is momentary most
+// of the time, and a delivery with budget left goes back to the ready set no
+// matter how often it loses there.
+func TestTenantGateStillDefersADeliveryThatHasTimeLeft(t *testing.T) {
+	srv := unreachableEndpoint(t)
+	now := time.Now()
+
+	h := newHarness(t, srv.URL,
+		func(o *Options) { o.Now = func() time.Time { return now } },
+		func(o *Options) { o.Limits = GateLimits{Global: 8, Org: 8, Project: 1, Endpoint: 4} },
+	)
+	h.store.job.Policy.MaxRetryDuration = 24 * time.Hour
+	h.store.job.FirstAttemptAt = now.Add(-time.Minute)
+
+	release := saturateProject(t, h)
+	defer release()
+
+	for i := 0; i < tenantGateBudgetCheckAfter*3; i++ {
+		h.worker.handle(context.Background(), h.lease())
+	}
+
+	completions, defers := h.store.counts()
+	if completions != 0 {
+		t.Fatalf("a delivery with 23h59m of budget left was terminated %d times", completions)
+	}
+	if defers != tenantGateBudgetCheckAfter*3 {
+		t.Fatalf("deferrals = %d, want %d: every refusal must still put the delivery back",
+			defers, tenantGateBudgetCheckAfter*3)
+	}
+	// Cheap in the steady state: one read per threshold refusals, not one per
+	// refusal.
+	if got := h.store.budgetReads(); got != 3 {
+		t.Fatalf("budget reads = %d over %d refusals, want 3 (one per %d)",
+			got, tenantGateBudgetCheckAfter*3, tenantGateBudgetCheckAfter)
+	}
+}
+
+// A delivery that gets THROUGH the gate is not stuck, and its streak restarts.
+// Without this a delivery that is occasionally refused - the normal shape of a
+// busy project - would accumulate refusals across hours and pay for reads it
+// has not earned.
+func TestTenantGateStreakResetsWhenTheDeliveryGetsThrough(t *testing.T) {
+	srv := unreachableEndpoint(t)
+	now := time.Now()
+
+	h := newHarness(t, srv.URL,
+		func(o *Options) { o.Now = func() time.Time { return now } },
+		func(o *Options) { o.Limits = GateLimits{Global: 8, Org: 8, Project: 1, Endpoint: 4} },
+	)
+	h.store.job.Policy.MaxRetryDuration = 24 * time.Hour
+	h.store.job.FirstAttemptAt = now.Add(-25 * time.Hour)
+	// The breaker is open, so a delivery that DOES get through the tenant gate
+	// still never reaches the network - it is expired on the breaker path
+	// instead, which is not what is being measured here.
+	h.health.set(h.job.Endpoint.ID, Health{
+		State: HealthOpen, ConsecutiveFailures: 500, ProbeAfter: now.Add(10 * time.Minute),
+	})
+
+	release := saturateProject(t, h)
+	for i := 1; i < tenantGateBudgetCheckAfter; i++ {
+		h.worker.handle(context.Background(), h.lease())
+	}
+	if got := h.store.budgetReads(); got != 0 {
+		t.Fatalf("budget reads = %d before the threshold", got)
+	}
+
+	// One clean pass through the gate.
+	release()
+	h.worker.handle(context.Background(), h.lease())
+
+	// Now saturate again: the streak restarted, so the next refusal is the
+	// FIRST of a new one and pays nothing.
+	release = saturateProject(t, h)
+	defer release()
+	h.worker.handle(context.Background(), h.lease())
+	if got := h.store.budgetReads(); got != 0 {
+		t.Fatalf("budget reads = %d; the streak survived a delivery that actually ran", got)
+	}
+}
+
+// The budget read is an optimisation, not a decision maker. If it fails, the
+// delivery must be deferred exactly as it was before this path existed - a
+// database blip may never terminate a customer's delivery, and it may not stop
+// the deferral either.
+func TestTenantGateBudgetReadFailureStillDefers(t *testing.T) {
+	srv := unreachableEndpoint(t)
+	now := time.Now()
+
+	h := newHarness(t, srv.URL,
+		func(o *Options) { o.Now = func() time.Time { return now } },
+		func(o *Options) { o.Limits = GateLimits{Global: 8, Org: 8, Project: 1, Endpoint: 4} },
+	)
+	h.store.job.Policy.MaxRetryDuration = 24 * time.Hour
+	h.store.job.FirstAttemptAt = now.Add(-25 * time.Hour)
+	h.store.budgetErr = errors.New("connection reset by peer")
+
+	release := saturateProject(t, h)
+	defer release()
+
+	for i := 0; i < tenantGateBudgetCheckAfter; i++ {
+		h.worker.handle(context.Background(), h.lease())
+	}
+
+	completions, defers := h.store.counts()
+	if completions != 0 {
+		t.Fatalf("a delivery was terminated on the strength of a FAILED budget read (%d completions)", completions)
+	}
+	if defers != tenantGateBudgetCheckAfter {
+		t.Fatalf("deferrals = %d, want %d: a failed read must not swallow the deferral either",
+			defers, tenantGateBudgetCheckAfter)
+	}
+}

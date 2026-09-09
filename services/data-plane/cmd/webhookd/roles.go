@@ -204,6 +204,21 @@ func egressLimits(cfg *config.Config) egress.Limits {
 	}
 }
 
+// workerTimeouts maps configuration onto the two INDEPENDENT budgets the
+// delivery loop runs on: one database call, and one object-storage fetch.
+//
+// It exists as a function for the same reason egressLimits does - so a test can
+// pin a relationship that is easy to break by accident and impossible to notice
+// in production. Both halves have been broken here before. The worker's
+// database calls ran on INGEST_DB_TIMEOUT_MS, so tuning the deadline of a
+// request a client is waiting on silently retuned a background loop that would
+// rather wait than abandon a lease; and the payload fetch ran on the same
+// budget, so any PAYLOAD_DOWNLOAD_TIMEOUT_MS set above it was truncated with no
+// sign that it had been.
+func workerTimeouts(cfg *config.Config) (db, payload time.Duration) {
+	return cfg.WorkerDBTimeout, cfg.PayloadDownloadTimeout
+}
+
 func runWorker(ctx context.Context, cfg *config.Config, pool *pgxpool.Pool, log *slog.Logger, workerID string) error {
 	// The keyring must be built before any work is claimed. A worker that
 	// cannot decrypt signing secrets would claim deliveries and fail every one
@@ -240,6 +255,18 @@ func runWorker(ctx context.Context, cfg *config.Config, pool *pgxpool.Pool, log 
 		return fmt.Errorf("build delivery rate limiter: %w", err)
 	}
 
+	// Said out loud, before any work is claimed, because the failure it
+	// describes is silent and its symptom (one customer's webhooks are slow)
+	// points nowhere near its cause (a different customer's endpoints are
+	// sitting on the pool). Warnings, never a refusal: taking the data plane
+	// down over a tuning choice is worse than the starvation it warns about.
+	// See config.ConcurrencyAdvisories and docs/FAILURE_RECOVERY.md, G13.
+	for _, advisory := range cfg.ConcurrencyAdvisories() {
+		log.Warn(advisory.Message, advisory.Fields...)
+	}
+
+	dbTimeout, payloadTimeout := workerTimeouts(cfg)
+
 	w, err := worker.New(worker.Options{
 		Queue:    newQueue(cfg, pool, log),
 		Store:    worker.NewPostgresStore(pool),
@@ -265,12 +292,9 @@ func runWorker(ctx context.Context, cfg *config.Config, pool *pgxpool.Pool, log 
 		ClaimBatch:   cfg.WorkerClaimBatch,
 		PollInterval: cfg.WorkerPollInterval,
 		Lease:        cfg.DeliveryLease,
-		DBTimeout:    cfg.IngestDBTimeout,
-		// The object fetch gets PAYLOAD_DOWNLOAD_TIMEOUT_MS, not the database
-		// budget. Passing IngestDBTimeout for both meant the delivery path's
-		// payload fetch inherited the smaller of the two and a
-		// PAYLOAD_DOWNLOAD_TIMEOUT_MS set above it was silently truncated.
-		PayloadTimeout:         cfg.PayloadDownloadTimeout,
+		// Two budgets, neither of them the ingest one. See workerTimeouts.
+		DBTimeout:              dbTimeout,
+		PayloadTimeout:         payloadTimeout,
 		MaxStoredResponseBytes: cfg.MaxStoredResponseBytes,
 		Logger:                 log,
 	})
@@ -283,7 +307,9 @@ func runWorker(ctx context.Context, cfg *config.Config, pool *pgxpool.Pool, log 
 	log.Info("worker started",
 		"worker_id", workerID,
 		"concurrency", cfg.WorkerConcurrency,
-		"max_conns_per_host", cfg.EgressMaxConnsPerHost)
+		"max_conns_per_host", cfg.EgressMaxConnsPerHost,
+		"db_timeout", dbTimeout,
+		"payload_timeout", payloadTimeout)
 	return w.Run(ctx)
 }
 
@@ -319,8 +345,21 @@ func (d deliveryLimiter) Allow(ctx context.Context, key string, limit int, windo
 // implies a fleet-wide guarantee it cannot make.
 func buildDeliveryLimiter(cfg *config.Config, log *slog.Logger) (worker.RateLimiter, error) {
 	if cfg.RedisURL == "" {
+		// Refused in production unless an operator has said, in configuration,
+		// that they mean it. A limit the customer configured and does not get
+		// is the same class of quiet downgrade as EGRESS_ALLOW_PRIVATE_NETWORKS
+		// and gets the same treatment. Nothing about the RUNTIME changes:
+		// delivery never depends on Redis, and the in-process bucket below is
+		// still the fallback when a configured Redis dies.
+		if err := cfg.ValidateDeliveryRateLimitScope(); err != nil {
+			return nil, err
+		}
+		metrics.DeliveryRateLimitFleetWide.Set(0)
 		log.Warn("REDIS_URL is not set; endpoint delivery rate limits are enforced PER REPLICA, not fleet-wide",
-			"effect", "an endpoint limit of N is effectively N x the number of worker pods")
+			"effect", "an endpoint limit of N is effectively N x the number of worker pods",
+			"app_env", cfg.AppEnv,
+			"acknowledged", cfg.DeliveryRateLimitAllowPerReplica,
+			"observe", "delivery_rate_limit_fleet_wide is 0 for as long as this holds")
 		return nil, nil
 	}
 	client, err := ratelimit.NewRedisClient(cfg.RedisURL, cfg.RedisTimeout)
@@ -337,30 +376,63 @@ func buildDeliveryLimiter(cfg *config.Config, log *slog.Logger) (worker.RateLimi
 		Timeout: cfg.RedisTimeout,
 		Logger:  log,
 	})
+	metrics.DeliveryRateLimitFleetWide.Set(1)
 	log.Info("endpoint delivery rate limiting is fleet-wide",
 		"redis_timeout_ms", cfg.RedisTimeout.Milliseconds(),
 		"degrades_to", "in-process buckets when redis is unreachable")
 	return deliveryLimiter{inner: limiter}, nil
 }
 
+// runAll runs every role in one process, and brings the WHOLE process down if
+// any single role fails.
+//
+// It used to log "role exited" and leave the others running, which produces the
+// worst state this system can be in: the worker refuses to start - because
+// delivery rate limits would be per-replica in production, say - while ingest
+// keeps answering 202. Events are accepted, durably, and nothing delivers them.
+// Every health probe stays green, because liveness does not know a role is
+// missing. That is silent data accumulation presented as a healthy service.
+//
+// A process that dies loudly is recoverable by a restart loop and visible in
+// any dashboard. A half-running one is neither.
 func runAll(ctx context.Context, cfg *config.Config, pool *pgxpool.Pool, log *slog.Logger, instanceID string) error {
-	var wg sync.WaitGroup
+	// Roles run on a context this function can cancel, so the first failure
+	// drains the rest rather than leaving them orphaned behind a dead peer.
+	runCtx, cancelRoles := context.WithCancel(ctx)
+	defer cancelRoles()
+
+	var (
+		wg      sync.WaitGroup
+		once    sync.Once
+		failure error
+	)
 	roles := map[string]func() error{
-		"ingest":    func() error { return runIngest(ctx, cfg, pool, log) },
-		"router":    func() error { return runRouter(ctx, cfg, pool, log) },
-		"scheduler": func() error { return runScheduler(ctx, cfg, pool, log) },
-		"worker":    func() error { return runWorker(ctx, cfg, pool, log, instanceID) },
+		"ingest":    func() error { return runIngest(runCtx, cfg, pool, log) },
+		"router":    func() error { return runRouter(runCtx, cfg, pool, log) },
+		"scheduler": func() error { return runScheduler(runCtx, cfg, pool, log) },
+		"worker":    func() error { return runWorker(runCtx, cfg, pool, log, instanceID) },
 	}
 	for name, fn := range roles {
 		wg.Add(1)
 		go func(name string, fn func() error) {
 			defer wg.Done()
+			// ctx, not runCtx: a role unwinding because a PEER failed is
+			// shutting down normally and has nothing of its own to report.
 			if err := fn(); err != nil && ctx.Err() == nil {
-				log.Error("role exited", "role", name, "error", err)
+				log.Error("role exited; stopping every role in this process",
+					"role", name, "error", err)
+				once.Do(func() {
+					failure = fmt.Errorf("role %s: %w", name, err)
+					cancelRoles()
+				})
 			}
 		}(name, fn)
 	}
 	wg.Wait()
+
+	if failure != nil {
+		return failure
+	}
 	return ctx.Err()
 }
 

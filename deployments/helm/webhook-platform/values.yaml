@@ -318,6 +318,15 @@ dataPlane:
     concurrency: 64
     pollIntervalMs: 250
     claimBatchSize: 100
+    # The worker's own database deadline. It used to borrow the ingest one, so
+    # tuning ingest silently retuned delivery. Must not exceed
+    # externalDatabase.statementTimeoutMs.
+    dbTimeoutMs: 5000
+    # Endpoint delivery rate limits are enforced fleet-wide through Redis. With
+    # no Redis they degrade to per-replica, multiplying a customer's configured
+    # limit by the replica count, so the worker refuses to start that way in
+    # production. Set true to take the downgrade deliberately.
+    allowPerReplicaRateLimits: false
     # A claimed delivery whose lease expires becomes reclaimable by another
     # worker. Must exceed the longest possible attempt (egress.totalTimeoutMs).
     leaseSeconds: 120
