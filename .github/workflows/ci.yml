@@ -144,6 +144,40 @@ jobs:
           REDIS_TEST_URL: redis://localhost:6379/1
         run: go test -race -count=1 ./...
 
+      # The failure-injection suites prove ARCHITECTURE.md 57's twenty recovery
+      # scenarios, and every one of them is gated on DATABASE_URL through
+      # testsupport.Pool, which t.Skips rather than fails when it is unset.
+      # That is the right behaviour for a laptop with no database and the worst
+      # possible behaviour here: if this job ever loses its `services:` block or
+      # its DATABASE_URL, `go test ./...` stays GREEN while proving nothing
+      # about crash recovery, tenant fairness, SSRF or double-claim safety.
+      #
+      # So assert they RAN. A skip in these packages fails the build.
+      - name: Failure-injection suites must not skip
+        working-directory: services/data-plane
+        env:
+          REDIS_TEST_URL: redis://localhost:6379/1
+        run: |
+          set -euo pipefail
+          go test -count=1 -v ./internal/failure/... > failure.log 2>&1 || {
+            cat failure.log
+            exit 1
+          }
+          if grep -q -- '--- SKIP' failure.log; then
+            echo '::error::A failure-injection scenario was SKIPPED, so it proved nothing.'
+            grep -- '--- SKIP' failure.log
+            exit 1
+          fi
+          ran=$(grep -c '^=== RUN   TestScenario' failure.log || true)
+          echo "failure-injection scenarios executed: $ran"
+          # Twenty scenarios, several with more than one test. If this count
+          # collapses, a package stopped being compiled in or was renamed out of
+          # the glob, which no other check would notice.
+          if [ "$ran" -lt 20 ]; then
+            echo "::error::only $ran scenario tests ran; expected at least 20"
+            exit 1
+          fi
+
   control-plane:
     name: Control plane and dashboard
     runs-on: ubuntu-latest

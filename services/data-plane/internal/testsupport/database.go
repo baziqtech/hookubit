@@ -24,6 +24,12 @@
 // query is then global over one package's rows, which is exactly the scope the
 // tests mean.
 //
+// One run at a time, unless you say otherwise. Names are derived from the
+// package path, so they are stable across runs by design - which means two
+// CONCURRENT runs against one DATABASE_URL claim the same names and the second
+// drops the first's database mid-test. Set TEST_DB_RUN_ID per run when that is
+// the situation; see runID.
+//
 // A per-package SCHEMA (search_path) would be lighter, but the Prisma
 // migrations create every object in `public`; each schema would have to be
 // migrated separately, and the data plane deliberately never runs migrations
@@ -107,7 +113,7 @@ func Pool(t *testing.T) *pgxpool.Pool {
 	}
 	if err := pool.Ping(ctx); err != nil {
 		pool.Close()
-		t.Fatalf("ping: %v", err)
+		t.Fatalf("ping: %v", explainVanishedDatabase(err))
 	}
 	t.Cleanup(pool.Close)
 	return pool
@@ -120,7 +126,7 @@ func prepare(raw, suffix string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	name := derivedName(template, suffix)
+	name := derivedName(template, suffixWithRunID(suffix))
 
 	preparedMu.Lock()
 	defer preparedMu.Unlock()
@@ -164,6 +170,29 @@ func createFromTemplate(raw, template, name string) (string, error) {
 		return "", fmt.Errorf("connect to the `postgres` maintenance database to create %q: %w", name, err)
 	}
 	defer func() { _ = conn.Close(context.Background()) }()
+
+	// Refuse to steal a database another RUN is using, rather than dropping it
+	// and letting both runs produce nonsense.
+	//
+	// Note there is NO eviction here, unlike the template below. On the template
+	// an idle session is a database GUI someone left open. On a per-package
+	// database it is a live run's POOLED connection - pgxpool holds those idle
+	// between queries - so evicting first and asking afterwards answers "is
+	// anyone using this?" by hanging up on them and observing the silence.
+	// The two ways that goes wrong are both hard to read from the far end - the
+	// victim gets 3D000 "database does not exist" plus "terminating connection
+	// due to administrator command", and the thief inherits the victim's rows,
+	// which matters because Claim and ClaimOutbox are deliberately GLOBAL
+	// queries: a scheduler test asking for one delivery gets five, and the
+	// failure reads as a broken LIMIT rather than as two runs sharing a name.
+	// Both symptoms have been misdiagnosed as flakiness here.
+	if live := otherSessions(ctx, conn, name); live > 0 {
+		return "", fmt.Errorf(
+			"test database %q already has %d live connection(s) from another test run; "+
+				"refusing to drop it out from under them. Set TEST_DB_RUN_ID to a distinct "+
+				"value per concurrent run (names are derived from the package path, so two "+
+				"runs against one DATABASE_URL claim the same name)", name, live)
+	}
 
 	drop := fmt.Sprintf(`DROP DATABASE IF EXISTS %s WITH (FORCE)`, quoteIdentifier(name))
 	create := fmt.Sprintf(`CREATE DATABASE %s TEMPLATE %s`, quoteIdentifier(name), quoteIdentifier(template))
@@ -290,6 +319,53 @@ func evictIdleSessions(ctx context.Context, conn *pgx.Conn, database string) int
 	return n
 }
 
+// explainVanishedDatabase names the one cause of 3D000 that is not a typo: a
+// SECOND test run against the same DATABASE_URL dropped this package's database
+// while this run was using it. The bare SQLSTATE reads as a broken checkout, and
+// the accompanying "terminating connection due to administrator command" reads
+// as a database problem; neither points at the other run.
+func explainVanishedDatabase(err error) error {
+	var pgErr *pgconn.PgError
+	if !errors.As(err, &pgErr) || pgErr.Code != "3D000" {
+		return err
+	}
+	if runID() != "" {
+		return err
+	}
+	return fmt.Errorf(
+		"%w\n\nthis package's test database existed at the start of the run and is gone now, "+
+			"which happens when a SECOND test run against the same DATABASE_URL recreated it "+
+			"(DROP DATABASE ... WITH (FORCE) evicts this run's connections). "+
+			"Set TEST_DB_RUN_ID to a distinct value per run when running more than one at a time",
+		err)
+}
+
+// otherSessions counts backends on a database other than this connection,
+// idle ones included.
+//
+// Counting idle is the point: a test process holds a pgxpool whose connections
+// are idle most of the time, so ignoring them would report an actively-running
+// peer as absent. A genuinely dead process leaves no backend at all - the OS
+// closes its sockets - so a false positive here is rare, and the error it
+// produces names its own remedy.
+func otherSessions(ctx context.Context, conn *pgx.Conn, database string) int {
+	countCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	var n int
+	err := conn.QueryRow(countCtx,
+		`SELECT count(*)
+		   FROM pg_stat_activity
+		  WHERE datname = $1
+		    AND pid <> pg_backend_pid()`, database).Scan(&n)
+	if err != nil {
+		// Not being able to look is not evidence of absence, but failing the
+		// run on a transient catalogue read would be worse than the race this
+		// guards. Proceed as before.
+		return 0
+	}
+	return n
+}
+
 // explain turns the two failures an operator will actually hit into a sentence
 // that names the cause, rather than leaving a bare SQLSTATE to be decoded.
 func explain(err error, name, template string) error {
@@ -352,6 +428,37 @@ func databaseName(raw string) (string, error) {
 // derivedName is template + "_" + suffix, kept inside NAMEDATALEN. When it does
 // not fit, the tail is replaced by a hash of the full name rather than simply
 // truncated, so two long package paths cannot collapse onto one database.
+// runID isolates concurrent test RUNS from each other. It is empty by default,
+// which keeps one stable database per package - the copy is dropped and
+// recreated at the start of each run, and left in place afterwards as the only
+// thing there is to look at when a failure needs a postmortem.
+//
+// That default is safe for `go test ./...`, where packages run in parallel
+// inside ONE process tree and each owns a distinct name. It is NOT safe for two
+// runs at once against the same DATABASE_URL: the second run's
+// `DROP DATABASE ... WITH (FORCE)` deletes the first run's database out from
+// under it, and the first fails with 3D000 plus "terminating connection due to
+// administrator command" - a failure that names neither the cause nor the other
+// run. Set TEST_DB_RUN_ID to any distinct string per run when that is what you
+// are doing (several agents on one checkout, or a local run beside CI on a
+// shared database). The cost is one leftover database per run per package.
+func runID() string {
+	return strings.TrimSpace(os.Getenv("TEST_DB_RUN_ID"))
+}
+
+// suffixWithRunID applies runID to a package suffix. It is applied HERE rather
+// than inside derivedName so that derivedName stays a pure function of its
+// arguments: an ambient environment variable that silently changes what a
+// name-derivation function returns is the kind of thing that makes a test suite
+// pass or fail depending on how it was invoked.
+func suffixWithRunID(suffix string) string {
+	id := runID()
+	if id == "" {
+		return suffix
+	}
+	return suffix + "_" + sanitiseIdentifierPart(id)
+}
+
 func derivedName(template, suffix string) string {
 	name := template + "_" + suffix
 	if len(name) <= maxIdentifier {
@@ -398,6 +505,26 @@ func importPathOf(fullName string) string {
 // A trailing `_test` is dropped so a package's external test package (which the
 // compiler names `.../db_test`) shares its database rather than getting a
 // second copy for no reason.
+// sanitiseIdentifierPart reduces arbitrary text to the character set
+// derivedName is allowed to put in an identifier. Length is not this function's
+// problem: derivedName hashes the whole name when it overruns NAMEDATALEN.
+func sanitiseIdentifierPart(in string) string {
+	var b strings.Builder
+	for _, r := range strings.ToLower(in) {
+		switch {
+		case r >= 'a' && r <= 'z', r >= '0' && r <= '9':
+			b.WriteRune(r)
+		default:
+			b.WriteRune('_')
+		}
+	}
+	out := strings.Trim(b.String(), "_")
+	if out == "" {
+		return "run"
+	}
+	return out
+}
+
 func packageSuffix(importPath string) string {
 	path := importPath
 	if i := strings.Index(path, "/internal/"); i >= 0 {
