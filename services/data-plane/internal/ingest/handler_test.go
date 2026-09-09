@@ -220,8 +220,15 @@ func assertErrorShape(t *testing.T, rec *httptest.ResponseRecorder, status int, 
 			t.Fatalf("error object is missing %q", field)
 		}
 	}
-	if len(detail) != 3 {
-		t.Fatalf("error object has %d fields, want exactly code, message, request_id", len(detail))
+	// `details` is the only permitted extra: it is where a 429 carries
+	// retry_after_seconds. Anything else appearing here is an accidental
+	// widening of a public contract.
+	for field := range detail {
+		switch field {
+		case "code", "message", "request_id", "details":
+		default:
+			t.Fatalf("error object carries unexpected field %q", field)
+		}
 	}
 	return body
 }
@@ -602,12 +609,14 @@ func TestOverlongIdempotencyKeyIsRejected(t *testing.T) {
 
 type denyLimiter struct{}
 
-func (denyLimiter) Allow(context.Context, Scope) (bool, error) { return false, nil }
+func (denyLimiter) Allow(context.Context, Scope) (LimitDecision, error) {
+	return LimitDecision{Allowed: false, RetryAfter: 7 * time.Second, LimitedScope: "project"}, nil
+}
 
 type faultyLimiter struct{}
 
-func (faultyLimiter) Allow(context.Context, Scope) (bool, error) {
-	return false, errors.New("redis unreachable")
+func (faultyLimiter) Allow(context.Context, Scope) (LimitDecision, error) {
+	return LimitDecision{}, errors.New("redis unreachable")
 }
 
 func TestRateLimitedRequestIs429AndCreatesNothing(t *testing.T) {

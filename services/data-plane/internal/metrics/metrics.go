@@ -68,7 +68,19 @@ var (
 	RateLimitHits = promauto.NewCounterVec(prometheus.CounterOpts{
 		Name: "rate_limit_hits_total",
 		Help: "Requests or deliveries deferred by a rate limit, by scope.",
-	}, []string{"scope"})
+	}, []string{"scope"}) // source_ip | ingest | project | organization | endpoint
+
+	// RateLimiterDegraded is THE alert for the limiter.
+	//
+	// The limiter fails open by design (ARCHITECTURE.md 14), so a Redis outage
+	// costs no traffic and produces no errors - which means nothing else in the
+	// system would ever tell an operator that fleet-wide ceilings have silently
+	// become per-replica ones. Any sustained non-zero rate here means the
+	// configured limits are not the limits in force.
+	RateLimiterDegraded = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "rate_limiter_degraded_total",
+		Help: "Rate limit decisions taken without the shared store, by cause. Limits are per replica while this is non-zero.",
+	}, []string{"cause"}) // redis | policy_lookup
 
 	CircuitBreakerOpened = promauto.NewCounter(prometheus.CounterOpts{
 		Name: "circuit_breaker_open_total",

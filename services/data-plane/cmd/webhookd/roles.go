@@ -43,12 +43,21 @@ func runIngest(ctx context.Context, cfg *config.Config, pool *pgxpool.Pool, log 
 			"payload_max_bytes", cfg.PayloadMaxBytes)
 	}
 
+	limiter, err := buildIngestLimiter(cfg, pool, log)
+	if err != nil {
+		return fmt.Errorf("build ingest rate limiter: %w", err)
+	}
+
 	handler := ingest.New(ingest.Options{
 		Store: ingest.NewPostgresStore(pool),
-		// PHASE 3: swap in the Redis token bucket (ARCHITECTURE.md 25). The
-		// seam is here so ingest does not need Redis to be correct.
-		Limiter:  ingest.AllowAll{},
-		Payloads: payloads,
+		// Two ceilings, in this order and for different reasons: Source is the
+		// pre-auth per-address bound that protects the connection pool from a
+		// flood with no credential, and Limiter is the policy-driven per-key,
+		// per-project and per-organisation budget from the control plane.
+		Limiter:          limiter,
+		Source:           buildSourceLimiter(cfg, log),
+		TrustedProxyHops: cfg.TrustedProxyHops,
+		Payloads:         payloads,
 		Limits: ingest.PayloadLimits{
 			InlineMax: cfg.PayloadInlineMaxBytes,
 			Max:       cfg.PayloadMaxBytes,

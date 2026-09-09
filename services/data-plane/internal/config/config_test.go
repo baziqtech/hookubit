@@ -124,3 +124,69 @@ func TestShutdownReadinessDelayDefaultsAndIsBounded(t *testing.T) {
 		t.Fatalf("a delay past the grace budget must be rejected, got %v", err)
 	}
 }
+
+// The rate-limit knobs, and the guard rails that stop a config change from
+// silently producing a limiter that cannot enforce what it advertises.
+func TestRateLimitDefaults(t *testing.T) {
+	t.Setenv("DATABASE_URL", "postgres://u:p@db:5432/x")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.RateLimitPolicyCacheTTL <= 0 {
+		t.Fatal("the policy cache TTL must have a positive default; an uncached lookup is a query per event")
+	}
+	if cfg.IngestSourceRateLimit <= 0 {
+		t.Fatal("the pre-auth ceiling must default to ON; it is the only bound on an unauthenticated flood")
+	}
+	if cfg.TrustedProxyHops != 0 {
+		t.Fatal("trusted proxy hops must default to 0: trusting a forwarded header by default lets a client forge its own bucket")
+	}
+	if cfg.RedisTimeout <= 0 || cfg.RedisTimeout > time.Second {
+		t.Fatalf("REDIS_TIMEOUT_MS default = %s; a limiter that can block a request for a second costs more than it saves", cfg.RedisTimeout)
+	}
+}
+
+func TestRateLimitConfigIsValidated(t *testing.T) {
+	cases := []struct {
+		name string
+		env  map[string]string
+		want string
+	}{
+		{
+			name: "a burst below the limit makes the limit unreachable",
+			env:  map[string]string{"INGEST_RATE_LIMIT": "100", "INGEST_RATE_LIMIT_BURST": "10"},
+			want: "INGEST_RATE_LIMIT_BURST",
+		},
+		{
+			name: "a source burst below the source limit is the same fault",
+			env:  map[string]string{"INGEST_SOURCE_RATE_LIMIT": "100", "INGEST_SOURCE_RATE_LIMIT_BURST": "10"},
+			want: "INGEST_SOURCE_RATE_LIMIT_BURST",
+		},
+		{
+			name: "a negative hop count is not a hop count",
+			env:  map[string]string{"INGEST_TRUSTED_PROXY_HOPS": "-1"},
+			want: "INGEST_TRUSTED_PROXY_HOPS",
+		},
+		{
+			name: "a zero window is a division by zero in the refill rate",
+			env:  map[string]string{"INGEST_RATE_LIMIT": "10", "INGEST_RATE_LIMIT_WINDOW_SECONDS": "0"},
+			want: "INGEST_RATE_LIMIT_WINDOW_SECONDS",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("DATABASE_URL", "postgres://u:p@db:5432/x")
+			for k, v := range tc.env {
+				t.Setenv(k, v)
+			}
+			_, err := Load()
+			if err == nil {
+				t.Fatal("configuration was accepted")
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("error does not name %s: %v", tc.want, err)
+			}
+		})
+	}
+}

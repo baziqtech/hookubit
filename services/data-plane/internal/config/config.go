@@ -12,6 +12,7 @@ import (
 
 	"github.com/shaq/webhook-platform/services/data-plane/internal/ingest"
 	"github.com/shaq/webhook-platform/services/data-plane/internal/queue"
+	"github.com/shaq/webhook-platform/services/data-plane/internal/ratelimit"
 )
 
 // ShutdownGrace is the TOTAL budget from SIGTERM to process exit, and
@@ -45,6 +46,43 @@ type Config struct {
 	DatabaseStatementTimeout time.Duration
 
 	RedisURL string
+	// RedisTimeout bounds ONE rate-limiter round trip. It is deliberately tiny:
+	// the limiter is an optimisation on a path whose latency budget is already
+	// spoken for, and a limiter that blocks a request for seconds waiting on
+	// its own store has done more damage than the traffic it was refusing.
+	RedisTimeout time.Duration
+
+	// --- Rate limiting (ARCHITECTURE.md 25) ------------------------------
+	//
+	// RateLimitPolicyCacheTTL is the ONLY staleness in the system: it is how
+	// long after an operator changes a rate_limit_policies row before every
+	// data-plane replica is enforcing the new value. Bounded and finite by
+	// requirement (ARCHITECTURE.md 55); nothing pushes an invalidation, so
+	// there is no cache that can get stuck.
+	RateLimitPolicyCacheTTL time.Duration
+
+	// IngestRateLimit is the built-in per-API-key ceiling, applied only when
+	// the project has no scope='ingest' policy of its own. It exists so a
+	// compromised or runaway credential is bounded out of the box; 0 disables
+	// it and leaves ingest limited by policy rows alone.
+	IngestRateLimit              int
+	IngestRateLimitWindowSeconds int
+	IngestRateLimitBurst         int
+
+	// IngestSourceRateLimit is the PRE-AUTH per-address ceiling - the one that
+	// runs before any database work. 0 disables it, which reopens
+	// unauthenticated pressure on the connection pool; see ingest.SourceLimiter.
+	IngestSourceRateLimit              int
+	IngestSourceRateLimitWindowSeconds int
+	IngestSourceRateLimitBurst         int
+	// IngestSourceAuthFailurePenalty is the EXTRA cost charged to an address
+	// whose request failed authentication.
+	IngestSourceAuthFailurePenalty int
+
+	// TrustedProxyHops is the exact number of proxies in front of the ingest
+	// server. It is never inferred: guessing high means a client can forge its
+	// own bucket key, guessing low means every client shares one bucket.
+	TrustedProxyHops int
 
 	S3Endpoint       string
 	S3Bucket         string
@@ -136,7 +174,21 @@ func Load() (*Config, error) {
 		DatabaseMaxConnections:   int32(envInt("DATABASE_MAX_CONNECTIONS", 20)),
 		DatabaseStatementTimeout: envDuration("DATABASE_STATEMENT_TIMEOUT_MS", 30*time.Second),
 
-		RedisURL: os.Getenv("REDIS_URL"),
+		RedisURL:     os.Getenv("REDIS_URL"),
+		RedisTimeout: envDuration("REDIS_TIMEOUT_MS", 50*time.Millisecond),
+
+		RateLimitPolicyCacheTTL: envDuration("RATE_LIMIT_POLICY_CACHE_TTL_MS", ratelimit.DefaultCacheTTL),
+
+		IngestRateLimit:              envInt("INGEST_RATE_LIMIT", 1000),
+		IngestRateLimitWindowSeconds: envInt("INGEST_RATE_LIMIT_WINDOW_SECONDS", 1),
+		IngestRateLimitBurst:         envInt("INGEST_RATE_LIMIT_BURST", 2000),
+
+		IngestSourceRateLimit:              envInt("INGEST_SOURCE_RATE_LIMIT", 300),
+		IngestSourceRateLimitWindowSeconds: envInt("INGEST_SOURCE_RATE_LIMIT_WINDOW_SECONDS", 1),
+		IngestSourceRateLimitBurst:         envInt("INGEST_SOURCE_RATE_LIMIT_BURST", 600),
+		IngestSourceAuthFailurePenalty:     envInt("INGEST_SOURCE_AUTH_FAILURE_PENALTY", 20),
+
+		TrustedProxyHops: envInt("INGEST_TRUSTED_PROXY_HOPS", 0),
 
 		S3Endpoint:       os.Getenv("S3_ENDPOINT"),
 		S3Bucket:         os.Getenv("S3_BUCKET"),
@@ -230,6 +282,31 @@ func Load() (*Config, error) {
 		problems = append(problems, fmt.Sprintf(
 			"SHUTDOWN_READINESS_DELAY_MS must not exceed %d; the delay plus the longest role drain (%s) has to fit inside the process shutdown grace",
 			MaxShutdownReadinessDelay.Milliseconds(), ingest.DrainTimeout))
+	}
+	if c.TrustedProxyHops < 0 {
+		problems = append(problems, "INGEST_TRUSTED_PROXY_HOPS must not be negative")
+	}
+	if c.RateLimitPolicyCacheTTL <= 0 {
+		problems = append(problems, "RATE_LIMIT_POLICY_CACHE_TTL_MS must be positive; an uncached policy lookup puts a query on the ingest hot path")
+	}
+	// A burst below the limit means the bucket cannot hold one window's worth
+	// of tokens, so the configured limit is unreachable - the same check the
+	// control plane enforces on rate_limit_policies rows.
+	if c.IngestRateLimit > 0 && c.IngestRateLimitBurst > 0 && c.IngestRateLimitBurst < c.IngestRateLimit {
+		problems = append(problems, "INGEST_RATE_LIMIT_BURST must not be below INGEST_RATE_LIMIT")
+	}
+	if c.IngestRateLimit > 0 && c.IngestRateLimitWindowSeconds <= 0 {
+		problems = append(problems, "INGEST_RATE_LIMIT_WINDOW_SECONDS must be positive")
+	}
+	if c.IngestSourceRateLimit > 0 && c.IngestSourceRateLimitBurst > 0 &&
+		c.IngestSourceRateLimitBurst < c.IngestSourceRateLimit {
+		problems = append(problems, "INGEST_SOURCE_RATE_LIMIT_BURST must not be below INGEST_SOURCE_RATE_LIMIT")
+	}
+	if c.IngestSourceRateLimit > 0 && c.IngestSourceRateLimitWindowSeconds <= 0 {
+		problems = append(problems, "INGEST_SOURCE_RATE_LIMIT_WINDOW_SECONDS must be positive")
+	}
+	if c.IngestSourceAuthFailurePenalty < 0 {
+		problems = append(problems, "INGEST_SOURCE_AUTH_FAILURE_PENALTY must not be negative")
 	}
 	if c.MaxConcurrencyEndpoint > c.MaxConcurrencyProject {
 		problems = append(problems, "MAX_CONCURRENCY_PER_ENDPOINT cannot exceed MAX_CONCURRENCY_PER_PROJECT")

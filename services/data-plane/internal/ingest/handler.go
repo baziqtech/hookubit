@@ -37,12 +37,20 @@ const DefaultDBTimeout = 5 * time.Second
 
 // Options configures a Handler. Every field except Store has a working default.
 type Options struct {
-	Store          Store
-	Limiter        RateLimiter
-	Payloads       PayloadStore
-	Limits         PayloadLimits
-	Logger         *slog.Logger
-	IdempotencyTTL time.Duration
+	Store   Store
+	Limiter RateLimiter
+	// Source is the pre-auth per-address ceiling. Nil disables it, which is
+	// only appropriate when something in front of the process already bounds
+	// an unauthenticated flood.
+	Source *SourceLimiter
+	// TrustedProxyHops is the EXACT number of proxies in front of this
+	// process. See ClientAddress: it is never inferred and never "trust
+	// everything".
+	TrustedProxyHops int
+	Payloads         PayloadStore
+	Limits           PayloadLimits
+	Logger           *slog.Logger
+	IdempotencyTTL   time.Duration
 	// DBTimeout bounds the database work of one accept. Defaults to
 	// DefaultDBTimeout.
 	DBTimeout time.Duration
@@ -52,28 +60,32 @@ type Options struct {
 
 // Handler serves POST /v1/projects/{project_id}/events.
 type Handler struct {
-	store          Store
-	limiter        RateLimiter
-	payloads       PayloadStore
-	limits         PayloadLimits
-	log            *slog.Logger
-	idempotencyTTL time.Duration
-	dbTimeout      time.Duration
-	now            func() time.Time
-	touch          *touchThrottle
+	store            Store
+	limiter          RateLimiter
+	source           *SourceLimiter
+	trustedProxyHops int
+	payloads         PayloadStore
+	limits           PayloadLimits
+	log              *slog.Logger
+	idempotencyTTL   time.Duration
+	dbTimeout        time.Duration
+	now              func() time.Time
+	touch            *touchThrottle
 }
 
 func New(opts Options) *Handler {
 	h := &Handler{
-		store:          opts.Store,
-		limiter:        opts.Limiter,
-		payloads:       opts.Payloads,
-		limits:         opts.Limits,
-		log:            opts.Logger,
-		idempotencyTTL: opts.IdempotencyTTL,
-		dbTimeout:      opts.DBTimeout,
-		now:            opts.Now,
-		touch:          newTouchThrottle(time.Minute),
+		store:            opts.Store,
+		limiter:          opts.Limiter,
+		source:           opts.Source,
+		trustedProxyHops: opts.TrustedProxyHops,
+		payloads:         opts.Payloads,
+		limits:           opts.Limits,
+		log:              opts.Logger,
+		idempotencyTTL:   opts.IdempotencyTTL,
+		dbTimeout:        opts.DBTimeout,
+		now:              opts.Now,
+		touch:            newTouchThrottle(time.Minute),
 	}
 	if h.limiter == nil {
 		h.limiter = AllowAll{}
@@ -150,9 +162,29 @@ func (h *Handler) accept(r *http.Request, projectID string, log *slog.Logger) (s
 	ctx, cancel := context.WithTimeout(r.Context(), h.dbTimeout)
 	defer cancel()
 
+	// 0. Pre-auth ceiling, BEFORE the database is touched.
+	//
+	// Steps 1..6 below are the order fixed by ARCHITECTURE.md 16 and this is
+	// not an extra step in it - it is the gate in front of it. Step 1 costs a
+	// connection from a pool of DATABASE_MAX_CONNECTIONS held for up to
+	// DBTimeout, and it runs for anyone who can open a socket. Charging an
+	// unauthenticated flood before that is the difference between a rate limit
+	// and a denial-of-service window (see SourceLimiter).
+	addr := ClientAddress(r, h.trustedProxyHops)
+	if allowed, wait := h.source.Allow(addr); !allowed {
+		metrics.RateLimitHits.WithLabelValues("source_ip").Inc()
+		return "", errRateLimited(wait)
+	}
+
 	// 1. Authenticate the API key.
 	key, apiErr := h.authenticate(ctx, r)
 	if apiErr != nil {
+		// A failed credential costs this address extra. It keeps the ceiling
+		// generous for honest traffic and punitive for a key-spraying flood,
+		// which is the only traffic that reaches this line repeatedly.
+		if apiErr.Code == CodeUnauthenticated {
+			h.source.Penalise(addr)
+		}
 		return "", apiErr
 	}
 
@@ -191,16 +223,16 @@ func (h *Handler) accept(r *http.Request, projectID string, log *slog.Logger) (s
 
 	// 4. Rate limit. A limiter fault must not reject traffic: Redis is a
 	// throughput control here, not the source of truth.
-	allowed, err := h.limiter.Allow(ctx, Scope{
+	decision, err := h.limiter.Allow(ctx, Scope{
 		OrganizationID: key.OrganizationID,
 		ProjectID:      key.ProjectID,
 		APIKeyID:       key.ID,
 	})
 	if err != nil {
 		log.Error("rate limiter unavailable, failing open", "error", err.Error())
-	} else if !allowed {
-		metrics.RateLimitHits.WithLabelValues("ingest").Inc()
-		return "", errRateLimited()
+	} else if !decision.Allowed {
+		log.Warn("rate limited", "limited_scope", decision.LimitedScope)
+		return "", errRateLimited(decision.RetryAfter)
 	}
 
 	// The request hash is over the EXACT bytes received, which is also what
