@@ -20,8 +20,36 @@ type Limits struct {
 	TotalTimeout          time.Duration
 	MaxResponseBytes      int64
 	MaxRedirects          int
-	IdleConnsPerHost      int
+
+	// MaxConnsPerHost caps how many connections this process will hold open to
+	// one host:port AT ONCE, across every endpoint and every tenant resolving
+	// there. It is a hard ceiling on outbound concurrency per destination:
+	// net/http BLOCKS a request that would exceed it until a connection frees
+	// up, so a value below the worker pool silently overrides
+	// MAX_CONCURRENCY_PER_ENDPOINT and friends and turns configured policy into
+	// a lie. See DefaultMaxConnsPerHost.
+	MaxConnsPerHost int
+
+	// IdleConnsPerHost bounds the WARM pool kept per host between requests. It
+	// never bounds concurrency - it only decides how many finished connections
+	// survive for reuse instead of being closed. Too low and every delivery to
+	// a busy customer pays a fresh TCP+TLS handshake; too high and the process
+	// sits on a socket per slot per host it has ever spoken to.
+	IdleConnsPerHost int
 }
+
+// Per-host connection defaults, used when Limits leaves them at zero. They are
+// deliberately not zero themselves: net/http reads MaxConnsPerHost == 0 as
+// UNLIMITED, which is the opposite of what a zero in this struct means
+// everywhere else in it.
+//
+// DefaultMaxConnsPerHost matches the default WORKER_CONCURRENCY. The real
+// default is derived from the configured pool size (see config.Load); this
+// constant is the fallback for callers that build a client without config.
+const (
+	DefaultMaxConnsPerHost  = 64
+	DefaultIdleConnsPerHost = 16
+)
 
 // DefaultLimits are conservative starting values, overridden per endpoint.
 func DefaultLimits() Limits {
@@ -33,7 +61,8 @@ func DefaultLimits() Limits {
 		TotalTimeout:          30 * time.Second,
 		MaxResponseBytes:      64 << 10,
 		MaxRedirects:          0,
-		IdleConnsPerHost:      4,
+		MaxConnsPerHost:       DefaultMaxConnsPerHost,
+		IdleConnsPerHost:      DefaultIdleConnsPerHost,
 	}
 }
 
@@ -48,20 +77,63 @@ type Client struct {
 // NewClient builds an egress client whose dialer refuses blocked addresses and
 // whose every phase has a deadline.
 func NewClient(guard *Guard, limits Limits) *Client {
+	// PreferGo is load-bearing, not a preference: it keeps resolution inside
+	// the Go resolver, where a context deadline actually cancels it. cgo's
+	// getaddrinfo runs on a thread this process cannot interrupt, so a
+	// DNSTimeout would expire while the lookup carried on holding an OS thread.
+	return newClient(guard, limits, &net.Resolver{PreferGo: true})
+}
+
+// newClient is NewClient with an injectable resolver, so a test can point
+// resolution at a nameserver that never answers without needing one.
+func newClient(guard *Guard, limits Limits, resolver *net.Resolver) *Client {
 	dialer := &net.Dialer{
 		Timeout:   limits.ConnectTimeout,
 		KeepAlive: 30 * time.Second,
 		Control:   guard.controlConn,
-		Resolver:  &net.Resolver{PreferGo: true},
+		Resolver:  resolver,
+	}
+
+	// DNSTimeout is bounded separately from the connect. Sharing one budget is
+	// what let a slow resolver eat the entire connect allowance and stall the
+	// worker slot behind it; see boundedDialer, which also explains why
+	// resolution moving here does not move the SSRF judgement.
+	bounded := &boundedDialer{
+		dialer:         dialer,
+		resolver:       resolver,
+		dnsTimeout:     limits.DNSTimeout,
+		connectTimeout: limits.ConnectTimeout,
+	}
+
+	// The per-host ceiling used to be derived - MaxConnsPerHost =
+	// IdleConnsPerHost * 4, off a hard-coded 4 - so the entire data plane made
+	// at most 16 concurrent requests to any one host:port however large the
+	// worker pool was. A k6 run measured what that costs: same scenario, same
+	// rates, endpoints on one host gave a fast-group p95 of 119.9 s against
+	// 16.6 s with the same endpoints spread over eight ports. Per-endpoint
+	// isolation cannot be configured underneath a ceiling that low, so the
+	// ceiling is now configuration, not arithmetic.
+	maxConns := limits.MaxConnsPerHost
+	if maxConns <= 0 {
+		maxConns = DefaultMaxConnsPerHost
+	}
+	idleConns := limits.IdleConnsPerHost
+	if idleConns <= 0 {
+		idleConns = DefaultIdleConnsPerHost
+	}
+	if idleConns > maxConns {
+		// Idle slots above the ceiling can never be filled; clamping keeps the
+		// transport's two numbers describing the same pool.
+		idleConns = maxConns
 	}
 
 	transport := &http.Transport{
-		DialContext:           dialer.DialContext,
+		DialContext:           bounded.DialContext,
 		TLSHandshakeTimeout:   limits.TLSHandshakeTimeout,
 		ResponseHeaderTimeout: limits.ResponseHeaderTimeout,
 		ExpectContinueTimeout: time.Second,
-		MaxIdleConnsPerHost:   limits.IdleConnsPerHost,
-		MaxConnsPerHost:       limits.IdleConnsPerHost * 4,
+		MaxIdleConnsPerHost:   idleConns,
+		MaxConnsPerHost:       maxConns,
 		IdleConnTimeout:       60 * time.Second,
 		ForceAttemptHTTP2:     true,
 		DisableCompression:    false,
@@ -77,8 +149,15 @@ func NewClient(guard *Guard, limits Limits) *Client {
 				// do not follow at all (ARCHITECTURE.md 30). A 302 to
 				// http://169.254.169.254/ is the whole attack.
 				if len(via) > limits.MaxRedirects {
-					return &BlockedTargetError{Target: req.URL.String(), Reason: "redirect not permitted"}
+					err := &BlockedTargetError{
+						Target: req.URL.String(),
+						Reason: "redirect not permitted",
+						Code:   CodeRedirect,
+					}
+					recordBlocked(err)
+					return err
 				}
+				// guard.CheckURL counts its own refusals.
 				if _, err := guard.CheckURL(req.URL.String()); err != nil {
 					return err
 				}

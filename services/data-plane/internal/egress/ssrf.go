@@ -4,11 +4,14 @@
 package egress
 
 import (
+	"errors"
 	"fmt"
 	"net"
 	"net/url"
 	"strings"
 	"syscall"
+
+	"github.com/shaq/webhook-platform/services/data-plane/internal/metrics"
 )
 
 // BlockedTargetError is returned when a destination violates egress policy.
@@ -17,7 +20,43 @@ import (
 type BlockedTargetError struct {
 	Target string
 	Reason string
+	// Code names the policy that refused this destination, drawn from the fixed
+	// vocabulary below. Reason is the human sentence and interpolates
+	// customer-supplied text; Code is the machine one and never does. Anything
+	// that groups, counts or alerts on refusals must use this field.
+	Code string
 }
+
+// The refusal vocabulary. This list is closed on purpose: it is the label set
+// of egress_blocked_total, so every value here becomes a time series and
+// anything unbounded here becomes an unbounded number of them.
+const (
+	CodeMalformedURL        = "malformed_url"
+	CodeScheme              = "scheme"
+	CodeNoHost              = "no_host"
+	CodeCredentialsInURL    = "credentials_in_url"
+	CodeNoAddress           = "no_address"
+	CodeMetadata            = "metadata"
+	CodeTransition          = "transition"
+	CodeUnspecifiedAddress  = "unspecified"
+	CodeLoopback            = "loopback"
+	CodeLinkLocal           = "link_local"
+	CodeMulticast           = "multicast"
+	CodePrivate             = "private"
+	CodeCGNAT               = "cgnat"
+	CodeProtocolAssignments = "protocol_assignments"
+	CodeDocumentation       = "documentation"
+	CodeBenchmarking        = "benchmarking"
+	CodeReserved            = "reserved"
+	CodeIPv6Special         = "ipv6_special"
+	CodeNetwork             = "network"
+	CodeDialAddress         = "dial_address"
+	CodeRedirect            = "redirect"
+	// CodeUnknown is the fallback for an error that reached the counter without
+	// a Code. It should never appear; if it does on a dashboard, a refusal path
+	// was added without a code rather than a refusal going uncounted.
+	CodeUnknown = "unknown"
+)
 
 func (e *BlockedTargetError) Error() string {
 	return fmt.Sprintf("egress blocked: %s (%s)", e.Reason, e.Target)
@@ -26,6 +65,30 @@ func (e *BlockedTargetError) Error() string {
 // BlockedTarget marks this error as a permanent policy rejection. Package retry
 // matches on this method rather than importing egress.
 func (e *BlockedTargetError) BlockedTarget() bool { return true }
+
+// recordBlocked counts one refusal on egress_blocked_total.
+//
+// It labels by Code and NEVER by Reason. Reason interpolates the thing that was
+// refused - a URL scheme a customer typed, a resolved IP address - and a label
+// whose values come from customer input is an unbounded label: one tenant
+// registering endpoints with a few thousand distinct schemes would create a few
+// thousand time series and take the metrics backend down with them. Target is
+// left out for the same reason.
+//
+// Called at the two decision boundaries, CheckURL and controlConn, rather than
+// inside CheckIP: CheckIP recurses through itself for transition addresses, so
+// counting there would report one refusal as two.
+func recordBlocked(err error) {
+	if err == nil {
+		return
+	}
+	code := CodeUnknown
+	var blocked *BlockedTargetError
+	if errors.As(err, &blocked) && blocked.Code != "" {
+		code = blocked.Code
+	}
+	metrics.EgressBlocked.WithLabelValues(code).Inc()
+}
 
 // Cloud instance-metadata addresses. Reaching these from a webhook target is
 // the canonical SSRF credential-theft path.
@@ -71,25 +134,33 @@ func NewGuard(allowPrivate bool, cidrs []string) (*Guard, error) {
 // It is a cheap first filter; CheckIP is the authoritative one, because only
 // the resolved address can be trusted.
 func (g *Guard) CheckURL(raw string) (*url.URL, error) {
+	u, err := g.checkURL(raw)
+	if err != nil {
+		recordBlocked(err)
+	}
+	return u, err
+}
+
+func (g *Guard) checkURL(raw string) (*url.URL, error) {
 	u, err := url.Parse(raw)
 	if err != nil {
-		return nil, &BlockedTargetError{Target: raw, Reason: "malformed URL"}
+		return nil, &BlockedTargetError{Target: raw, Reason: "malformed URL", Code: CodeMalformedURL}
 	}
 	switch u.Scheme {
 	case "http", "https":
 	default:
-		return nil, &BlockedTargetError{Target: raw, Reason: "scheme " + u.Scheme + " is not permitted"}
+		return nil, &BlockedTargetError{Target: raw, Reason: "scheme " + u.Scheme + " is not permitted", Code: CodeScheme}
 	}
 	if u.Host == "" {
-		return nil, &BlockedTargetError{Target: raw, Reason: "URL has no host"}
+		return nil, &BlockedTargetError{Target: raw, Reason: "URL has no host", Code: CodeNoHost}
 	}
 	if u.User != nil {
-		return nil, &BlockedTargetError{Target: raw, Reason: "credentials in URL are not permitted"}
+		return nil, &BlockedTargetError{Target: raw, Reason: "credentials in URL are not permitted", Code: CodeCredentialsInURL}
 	}
 
 	host := u.Hostname()
 	if host == "" {
-		return nil, &BlockedTargetError{Target: raw, Reason: "URL has no host"}
+		return nil, &BlockedTargetError{Target: raw, Reason: "URL has no host", Code: CodeNoHost}
 	}
 	// A literal IP can be judged immediately. A hostname cannot be judged here
 	// at all - see CheckIP, which runs at dial time on the address actually used.
@@ -107,7 +178,7 @@ func (g *Guard) CheckURL(raw string) (*url.URL, error) {
 // private address past this, because this runs after resolution and before connect.
 func (g *Guard) CheckIP(ip net.IP) error {
 	if ip == nil {
-		return &BlockedTargetError{Target: "<nil>", Reason: "no resolved address"}
+		return &BlockedTargetError{Target: "<nil>", Reason: "no resolved address", Code: CodeNoAddress}
 	}
 	target := ip.String()
 
@@ -118,7 +189,7 @@ func (g *Guard) CheckIP(ip net.IP) error {
 	// allowlist by refusing to boot with AllowPrivateNetworks in production.
 	for _, m := range metadataAddrs {
 		if m != nil && ip.Equal(m) {
-			return &BlockedTargetError{Target: target, Reason: "cloud instance metadata address"}
+			return &BlockedTargetError{Target: target, Reason: "cloud instance metadata address", Code: CodeMetadata}
 		}
 	}
 
@@ -130,6 +201,7 @@ func (g *Guard) CheckIP(ip net.IP) error {
 			return &BlockedTargetError{
 				Target: target,
 				Reason: "transition address embedding " + embedded.String(),
+				Code:   CodeTransition,
 			}
 		}
 	}
@@ -146,15 +218,15 @@ func (g *Guard) CheckIP(ip net.IP) error {
 
 	switch {
 	case ip.IsUnspecified():
-		return &BlockedTargetError{Target: target, Reason: "unspecified address"}
+		return &BlockedTargetError{Target: target, Reason: "unspecified address", Code: CodeUnspecifiedAddress}
 	case ip.IsLoopback():
-		return &BlockedTargetError{Target: target, Reason: "loopback address"}
+		return &BlockedTargetError{Target: target, Reason: "loopback address", Code: CodeLoopback}
 	case ip.IsLinkLocalUnicast(), ip.IsLinkLocalMulticast():
-		return &BlockedTargetError{Target: target, Reason: "link-local address"}
+		return &BlockedTargetError{Target: target, Reason: "link-local address", Code: CodeLinkLocal}
 	case ip.IsInterfaceLocalMulticast(), ip.IsMulticast():
-		return &BlockedTargetError{Target: target, Reason: "multicast address"}
+		return &BlockedTargetError{Target: target, Reason: "multicast address", Code: CodeMulticast}
 	case ip.IsPrivate():
-		return &BlockedTargetError{Target: target, Reason: "private address"}
+		return &BlockedTargetError{Target: target, Reason: "private address", Code: CodePrivate}
 	}
 
 	// net.IP.IsPrivate covers RFC1918 and RFC4193 (fc00::/7) only. The ranges
@@ -162,17 +234,17 @@ func (g *Guard) CheckIP(ip net.IP) error {
 	if v4 := ip.To4(); v4 != nil {
 		switch {
 		case v4[0] == 100 && v4[1] >= 64 && v4[1] <= 127:
-			return &BlockedTargetError{Target: target, Reason: "carrier-grade NAT range (100.64.0.0/10)"}
+			return &BlockedTargetError{Target: target, Reason: "carrier-grade NAT range (100.64.0.0/10)", Code: CodeCGNAT}
 		case v4[0] == 192 && v4[1] == 0 && v4[2] == 0:
-			return &BlockedTargetError{Target: target, Reason: "IETF protocol assignments (192.0.0.0/24)"}
+			return &BlockedTargetError{Target: target, Reason: "IETF protocol assignments (192.0.0.0/24)", Code: CodeProtocolAssignments}
 		case v4[0] == 192 && v4[1] == 0 && v4[2] == 2,
 			v4[0] == 198 && v4[1] == 51 && v4[2] == 100,
 			v4[0] == 203 && v4[1] == 0 && v4[2] == 113:
-			return &BlockedTargetError{Target: target, Reason: "documentation range"}
+			return &BlockedTargetError{Target: target, Reason: "documentation range", Code: CodeDocumentation}
 		case v4[0] == 198 && (v4[1] == 18 || v4[1] == 19):
-			return &BlockedTargetError{Target: target, Reason: "benchmarking range (198.18.0.0/15)"}
+			return &BlockedTargetError{Target: target, Reason: "benchmarking range (198.18.0.0/15)", Code: CodeBenchmarking}
 		case v4[0] >= 240:
-			return &BlockedTargetError{Target: target, Reason: "reserved range (240.0.0.0/4)"}
+			return &BlockedTargetError{Target: target, Reason: "reserved range (240.0.0.0/4)", Code: CodeReserved}
 		}
 	} else {
 		// IPv4-mapped IPv6 (::ffff:127.0.0.1) is re-checked as IPv4 by To4()
@@ -181,11 +253,11 @@ func (g *Guard) CheckIP(ip net.IP) error {
 			switch {
 			case ip[0] == 0x01 && ip[1] == 0x00 && ip[2] == 0 && ip[3] == 0 &&
 				ip[4] == 0 && ip[5] == 0 && ip[6] == 0 && ip[7] == 0:
-				return &BlockedTargetError{Target: target, Reason: "IPv6 discard prefix (100::/64)"}
+				return &BlockedTargetError{Target: target, Reason: "IPv6 discard prefix (100::/64)", Code: CodeIPv6Special}
 			case ip[0] == 0x20 && ip[1] == 0x01 && ip[2] <= 0x01:
-				return &BlockedTargetError{Target: target, Reason: "IPv6 special-purpose range (2001::/23)"}
+				return &BlockedTargetError{Target: target, Reason: "IPv6 special-purpose range (2001::/23)", Code: CodeIPv6Special}
 			case ip[0] == 0x20 && ip[1] == 0x01 && ip[2] == 0x0d && ip[3] == 0xb8:
-				return &BlockedTargetError{Target: target, Reason: "IPv6 documentation range (2001:db8::/32)"}
+				return &BlockedTargetError{Target: target, Reason: "IPv6 documentation range (2001:db8::/32)", Code: CodeDocumentation}
 			}
 		}
 	}
@@ -197,14 +269,22 @@ func (g *Guard) CheckIP(ip net.IP) error {
 // resolved address, after resolution and immediately before connect, which is
 // exactly the point at which a rebinding attack would otherwise win.
 func (g *Guard) controlConn(network, address string, _ syscall.RawConn) error {
+	err := g.judgeDial(network, address)
+	if err != nil {
+		recordBlocked(err)
+	}
+	return err
+}
+
+func (g *Guard) judgeDial(network, address string) error {
 	switch network {
 	case "tcp", "tcp4", "tcp6":
 	default:
-		return &BlockedTargetError{Target: network, Reason: "network " + network + " is not permitted"}
+		return &BlockedTargetError{Target: network, Reason: "network " + network + " is not permitted", Code: CodeNetwork}
 	}
 	host, _, err := net.SplitHostPort(address)
 	if err != nil {
-		return &BlockedTargetError{Target: address, Reason: "unparseable dial address"}
+		return &BlockedTargetError{Target: address, Reason: "unparseable dial address", Code: CodeDialAddress}
 	}
 	return g.CheckIP(net.ParseIP(host))
 }

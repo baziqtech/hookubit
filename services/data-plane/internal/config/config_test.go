@@ -190,3 +190,57 @@ func TestRateLimitConfigIsValidated(t *testing.T) {
 		})
 	}
 }
+
+// REGRESSION. The per-host connection ceiling used to be arithmetic, not
+// configuration: egress hard-coded IdleConnsPerHost = 4 and net/http derived
+// MaxConnsPerHost = 16 from it, so one data-plane process made at most 16
+// concurrent requests to any one host:port however large WORKER_CONCURRENCY
+// was, and every per-endpoint, per-project and per-org concurrency ceiling
+// above it was fiction for any customer whose endpoints share a hostname.
+//
+// The default now tracks the worker pool: a process cannot have more than
+// WorkerConcurrency attempts in flight, so WorkerConcurrency connections to one
+// host is exactly enough for the transport never to be the thing that queues.
+func TestEgressMaxConnsPerHostDefaultsToTheWorkerPool(t *testing.T) {
+	cfg, err := loadWith(t, nil)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.EgressMaxConnsPerHost != cfg.WorkerConcurrency {
+		t.Fatalf("EgressMaxConnsPerHost = %d, want WorkerConcurrency (%d): a transport ceiling below the pool silently overrides MAX_CONCURRENCY_PER_ENDPOINT",
+			cfg.EgressMaxConnsPerHost, cfg.WorkerConcurrency)
+	}
+
+	cfg, err = loadWith(t, map[string]string{"WORKER_CONCURRENCY": "200"})
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.EgressMaxConnsPerHost != 200 {
+		t.Fatalf("EgressMaxConnsPerHost = %d, want 200; the default must follow WORKER_CONCURRENCY, not a constant", cfg.EgressMaxConnsPerHost)
+	}
+}
+
+func TestEgressMaxConnsPerHostIsConfigurableAndBounded(t *testing.T) {
+	cfg, err := loadWith(t, map[string]string{
+		"WORKER_CONCURRENCY":        "64",
+		"EGRESS_MAX_CONNS_PER_HOST": "8",
+	})
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	// Deliberately below the pool is allowed - being gentle with a fragile
+	// consumer is a legitimate choice. It must just be a visible one.
+	if cfg.EgressMaxConnsPerHost != 8 {
+		t.Fatalf("EgressMaxConnsPerHost = %d, want 8", cfg.EgressMaxConnsPerHost)
+	}
+
+	// Zero is not "no limit" here. net/http reads MaxConnsPerHost == 0 as
+	// unlimited, which is the opposite of what every other bound in this
+	// config means, so an explicit non-positive value must not reach the
+	// transport. Zero itself means "derive", so negative is the case to check.
+	if _, err := loadWith(t, map[string]string{"EGRESS_MAX_CONNS_PER_HOST": "-1"}); err == nil {
+		t.Fatal("a negative EGRESS_MAX_CONNS_PER_HOST was accepted")
+	} else if !strings.Contains(err.Error(), "EGRESS_MAX_CONNS_PER_HOST") {
+		t.Fatalf("error does not name the offending variable: %v", err)
+	}
+}

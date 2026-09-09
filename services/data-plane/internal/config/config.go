@@ -14,6 +14,7 @@ import (
 	"github.com/shaq/webhook-platform/services/data-plane/internal/payloadstore"
 	"github.com/shaq/webhook-platform/services/data-plane/internal/queue"
 	"github.com/shaq/webhook-platform/services/data-plane/internal/ratelimit"
+	"github.com/shaq/webhook-platform/services/data-plane/internal/router"
 )
 
 // ShutdownGrace is the TOTAL budget from SIGTERM to process exit, and
@@ -139,7 +140,6 @@ type Config struct {
 	WorkerClaimBatch   int
 	DeliveryLease      time.Duration
 	OutboxPollInterval time.Duration
-	OutboxBatchSize    int
 
 	// Endpoint signing secrets are encrypted by the NestJS control plane and
 	// decrypted here. Same key, same envelope, same AAD - see internal/worker.
@@ -152,6 +152,10 @@ type Config struct {
 	RouterLease                    time.Duration
 	RouterMaxSubscriptionsPerEvent int
 	RouterMaxOutboxAttempts        int
+	// RouterMaxOutboxRetryDuration bounds RECORDED outbox failure by elapsed
+	// time. A count cannot separate a twenty-minute database brownout from a row
+	// that fails every time; a clock can. See router.DefaultMaxOutboxRetryDuration.
+	RouterMaxOutboxRetryDuration time.Duration
 
 	BreakerFailureThreshold  int
 	BreakerDegradedThreshold int
@@ -178,6 +182,12 @@ type Config struct {
 	EgressMaxRedirects          int
 	EgressAllowPrivateNetworks  bool
 	EgressPrivateAllowlist      []string
+
+	// EgressMaxConnsPerHost is the hard ceiling on concurrent connections this
+	// process opens to one destination host:port, shared by every endpoint and
+	// every tenant that resolves there. Defaults to WorkerConcurrency - see the
+	// derivation below for why the two are tied.
+	EgressMaxConnsPerHost int
 
 	OTLPEndpoint string
 }
@@ -249,7 +259,6 @@ func Load() (*Config, error) {
 		WorkerClaimBatch:   envInt("WORKER_CLAIM_BATCH_SIZE", 100),
 		DeliveryLease:      time.Duration(envInt("DELIVERY_LEASE_SECONDS", 120)) * time.Second,
 		OutboxPollInterval: envDuration("OUTBOX_POLL_INTERVAL_MS", 250*time.Millisecond),
-		OutboxBatchSize:    envInt("OUTBOX_BATCH_SIZE", 200),
 
 		EncryptionKey:         os.Getenv("ENCRYPTION_KEY"),
 		EncryptionKeyID:       env("ENCRYPTION_KEY_ID", "k1"),
@@ -260,6 +269,7 @@ func Load() (*Config, error) {
 		RouterLease:                    time.Duration(envInt("ROUTER_LEASE_SECONDS", 60)) * time.Second,
 		RouterMaxSubscriptionsPerEvent: envInt("ROUTER_MAX_SUBSCRIPTIONS_PER_EVENT", 1000),
 		RouterMaxOutboxAttempts:        envInt("ROUTER_MAX_OUTBOX_ATTEMPTS", 10),
+		RouterMaxOutboxRetryDuration:   envDuration("ROUTER_MAX_OUTBOX_RETRY_DURATION_MS", router.DefaultMaxOutboxRetryDuration),
 
 		BreakerFailureThreshold:  envInt("BREAKER_FAILURE_THRESHOLD", 5),
 		BreakerDegradedThreshold: envInt("BREAKER_DEGRADED_THRESHOLD", 3),
@@ -286,10 +296,36 @@ func Load() (*Config, error) {
 		EgressTotalTimeout:          envDuration("EGRESS_TOTAL_TIMEOUT_MS", 30*time.Second),
 		EgressMaxResponseBytes:      int64(envInt("EGRESS_MAX_RESPONSE_BYTES", 64<<10)),
 		EgressMaxRedirects:          envInt("EGRESS_MAX_REDIRECTS", 0),
-		EgressAllowPrivateNetworks:  envBool("EGRESS_ALLOW_PRIVATE_NETWORKS", false),
-		EgressPrivateAllowlist:      splitList(os.Getenv("EGRESS_PRIVATE_ALLOWLIST")),
+		// 0 means "derive from WORKER_CONCURRENCY"; see below.
+		EgressMaxConnsPerHost:      envInt("EGRESS_MAX_CONNS_PER_HOST", 0),
+		EgressAllowPrivateNetworks: envBool("EGRESS_ALLOW_PRIVATE_NETWORKS", false),
+		EgressPrivateAllowlist:     splitList(os.Getenv("EGRESS_PRIVATE_ALLOWLIST")),
 
 		OTLPEndpoint: os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT"),
+	}
+
+	// The per-host transport ceiling defaults to the worker pool size, because
+	// a single process cannot have more than WorkerConcurrency attempts in
+	// flight, so WorkerConcurrency connections to one host is exactly enough
+	// for the pool to never queue on the transport - and not one connection
+	// more than it could use.
+	//
+	// The alternative, a fixed small number, is what shipped: the ceiling was
+	// 16 whatever the pool was, and it sat BELOW MAX_CONCURRENCY_PER_ENDPOINT,
+	// MAX_CONCURRENCY_PER_PROJECT and the delivery gate, silently overriding
+	// all of them for any customer whose endpoints share a hostname - which is
+	// the normal shape. Politeness to a customer's server is real, but it
+	// belongs to the controls an operator can see and a customer can be told
+	// about (the concurrency gate and the rate limiter), not to a transport
+	// constant that makes those controls fiction. Set EGRESS_MAX_CONNS_PER_HOST
+	// explicitly to be gentler than the pool; the platform will then queue on
+	// the transport on purpose rather than by accident.
+	//
+	// Only an UNSET knob derives. A negative one is rejected below rather than
+	// quietly replaced, because silently substituting a number for the one an
+	// operator wrote is the failure mode this whole change exists to remove.
+	if c.EgressMaxConnsPerHost == 0 && c.WorkerConcurrency > 0 {
+		c.EgressMaxConnsPerHost = c.WorkerConcurrency
 	}
 
 	// Guard rails that have bitten real deployments.
@@ -365,6 +401,10 @@ func Load() (*Config, error) {
 	}
 	if c.MaxConcurrencyEndpoint > c.MaxConcurrencyProject {
 		problems = append(problems, "MAX_CONCURRENCY_PER_ENDPOINT cannot exceed MAX_CONCURRENCY_PER_PROJECT")
+	}
+	if c.EgressMaxConnsPerHost <= 0 {
+		problems = append(problems,
+			"EGRESS_MAX_CONNS_PER_HOST must be positive; net/http reads zero as UNLIMITED connections to one host, which is not a bound")
 	}
 
 	if len(problems) > 0 {

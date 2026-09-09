@@ -17,7 +17,7 @@ import (
 	"github.com/shaq/webhook-platform/services/data-plane/internal/metrics"
 	"github.com/shaq/webhook-platform/services/data-plane/internal/payloadstore"
 	"github.com/shaq/webhook-platform/services/data-plane/internal/queue"
-	"github.com/shaq/webhook-platform/services/data-plane/internal/retry"
+	"github.com/shaq/webhook-platform/services/data-plane/internal/ratelimit"
 	"github.com/shaq/webhook-platform/services/data-plane/internal/router"
 	"github.com/shaq/webhook-platform/services/data-plane/internal/worker"
 )
@@ -87,8 +87,13 @@ func runRouter(ctx context.Context, cfg *config.Config, pool *pgxpool.Pool, log 
 		Lease:                    cfg.RouterLease,
 		MaxSubscriptionsPerEvent: cfg.RouterMaxSubscriptionsPerEvent,
 		MaxOutboxAttempts:        cfg.RouterMaxOutboxAttempts,
+		MaxOutboxRetryDuration:   cfg.RouterMaxOutboxRetryDuration,
 		LagInterval:              10 * time.Second,
-		RetryBackoff:             retry.DefaultPolicy(),
+		// The OUTBOX's backoff, not the delivery one. Passing
+		// retry.DefaultPolicy() here made the outbox back off on the delivery
+		// schedule, whose 1h cap against a 1h MaxOutboxRetryDuration would park
+		// an accepted event after a single retry.
+		RetryBackoff: router.DefaultOutboxBackoff(),
 	})
 	if err != nil {
 		return fmt.Errorf("build router: %w", err)
@@ -113,6 +118,13 @@ func newQueue(cfg *config.Config, pool *pgxpool.Pool, log *slog.Logger) *queue.P
 	return queue.NewPostgresQueue(pool, strategy)
 }
 
+// queueDepthInterval is how often queue_depth is recomputed. A constant rather
+// than an environment variable: it is one aggregate over the non-terminal rows,
+// the cost is the same for every deployment, and fifteen seconds is well inside
+// any useful scrape interval. If a deployment ever needs it tuned, that is the
+// moment to add the knob - not before.
+const queueDepthInterval = 15 * time.Second
+
 func runScheduler(ctx context.Context, cfg *config.Config, pool *pgxpool.Pool, log *slog.Logger) error {
 	q := newQueue(cfg, pool, log)
 
@@ -121,6 +133,25 @@ func runScheduler(ctx context.Context, cfg *config.Config, pool *pgxpool.Pool, l
 	// it is far too infrequent to deserve a process. See internal/payloadstore
 	// for why an object lifecycle rule cannot do this job.
 	go runPayloadSweep(ctx, cfg, pool, log)
+
+	// The queue depth gauge rides here for the same reason and one more: it is
+	// a pure READER - no lease, no claim, no write - so the singleton
+	// reconciliation role is the cheapest place to put it, and its numbers are
+	// fleet-wide rather than per-replica.
+	//
+	// It is the only instrument that can see the failure modes that produce no
+	// attempt at all. A delivery deferred by an open circuit breaker or a rate
+	// limit writes no delivery_attempts row and moves no counter; the rows just
+	// accumulate. Counters of things that happened cannot show work that is not
+	// happening.
+	//
+	// The error is discarded on purpose: Run returns nil on cancellation and
+	// swallows query faults itself, so there is nothing here that should be able
+	// to take the scheduler down. A metrics refresher must never be why a role
+	// exits.
+	go func() {
+		_ = metrics.NewQueueDepthCollector(pool, queueDepthInterval, log).Run(ctx)
+	}()
 
 	// The scheduler owns recovery, not timing: Claim already treats a due
 	// delivery - including one whose lease has expired - as ready, so losing
@@ -141,6 +172,38 @@ func runScheduler(ctx context.Context, cfg *config.Config, pool *pgxpool.Pool, l
 	}, log)
 }
 
+// egressLimits maps configuration onto the outbound HTTP bounds. It exists as a
+// function so a test can pin the one relationship that is easy to break by
+// accident and impossible to notice in production: the per-host connection
+// ceiling must be what the operator configured.
+//
+// It used to read `IdleConnsPerHost: 4` here, and net/http derived a
+// MaxConnsPerHost of 16 from it. That was the real limit on outbound
+// concurrency to any one customer host - below WORKER_CONCURRENCY, below
+// MAX_CONCURRENCY_PER_ENDPOINT, and reachable from no environment variable.
+func egressLimits(cfg *config.Config) egress.Limits {
+	// Warm connections are worth keeping, but not one per pool slot per host:
+	// a data plane speaking to thousands of customer hosts would then hold
+	// thousands of idle sockets. Cap the warm pool at the transport default and
+	// let the ceiling above it carry the concurrency. Idle slots never bound
+	// concurrency, so this cannot re-create the bug it replaces.
+	idle := egress.DefaultIdleConnsPerHost
+	if cfg.EgressMaxConnsPerHost < idle {
+		idle = cfg.EgressMaxConnsPerHost
+	}
+	return egress.Limits{
+		DNSTimeout:            cfg.EgressDNSTimeout,
+		ConnectTimeout:        cfg.EgressConnectTimeout,
+		TLSHandshakeTimeout:   cfg.EgressTLSTimeout,
+		ResponseHeaderTimeout: cfg.EgressResponseHeaderTimeout,
+		TotalTimeout:          cfg.EgressTotalTimeout,
+		MaxResponseBytes:      cfg.EgressMaxResponseBytes,
+		MaxRedirects:          cfg.EgressMaxRedirects,
+		MaxConnsPerHost:       cfg.EgressMaxConnsPerHost,
+		IdleConnsPerHost:      idle,
+	}
+}
+
 func runWorker(ctx context.Context, cfg *config.Config, pool *pgxpool.Pool, log *slog.Logger, workerID string) error {
 	// The keyring must be built before any work is claimed. A worker that
 	// cannot decrypt signing secrets would claim deliveries and fail every one
@@ -154,16 +217,7 @@ func runWorker(ctx context.Context, cfg *config.Config, pool *pgxpool.Pool, log 
 	if err != nil {
 		return fmt.Errorf("build egress guard: %w", err)
 	}
-	client := egress.NewClient(guard, egress.Limits{
-		DNSTimeout:            cfg.EgressDNSTimeout,
-		ConnectTimeout:        cfg.EgressConnectTimeout,
-		TLSHandshakeTimeout:   cfg.EgressTLSTimeout,
-		ResponseHeaderTimeout: cfg.EgressResponseHeaderTimeout,
-		TotalTimeout:          cfg.EgressTotalTimeout,
-		MaxResponseBytes:      cfg.EgressMaxResponseBytes,
-		MaxRedirects:          cfg.EgressMaxRedirects,
-		IdleConnsPerHost:      4,
-	})
+	client := egress.NewClient(guard, egressLimits(cfg))
 
 	// The worker must read what ingest wrote. Both sides build the same store
 	// from the same S3_* configuration, so the key layout cannot drift: a
@@ -181,6 +235,11 @@ func runWorker(ctx context.Context, cfg *config.Config, pool *pgxpool.Pool, log 
 		payloads = store
 	}
 
+	limiter, err := buildDeliveryLimiter(cfg, log)
+	if err != nil {
+		return fmt.Errorf("build delivery rate limiter: %w", err)
+	}
+
 	w, err := worker.New(worker.Options{
 		Queue:    newQueue(cfg, pool, log),
 		Store:    worker.NewPostgresStore(pool),
@@ -188,6 +247,7 @@ func runWorker(ctx context.Context, cfg *config.Config, pool *pgxpool.Pool, log 
 		Client:   client,
 		Keyring:  ring,
 		Payloads: payloads,
+		Limiter:  limiter,
 		Limits: worker.GateLimits{
 			Global:   cfg.MaxConcurrencyGlobal,
 			Org:      cfg.MaxConcurrencyPerOrg,
@@ -200,20 +260,87 @@ func runWorker(ctx context.Context, cfg *config.Config, pool *pgxpool.Pool, log 
 			HalfOpenSuccesses: cfg.BreakerHalfOpenSuccesses,
 			BaseCooldown:      cfg.BreakerBaseCooldown,
 		},
-		WorkerID:               workerID,
-		Concurrency:            cfg.WorkerConcurrency,
-		ClaimBatch:             cfg.WorkerClaimBatch,
-		PollInterval:           cfg.WorkerPollInterval,
-		Lease:                  cfg.DeliveryLease,
-		DBTimeout:              cfg.IngestDBTimeout,
+		WorkerID:     workerID,
+		Concurrency:  cfg.WorkerConcurrency,
+		ClaimBatch:   cfg.WorkerClaimBatch,
+		PollInterval: cfg.WorkerPollInterval,
+		Lease:        cfg.DeliveryLease,
+		DBTimeout:    cfg.IngestDBTimeout,
+		// The object fetch gets PAYLOAD_DOWNLOAD_TIMEOUT_MS, not the database
+		// budget. Passing IngestDBTimeout for both meant the delivery path's
+		// payload fetch inherited the smaller of the two and a
+		// PAYLOAD_DOWNLOAD_TIMEOUT_MS set above it was silently truncated.
+		PayloadTimeout:         cfg.PayloadDownloadTimeout,
 		MaxStoredResponseBytes: cfg.MaxStoredResponseBytes,
 		Logger:                 log,
 	})
 	if err != nil {
 		return fmt.Errorf("build worker: %w", err)
 	}
-	log.Info("worker started", "worker_id", workerID, "concurrency", cfg.WorkerConcurrency)
+	// max_conns_per_host is logged next to concurrency deliberately: it is the
+	// one bound that can silently outrank every configured concurrency ceiling,
+	// and an operator comparing the two numbers can see that it does.
+	log.Info("worker started",
+		"worker_id", workerID,
+		"concurrency", cfg.WorkerConcurrency,
+		"max_conns_per_host", cfg.EgressMaxConnsPerHost)
 	return w.Run(ctx)
+}
+
+// deliveryLimiter adapts internal/ratelimit onto worker.RateLimiter, so a
+// per-endpoint delivery ceiling is charged against ONE fleet-wide bucket rather
+// than one bucket per worker replica.
+//
+// Two properties this must not lose, both asserted by the outage suite:
+//
+//   - it never fails closed. internal/ratelimit resolves every fault itself -
+//     a dead Redis, a timeout, a degraded circuit - and falls back to the
+//     in-process bucket, so the worst a Redis outage can do is put the ceiling
+//     back to per replica. A delivery is never refused because a cache blipped.
+//   - internal/worker never learns Redis exists. The go-redis dependency lives
+//     in internal/ratelimit and reaches the worker only through this interface;
+//     the structural guard in internal/failure/outage asserts that the durable
+//     path imports no Redis client, and it is right to.
+type deliveryLimiter struct{ inner *ratelimit.Limiter }
+
+func (d deliveryLimiter) Allow(ctx context.Context, key string, limit int, window time.Duration) (bool, time.Duration) {
+	if limit <= 0 || window <= 0 {
+		return true, 0
+	}
+	return d.inner.AllowBucket(ctx, ratelimit.BucketFor(ratelimit.ScopeEndpoint, key, limit, window))
+}
+
+// buildDeliveryLimiter returns the limiter for endpoints.rate_limit, or nil to
+// leave the worker on its own in-process token bucket.
+//
+// Nil is the honest answer with no REDIS_URL: worker.New already defaults to an
+// in-process bucket, and routing through internal/ratelimit's local fallback
+// instead would be the same behaviour with an extra layer and a name that
+// implies a fleet-wide guarantee it cannot make.
+func buildDeliveryLimiter(cfg *config.Config, log *slog.Logger) (worker.RateLimiter, error) {
+	if cfg.RedisURL == "" {
+		log.Warn("REDIS_URL is not set; endpoint delivery rate limits are enforced PER REPLICA, not fleet-wide",
+			"effect", "an endpoint limit of N is effectively N x the number of worker pods")
+		return nil, nil
+	}
+	client, err := ratelimit.NewRedisClient(cfg.RedisURL, cfg.RedisTimeout)
+	if err != nil {
+		return nil, fmt.Errorf("build delivery limiter redis client: %w", err)
+	}
+
+	limiter := ratelimit.New(ratelimit.Options{
+		// No policy Source: this limiter charges the endpoint's own
+		// rate_limit column, which arrives on the delivery row. Adding a source
+		// here would put a policy query on the delivery hot path for buckets
+		// nothing resolves from rows.
+		Redis:   ratelimit.NewRedisScripter(client),
+		Timeout: cfg.RedisTimeout,
+		Logger:  log,
+	})
+	log.Info("endpoint delivery rate limiting is fleet-wide",
+		"redis_timeout_ms", cfg.RedisTimeout.Milliseconds(),
+		"degrades_to", "in-process buckets when redis is unreachable")
+	return deliveryLimiter{inner: limiter}, nil
 }
 
 func runAll(ctx context.Context, cfg *config.Config, pool *pgxpool.Pool, log *slog.Logger, instanceID string) error {
