@@ -16,4 +16,28 @@
 //
 // The suite needs a database. testsupport.Pool SKIPS rather than fails when
 // DATABASE_URL is unset, and that contract is preserved here.
+// # An unexplained anomaly, recorded rather than hidden
+//
+// On 2026-09-09, TestScenario06_SchedulerCrashes failed three times inside
+// full-suite runs with "claimed 5 deliveries with the scheduler down, want 1".
+// An instrumented run confirmed it is not a bad assertion: with five rows in the
+// database and queue.Claim called with a limit of 1, five Lease values came back
+// AND five rows in `deliveries` were left carrying that call's locked_by. The
+// database really did update five rows through a statement whose subquery ends
+// in LIMIT $3.
+//
+// It has not reproduced since, across thirteen consecutive full-suite runs
+// including four at load average 21, a 25-iteration tight loop around the same
+// claim, and runs with pgx statement caching disabled. So the mechanism is
+// unknown. Ruled out by observation, not by argument: a wrong assertion, the
+// test's own seeding, tests inside this package running in parallel (none call
+// t.Parallel), and cross-run database theft (which the testsupport guard now
+// refuses outright, and which produces a different symptom).
+//
+// If you see it again, capture it rather than re-running: the useful evidence is
+// the row count in `deliveries` carrying the claim's locked_by immediately
+// afterwards, and pg_stat_activity for the statement as the server received it.
+// A claim that overruns its limit in production would let a worker hold more
+// leases than its pool can run, which breaks the bound WORKER_CONCURRENCY is
+// supposed to give.
 package failure
