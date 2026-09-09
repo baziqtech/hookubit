@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/shaq/webhook-platform/services/data-plane/internal/ingest"
+	"github.com/shaq/webhook-platform/services/data-plane/internal/payloadstore"
 	"github.com/shaq/webhook-platform/services/data-plane/internal/queue"
 	"github.com/shaq/webhook-platform/services/data-plane/internal/ratelimit"
 )
@@ -90,9 +91,36 @@ type Config struct {
 	S3AccessKey      string
 	S3SecretKey      string
 	S3ForcePathStyle bool
+	// S3Prefix is the key namespace the platform owns inside the bucket.
+	// Everything written lives under it, so the orphan sweep can name one
+	// prefix and be sure it covers the platform's objects and nothing an
+	// operator put in the bucket by hand.
+	S3Prefix string
 
 	PayloadInlineMaxBytes int64
 	PayloadMaxBytes       int64
+
+	// PayloadUploadTimeout and PayloadDownloadTimeout bound ONE object storage
+	// call each, retries included. Neither may be unbounded: an upload sits on
+	// the ingest hot path and a download sits between a worker and its
+	// endpoint (ARCHITECTURE.md 31).
+	PayloadUploadTimeout   time.Duration
+	PayloadDownloadTimeout time.Duration
+	// PayloadStoreMaxAttempts bounds the SDK's own retrying. A count, not a
+	// deadline; the timeouts above are the deadline.
+	PayloadStoreMaxAttempts int
+
+	// Orphan sweep. `PlanPayload` uploads before the ingest transaction, so a
+	// process that dies in between leaves an object no events row references.
+	// See internal/payloadstore for why this is a sweep rather than a bucket
+	// lifecycle rule.
+	PayloadSweepEnabled  bool
+	PayloadSweepInterval time.Duration
+	// PayloadSweepMinAge is how old an object must be before the sweep will
+	// even consider it. It is floored at payloadstore.MinAgeFloor: anything
+	// shorter races a request that is between its upload and its COMMIT.
+	PayloadSweepMinAge    time.Duration
+	PayloadSweepMaxDelete int
 
 	IngestPort  int
 	MetricsPort int
@@ -196,9 +224,19 @@ func Load() (*Config, error) {
 		S3AccessKey:      os.Getenv("S3_ACCESS_KEY"),
 		S3SecretKey:      os.Getenv("S3_SECRET_KEY"),
 		S3ForcePathStyle: envBool("S3_FORCE_PATH_STYLE", true),
+		S3Prefix:         env("S3_PREFIX", payloadstore.DefaultPrefix),
 
 		PayloadInlineMaxBytes: int64(envInt("PAYLOAD_INLINE_MAX_BYTES", 64<<10)),
 		PayloadMaxBytes:       int64(envInt("PAYLOAD_MAX_BYTES", 1<<20)),
+
+		PayloadUploadTimeout:    envDuration("PAYLOAD_UPLOAD_TIMEOUT_MS", payloadstore.DefaultUploadTimeout),
+		PayloadDownloadTimeout:  envDuration("PAYLOAD_DOWNLOAD_TIMEOUT_MS", payloadstore.DefaultDownloadTimeout),
+		PayloadStoreMaxAttempts: envInt("PAYLOAD_STORE_MAX_ATTEMPTS", payloadstore.DefaultMaxAttempts),
+
+		PayloadSweepEnabled:   envBool("PAYLOAD_SWEEP_ENABLED", true),
+		PayloadSweepInterval:  envDuration("PAYLOAD_SWEEP_INTERVAL_MS", time.Hour),
+		PayloadSweepMinAge:    envDuration("PAYLOAD_SWEEP_MIN_AGE_MS", 24*time.Hour),
+		PayloadSweepMaxDelete: envInt("PAYLOAD_SWEEP_MAX_DELETES", 1000),
 
 		IngestPort:      envInt("INGEST_PORT", 8080),
 		MetricsPort:     envInt("DATA_PLANE_METRICS_PORT", 9090),
@@ -261,6 +299,23 @@ func Load() (*Config, error) {
 	}
 	if c.PayloadInlineMaxBytes > c.PayloadMaxBytes {
 		problems = append(problems, "PAYLOAD_INLINE_MAX_BYTES cannot exceed PAYLOAD_MAX_BYTES")
+	}
+	if c.PayloadUploadTimeout <= 0 {
+		problems = append(problems, "PAYLOAD_UPLOAD_TIMEOUT_MS must be positive; an unbounded upload holds an ingest request open")
+	}
+	if c.PayloadDownloadTimeout <= 0 {
+		problems = append(problems, "PAYLOAD_DOWNLOAD_TIMEOUT_MS must be positive; an unbounded download holds a worker slot open")
+	}
+	if c.PayloadStoreMaxAttempts <= 0 {
+		problems = append(problems, "PAYLOAD_STORE_MAX_ATTEMPTS must be positive")
+	}
+	if c.PayloadSweepEnabled && c.PayloadSweepMinAge < payloadstore.MinAgeFloor {
+		problems = append(problems, fmt.Sprintf(
+			"PAYLOAD_SWEEP_MIN_AGE_MS must be at least %d; a shorter window races an ingest request that is between its upload and its COMMIT",
+			payloadstore.MinAgeFloor.Milliseconds()))
+	}
+	if c.S3Bucket != "" && c.S3Prefix == "" {
+		problems = append(problems, "S3_PREFIX must not be empty; the sweep needs a namespace it can be sure the platform owns")
 	}
 	if c.WorkerConcurrency <= 0 {
 		problems = append(problems, "WORKER_CONCURRENCY must be positive; unbounded worker pools are not permitted")

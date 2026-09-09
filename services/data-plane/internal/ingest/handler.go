@@ -338,12 +338,19 @@ func (h *Handler) persist(
 ) (string, *apiError) {
 	eventID := ids.New(ids.Event)
 
-	// NOTE: an offloaded payload is uploaded here, BEFORE the transaction. If
-	// the claim below is lost or the insert fails, that object is orphaned - no
-	// events row will ever reference it and nothing reclaims it. Uploading
-	// after the claim would mean holding the ingest transaction open across an
-	// S3 round trip, which is worse. See "Object storage reconciliation" in
-	// HANDOFF.md: the fix is a lifecycle rule or a sweep on the bucket.
+	// An offloaded payload is uploaded here, BEFORE the transaction, because
+	// the key contains the event ID and the row carries the location - and
+	// because holding the ingest transaction open across an S3 round trip is
+	// the thing ARCHITECTURE.md forbids on this path.
+	//
+	// That leaves a window in which the object exists and no row references it.
+	// It is closed by the compensating deletes below on every path where we
+	// KNOW nothing was written, and by the sweep in internal/payloadstore for
+	// the residue (a crash between the PUT and the COMMIT).
+	//
+	// Note also what does NOT happen here: an offload that fails is an error,
+	// never a 202. `accepted` means durably recoverable, and a payload that is
+	// in neither PostgreSQL nor the bucket is neither.
 	plan, apiErr := PlanPayload(ctx, h.payloads, h.limits, key.ProjectID, eventID, body)
 	if apiErr != nil {
 		return "", apiErr
@@ -352,6 +359,9 @@ func (h *Handler) persist(
 	headers, err := requestMetadata(envelope)
 	if err != nil {
 		log.Error("encode event metadata", "error", err.Error())
+		// Nothing has touched the database yet, so the object we just wrote is
+		// provably unreferenced.
+		DisposeOrphan(h.payloads, plan.Location, log)
 		return "", errInternal()
 	}
 
@@ -371,12 +381,25 @@ func (h *Handler) persist(
 	})
 	if err != nil {
 		log.Error("persist event failed", "error", err.Error())
+		// DELIBERATELY NO compensating delete. A CreateEvent error is
+		// AMBIGUOUS: a COMMIT that timed out may still have landed, and an
+		// events row whose payload object we deleted is unrecoverable, whereas
+		// an orphaned object costs storage until the sweep reclaims it. When
+		// the two mistakes are not symmetrical, take the cheap one.
+		if plan.Location != "" {
+			metrics.PayloadOrphans.WithLabelValues("leaked").Inc()
+		}
 		return "", errInternal()
 	}
 	if !created {
 		// Lost the race on the unique (project_id, key) index: another request
-		// with the same key committed while this one was in flight. Re-read and
-		// answer from what actually committed.
+		// with the same key committed while this one was in flight. Nothing was
+		// written under OUR event ID - the transaction returned before the
+		// INSERT and rolled back - so the object we uploaded a moment ago is
+		// provably unreferenced and is cleaned up now rather than swept later.
+		DisposeOrphan(h.payloads, plan.Location, log)
+
+		// Re-read and answer from what actually committed.
 		eventID, decided, apiErr := h.checkIdempotency(ctx, key.ProjectID, idempotencyKey, requestHash)
 		if apiErr != nil {
 			return "", apiErr
@@ -390,6 +413,9 @@ func (h *Handler) persist(
 	}
 
 	metrics.EventsIngested.WithLabelValues(key.ProjectEnvironment).Inc()
+	if plan.Location != "" {
+		metrics.PayloadOffloads.WithLabelValues("stored").Inc()
+	}
 	return eventID, nil
 }
 

@@ -164,4 +164,29 @@ var (
 		Name: "queue_leases_lost_total",
 		Help: "Leases found to be no longer held by this worker, by the operation that discovered it.",
 	}, []string{"operation"}) // renew | release
+
+	// PayloadOffloads counts events whose payload went to object storage
+	// instead of inline into PostgreSQL, by outcome. A rising `error` is an
+	// ingest outage in the making: an offload that fails is a 500, never a 202.
+	PayloadOffloads = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "payload_offloads_total",
+		Help: "Payloads written to object storage at ingest, by outcome.",
+	}, []string{"outcome"}) // stored | error
+
+	// PayloadFetches counts reads of an offloaded payload on the delivery
+	// path. `missing` means the object is gone and the delivery failed
+	// distinctly; `unavailable` means the bucket did not answer and the
+	// delivery was DEFERRED without burning an attempt.
+	PayloadFetches = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "payload_fetches_total",
+		Help: "Reads of an offloaded payload on the delivery path, by outcome.",
+	}, []string{"outcome"}) // fetched | missing | unavailable | corrupt
+
+	// PayloadOrphans counts objects uploaded by a request that then wrote no
+	// events row. `deleted` is the compensating delete succeeding in-request;
+	// `leaked` is one left for the sweep; `swept` is one the sweep reclaimed.
+	PayloadOrphans = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "payload_orphan_objects_total",
+		Help: "Unreferenced payload objects, by how they were dealt with.",
+	}, []string{"outcome"}) // deleted | leaked | swept
 )

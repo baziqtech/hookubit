@@ -96,6 +96,38 @@ func (w *Worker) deliver(ctx context.Context, j queue.DeliveryJob, log *slog.Log
 	}
 	defer releaseEndpoint()
 
+	// Resolve the payload HERE, after the endpoint concurrency gate and before
+	// the breaker, and the position is deliberate on both sides.
+	//
+	// After the gate, because an object storage fetch for a delivery that a
+	// concurrency ceiling is about to turn away is wasted bandwidth on the one
+	// path that is already saturated.
+	//
+	// Before the breaker, because Allow CLAIMS the half-open probe slot for a
+	// recovering endpoint. Claiming that slot and then deferring because OUR
+	// bucket is down would spend a recovering endpoint's one probe on a
+	// delivery that never reaches the network, and delay its recovery by a
+	// whole cooldown for a reason that has nothing to do with it.
+	payload, err := w.resolvePayload(ctx, job)
+	if err != nil {
+		if errors.Is(err, ErrPayloadStoreUnavailable) {
+			// The endpoint is fine; we are not. Defer WITHOUT recording an
+			// attempt: no request was made, so nothing may be charged against
+			// the retry budget, and the delivery drains on its own once the
+			// bucket comes back.
+			log.Error("payload could not be fetched from object storage; deferring", "error", err)
+			w.deferDelivery(ctx, job.DeliveryID, ReasonPayloadUnavailable, w.spread(deferBaseDelay), log)
+			return
+		}
+		// ErrPayloadGone / ErrPayloadCorrupt / ErrNoPayload: definitive, and
+		// recorded as an attempt so the ledger can answer for it.
+		w.recordNonHTTP(ctx, job, w.now(), err, log)
+		return
+	}
+	// From here the delivery signs and sends exactly these bytes and nothing
+	// derived from them.
+	job.Payload = payload
+
 	breakerCtx, cancelBreaker := w.dbContext(ctx)
 	verdict := w.breaker.Allow(breakerCtx, job.Endpoint.ID)
 	cancelBreaker()
@@ -136,9 +168,9 @@ func (w *Worker) attempt(ctx context.Context, job *Job, verdict Verdict, log *sl
 		return
 	}
 	if len(job.Payload) == 0 {
-		// events.payload_raw is authoritative. The jsonb column is a
-		// normalised projection, so signing or sending it would produce a
-		// payload the consumer cannot verify - see ErrNoPayload.
+		// Unreachable: resolvePayload has already established the bytes and
+		// verified them against events.payload_hash. Kept because the cost of
+		// being wrong is signing and shipping an empty body - see ErrNoPayload.
 		w.recordNonHTTP(ctx, job, started,
 			fmt.Errorf("%w (payload_location=%q)", ErrNoPayload, job.PayloadLocation), log)
 		return
@@ -282,6 +314,12 @@ func (w *Worker) recordNonHTTP(ctx context.Context, job *Job, started time.Time,
 	}
 	if errors.Is(cause, ErrNoPayload) {
 		decision.Reason = ReasonPayloadUnavailable
+	}
+	if errors.Is(cause, ErrPayloadGone) {
+		decision.Reason = ReasonPayloadGone
+	}
+	if errors.Is(cause, ErrPayloadCorrupt) {
+		decision.Reason = ReasonPayloadCorrupt
 	}
 
 	log.Error("delivery could not be attempted", "error", cause, "next_state", string(decision.State))

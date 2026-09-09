@@ -214,32 +214,50 @@ how much they will hurt if they are missing.
      cares about. Gate the field on a non-terminal status. Nothing in the API
      contract changes: `next_attempt_at` is already typed `string | null`.
 
-## Object storage reconciliation: orphaned payloads (owned by whoever runs the bucket)
+## Object storage reconciliation: orphaned payloads — RESOLVED
 
-`PlanPayload` uploads an offloaded payload to `s3://<bucket>/<project>/<event>`
-**before** the ingest transaction, because the object key contains the event ID
-and the event row carries the location. If `CreateEvent` then reports
-`created=false` (a lost idempotency race) or fails, the object is already
-written and no `events` row will ever reference it. Nothing reclaims it today,
-so the cost leaks: one orphaned object per lost race, forever.
+`PlanPayload` uploads an offloaded payload to
+`s3://<bucket>/<prefix>/<project_id>/<event_id>` **before** the ingest
+transaction, because the key contains the event ID and the row carries the
+location, and because holding that transaction open across an S3 round trip is
+what ARCHITECTURE.md forbids on the hot path. That window is now closed from
+both ends rather than accepted as a leak.
 
-Restructuring so the upload happens only after the claim is won is not free -
-the claim and the event insert are one transaction on purpose (an idempotency
-row that points at an event which was never written is worse than an orphan),
-and holding that transaction open across an S3 round trip is exactly the thing
-ARCHITECTURE.md forbids. So this is a reconciliation requirement, not an
-ingest bug:
+1. **Compensating delete, in-request** (`ingest.DisposeOrphan`). Every path
+   where ingest KNOWS no `events` row was written — a lost idempotency race, a
+   failure before the INSERT — deletes the object it just uploaded. That was
+   the recorded cause ("one orphaned object per lost race, forever") and it now
+   costs one DELETE in the same request.
 
-- **Preferred:** an object lifecycle rule on the payload prefix, plus a
-  sweep that deletes objects older than the idempotency window with no
-  matching `events.payload_location`. The event ID is in the key, so the sweep
-  is a single indexed lookup per candidate.
-- The sweep must never delete an object younger than the ingest deadline
-  (`INGEST_DB_TIMEOUT_MS`, default 5s) plus a margin, or it will race a
-  request that is between the upload and its COMMIT.
+   It is deliberately **not** done when `CreateEvent` returns an error: a COMMIT
+   that timed out may still have landed, and deleting then destroys a live
+   event's payload. Leaking an object is recoverable; that is not. Pinned by
+   `TestAmbiguousPersistFailureLeavesTheObjectAlone`.
 
-Until one of those exists, the leak is bounded only by how often two requests
-with the same idempotency key race.
+2. **A sweep for the residue** (`payloadstore.Store.Reconcile`, run hourly by
+   the scheduler role). What (1) cannot cover is the process dying between the
+   PUT and the COMMIT. The sweep lists the prefix, derives each object's age
+   **from its key** — the event ID is a ULID, so no HEAD request is needed — and
+   deletes only what no `events` row references.
+
+A bucket lifecycle rule was considered and rejected as the primary mechanism:
+orphans and live payloads share a prefix and are indistinguishable by age alone,
+so any expiry broad enough to catch orphans also deletes payloads events still
+point at. One remains useful *after* event retention, not instead of this.
+
+The sweep is timid on purpose, because its failure mode is deleting customer
+data:
+
+| Guard | Effect |
+|---|---|
+| `ParseKey` | only keys of the exact shape this package writes are candidates |
+| `PAYLOAD_SWEEP_MIN_AGE_MS` (24h, floored at 1h) | never touches an object young enough to belong to a request mid-COMMIT |
+| object `LastModified` | corroborates the key's age; whichever is younger wins |
+| lookup error | skips the object, never deletes it |
+| `PAYLOAD_SWEEP_MAX_DELETES` (1000) | one run cannot cascade |
+
+Concurrent sweeps across replicas need no lease: deleting an already-deleted key
+succeeds.
 
 ## Timeouts on the ingest hot path
 
@@ -360,12 +378,14 @@ lease from an endpoint timeout.
   bucket (ARCHITECTURE.md 25). It must **fail open**: `internal/ingest` already
   logs a limiter fault and admits the request, and there is a test pinning that
   behaviour.
-- `ingest.PayloadStore` — `NewUnconfiguredPayloadStore()` today, which refuses
-  every write. Consequence worth knowing before someone debugs it in
-  production: **with `S3_BUCKET` unset, the effective maximum event size is
-  `PAYLOAD_INLINE_MAX_BYTES`, not `PAYLOAD_MAX_BYTES`**, and a payload above it
-  is rejected `413 payload_too_large` with a message saying exactly that. The
-  ingest role logs a warning at startup when the bucket is unset.
+- `ingest.PayloadStore` — now `payloadstore.Store` (AWS SDK v2, S3-compatible,
+  path-style for MinIO) whenever `S3_BUCKET` is set. With `S3_BUCKET` **unset**
+  it is still `NewUnconfiguredPayloadStore()`, and the consequence is unchanged
+  and worth knowing before someone debugs it in production: **the effective
+  maximum event size is `PAYLOAD_INLINE_MAX_BYTES`, not `PAYLOAD_MAX_BYTES`**,
+  and a payload above it is rejected `413 payload_too_large` with a message
+  saying exactly that. The ingest role logs a warning at startup when the
+  bucket is unset.
 - `idempotency_keys` TTL is a constant (`DefaultIdempotencyTTL`, 24h), not
   configuration. Promote it to an env var if a customer needs a longer window.
 
@@ -752,12 +772,26 @@ correctly" as verified in the algorithm and unverified in the deployment.
   front the *read* later; the probe admission must stay a conditional UPDATE in
   PostgreSQL, because it is the mutual exclusion that stops a thousand workers
   probing a recovering endpoint at once.
-- **Large payloads are not deliverable.** If `events.payload_raw` is NULL and
-  `payload_location` is set, the worker has no object-storage client and fails
-  the attempt with `payload_unavailable` — retryable, so it drains once an S3
-  client is wired, and bounded by `max_retry_duration` so it does not sit
-  forever. Wiring a read-side `PayloadStore` is the fix; the seam is
-  `ErrNoPayload` in `errors.go`.
+- **Large payloads ARE deliverable.** The worker fetches
+  `events.payload_location` through `worker.PayloadFetcher` and signs the exact
+  bytes it fetched, after checking they hash to `events.payload_hash`. Four
+  outcomes, and they are deliberately distinct:
+
+  | Situation | Outcome | Reason |
+  |---|---|---|
+  | fetched, hash matches | delivered | — |
+  | bucket unreachable / no client configured | **deferred**, no attempt row, retry budget untouched | `payload_unavailable` |
+  | object missing (404, swept, never written) | terminal `failed` | `payload_object_missing` |
+  | bytes do not match `payload_hash` | terminal `failed` | `payload_hash_mismatch` |
+
+  The last two are permanent (`retry.IsPermanentError`) because no retry can
+  change them, and both carry `http_status = 0` so the ledger never implies the
+  customer's endpoint rejected anything.
+
+  The fetch happens after the endpoint concurrency gate and **before** the
+  breaker: `Breaker.Allow` claims the half-open probe slot, and spending a
+  recovering endpoint's one probe on a delivery that never reaches the network
+  would delay its recovery by a whole cooldown for a reason unrelated to it.
 
 ## 5. Decisions taken, so they can be argued with
 

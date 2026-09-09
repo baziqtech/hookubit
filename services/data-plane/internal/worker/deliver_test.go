@@ -343,9 +343,12 @@ func TestDeliveryFailsWithoutRawPayloadBytes(t *testing.T) {
 	}))
 	defer srv.Close()
 
+	// No payload_raw AND no payload_location: there is nowhere the bytes could
+	// be. That is a recorded failure, not a deferral - deferring would leave
+	// the delivery cycling forever over a row that will never gain bytes.
 	h := newHarness(t, srv.URL)
 	h.store.job.Payload = nil
-	h.store.job.PayloadLocation = "s3://bucket/evt_01TEST"
+	h.store.job.PayloadLocation = ""
 	h.worker.handle(context.Background(), h.lease())
 
 	got := h.store.lastCompletion(t)

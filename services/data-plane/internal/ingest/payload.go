@@ -6,6 +6,10 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"log/slog"
+	"time"
+
+	"github.com/shaq/webhook-platform/services/data-plane/internal/metrics"
 )
 
 // PayloadStore offloads payloads too large to sit inline in PostgreSQL
@@ -102,6 +106,7 @@ func PlanPayload(
 
 	location, err := store.Put(ctx, projectID, eventID, body)
 	if err != nil {
+		metrics.PayloadOffloads.WithLabelValues("error").Inc()
 		if errors.Is(err, ErrPayloadStoreUnavailable) {
 			// Be honest about the effective limit rather than returning a 500
 			// for what is a deployment configuration, not a fault.
@@ -113,4 +118,46 @@ func PlanPayload(
 	}
 	plan.Location = location
 	return plan, nil
+}
+
+// PayloadDisposer is optionally implemented by a PayloadStore that can remove
+// an object it just wrote.
+//
+// It is an OPTIONAL interface rather than a method on PayloadStore on purpose:
+// the write path is what ingest requires to function, disposal is a
+// housekeeping courtesy, and a store that cannot delete must still be usable.
+// Ingest type-asserts for it and carries on without it.
+type PayloadDisposer interface {
+	Delete(ctx context.Context, location string) error
+}
+
+// DisposeOrphan deletes an offloaded payload that this request uploaded and
+// then decided not to reference.
+//
+// It is safe ONLY where the caller knows no events row was written. The key
+// contains the event ID this request minted, which no other request can have
+// produced, so the object is provably unreferenced - see the orphan discussion
+// in internal/payloadstore. Where the outcome is AMBIGUOUS (a CreateEvent error
+// whose COMMIT may have landed) the caller must not call this: leaking an
+// object is recoverable, deleting a live payload is not.
+//
+// Best effort and detached from the request's deadline, which by this point may
+// already be the reason we are here. Failure is logged and left to the sweep.
+func DisposeOrphan(store PayloadStore, location string, log *slog.Logger) {
+	if location == "" {
+		return
+	}
+	disposer, ok := store.(PayloadDisposer)
+	if !ok {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := disposer.Delete(ctx, location); err != nil {
+		log.Warn("could not delete an orphaned payload object; the sweep will reclaim it",
+			"error", err.Error())
+		metrics.PayloadOrphans.WithLabelValues("leaked").Inc()
+		return
+	}
+	metrics.PayloadOrphans.WithLabelValues("deleted").Inc()
 }

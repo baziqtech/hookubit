@@ -42,6 +42,12 @@ type Options struct {
 	Client  HTTPDoer
 	Keyring *Keyring
 
+	// Payloads reads offloaded payloads (ARCHITECTURE.md 32). Nil is legal and
+	// means this deployment stores every payload inline; a delivery that then
+	// meets a payload_location DEFERS rather than failing, because the fix is
+	// a configuration change and the delivery is still perfectly good.
+	Payloads PayloadFetcher
+
 	// Limiter defaults to an in-process token bucket. Swap in the Redis
 	// implementation when it exists; it must fail open.
 	Limiter RateLimiter
@@ -83,14 +89,15 @@ type Options struct {
 //     in front of the slow endpoint, which is the starvation this design exists
 //     to prevent, reintroduced one `<-ch` at a time.
 type Worker struct {
-	queue   queue.Queue
-	store   Store
-	client  HTTPDoer
-	breaker *Breaker
-	limiter RateLimiter
-	gate    *Gate
-	keyring *Keyring
-	keeper  *queue.LeaseKeeper
+	queue    queue.Queue
+	store    Store
+	client   HTTPDoer
+	breaker  *Breaker
+	limiter  RateLimiter
+	gate     *Gate
+	keyring  *Keyring
+	keeper   *queue.LeaseKeeper
+	payloads PayloadFetcher
 
 	workerID        string
 	concurrency     int
@@ -191,6 +198,7 @@ func New(opts Options) (*Worker, error) {
 		gate:            gate,
 		keyring:         opts.Keyring,
 		keeper:          keeper,
+		payloads:        opts.Payloads,
 		workerID:        opts.WorkerID,
 		concurrency:     concurrency,
 		claimBatch:      claimBatch,

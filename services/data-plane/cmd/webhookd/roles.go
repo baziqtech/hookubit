@@ -14,6 +14,8 @@ import (
 	"github.com/shaq/webhook-platform/services/data-plane/internal/egress"
 	"github.com/shaq/webhook-platform/services/data-plane/internal/ids"
 	"github.com/shaq/webhook-platform/services/data-plane/internal/ingest"
+	"github.com/shaq/webhook-platform/services/data-plane/internal/metrics"
+	"github.com/shaq/webhook-platform/services/data-plane/internal/payloadstore"
 	"github.com/shaq/webhook-platform/services/data-plane/internal/queue"
 	"github.com/shaq/webhook-platform/services/data-plane/internal/retry"
 	"github.com/shaq/webhook-platform/services/data-plane/internal/router"
@@ -34,13 +36,19 @@ func runIngest(ctx context.Context, cfg *config.Config, pool *pgxpool.Pool, log 
 	// rate limit, check the idempotency key, then BEGIN; INSERT events; INSERT
 	// event_outbox; COMMIT; and only then return 202. Nothing is published to
 	// any queue before that COMMIT.
-	payloads := ingest.NewUnconfiguredPayloadStore()
-	if cfg.S3Bucket == "" {
-		// Worth saying out loud: without object storage the effective maximum
-		// event size is PAYLOAD_INLINE_MAX_BYTES, not PAYLOAD_MAX_BYTES.
-		log.Warn("object storage is not configured; payloads at or above the inline limit will be rejected",
-			"payload_inline_max_bytes", cfg.PayloadInlineMaxBytes,
-			"payload_max_bytes", cfg.PayloadMaxBytes)
+	store, err := buildPayloadStore(ctx, cfg, log)
+	if err != nil {
+		// Refusing to start is the honest failure. Starting without the bucket
+		// an operator configured would silently drop the effective maximum
+		// event size to PAYLOAD_INLINE_MAX_BYTES and 413 every large event.
+		return fmt.Errorf("build payload store: %w", err)
+	}
+	// Assigned through an explicit nil check rather than passed straight in: a
+	// nil *payloadstore.Store in an interface is NOT a nil interface, and the
+	// difference between the two is a panic on the first oversized event.
+	payloads := ingest.PayloadStore(ingest.NewUnconfiguredPayloadStore())
+	if store != nil {
+		payloads = store
 	}
 
 	limiter, err := buildIngestLimiter(cfg, pool, log)
@@ -107,6 +115,13 @@ func newQueue(cfg *config.Config, pool *pgxpool.Pool, log *slog.Logger) *queue.P
 
 func runScheduler(ctx context.Context, cfg *config.Config, pool *pgxpool.Pool, log *slog.Logger) error {
 	q := newQueue(cfg, pool, log)
+
+	// The orphan sweep rides on the scheduler because it is the same kind of
+	// job - periodic reconciliation of state nothing else owns - and because
+	// it is far too infrequent to deserve a process. See internal/payloadstore
+	// for why an object lifecycle rule cannot do this job.
+	go runPayloadSweep(ctx, cfg, pool, log)
+
 	// The scheduler owns recovery, not timing: Claim already treats a due
 	// delivery - including one whose lease has expired - as ready, so losing
 	// this role costs efficiency and operator clarity, not deliveries. What it
@@ -150,12 +165,29 @@ func runWorker(ctx context.Context, cfg *config.Config, pool *pgxpool.Pool, log 
 		IdleConnsPerHost:      4,
 	})
 
+	// The worker must read what ingest wrote. Both sides build the same store
+	// from the same S3_* configuration, so the key layout cannot drift: a
+	// disagreement here would accept every large event with a 202 and then
+	// fail it at delivery.
+	store, err := buildPayloadStore(ctx, cfg, log)
+	if err != nil {
+		return fmt.Errorf("build payload store: %w", err)
+	}
+	// Same trap as in runIngest: worker.Options.Payloads must be a genuinely
+	// nil interface when there is no bucket, or the nil-check inside the
+	// delivery path passes and dereferences nothing.
+	var payloads worker.PayloadFetcher
+	if store != nil {
+		payloads = store
+	}
+
 	w, err := worker.New(worker.Options{
-		Queue:   newQueue(cfg, pool, log),
-		Store:   worker.NewPostgresStore(pool),
-		Health:  worker.NewPostgresStore(pool),
-		Client:  client,
-		Keyring: ring,
+		Queue:    newQueue(cfg, pool, log),
+		Store:    worker.NewPostgresStore(pool),
+		Health:   worker.NewPostgresStore(pool),
+		Client:   client,
+		Keyring:  ring,
+		Payloads: payloads,
 		Limits: worker.GateLimits{
 			Global:   cfg.MaxConcurrencyGlobal,
 			Org:      cfg.MaxConcurrencyPerOrg,
@@ -221,4 +253,68 @@ func tick(ctx context.Context, interval time.Duration, work func(context.Context
 			work(ctx)
 		}
 	}
+}
+
+// buildPayloadStore returns the object store for offloaded payloads, or the
+// refusing stub when no bucket is configured.
+//
+// Both ingest and the worker call this, which is the point: one function, one
+// key layout, no way for the writer and the reader to disagree.
+func buildPayloadStore(ctx context.Context, cfg *config.Config, log *slog.Logger) (*payloadstore.Store, error) {
+	if cfg.S3Bucket == "" {
+		// Worth saying out loud: without object storage the effective maximum
+		// event size is PAYLOAD_INLINE_MAX_BYTES, not PAYLOAD_MAX_BYTES.
+		log.Warn("object storage is not configured; payloads at or above the inline limit will be rejected",
+			"payload_inline_max_bytes", cfg.PayloadInlineMaxBytes,
+			"payload_max_bytes", cfg.PayloadMaxBytes)
+		return nil, nil
+	}
+	return payloadstore.New(ctx, payloadstore.Config{
+		Endpoint:       cfg.S3Endpoint,
+		Bucket:         cfg.S3Bucket,
+		Region:         cfg.S3Region,
+		AccessKey:      cfg.S3AccessKey,
+		SecretKey:      cfg.S3SecretKey,
+		ForcePathStyle: cfg.S3ForcePathStyle,
+		Prefix:         cfg.S3Prefix,
+
+		UploadTimeout:   cfg.PayloadUploadTimeout,
+		DownloadTimeout: cfg.PayloadDownloadTimeout,
+		MaxAttempts:     cfg.PayloadStoreMaxAttempts,
+		// The read ceiling is the largest event the platform accepts. An object
+		// bigger than that is not one of ours, whatever its metadata claims.
+		MaxObjectBytes: cfg.PayloadMaxBytes,
+	})
+}
+
+// runPayloadSweep reclaims payload objects that no events row references.
+func runPayloadSweep(ctx context.Context, cfg *config.Config, pool *pgxpool.Pool, log *slog.Logger) {
+	if !cfg.PayloadSweepEnabled || cfg.S3Bucket == "" {
+		return
+	}
+	store, err := buildPayloadStore(ctx, cfg, log)
+	if err != nil || store == nil {
+		log.Error("orphan payload sweep disabled: could not build the payload store", "error", err)
+		return
+	}
+	lookup := payloadstore.NewPostgresEventLookup(pool)
+
+	_ = tick(ctx, cfg.PayloadSweepInterval, func(ctx context.Context) {
+		report, err := store.Reconcile(ctx, lookup, payloadstore.ReconcileOptions{
+			MinAge:     cfg.PayloadSweepMinAge,
+			MaxDeletes: cfg.PayloadSweepMaxDelete,
+			Logger:     log,
+		})
+		if err != nil {
+			log.Error("orphan payload sweep failed", "error", err,
+				"examined", report.Examined, "deleted", report.Deleted)
+			return
+		}
+		if report.Deleted > 0 {
+			metrics.PayloadOrphans.WithLabelValues("swept").Add(float64(report.Deleted))
+			log.Warn("orphan payload sweep reclaimed objects",
+				"examined", report.Examined, "deleted", report.Deleted,
+				"referenced", report.Referenced, "skipped", report.Skipped)
+		}
+	}, log)
 }

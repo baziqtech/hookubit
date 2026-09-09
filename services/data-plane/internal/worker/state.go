@@ -70,7 +70,13 @@ const (
 	ReasonConcurrencyLimited Reason = "concurrency_limit"
 	ReasonSigningFailed      Reason = "signing_failed"
 	ReasonPayloadUnavailable Reason = "payload_unavailable"
-	ReasonWorkerShutdown     Reason = "worker_shutdown"
+	// ReasonPayloadGone and ReasonPayloadCorrupt are OUR failures, and they are
+	// separate reasons from everything above so that an operator answering
+	// "what happened to this event" is never left thinking the customer's
+	// endpoint rejected it.
+	ReasonPayloadGone    Reason = "payload_object_missing"
+	ReasonPayloadCorrupt Reason = "payload_hash_mismatch"
+	ReasonWorkerShutdown Reason = "worker_shutdown"
 )
 
 // Outcome is what one attempt produced. Exactly one of HTTPStatus and Err is
@@ -203,6 +209,10 @@ func ErrorCode(status int, err error) string {
 		return fmt.Sprintf("http_%d", status)
 	}
 	switch {
+	case errors.Is(err, ErrPayloadGone):
+		return "payload_object_missing"
+	case errors.Is(err, ErrPayloadCorrupt):
+		return "payload_hash_mismatch"
 	case errors.Is(err, ErrNoPayload):
 		return "payload_unavailable"
 	case errors.Is(err, ErrSigning):

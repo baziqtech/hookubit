@@ -76,8 +76,15 @@ type Job struct {
 
 	// Payload is events.payload_raw: the EXACT bytes the customer sent. This
 	// is what is signed and what is delivered. Never the jsonb projection.
+	// It is NULL when the payload was offloaded, in which case
+	// PayloadLocation names the object holding the equally exact bytes.
 	Payload         []byte
 	PayloadLocation string
+	// PayloadHash is events.payload_hash: SHA-256 of the exact request bytes,
+	// computed by ingest before either storage path was chosen. It is what
+	// makes the two paths comparable - whatever the worker ends up holding
+	// must hash to this or it is not what the customer sent.
+	PayloadHash string
 
 	EventCreatedAt time.Time
 	FirstAttemptAt time.Time
@@ -174,6 +181,7 @@ SELECT d.event_id, d.organization_id, d.project_id,
        COALESCE(e.rate_limit, 0), e.rate_limit_window_seconds,
        COALESCE(e.custom_headers::text, ''),
        ev.event_type, ev.payload_raw, COALESCE(ev.payload_location, ''),
+       COALESCE(ev.payload_hash, ''),
        COALESCE(ev.ordering_key, ''), ev.created_at,
        COALESCE(
          (SELECT MIN(a.started_at) FROM delivery_attempts a WHERE a.delivery_id = d.id),
@@ -245,7 +253,7 @@ func (s *PostgresStore) Load(ctx context.Context, deliveryID string) (*Job, erro
 		&timeoutMS, &job.Endpoint.MaxConcurrency,
 		&job.Endpoint.RateLimit, &rateWindowSeconds,
 		&customHeadersJSON,
-		&job.EventType, &job.Payload, &job.PayloadLocation,
+		&job.EventType, &job.Payload, &job.PayloadLocation, &job.PayloadHash,
 		&job.OrderingKey, &job.EventCreatedAt,
 		&job.FirstAttemptAt,
 		&strategy, &policyMaxAttempt, &initialDelayMS, &maxDelayMS,

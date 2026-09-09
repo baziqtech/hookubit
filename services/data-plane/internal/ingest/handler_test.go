@@ -795,3 +795,106 @@ func TestCreateEventReceivesADeadline(t *testing.T) {
 		t.Fatal("CreateEvent ran on a context with no deadline")
 	}
 }
+
+// --- orphaned payload objects ---------------------------------------------
+//
+// PlanPayload uploads BEFORE the transaction. Every path below is one where the
+// upload happened and the events row did not, and the difference between them
+// is whether we can be SURE of that.
+
+// A lost idempotency race is unambiguous: CreateEvent returned before its
+// INSERT and rolled back, so nothing references the object we just wrote and it
+// is deleted in the same request rather than left for the sweep.
+func TestLostIdempotencyRaceDeletesTheObjectItJustUploaded(t *testing.T) {
+	f := newFixture(t)
+	// Above InlineMax (512) so the payload is offloaded.
+	body := `{"event_type":"order.created","data":{"blob":"` + strings.Repeat("x", 600) + `"}}`
+	winner := ids.New(ids.Event)
+
+	// A competing request commits the same key while this one is in flight.
+	f.store.beforeClaim = func(s *fakeStore) {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		s.idem[f.projectID+"\x00"+"key-1"] = &IdempotencyRecord{
+			Key:         "key-1",
+			RequestHash: HashPayload([]byte(body)),
+			EventID:     winner,
+			ExpiresAt:   time.Now().Add(time.Hour),
+		}
+	}
+
+	rec := f.post(t, body, map[string]string{"Idempotency-Key": "key-1"})
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, want 202 (body %s)", rec.Code, rec.Body.String())
+	}
+	if f.payloads.calls != 1 {
+		t.Fatalf("uploads = %d, want 1", f.payloads.calls)
+	}
+	deleted := f.payloads.deletedLocations()
+	if len(deleted) != 1 || deleted[0] != f.payloads.location {
+		t.Fatalf("deleted = %v, want the orphan %q; a lost race must not leak an object",
+			deleted, f.payloads.location)
+	}
+}
+
+// A CreateEvent ERROR is ambiguous - a COMMIT that timed out may still have
+// landed - so the object stays. Leaking storage is recoverable; deleting a live
+// event's payload is not.
+func TestAmbiguousPersistFailureLeavesTheObjectAlone(t *testing.T) {
+	f := newFixture(t)
+	f.store.createErr = errors.New("commit timed out")
+	body := `{"event_type":"order.created","data":{"blob":"` + strings.Repeat("x", 600) + `"}}`
+
+	rec := f.post(t, body, nil)
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 500", rec.Code)
+	}
+	if got := f.payloads.deletedLocations(); len(got) != 0 {
+		t.Fatalf("deleted %v after an ambiguous failure; the commit may have landed", got)
+	}
+}
+
+// The 202 contract: `accepted` means durably recoverable. A payload that
+// reached neither PostgreSQL nor the bucket is neither, so the request fails.
+func TestObjectStorageFailureIsNeverA202(t *testing.T) {
+	f := newFixture(t)
+	f.payloads.err = errors.New("bucket unreachable")
+	body := `{"event_type":"order.created","data":{"blob":"` + strings.Repeat("x", 600) + `"}}`
+
+	rec := f.post(t, body, nil)
+	if rec.Code == http.StatusAccepted {
+		t.Fatal("an event whose payload is not durable was accepted; 202 would be a lie")
+	}
+	assertErrorShape(t, rec, http.StatusInternalServerError, CodeInternalError)
+	if f.store.eventCount() != 0 {
+		t.Fatal("an events row was written for a payload that was never stored")
+	}
+}
+
+// The offloaded row shape: payload_raw NULL, payload_location set, and
+// payload_hash STILL the hash of the exact request bytes - which is what makes
+// the delivery path able to check that what it fetched is what was sent.
+func TestOffloadedEventRecordsLocationAndHashButNoInlinePayload(t *testing.T) {
+	f := newFixture(t)
+	body := `{"event_type":"order.created","data":{"blob":"` + strings.Repeat("x", 600) + `"}}`
+
+	if rec := f.post(t, body, nil); rec.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, want 202 (body %s)", rec.Code, rec.Body.String())
+	}
+	got := f.store.lastEvent(t)
+	if got.Payload != nil {
+		t.Fatal("an offloaded payload was also written inline")
+	}
+	if got.PayloadLocation == "" {
+		t.Fatal("payload_location is empty for an offloaded payload")
+	}
+	if got.PayloadSize != len(body) {
+		t.Fatalf("payload_size = %d, want %d", got.PayloadSize, len(body))
+	}
+	if got.PayloadHash != HashPayload([]byte(body)) {
+		t.Fatal("payload_hash is not the SHA-256 of the exact request bytes")
+	}
+	if string(f.payloads.stored) != body {
+		t.Fatal("object storage did not receive the exact request bytes")
+	}
+}
