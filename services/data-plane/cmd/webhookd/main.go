@@ -22,6 +22,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -64,13 +65,22 @@ func run() error {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	pool, err := db.Open(ctx, cfg.DatabaseURL, cfg.DatabaseMaxConnections, cfg.DatabaseStatementTimeout)
-	if err != nil {
-		return fmt.Errorf("connect to PostgreSQL: %w", err)
-	}
-	defer pool.Close()
+	// The pool is opened AFTER the probe server binds, so the readiness check
+	// reaches it through a holder rather than a captured variable. Ordering
+	// matters more than it looks: opening the pool first meant a PostgreSQL
+	// outage exited the process before :9090 ever bound, so every pod
+	// crash-looped and recovery waited on kubelet's backoff instead of on the
+	// database. A startupProbe cannot help a process that has already exited.
+	var poolRef atomic.Pointer[pgxpool.Pool]
 
 	health := httpx.NewHealth(func(ctx context.Context) map[string]string {
+		pool := poolRef.Load()
+		if pool == nil {
+			// Distinct from "down" on purpose: the pool has not been opened
+			// yet, which is a different operator story from one that opened and
+			// then failed.
+			return map[string]string{"postgres": "connecting"}
+		}
 		state := "up"
 		if err := pool.Ping(ctx); err != nil {
 			state = "down"
@@ -96,6 +106,25 @@ func run() error {
 		"metrics_port", cfg.MetricsPort,
 		"shutdown_readiness_delay", cfg.ShutdownReadinessDelay,
 	)
+	pool, err := db.OpenWithRetry(
+		ctx, cfg.DatabaseURL, cfg.DatabaseMaxConnections, cfg.DatabaseStatementTimeout,
+		func(attempt int, err error, retryIn time.Duration) {
+			log.Warn("PostgreSQL is not reachable; waiting",
+				"attempt", attempt,
+				"retry_in", retryIn,
+				"error", err,
+			)
+		},
+	)
+	if err != nil {
+		// The probe server is already listening, so close it rather than
+		// leaving the deferred shutdown below unreachable on this path.
+		stopProbes(probes, log)
+		return fmt.Errorf("connect to PostgreSQL: %w", err)
+	}
+	defer pool.Close()
+	poolRef.Store(pool)
+
 	health.SetReady(true)
 
 	runCtx, cancelRun, drainStartedAt := beginDrain(ctx, health, cfg.ShutdownReadinessDelay, log, role)
@@ -131,6 +160,16 @@ func run() error {
 		return runErr
 	}
 	return nil
+}
+
+// stopProbes closes the probe server on the boot-failure path, where the
+// ordinary shutdown sequence below is never reached.
+func stopProbes(probes *http.Server, log *slogLogger) {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if err := probes.Shutdown(ctx); err != nil {
+		log.Warn("probe server did not shut down cleanly", "error", err)
+	}
 }
 
 // beginDrain orders the shutdown so readiness stops advertising BEFORE anything
