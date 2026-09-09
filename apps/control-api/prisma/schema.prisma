@@ -560,6 +560,16 @@ model EventOutbox {
   lastError   String?      @map("last_error")
   processedAt DateTime?    @map("processed_at")
   createdAt   DateTime     @default(now()) @map("created_at")
+  /// W3C `traceparent` of the INGEST request that committed this row, written
+  /// inside that same transaction (ARCHITECTURE.md 44). The router reads it and
+  /// LINKS its fan-out span to it - it does not become a child of it, because
+  /// the fan-out happens an arbitrary time later on a different pod and a
+  /// parent-child edge across that gap reports six-hour ingest latencies.
+  ///
+  /// A fixed 55 characters; `tracestate` is deliberately not stored. Null means
+  /// tracing was off, or the row predates it: the router then starts an
+  /// unlinked root, so nothing in the delivery path depends on this being set.
+  traceContext String?     @map("trace_context")
 
   event Event @relation(fields: [eventId], references: [id], onDelete: Cascade)
 
@@ -649,6 +659,15 @@ model Delivery {
   /// `attempt_count: 5` with an empty attempt list is indistinguishable from
   /// "we never tried" unless something says the detail was pruned.
   attemptsPrunedAt DateTime?    @map("attempts_pruned_at")
+  /// W3C `traceparent` of the ROUTER's fan-out span, written in the same
+  /// transaction that materialised this row. The worker reads it and links each
+  /// attempt to it.
+  ///
+  /// It is the router's context and not the event's because a delivery is a
+  /// SEPARATE RETRY CHAIN from its event: one event becomes N deliveries, each
+  /// living and failing independently. Null means tracing was off, or the row
+  /// predates it.
+  traceContext   String?        @map("trace_context")
 
   /// Restrict, not Cascade. `delivery_attempts` is append-only and this table is
   /// the answer to "did finance ever receive this?"; a single
@@ -747,6 +766,20 @@ model DeliveryAttempt {
   durationMs      Int?          @map("duration_ms")
   workerId        String?       @map("worker_id")
   createdAt       DateTime      @default(now()) @map("created_at")
+  /// Trace id (32 hex) of the span for THIS attempt, and the seam between the
+  /// delivery ledger and the trace backend: the row an operator is already
+  /// looking at names the trace of that exact attempt.
+  ///
+  /// Written ONLY when the span was actually sampled. A trace id for a dropped
+  /// span is a link that leads to an empty page, from which an operator
+  /// concludes the backend is broken rather than that this attempt was not
+  /// recorded - so null honestly means "no trace was kept for this attempt".
+  ///
+  /// Each attempt has its OWN trace rather than sharing one with the delivery:
+  /// attempts are up to an hour apart on different pods, and nothing can hold a
+  /// span open across a process restart. The retry chain is reassembled by
+  /// querying the backend for webhook.delivery.id, not by the span tree.
+  traceId         String?       @map("trace_id")
 
   delivery Delivery @relation(fields: [deliveryId], references: [id], onDelete: Cascade)
 

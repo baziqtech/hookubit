@@ -10,6 +10,7 @@ import {
   DEFAULT_AUTO_DISABLE_INTERVAL_MINUTES,
   DEFAULT_AUTO_DISABLE_MAX_PER_RUN,
 } from './auto-disable-policy';
+import { withSpan } from '../tracing/with-span';
 import {
   AutoDisableOptions,
   EndpointAutoDisableService,
@@ -94,7 +95,14 @@ export class AutoDisableScheduler implements OnApplicationBootstrap, OnApplicati
     }
     this.running = true;
     try {
-      const report = await this.sweeper.sweep(this.options());
+      // A root span for the pass. The sweep has no request behind it, so
+      // without one its database spans would be a scatter of parentless
+      // single-span traces; with one, a pass is a single trace and "why was the
+      // auto-disable sweep slow last night?" is answerable. Inert - literally
+      // just the callback - when tracing is off.
+      const report = await withSpan('endpoint auto-disable sweep', {}, () =>
+        this.sweeper.sweep(this.options()),
+      );
       if (report.skipped) {
         this.logger.debug('Another replica holds the auto-disable lock; nothing to do.');
         return;

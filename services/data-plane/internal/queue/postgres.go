@@ -54,7 +54,8 @@ const claimedColumns = `
           d.id, d.event_id, d.endpoint_id, d.organization_id, d.project_id,
           d.attempt_count, COALESCE(d.next_attempt_at, d.created_at),
           COALESCE(d.ordering_key, ''), d.locked_until,
-          GREATEST(EXTRACT(EPOCH FROM (now() - COALESCE(d.next_attempt_at, d.created_at))), 0)::double precision`
+          GREATEST(EXTRACT(EPOCH FROM (now() - COALESCE(d.next_attempt_at, d.created_at))), 0)::double precision,
+          COALESCE(d.trace_context, '')`
 
 // claimFIFOSQL leases the globally oldest ready deliveries.
 //
@@ -391,6 +392,7 @@ func scanLeases(rows pgx.Rows, workerID string) ([]Lease, error) {
 			&job.DeliveryID, &job.EventID, &job.EndpointID,
 			&job.OrganizationID, &job.ProjectID,
 			&job.Attempt, &job.ScheduledAt, &job.OrderingKey, &expiresAt, &delaySecs,
+			&job.TraceContext,
 		); err != nil {
 			return nil, fmt.Errorf("scan claimed delivery: %w", err)
 		}

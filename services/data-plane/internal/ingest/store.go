@@ -52,6 +52,16 @@ type CreateEventParams struct {
 	// empty.
 	RequestHash          string
 	IdempotencyExpiresAt time.Time
+
+	// TraceContext is the W3C `traceparent` of the ingest request, written to
+	// event_outbox.trace_context INSIDE this transaction (ARCHITECTURE.md 44).
+	//
+	// It goes on the OUTBOX row and not on the event, because it describes the
+	// WORK - and the work is what the router claims. It commits with the event,
+	// so a rolled-back transaction leaves no context describing an acceptance
+	// that never happened. Empty writes NULL, which is what every row written
+	// with tracing off carries and what the router treats as "no upstream".
+	TraceContext string
 }
 
 // Store is the ingest API's whole database surface. Narrow on purpose: it makes
@@ -171,8 +181,8 @@ INSERT INTO events (
 // (ARCHITECTURE.md 15). It commits with the event; the router picks it up
 // afterwards. Nothing is published anywhere before this COMMIT.
 const insertOutboxSQL = `
-INSERT INTO event_outbox (id, event_id, type, status, attempts, available_at, created_at)
-VALUES ($1, $2, 'event.created', 'pending', 0, now(), now())
+INSERT INTO event_outbox (id, event_id, type, status, attempts, available_at, created_at, trace_context)
+VALUES ($1, $2, 'event.created', 'pending', 0, now(), now(), $3)
 `
 
 func (s *PostgresStore) CreateEvent(ctx context.Context, p CreateEventParams) (created bool, err error) {
@@ -235,7 +245,11 @@ func (s *PostgresStore) CreateEvent(ctx context.Context, p CreateEventParams) (c
 		return false, fmt.Errorf("insert event: %w", err)
 	}
 
-	if _, err := tx.Exec(ctx, insertOutboxSQL, ids.New(ids.Outbox), p.EventID); err != nil {
+	var traceContext any
+	if p.TraceContext != "" {
+		traceContext = p.TraceContext
+	}
+	if _, err := tx.Exec(ctx, insertOutboxSQL, ids.New(ids.Outbox), p.EventID, traceContext); err != nil {
 		return false, fmt.Errorf("insert event outbox: %w", err)
 	}
 

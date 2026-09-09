@@ -151,6 +151,18 @@ payload:
 observability:
   otlpEndpoint: ''
   serviceNamespace: webhook-platform
+  # Separates two deployments sharing one collector.
+  serviceName: control-api
+  # Head sampling ratio, 0..1. A REMOTE traceparent is capped at this rather
+  # than obeyed: it is an unauthenticated header on an internet-facing API, so
+  # honouring it would let any caller set our span volume.
+  tracesSamplerArg: 1
+  # The data plane reads its OWN name and ratio, with no fallback to the two
+  # above: one ConfigMap, two processes, and these are settings both cannot be
+  # right about. A shared ratio of 1 records a span for every attempt of every
+  # delivery of every event.
+  dataPlaneServiceName: data-plane
+  dataPlaneTracesSamplerArg: 0.05
   # Adds prometheus.io/scrape annotations to data-plane pods.
   prometheusAnnotations: true
 

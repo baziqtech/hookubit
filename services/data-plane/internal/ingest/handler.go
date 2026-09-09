@@ -11,8 +11,11 @@ import (
 	"sync"
 	"time"
 
+	"go.opentelemetry.io/otel/trace"
+
 	"github.com/shaq/webhook-platform/services/data-plane/internal/ids"
 	"github.com/shaq/webhook-platform/services/data-plane/internal/metrics"
+	"github.com/shaq/webhook-platform/services/data-plane/internal/tracing"
 )
 
 // requestIDPrefix matches the `req_...` shape quoted in error bodies and on
@@ -130,11 +133,23 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	started := h.now()
-	log := h.log.With("request_id", requestID, "project_id", projectID)
+
+	// The stage root for the whole accept. It is opened here and not in a
+	// wrapping middleware so that the 404 and 405 paths above - which are not
+	// this API's route at all - produce no spans; an unrouted scan of the
+	// internet must not be able to fill a trace backend.
+	ctx, span := startIngestSpan(r, projectID, requestID)
+	defer span.End()
+	r = r.WithContext(ctx)
+
+	// trace_id on the log line is the seam ARCHITECTURE.md 63 asks for: both,
+	// not either. It is absent, and the line unchanged, when tracing is off.
+	log := tracing.Logger(ctx, h.log).With("request_id", requestID, "project_id", projectID)
 
 	eventID, apiErr := h.accept(r, projectID, log)
 	if apiErr != nil {
 		metrics.EventsIngestionFailed.WithLabelValues(apiErr.Code).Inc()
+		finishIngestSpan(span, apiErr.Status, apiErr.Code, "")
 		// Message text is contract, not customer data: safe to log.
 		log.Warn("ingest rejected",
 			"code", apiErr.Code,
@@ -145,6 +160,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	finishIngestSpan(span, http.StatusAccepted, "", eventID)
 	log.Info("event accepted",
 		"event_id", eventID,
 		"duration_ms", h.now().Sub(started).Milliseconds(),
@@ -365,7 +381,25 @@ func (h *Handler) persist(
 		return "", errInternal()
 	}
 
-	created, err := h.store.CreateEvent(ctx, CreateEventParams{
+	// The durability boundary, and the only part of the accept that can be
+	// slow for a reason an operator can act on. The trace context written to
+	// the outbox row is taken from the STAGE ROOT rather than from this child:
+	// what the router links to is "the request that accepted this event", and a
+	// child span that has already ended is not a useful link target.
+	persistCtx, persistSpan := tracing.Start(ctx, "ingest.persist",
+		trace.WithSpanKind(trace.SpanKindInternal),
+		trace.WithAttributes(
+			tracing.AttrEventID.String(eventID),
+			tracing.AttrPayloadBytes.Int(plan.Size),
+			tracing.AttrPayloadStored.Bool(plan.Location != ""),
+		))
+	created, err := h.store.CreateEvent(persistCtx, CreateEventParams{
+		// The traceparent of the ingest REQUEST, committed in the same
+		// transaction as the event and its outbox row. If the transaction rolls
+		// back there is no row and no context, which is the property that makes
+		// this honest: a stored context always describes work that actually
+		// happened.
+		TraceContext:         tracing.Encode(ctx),
 		EventID:              eventID,
 		OrganizationID:       key.OrganizationID,
 		ProjectID:            key.ProjectID,
@@ -379,6 +413,8 @@ func (h *Handler) persist(
 		RequestHash:          requestHash,
 		IdempotencyExpiresAt: h.now().Add(h.idempotencyTTL),
 	})
+	tracing.RecordError(persistSpan, err)
+	persistSpan.End()
 	if err != nil {
 		log.Error("persist event failed", "error", err.Error())
 		// DELIBERATELY NO compensating delete. A CreateEvent error is

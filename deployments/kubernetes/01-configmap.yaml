@@ -105,3 +105,15 @@ data:
   # Observability
   OTEL_SERVICE_NAMESPACE: 'webhook-platform'
   OTEL_EXPORTER_OTLP_ENDPOINT: ''
+  # Scheme required and validated: 'otel-collector:4318' parses as a URL whose
+  # scheme is the hostname, and would boot cleanly while exporting nothing.
+  OTEL_SERVICE_NAME: 'control-api'
+  # Head sampling ratio. A REMOTE traceparent is capped at this rather than
+  # obeyed - it is an unauthenticated header on an internet-facing API.
+  OTEL_TRACES_SAMPLER_ARG: '1'
+  # The data plane reads its OWN name and ratio with NO fallback to the bare keys
+  # above: both planes read this ConfigMap, and these are per-process settings
+  # two processes cannot both be right about. A shared ratio of 1 would record a
+  # span for every attempt of every delivery of every event.
+  DATA_PLANE_OTEL_SERVICE_NAME: 'data-plane'
+  DATA_PLANE_OTEL_TRACES_SAMPLER_ARG: '0.05'

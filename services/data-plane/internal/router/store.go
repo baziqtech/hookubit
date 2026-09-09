@@ -76,6 +76,11 @@ type OutboxRow struct {
 	// unavailable for twenty minutes" from "this row always errors", and time
 	// can.
 	FailingSince *time.Time
+	// TraceContext is the W3C `traceparent` of the INGEST request that
+	// committed this row (ARCHITECTURE.md 44). Empty for a row written with
+	// tracing off, or before the column existed; the router then starts an
+	// unlinked root, so nothing here can change what is fanned out.
+	TraceContext string
 }
 
 // Outcome is how one outbox row was resolved.
@@ -116,6 +121,21 @@ type RouteRequest struct {
 	// and had no recovery path, because replay is built on delivery rows and
 	// those endpoints had none.
 	FanOutBatch int
+
+	// TraceContext is the W3C `traceparent` of the ROUTER's fan-out span,
+	// stamped onto every delivery row this call creates. The worker reads it
+	// and links each attempt to it (ARCHITECTURE.md 44).
+	//
+	// ONE value for the whole batch, not one per delivery. A per-delivery span
+	// would mean ROUTER_MAX_SUBSCRIPTIONS_PER_EVENT spans per fan-out - up to
+	// 2000 per transaction at the shipped default, for an event that has not
+	// been delivered anywhere yet. The fan-out is one unit of work and gets one
+	// span; the deliveries it creates all point at it, which is exactly what
+	// "these N deliveries came from that fan-out" means.
+	//
+	// Empty writes NULL, which is what a delivery created with tracing off
+	// carries.
+	TraceContext string
 }
 
 // RouteResult reports what happened. Created is the number of delivery rows
@@ -207,7 +227,8 @@ WHERE o.id IN (
     LIMIT $3
 )
 RETURNING o.id, o.event_id, o.type, o.attempts, o.unaccounted_attempts,
-          COALESCE(o.fan_out_cursor, ''), o.failing_since`
+          COALESCE(o.fan_out_cursor, ''), o.failing_since,
+          COALESCE(o.trace_context, '')`
 
 // markEventsProcessingSQL is the `received -> processing` half of the event
 // state machine (ARCHITECTURE.md 19). It runs in the claim transaction so the
@@ -240,7 +261,8 @@ func (s *PostgresStore) ClaimOutbox(
 	for rows.Next() {
 		var r OutboxRow
 		if err := rows.Scan(&r.ID, &r.EventID, &r.Type, &r.Attempts,
-			&r.UnaccountedAttempts, &r.FanOutCursor, &r.FailingSince); err != nil {
+			&r.UnaccountedAttempts, &r.FanOutCursor, &r.FailingSince,
+			&r.TraceContext); err != nil {
 			rows.Close()
 			return nil, fmt.Errorf("scan claimed outbox row: %w", err)
 		}
@@ -406,7 +428,7 @@ INSERT INTO deliveries (
     organization_id, project_id,
     status, attempt_count, max_attempts,
     next_attempt_at, ordering_key,
-    created_at, updated_at
+    created_at, updated_at, trace_context
 )
 SELECT t.id, $1::text, t.endpoint_id, t.subscription_id,
        $2::text, $3::text,
@@ -418,7 +440,10 @@ SELECT t.id, $1::text, t.endpoint_id, t.subscription_id,
        -- is claimed on the same cycle - but it is the same rounding that made
        -- an outbox test fail 1 in 10, so it is worth knowing it exists.
        now(), $4::text,
-       now(), now()
+       -- created_at, updated_at, trace_context. The trace context is one value
+       -- for the whole batch: the fan-out is one unit of work with one span,
+       -- and every delivery it creates links back to that span.
+       now(), now(), $9::text
 FROM unnest($5::text[], $6::text[], $7::text[], $8::int[])
      AS t(id, endpoint_id, subscription_id, max_attempts)
 ON CONFLICT (event_id, endpoint_id) WHERE replay_of_delivery_id IS NULL
@@ -574,7 +599,7 @@ func (s *PostgresStore) Route(ctx context.Context, req RouteRequest) (RouteResul
 	}
 
 	if len(plan.Targets) > 0 {
-		created, err := insertDeliveries(ctx, tx, ev, plan.Targets)
+		created, err := insertDeliveries(ctx, tx, ev, plan.Targets, req.TraceContext)
 		if err != nil {
 			return res, err
 		}
@@ -673,7 +698,7 @@ func (s *PostgresStore) loadCandidates(
 	return candidates, more, nil
 }
 
-func insertDeliveries(ctx context.Context, tx pgx.Tx, ev Event, targets []Target) (int, error) {
+func insertDeliveries(ctx context.Context, tx pgx.Tx, ev Event, targets []Target, traceContext string) (int, error) {
 	deliveryIDs := make([]string, len(targets))
 	endpointIDs := make([]string, len(targets))
 	subscriptionIDs := make([]string, len(targets))
@@ -693,9 +718,14 @@ func insertDeliveries(ctx context.Context, tx pgx.Tx, ev Event, targets []Target
 		orderingKey = ev.OrderingKey
 	}
 
+	var trace any
+	if traceContext != "" {
+		trace = traceContext
+	}
+
 	rows, err := tx.Query(ctx, insertDeliveriesSQL,
 		ev.ID, ev.OrganizationID, ev.ProjectID, orderingKey,
-		deliveryIDs, endpointIDs, subscriptionIDs, maxAttempts,
+		deliveryIDs, endpointIDs, subscriptionIDs, maxAttempts, trace,
 	)
 	if err != nil {
 		return 0, fmt.Errorf("insert deliveries for event %s: %w", ev.ID, err)

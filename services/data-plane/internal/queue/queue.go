@@ -39,6 +39,16 @@ type DeliveryJob struct {
 	Attempt        int       `json:"attempt"`
 	ScheduledAt    time.Time `json:"scheduled_at"`
 	OrderingKey    string    `json:"ordering_key,omitempty"`
+	// TraceContext is the W3C `traceparent` of the ROUTER's fan-out span,
+	// stored on the delivery row (ARCHITECTURE.md 44). It travels with the
+	// claim rather than being read later by worker.Store.Load, because the
+	// operator questions that need a span - "why has this delivery not moved?"
+	// - are answered by the tenant concurrency gate and the circuit breaker,
+	// both of which refuse BEFORE the row is ever loaded.
+	//
+	// It is an identifier, not a payload, which is the same rule the rest of
+	// this struct follows.
+	TraceContext string `json:"trace_context,omitempty"`
 }
 
 // Lease is a time-bounded claim on a job. A worker that dies mid-delivery

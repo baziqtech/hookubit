@@ -22,6 +22,8 @@ import { OutboxModule } from './outbox/outbox.module';
 import { ProjectsModule } from './projects/projects.module';
 import { RateLimitsModule } from './rate-limits/rate-limits.module';
 import { RetryPoliciesModule } from './retry-policies/retry-policies.module';
+import { traceLogFields } from './tracing/log-correlation';
+import { TracingModule } from './tracing/tracing.module';
 import { WebhookSubscriptionsModule } from './webhook-subscriptions/webhook-subscriptions.module';
 
 @Module({
@@ -57,10 +59,22 @@ import { WebhookSubscriptionsModule } from './webhook-subscriptions/webhook-subs
           ],
           remove: true,
         },
+        // Log <-> trace correlation (ARCHITECTURE.md 63 asks for both, and two
+        // systems that cannot be joined are not both). Inert when tracing is
+        // off; see tracing/log-correlation.ts.
+        customProps: traceLogFields,
         transport:
           process.env.APP_ENV === 'development' ? { target: 'pino-pretty' } : undefined,
       },
     }),
+    // OpenTelemetry (ARCHITECTURE.md 44). Registered next to LoggerModule
+    // because the two are one feature: the span carries pino's request id and
+    // pino's lines carry the span's trace id. The relative order of the two
+    // does not matter - the middleware reads `req.id` when the response
+    // finishes, by which time pino has long since minted it, and pino's own
+    // completion line is emitted inside the request's async context either way
+    // (asserted in tracing/log-correlation.spec.ts).
+    TracingModule,
     PrismaModule,
     CommonModule,
     HealthModule,

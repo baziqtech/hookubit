@@ -9,8 +9,13 @@ import (
 	"sync"
 	"time"
 
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
+
 	"github.com/shaq/webhook-platform/services/data-plane/internal/metrics"
 	"github.com/shaq/webhook-platform/services/data-plane/internal/retry"
+	"github.com/shaq/webhook-platform/services/data-plane/internal/tracing"
 )
 
 // ErrLeaseLost reports that an outbox row this router believed it held is no
@@ -270,8 +275,47 @@ func (r *Router) RunOnce(ctx context.Context) (int, error) {
 }
 
 // process resolves one claimed outbox row.
+//
+// # The fan-out is a NEW TRACE, linked to the ingest that caused it
+//
+// The span opened here is a stage ROOT with a link to
+// event_outbox.trace_context, never a child of it. The reasoning is in
+// internal/tracing/context.go and comes down to three things: the fan-out
+// happens an arbitrary time after the 202 - so a parent-child edge reports
+// hour-long ingest latencies to every backend that derives one; the ingest's
+// sampling decision would otherwise silently decide whether the fan-out is
+// recorded at all; and one event can fan out to thousands of deliveries, each
+// with its own retry chain, which under parent-child is a single trace no
+// backend assembles.
+//
+// It is opened around `process` rather than around `RunOnce` on purpose. One
+// poll claims a BATCH of unrelated events belonging to different tenants;
+// making that batch a span would produce a trace that mixes tenants and whose
+// duration is "how long the slowest unrelated event took". The unit an operator
+// asks about is one event's fan-out, so that is the unit that gets a span. The
+// claim itself is left untraced deliberately: it runs four times a second per
+// replica and is empty almost every time, and its two real questions - depth
+// and lag - are already gauges (outbox_lag_seconds, queue_depth).
 func (r *Router) process(ctx context.Context, row OutboxRow) {
-	log := r.opts.Logger.With(
+	ctx, span := tracing.StartStage(ctx, "webhook.fan_out", tracing.StageOptions{
+		Upstream: row.TraceContext,
+		// Consumer: this work was produced by another process and picked up
+		// here, which is exactly what the kind means.
+		Kind: trace.SpanKindConsumer,
+		// A re-claim is a row that has already been picked up at least once, so
+		// something went wrong the first time. Sampled in at 100%: it is rare
+		// on a healthy platform and it is the only shape an operator ever asks
+		// about. See internal/tracing/sampler.go.
+		Recovery: row.Attempts > 1,
+		Attributes: []attribute.KeyValue{
+			tracing.AttrOutboxID.String(row.ID),
+			tracing.AttrEventID.String(row.EventID),
+			tracing.AttrAttempt.Int(row.Attempts),
+		},
+	})
+	defer span.End()
+
+	log := tracing.Logger(ctx, r.opts.Logger).With(
 		"outbox_id", row.ID,
 		"event_id", row.EventID,
 		"attempts", row.Attempts,
@@ -283,6 +327,7 @@ func (r *Router) process(ctx context.Context, row OutboxRow) {
 		// one day, but silently re-claiming a row forever is how a queue stops.
 		log.Error("outbox row has an unhandled type; parking",
 			"outbox_type", row.Type, "handled_type", OutboxTypeEventCreated)
+		markOutcome(span, "parked", "unknown_outbox_type")
 		r.park(ctx, row, "unknown_outbox_type",
 			fmt.Sprintf("outbox type %q is not handled by the router", row.Type), log)
 		return
@@ -303,6 +348,7 @@ func (r *Router) process(ctx context.Context, row OutboxRow) {
 			"max_outbox_attempts", r.opts.MaxOutboxAttempts,
 			"meaning", "claimed this many times without the router recording any outcome, which is what a row that kills the process looks like",
 			"consequence", "this event will not be delivered until an operator requeues it")
+		markOutcome(span, "parked", "attempts_exhausted")
 		r.park(ctx, row, "attempts_exhausted",
 			fmt.Sprintf("claimed %d times (%d of them leaving no recorded outcome, bound %d)",
 				row.Attempts, row.UnaccountedAttempts, r.opts.MaxOutboxAttempts), log)
@@ -321,6 +367,7 @@ func (r *Router) process(ctx context.Context, row OutboxRow) {
 				"failing_for", failing.Round(time.Second).String(),
 				"max_outbox_retry_duration", r.opts.MaxOutboxRetryDuration.String(),
 				"consequence", "this event will not be delivered until an operator requeues it")
+			markOutcome(span, "parked", "retry_duration_exceeded")
 			r.park(ctx, row, "retry_duration_exceeded",
 				fmt.Sprintf("failing since %s (%s, bound %s)",
 					row.FailingSince.UTC().Format(time.RFC3339),
@@ -334,6 +381,11 @@ func (r *Router) process(ctx context.Context, row OutboxRow) {
 		RouterID:    r.opts.RouterID,
 		Row:         row,
 		FanOutBatch: r.opts.MaxSubscriptionsPerEvent,
+		// THIS span's context, stamped onto every delivery row the transaction
+		// creates. It is written inside that transaction, so a rolled-back
+		// fan-out leaves no delivery pointing at a span that describes work
+		// which never committed.
+		TraceContext: tracing.Encode(ctx),
 	})
 	RouteDuration.Observe(time.Since(started).Seconds())
 
@@ -343,8 +395,23 @@ func (r *Router) process(ctx context.Context, row OutboxRow) {
 			// rather than issuing another statement on a dead context.
 			return
 		}
+		tracing.RecordError(span, err)
+		markOutcome(span, "released", "fan_out_failed")
 		r.release(ctx, row, err, log)
 		return
+	}
+
+	span.SetAttributes(
+		tracing.AttrOutcome.String(string(res.Outcome)),
+		tracing.AttrDeliveriesMade.Int(res.Created),
+		tracing.AttrFanOutPlanned.Int(len(res.Plan.Targets)),
+	)
+	if res.Event.ProjectID != "" {
+		span.SetAttributes(
+			tracing.AttrProjectID.String(res.Event.ProjectID),
+			tracing.AttrOrganizationID.String(res.Event.OrganizationID),
+			tracing.AttrEventType.String(res.Event.EventType),
+		)
 	}
 
 	switch res.Outcome {
@@ -354,6 +421,7 @@ func (r *Router) process(ctx context.Context, row OutboxRow) {
 		// recovery strategy, and a retention job that ever bypasses the FK
 		// would otherwise wedge the queue.
 		log.Warn("outbox row points at an event that no longer exists; parking")
+		markOutcome(span, "parked", "event_missing")
 		r.park(ctx, row, "event_missing", "event row no longer exists", log)
 
 	case OutcomeLeaseLost:
@@ -411,6 +479,26 @@ func (r *Router) process(ctx context.Context, row OutboxRow) {
 			"deliveries_created", res.Created,
 			"planned", len(res.Plan.Targets),
 			"resumed_from_subscription_id", row.FanOutCursor)
+	}
+}
+
+// markOutcome records a non-routed resolution on the fan-out span.
+//
+// A parked row is an ERROR in the span sense: an event that returned 202 and
+// will not be delivered without a human. A released one is not - it is going to
+// be retried and the platform is behaving as designed - so it gets the
+// attributes and no error status, or every transient database blip would show
+// up as a red trace.
+func markOutcome(span trace.Span, outcome, reason string) {
+	if !span.IsRecording() {
+		return
+	}
+	span.SetAttributes(
+		tracing.AttrOutcome.String(outcome),
+		tracing.AttrDeliveryReason.String(reason),
+	)
+	if outcome == "parked" {
+		span.SetStatus(codes.Error, reason)
 	}
 }
 

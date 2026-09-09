@@ -117,6 +117,79 @@ describe('validateEnv', () => {
     });
   });
 
+  describe('tracing (OTEL_*)', () => {
+    it('leaves the exporter endpoint unset by default - unset is the off switch', () => {
+      const env = validateEnv(baseEnv());
+      expect(env.OTEL_EXPORTER_OTLP_ENDPOINT).toBeUndefined();
+    });
+
+    it.each(['', '  ', '\t'])(
+      'treats a blank OTEL_EXPORTER_OTLP_ENDPOINT %j as unset rather than failing boot',
+      (blank) => {
+        const env = validateEnv({ ...baseEnv(), OTEL_EXPORTER_OTLP_ENDPOINT: blank });
+        expect(env.OTEL_EXPORTER_OTLP_ENDPOINT).toBeUndefined();
+      },
+    );
+
+    it('keeps a real collector endpoint', () => {
+      const env = validateEnv({
+        ...baseEnv(),
+        OTEL_EXPORTER_OTLP_ENDPOINT: 'http://otel-collector:4318',
+      });
+      expect(env.OTEL_EXPORTER_OTLP_ENDPOINT).toBe('http://otel-collector:4318');
+    });
+
+    it('REFUSES to boot on an endpoint that is not a URL', () => {
+      expect(() =>
+        validateEnv({ ...baseEnv(), OTEL_EXPORTER_OTLP_ENDPOINT: 'not a url at all' }),
+      ).toThrow(/OTEL_EXPORTER_OTLP_ENDPOINT/);
+    });
+
+    // `z.string().url()` alone accepts this: it reads `otel-collector:` as the
+    // scheme. Omitting http:// is the likeliest mistake an operator makes, and
+    // it would otherwise boot cleanly and export nothing, for ever.
+    it('REFUSES an endpoint with no http(s) scheme', () => {
+      expect(() =>
+        validateEnv({ ...baseEnv(), OTEL_EXPORTER_OTLP_ENDPOINT: 'otel-collector:4318' }),
+      ).toThrow(/OTEL_EXPORTER_OTLP_ENDPOINT/);
+      expect(() =>
+        validateEnv({ ...baseEnv(), OTEL_EXPORTER_OTLP_ENDPOINT: 'grpc://otel-collector:4317' }),
+      ).toThrow(/OTEL_EXPORTER_OTLP_ENDPOINT/);
+    });
+
+    it('accepts https', () => {
+      const env = validateEnv({
+        ...baseEnv(),
+        OTEL_EXPORTER_OTLP_ENDPOINT: 'https://collector.example.com:4318',
+      });
+      expect(env.OTEL_EXPORTER_OTLP_ENDPOINT).toBe('https://collector.example.com:4318');
+    });
+
+    it('defaults the service identity', () => {
+      const env = validateEnv(baseEnv());
+      expect(env.OTEL_SERVICE_NAME).toBe('control-api');
+      expect(env.OTEL_SERVICE_NAMESPACE).toBe('webhook-platform');
+    });
+
+    it('defaults the sampler to 1 - the control plane is not the hot path', () => {
+      expect(validateEnv(baseEnv()).OTEL_TRACES_SAMPLER_ARG).toBe(1);
+      expect(validateEnv({ ...baseEnv(), OTEL_TRACES_SAMPLER_ARG: '  ' }).OTEL_TRACES_SAMPLER_ARG).toBe(1);
+    });
+
+    it('accepts a ratio in range and rejects one outside it', () => {
+      expect(validateEnv({ ...baseEnv(), OTEL_TRACES_SAMPLER_ARG: '0.05' }).OTEL_TRACES_SAMPLER_ARG).toBe(0.05);
+      expect(() => validateEnv({ ...baseEnv(), OTEL_TRACES_SAMPLER_ARG: '1.5' })).toThrow(
+        /OTEL_TRACES_SAMPLER_ARG/,
+      );
+      expect(() => validateEnv({ ...baseEnv(), OTEL_TRACES_SAMPLER_ARG: '-1' })).toThrow(
+        /OTEL_TRACES_SAMPLER_ARG/,
+      );
+      expect(() => validateEnv({ ...baseEnv(), OTEL_TRACES_SAMPLER_ARG: 'half' })).toThrow(
+        /OTEL_TRACES_SAMPLER_ARG/,
+      );
+    });
+  });
+
   describe('required configuration still fails loudly when blank', () => {
     it.each(['', '   ', undefined])('rejects DATABASE_URL %j', (value) => {
       expect(() => validateEnv({ ...baseEnv(), DATABASE_URL: value })).toThrow(/DATABASE_URL/);

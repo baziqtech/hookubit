@@ -110,6 +110,17 @@ type AttemptRecord struct {
 	ErrorMessage    string
 	Duration        time.Duration
 	WorkerID        string
+	// TraceID is the trace of the span for THIS attempt, and it is the seam
+	// between the delivery ledger and the trace backend: the attempt row an
+	// operator is already looking at names the trace of that exact attempt.
+	//
+	// It is set ONLY when the span was actually sampled - see
+	// tracing.SampledTraceID. Recording the id of a dropped span would put a
+	// link in the operator UI that leads to an empty page, from which the
+	// operator concludes the backend is broken rather than that this attempt
+	// was not recorded. Empty writes NULL, which honestly means "no trace was
+	// kept for this attempt".
+	TraceID string
 }
 
 // Transition is one move of the delivery state machine, with its reason.
@@ -460,9 +471,10 @@ const insertAttemptSQL = `
 INSERT INTO delivery_attempts (
     id, delivery_id, attempt_number, started_at, completed_at, status,
     http_status, request_headers, response_headers, response_body,
-    response_size, error_code, error_message, duration_ms, worker_id, created_at)
+    response_size, error_code, error_message, duration_ms, worker_id, created_at,
+    trace_id)
 VALUES ($1, $2, $3, $4, $5, $6::text::"AttemptStatus", $7, $8::jsonb, $9::jsonb,
-        $10, $11, $12, $13, $14, $15, now())
+        $10, $11, $12, $13, $14, $15, now(), $16)
 `
 
 // Complete implements Store.
@@ -557,6 +569,7 @@ func insertAttempt(ctx context.Context, tx pgx.Tx, deliveryID string, a *Attempt
 		textOrNil(a.ErrorMessage),
 		int(a.Duration.Milliseconds()),
 		textOrNil(a.WorkerID),
+		textOrNil(a.TraceID),
 	)
 	if err != nil {
 		return fmt.Errorf("record attempt %d for delivery %s: %w", a.Number, deliveryID, err)

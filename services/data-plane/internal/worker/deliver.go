@@ -10,11 +10,16 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
+
 	"github.com/shaq/webhook-platform/services/data-plane/internal/egress"
 	"github.com/shaq/webhook-platform/services/data-plane/internal/metrics"
 	"github.com/shaq/webhook-platform/services/data-plane/internal/queue"
 	"github.com/shaq/webhook-platform/services/data-plane/internal/retry"
 	"github.com/shaq/webhook-platform/services/data-plane/internal/signing"
+	"github.com/shaq/webhook-platform/services/data-plane/internal/tracing"
 )
 
 // deferBaseDelay is how long a delivery waits after being turned away by a
@@ -28,7 +33,17 @@ const deferBaseDelay = 2 * time.Second
 // could only log it would add nothing.
 func (w *Worker) handle(ctx context.Context, lease queue.Lease) {
 	job := lease.Job
-	log := w.log.With(
+
+	// The stage root for this attempt. It covers the gates and the deferrals as
+	// well as the request, because "why has this delivery not moved" is a
+	// question about the gates. See startAttemptSpan.
+	ctx, span := startAttemptSpan(ctx, lease)
+	defer span.End()
+
+	// trace_id on every line of this delivery's story. ARCHITECTURE.md 63 wants
+	// both; this is the seam between them, and it is absent - leaving the lines
+	// byte-identical - when tracing is off.
+	log := tracing.Logger(ctx, w.log).With(
 		"delivery_id", job.DeliveryID,
 		"event_id", job.EventID,
 		"endpoint_id", job.EndpointID,
@@ -107,6 +122,24 @@ func (w *Worker) deliver(ctx context.Context, j queue.DeliveryJob, log *slog.Log
 		return
 	}
 	log = log.With("endpoint_url_host", hostOf(job.Endpoint.URL))
+	// HOST ONLY, never the URL. A customer's endpoint URL can carry a token in
+	// its query string; this is the same reduction the log line above makes and
+	// it is not negotiable for a span either (engineering rule 12).
+	if span := spanOf(ctx); span.IsRecording() {
+		attrs := []attribute.KeyValue{
+			tracing.AttrServerAddress.String(tracing.EndpointHost(job.Endpoint.URL)),
+			tracing.AttrEventType.String(job.EventType),
+			tracing.AttrMaxAttempts.Int(job.Policy.MaxAttempts),
+			tracing.AttrPayloadStored.Bool(job.PayloadLocation != ""),
+		}
+		if !job.EventCreatedAt.IsZero() {
+			// End-to-end age at the moment this attempt starts. It is the
+			// number the linked ingest span cannot give, because the two spans
+			// are deliberately in different traces.
+			attrs = append(attrs, tracing.AttrEventAgeMS.Int64(w.now().Sub(job.EventCreatedAt).Milliseconds()))
+		}
+		span.SetAttributes(attrs...)
+	}
 
 	if deliverable, reason := job.Endpoint.Deliverable(); !deliverable {
 		// Not a failure of this delivery - the operator switched the endpoint
@@ -268,8 +301,40 @@ func (w *Worker) attempt(ctx context.Context, job *Job, verdict Verdict, log *sl
 		defer cancelCall()
 	}
 
-	resp, doErr := w.client.Do(callCtx, http.MethodPost, job.Endpoint.URL, headers, job.Payload)
+	// The one irreversible step, and the one worth its own span: everything
+	// above it is bookkeeping measured in microseconds, and this is where a
+	// slow endpoint holds a worker slot for thirty seconds.
+	//
+	// NOTE FOR ANYONE ADDING INSTRUMENTATION HERE: this is a MANUAL span around
+	// the call, not otelhttp.NewTransport around the client. That is
+	// deliberate and load-bearing. egress.Client's transport carries the SSRF
+	// guarantee - Dialer.Control runs per RESOLVED ADDRESS, after resolution,
+	// immediately before connect, with no cached verdict - and any wrapper that
+	// replaced or re-created the transport would move or lose it. A span is
+	// worth nothing next to that.
+	httpCtx, httpSpan := tracing.Start(callCtx, "webhook.delivery.http",
+		trace.WithSpanKind(trace.SpanKindClient),
+		trace.WithAttributes(
+			tracing.AttrHTTPMethod.String(http.MethodPost),
+			// Host only. Never the URL, never the headers (they carry the
+			// signature), never the body.
+			tracing.AttrServerAddress.String(tracing.EndpointHost(job.Endpoint.URL)),
+			tracing.AttrPayloadBytes.Int(len(job.Payload)),
+		))
+	resp, doErr := w.client.Do(httpCtx, http.MethodPost, job.Endpoint.URL, headers, job.Payload)
 	finished := w.now()
+	if httpSpan.IsRecording() {
+		if resp != nil {
+			httpSpan.SetAttributes(tracing.AttrHTTPStatus.Int(resp.StatusCode))
+		}
+		if doErr != nil {
+			// The CLASSIFICATION, not the message. A transport error's text can
+			// contain the full URL it failed to reach, query string included.
+			httpSpan.SetAttributes(tracing.AttrErrorType.String(ErrorCode(0, doErr)))
+			httpSpan.SetStatus(codes.Error, ErrorCode(0, doErr))
+		}
+	}
+	httpSpan.End()
 
 	// THE crash-safety check, and it must come before any write.
 	//
@@ -331,6 +396,7 @@ func (w *Worker) attempt(ctx context.Context, job *Job, verdict Verdict, log *sl
 		ErrorCode:      decision.ErrorCode,
 		Duration:       finished.Sub(started),
 		WorkerID:       w.workerID,
+		TraceID:        tracing.SampledTraceID(ctx),
 	}
 	if resp != nil {
 		attempt.ResponseHeaders = RedactHeaders(resp.Headers)
@@ -420,6 +486,7 @@ func (w *Worker) recordNonHTTP(ctx context.Context, job *Job, started time.Time,
 		ErrorCode:    decision.ErrorCode,
 		ErrorMessage: truncate(cause.Error(), 1024),
 		WorkerID:     w.workerID,
+		TraceID:      tracing.SampledTraceID(ctx),
 	}, decision, log)
 }
 
@@ -469,6 +536,8 @@ func (w *Worker) finish(ctx context.Context, job *Job, attempt *AttemptRecord, d
 	// guarded by locked_by and cannot clobber another worker's claim.
 	writeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), w.dbTimeout)
 	defer cancel()
+
+	recordTransition(ctx, decision, attempt)
 
 	if err := w.store.Complete(writeCtx, w.workerID, job.DeliveryID, attempt, next); err != nil {
 		if errors.Is(err, ErrLeaseNotHeld) {
@@ -611,6 +680,8 @@ func (w *Worker) deferDelivery(
 	if delay <= 0 {
 		delay = time.Second
 	}
+	recordDeferred(ctx, reason, delay)
+
 	writeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), w.dbTimeout)
 	defer cancel()
 
@@ -653,6 +724,7 @@ func (w *Worker) expireDelivery(
 	defer cancel()
 
 	next := Transition{State: StateExhausted, Reason: ReasonBudgetExhausted}
+	recordTransition(ctx, Decision{State: StateExhausted, Reason: ReasonBudgetExhausted}, nil)
 	attrs := append([]slog.Attr{
 		slog.String("reason", string(ReasonBudgetExhausted)),
 		slog.String("deferred_for", string(deferredFor)),

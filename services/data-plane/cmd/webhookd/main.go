@@ -33,6 +33,7 @@ import (
 	"github.com/shaq/webhook-platform/services/data-plane/internal/httpx"
 	"github.com/shaq/webhook-platform/services/data-plane/internal/ids"
 	"github.com/shaq/webhook-platform/services/data-plane/internal/logging"
+	"github.com/shaq/webhook-platform/services/data-plane/internal/tracing"
 )
 
 // shutdownGrace bounds the whole shutdown, from signal to exit. The arithmetic
@@ -59,6 +60,29 @@ func run() error {
 	}
 	log := logging.New(cfg.LogLevel, "webhookd-"+role)
 	instanceID := ids.New(ids.Worker)
+
+	// Telemetry is started BEFORE the probe server and the pool, and its
+	// failure is a warning rather than a refusal to start.
+	//
+	// Both halves of that are deliberate. Before, so that the database retry
+	// loop below - the slowest and most interesting part of a bad boot - is
+	// inside whatever tracing this deployment has. A warning, because a typo in
+	// a collector URL taking the data plane down is a far worse outage than the
+	// missing traces, and because ARCHITECTURE.md's whole position on
+	// observability is that it must never be load-bearing. With
+	// OTEL_EXPORTER_OTLP_ENDPOINT unset this builds nothing at all: no
+	// exporter, no goroutine, no provider. See internal/tracing.
+	// context.Background, not the signal context: building the exporter is a
+	// few microseconds of struct assembly with no network in it, and handing it
+	// a context that SIGTERM can cancel would leave a process signalled during
+	// boot with no telemetry for its own drain.
+	traces, err := tracing.Setup(context.Background(), tracing.FromEnv(role, instanceID, cfg.AppEnv), log)
+	if err != nil {
+		log.Warn("tracing could not be started; continuing without it",
+			"error", err,
+			"effect", "no spans are exported; deliveries and metrics are unaffected")
+		traces = nil
+	}
 
 	// SIGTERM cancels this context, which every loop below selects on
 	// (ARCHITECTURE.md 47).
@@ -120,6 +144,7 @@ func run() error {
 		// The probe server is already listening, so close it rather than
 		// leaving the deferred shutdown below unreachable on this path.
 		stopProbes(probes, log)
+		flushTraces(traces, log)
 		return fmt.Errorf("connect to PostgreSQL: %w", err)
 	}
 	defer pool.Close()
@@ -154,12 +179,31 @@ func run() error {
 	if err := probes.Shutdown(probeCtx); err != nil {
 		log.Warn("probe server did not shut down cleanly", "error", err)
 	}
+	// Step 6 of ARCHITECTURE.md 47, and it runs LAST on purpose: the spans
+	// worth keeping from a shutdown are the ones describing the drain that has
+	// just finished. Shutdown takes its own bounded context rather than the
+	// cancelled one - see tracing.Provider.Shutdown - so the final batch is not
+	// dropped by the very signal it describes.
+	flushTraces(traces, log)
+
 	log.Info("data plane stopped", "role", role)
 
 	if runErr != nil && !errors.Is(runErr, context.Canceled) {
 		return runErr
 	}
 	return nil
+}
+
+// flushTraces exports whatever is queued and stops the provider. Failing to
+// flush is logged and otherwise ignored: nothing about the correctness of what
+// this process already committed depends on a span reaching a collector.
+func flushTraces(traces *tracing.Provider, log *slogLogger) {
+	if traces == nil {
+		return
+	}
+	if err := traces.Shutdown(); err != nil {
+		log.Warn("tracing did not flush cleanly; some spans were dropped", "error", err)
+	}
 }
 
 // stopProbes closes the probe server on the boot-failure path, where the

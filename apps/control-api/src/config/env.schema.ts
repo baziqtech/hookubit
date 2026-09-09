@@ -112,6 +112,68 @@ export const envSchema = z.object({
   ENDPOINT_AUTO_DISABLE_MAX_PER_RUN: blankAsUnset(
     z.coerce.number().int().min(1).max(10_000).default(200),
   ),
+  /**
+   * Tracing (ARCHITECTURE.md 44, docs/ROADMAP.md Phase 6).
+   *
+   * The BASE OTLP/HTTP endpoint of a collector - `http://otel-collector:4318`,
+   * not `.../v1/traces`; the signal path is appended for you. UNSET IS THE
+   * SWITCH: with no endpoint the control plane builds no exporter, no span
+   * processor and no tracer provider at all, so there is nothing to retry
+   * against a collector that does not exist and nothing to slow boot down.
+   *
+   * Validated as an http(s) URL rather than accepted as free text because a
+   * typo here would otherwise surface as a silent export failure hours later -
+   * the one failure mode the whole "controls must not lie" rule exists to
+   * prevent. The scheme check is not redundant: `z.string().url()` accepts
+   * `otel-collector:4318`, reading the host as a URL SCHEME, so the most likely
+   * mistake an operator makes - omitting `http://` - is the one a bare `.url()`
+   * would have waved through.
+   */
+  OTEL_EXPORTER_OTLP_ENDPOINT: blankAsUnset(
+    z
+      .string()
+      .url()
+      .refine(
+        (v) => /^https?:\/\//i.test(v),
+        'OTEL_EXPORTER_OTLP_ENDPOINT must start with http:// or https:// (the collector base URL, e.g. http://otel-collector:4318)',
+      )
+      .optional(),
+  ),
+  /**
+   * `service.namespace` on every span. Groups this deployment's services in the
+   * trace backend, so a shared collector can carry two installs without their
+   * `control-api` spans merging into one service.
+   */
+  OTEL_SERVICE_NAMESPACE: blankAsUnset(
+    z
+      .string()
+      .max(64, 'OTEL_SERVICE_NAMESPACE must be at most 64 characters')
+      .default('webhook-platform'),
+  ),
+  /**
+   * `service.name` on every span. Overridable because a self-hosted install may
+   * run two control planes (staging and production) against one collector, and
+   * `service.namespace` alone does not separate them in every backend.
+   */
+  OTEL_SERVICE_NAME: blankAsUnset(
+    z
+      .string()
+      .max(64, 'OTEL_SERVICE_NAME must be at most 64 characters')
+      .default('control-api'),
+  ),
+  /**
+   * Head sampling ratio, 0..1, parent-based. Defaults to 1: the control plane
+   * is the configuration and operator surface, deliberately NOT the delivery
+   * hot path (that is the Go data plane), so its request rate is small enough
+   * that sampling buys nothing and losing the one slow request costs a lot.
+   *
+   * Parent-based, but the remote-parent branch is capped at this same ratio
+   * rather than obeying it: `traceparent` is an unauthenticated request header,
+   * and a caller must not get to decide how much we record. See the sampler in
+   * tracing/tracer-provider.service.ts.
+   */
+  OTEL_TRACES_SAMPLER_ARG: blankAsUnset(z.coerce.number().min(0).max(1).default(1)),
+
   ALLOW_OPEN_REGISTRATION: blankAsUnset(
     z
       .string()

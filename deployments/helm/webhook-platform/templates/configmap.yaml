@@ -74,6 +74,10 @@ data:
 
   OTEL_EXPORTER_OTLP_ENDPOINT: {{ .Values.observability.otlpEndpoint | quote }}
   OTEL_SERVICE_NAMESPACE: {{ .Values.observability.serviceNamespace | quote }}
+  OTEL_SERVICE_NAME: {{ .Values.observability.serviceName | quote }}
+  OTEL_TRACES_SAMPLER_ARG: {{ .Values.observability.tracesSamplerArg | quote }}
+  DATA_PLANE_OTEL_SERVICE_NAME: {{ .Values.observability.dataPlaneServiceName | quote }}
+  DATA_PLANE_OTEL_TRACES_SAMPLER_ARG: {{ .Values.observability.dataPlaneTracesSamplerArg | quote }}
 {{- range $k, $v := .Values.extraEnv }}
   {{ $k }}: {{ $v | quote }}
 {{- end }}
