@@ -260,12 +260,24 @@ jobs:
       # ══════════════════════════════════════════════════════════════════
       - name: Migrations match schema.prisma (except the documented, inexpressible drift)
         working-directory: apps/control-api
+        env:
+          # libpq rejects Prisma's ?schema= parameter, so psql gets its own URL.
+          PGURL: postgresql://webhook:webhook@localhost:5432/webhook_platform_test
         run: |
           set -euo pipefail
+          # The shadow database must NOT be the job's own database. `migrate
+          # diff --from-migrations` applies every migration to the shadow as
+          # scratch and leaves the tables behind without a _prisma_migrations
+          # row - so the next step's `migrate deploy` against the same database
+          # met a non-empty schema with no migration history and refused with
+          # P3005 "The database schema is not empty". That failed this job on
+          # every run from the day it was written. The service user owns the
+          # container, so it may create a sibling database for the diff.
+          psql "$PGURL" -v ON_ERROR_STOP=1 -c 'CREATE DATABASE webhook_platform_shadow'
           npx prisma migrate diff \
             --from-migrations prisma/migrations \
             --to-schema-datamodel prisma/schema.prisma \
-            --shadow-database-url "$DATABASE_URL" \
+            --shadow-database-url "postgresql://webhook:webhook@localhost:5432/webhook_platform_shadow?schema=public" \
             --script > /tmp/drift.sql
 
           echo "--- raw drift script ---"
