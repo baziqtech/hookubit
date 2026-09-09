@@ -96,6 +96,12 @@ jobs:
       # split already exists in the root package.json (`test:db:migrate` uses
       # ?schema=, `go:test:db` uses ?sslmode=).
       DATABASE_URL: postgresql://webhook:webhook@localhost:5432/webhook_platform_test?sslmode=disable
+      redis:
+        image: redis:7-alpine
+        ports: ['6379:6379']
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s --health-timeout 3s --health-retries 10
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
@@ -132,6 +138,10 @@ jobs:
       # batch contained. That was misread as flakiness three times.
       - name: Test
         working-directory: services/data-plane
+        env:
+          # Without this the three live Lua tests skip, and the script that
+          # actually runs against Redis is never exercised anywhere.
+          REDIS_TEST_URL: redis://localhost:6379/1
         run: go test -race -count=1 ./...
 
   control-plane:
