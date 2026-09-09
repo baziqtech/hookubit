@@ -464,6 +464,45 @@ when it is violated, and the control plane does not know `WORKER_CONCURRENCY`
 exists. An operator gets isolation by knowing this paragraph. That gap is G13 in
 docs/FAILURE_RECOVERY.md, and it is the most operationally significant one open.
 
+## 7b. Graceful shutdown under load
+
+ARCHITECTURE.md 47 requires a drain that does not lose work, and the shutdown
+path has a specific hazard: a restart must not be charged to the customer. An
+attempt cancelled by OUR drain, written as a failed attempt row, advances
+`attempt_count` and moves that endpoint's breaker one failure closer to open -
+so a rolling deploy degrades every slow customer's health.
+
+Exercised on 2026-09-09 against endpoints that take 5s to answer, so work was
+genuinely in flight rather than theoretically so:
+
+1. 20 events to a project with 10 slow endpoints. At the moment of the signal:
+   **64 deliveries `processing`, 56 `pending`.**
+2. `SIGTERM`.
+
+Observed:
+
+| | |
+| --- | --- |
+| readiness flipped to `draining` | within 1s, before any listener closed |
+| process kept serving | ~5s propagation window, then exited cleanly |
+| deliveries | 120 of 120 succeeded, 120 distinct (event, endpoint) pairs |
+| attempts | 120 - exactly one per delivery, all HTTP 200 |
+| attempt rows reading `context canceled` | **0** |
+| rows still locked by the dead process | **0** |
+
+The drain completed the in-flight work rather than abandoning it, so nothing
+needed the shutdown-defer path. That path - where the drain window expires
+before an attempt finishes, and the delivery is deferred with
+`ReasonWorkerShutdown`, no attempt row and no retry budget spent - is covered by
+`internal/worker/defer_test.go` and by the lease-keeper cancellation-cause test
+in `internal/queue`, because reproducing it under load would mean an endpoint
+slower than `DrainTimeout` and a 15s pause in every suite run.
+
+Re-run this after any change to the drain ordering, the lease keeper, or the
+cancellation cause. The number that matters is the zero on the `context
+canceled` row: if it is ever non-zero, restarts are silently damaging customer
+endpoint health.
+
 ## 8. Tuning knobs
 
 Sizing (seed-time; re-seed after changing):

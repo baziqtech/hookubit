@@ -42,8 +42,11 @@ tests for all 20 scenarios in ARCHITECTURE.md 57, with the recovery strategy for
 each written down in docs/FAILURE_RECOVERY.md · Kubernetes manifests and Helm
 chart · migration job.
 
-Outstanding: OpenTelemetry traces end to end · graceful shutdown verified under
-load.
+Outstanding: OpenTelemetry traces end to end.
+
+Graceful shutdown is verified under load in docs/LOAD_TESTING.md 7b - 64
+deliveries in flight against 5s endpoints at the moment of SIGTERM, all 120
+completed, zero attempt rows charged to an endpoint for our restart.
 
 Backup and restore is documented in docs/BACKUP_RESTORE.md, and ARCHITECTURE.md
 63's "destroyed and recreated against the same external PostgreSQL" line is
