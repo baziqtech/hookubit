@@ -101,18 +101,22 @@ func TestScenario06_SchedulerCrashes(t *testing.T) {
 		t.Fatalf("claim while the scheduler is down: %v", err)
 	}
 	if len(leases) != 1 {
-		// This assertion has failed intermittently and unexplainably (see
-		// doc.go): five leases came back from a claim whose limit was 1, and
-		// five rows really did carry that call's locked_by, so it is not a bad
-		// assertion. It has never reproduced on demand. These reads cost
-		// nothing on the passing path and are the evidence the next occurrence
-		// needs - capture them rather than re-running.
+		// This assertion once failed intermittently: a LIMIT-1 claim returned all
+		// five rows. Root cause, fixed in queue.claimFIFOSQL and documented there:
+		// under bloated-table statistics the planner re-executed the claim's
+		// IN-subquery per outer row, and LockRows skipped rows the same UPDATE
+		// had already modified. These reads cost nothing on the passing path and
+		// are the evidence a recurrence needs - the statistics are the trigger.
 		var total, locked, ready int
 		_ = pool.QueryRow(context.Background(), `SELECT count(*) FROM deliveries`).Scan(&total)
 		_ = pool.QueryRow(context.Background(), `SELECT count(*) FROM deliveries WHERE locked_by='wrk_live'`).Scan(&locked)
 		_ = pool.QueryRow(context.Background(),
 			`SELECT count(*) FROM deliveries WHERE status IN ('pending','scheduled','queued','retrying','processing')`).Scan(&ready)
 		t.Logf("DIAG total_rows=%d locked_by_wrk_live=%d ready_set=%d leases=%d", total, locked, ready, len(leases))
+		var relpages, reltuples float64
+		_ = pool.QueryRow(context.Background(),
+			`SELECT relpages::float8, reltuples::float8 FROM pg_class WHERE relname = 'deliveries'`).Scan(&relpages, &reltuples)
+		t.Logf("DIAG pg_class deliveries relpages=%v reltuples=%v", relpages, reltuples)
 		for i, l := range leases {
 			t.Logf("DIAG lease[%d] delivery=%s project=%s", i, l.Job.DeliveryID, l.Job.ProjectID)
 		}

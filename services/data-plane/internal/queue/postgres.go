@@ -64,20 +64,45 @@ const claimedColumns = `
 //     crashed worker's in-flight deliveries come back - see claimStatuses.
 //   - The row is moved to `processing` in the same statement, so a claim is
 //     visible to the operator UI immediately.
+//
+// claimFIFOSQL picks the batch in a MATERIALIZED CTE and only then updates.
+//
+// It used to be `UPDATE ... WHERE id IN (SELECT ... FOR UPDATE SKIP LOCKED
+// LIMIT $3)`, which is the textbook shape and is WRONG under one planner
+// choice. When the statistics say the table is tiny - relpages high,
+// reltuples near zero, which is exactly what autovacuum leaves behind after a
+// burst is drained or a retention sweep empties the table - the planner runs
+// the IN-subquery on the INNER side of a nested-loop semi join, re-executing
+// Sort -> LockRows -> Limit once per outer row. On each re-execution LockRows
+// re-locks the first sorted row; a row this same UPDATE already modified is
+// TM_SelfModified, which LockRows treats as deleted and skips, so the NEXT tied
+// row becomes that turn's LIMIT-1 winner and matches the next outer row. With
+// a fan-out batch every row ties on (next_attempt_at, created_at), so a claim
+// of LIMIT 1 returned every ready row: measured 5 of 5, ten times out of ten,
+// against relpages=14 reltuples=1, and reproduced inside the failure suite at
+// relpages=6 reltuples=0. Under any other statistics state the planner hashes
+// the subquery once and the LIMIT holds - which is why it read as flakiness.
+//
+// A MATERIALIZED CTE is evaluated exactly once into a tuplestore before the
+// UPDATE joins to it, so the batch is bounded by construction, whatever plan
+// the join takes. The id tiebreaker makes the order deterministic among rows
+// that tie, which a fan-out batch always does.
 const claimFIFOSQL = `
+WITH picked AS MATERIALIZED (
+    SELECT id AS picked_id
+    FROM deliveries
+    WHERE ` + readyPredicate + `
+    ORDER BY next_attempt_at NULLS FIRST, created_at, id
+    FOR UPDATE SKIP LOCKED
+    LIMIT $3
+)
 UPDATE deliveries d
 SET status        = 'processing',
     locked_by     = $1,
     locked_until  = now() + $2::interval,
     updated_at    = now()
-WHERE d.id IN (
-    SELECT id
-    FROM deliveries
-    WHERE ` + readyPredicate + `
-    ORDER BY next_attempt_at NULLS FIRST, created_at
-    FOR UPDATE SKIP LOCKED
-    LIMIT $3
-)
+FROM picked
+WHERE d.id = picked.picked_id
 RETURNING ` + claimedColumns
 
 // claimTenantFairSQL is the ADR-0007 claim: one bounded pick per tenant in the
@@ -87,14 +112,13 @@ RETURNING ` + claimedColumns
 // per-tenant cap, $6 the overall claim limit. FOR UPDATE SKIP LOCKED sits
 // inside the LATERAL, which is an inner join, so per-row locking and skipping
 // behave exactly as in the FIFO statement.
+// Same MATERIALIZED shape as claimFIFOSQL, for the same reason: a FROM-subquery
+// with LIMIT can land on the inner side of a nested loop and be re-run per outer
+// row, and LockRows skipping self-modified rows would then over-claim across
+// the whole batch. See the comment on claimFIFOSQL.
 const claimTenantFairSQL = `
-UPDATE deliveries d
-SET status        = 'processing',
-    locked_by     = $1,
-    locked_until  = now() + $2::interval,
-    updated_at    = now()
-FROM (
-    SELECT c.id
+WITH picked AS MATERIALIZED (
+    SELECT c.id AS picked_id
     FROM unnest($3::text[], $4::text[]) AS t(organization_id, project_id)
     CROSS JOIN LATERAL (
         SELECT dd.id
@@ -104,13 +128,19 @@ FROM (
           AND dd.status IN ` + claimStatuses + `
           AND (dd.next_attempt_at IS NULL OR dd.next_attempt_at <= now())
           AND (dd.locked_until IS NULL OR dd.locked_until < now())
-        ORDER BY dd.next_attempt_at NULLS FIRST, dd.created_at
+        ORDER BY dd.next_attempt_at NULLS FIRST, dd.created_at, dd.id
         LIMIT $5
         FOR UPDATE SKIP LOCKED
     ) c
     LIMIT $6
-) picked
-WHERE d.id = picked.id
+)
+UPDATE deliveries d
+SET status        = 'processing',
+    locked_by     = $1,
+    locked_until  = now() + $2::interval,
+    updated_at    = now()
+FROM picked
+WHERE d.id = picked.picked_id
 RETURNING ` + claimedColumns
 
 // tenantSnapshotSQL is PostgreSQL's missing loose index scan, written by hand.

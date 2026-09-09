@@ -209,23 +209,30 @@ var _ Store = (*PostgresStore)(nil)
 // nothing, and only a claim that vanished silently does. Before that split, a
 // twenty-minute Postgres brownout burned all ten attempts on rows whose fan-out
 // was never even tried, and parked events that had already been answered 202.
+// The batch is fixed in a MATERIALIZED CTE before the UPDATE runs. The
+// `WHERE id IN (SELECT ... LIMIT $3)` form this replaced can be planned with the
+// subquery re-executed once per outer row, and LockRows then skips rows this
+// same statement already updated, so a claim of $3 rows took every ready row.
+// queue.claimFIFOSQL has the full account and the measurements.
 const claimOutboxSQL = `
+WITH picked AS MATERIALIZED (
+    SELECT id AS picked_id
+    FROM event_outbox
+    WHERE status IN ('pending', 'processing')
+      AND available_at <= now()
+      AND (locked_until IS NULL OR locked_until < now())
+    ORDER BY available_at, created_at, id
+    FOR UPDATE SKIP LOCKED
+    LIMIT $3
+)
 UPDATE event_outbox o
 SET status               = 'processing',
     attempts             = o.attempts + 1,
     unaccounted_attempts = o.unaccounted_attempts + 1,
     locked_by            = $1,
     locked_until         = now() + $2::interval
-WHERE o.id IN (
-    SELECT id
-    FROM event_outbox
-    WHERE status IN ('pending', 'processing')
-      AND available_at <= now()
-      AND (locked_until IS NULL OR locked_until < now())
-    ORDER BY available_at, created_at
-    FOR UPDATE SKIP LOCKED
-    LIMIT $3
-)
+FROM picked
+WHERE o.id = picked.picked_id
 RETURNING o.id, o.event_id, o.type, o.attempts, o.unaccounted_attempts,
           COALESCE(o.fan_out_cursor, ''), o.failing_since,
           COALESCE(o.trace_context, '')`

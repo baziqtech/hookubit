@@ -79,6 +79,14 @@ var terminalPredicate = func() string {
 // behind a customer's transaction while holding locks of its own - which is the
 // shape of the incident retention is supposed to prevent, not cause.
 //
+// # Why `doomed` is MATERIALIZED
+//
+// A single-reference CTE may be inlined by the planner, and an inlined
+// LIMIT/FOR UPDATE subquery can be re-executed per outer row when the planner
+// puts it on the inner side of a nested loop - at which point the batch bound
+// is no longer a bound. The claim statements in internal/queue hit exactly that
+// and have the measurements. MATERIALIZED evaluates the candidate set once.
+//
 // # Why the DELETE is a data-modifying CTE
 //
 // PostgreSQL executes every data-modifying statement in a WITH clause exactly
@@ -87,7 +95,7 @@ var terminalPredicate = func() string {
 // really updates, both against the row set `doomed` fixed - there is no window
 // in which a delivery is marked pruned while its attempts survive.
 var pruneAttemptsSQL = fmt.Sprintf(`
-WITH doomed AS (
+WITH doomed AS MATERIALIZED (
     SELECT id
     FROM deliveries
     WHERE %s
@@ -134,7 +142,7 @@ SELECT (SELECT count(*) FROM gone)::bigint,
 // survive. The trade is not worth the write cost; it is documented here so the
 // 404 is a known answer rather than a mystery.
 var pruneDeliveriesSQL = fmt.Sprintf(`
-WITH doomed AS (
+WITH doomed AS MATERIALIZED (
     SELECT id
     FROM deliveries
     WHERE %s
