@@ -1060,6 +1060,9 @@ function buildFixture(index: number): Fixture {
       id: deliveryId,
       event_id: eventId,
       endpoint_id: endpointId,
+      // These fixtures are all inside the retention window, so their attempts
+      // are still on the ledger. See DeliveryDto.attempts_pruned_at.
+      attempts_pruned_at: null,
       subscription_id: subscriptionId,
       project_id: PROD,
       status,

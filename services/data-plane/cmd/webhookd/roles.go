@@ -18,6 +18,7 @@ import (
 	"github.com/shaq/webhook-platform/services/data-plane/internal/payloadstore"
 	"github.com/shaq/webhook-platform/services/data-plane/internal/queue"
 	"github.com/shaq/webhook-platform/services/data-plane/internal/ratelimit"
+	"github.com/shaq/webhook-platform/services/data-plane/internal/retention"
 	"github.com/shaq/webhook-platform/services/data-plane/internal/router"
 	"github.com/shaq/webhook-platform/services/data-plane/internal/worker"
 )
@@ -151,6 +152,32 @@ func runScheduler(ctx context.Context, cfg *config.Config, pool *pgxpool.Pool, l
 	// exits.
 	go func() {
 		_ = metrics.NewQueueDepthCollector(pool, queueDepthInterval, log).Run(ctx)
+	}()
+
+	// Delivery ledger retention rides here for the same reasons as the collector
+	// above: periodic reconciliation of state nothing else owns, far too
+	// infrequent to deserve a process, on a role that is already a singleton. It
+	// takes no lease - every statement is bounded, idempotent and
+	// self-terminating - so a second scheduler would be wasteful, not unsafe.
+	go func() {
+		rcfg, err := retention.ConfigFromEnv()
+		if err != nil {
+			// Refusing to sweep is the safe failure, and this is the one
+			// background job that must NOT fall back to a default: a mistyped
+			// egress timeout costs latency, a mistyped retention horizon deletes
+			// the delivery ledger on a schedule nobody chose.
+			log.Error("delivery ledger retention disabled: invalid configuration", "error", err)
+			return
+		}
+		sweeper, err := retention.New(pool, rcfg, log)
+		if err != nil {
+			log.Error("delivery ledger retention disabled", "error", err)
+			return
+		}
+		// Discarded exactly as the collector's is: Run returns nil on
+		// cancellation and logs its own failures. This role also owns lease
+		// reclaim, which deliveries depend on and disk space does not.
+		_ = sweeper.Run(ctx)
 	}()
 
 	// The scheduler owns recovery, not timing: Claim already treats a due

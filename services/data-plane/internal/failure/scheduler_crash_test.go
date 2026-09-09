@@ -101,6 +101,21 @@ func TestScenario06_SchedulerCrashes(t *testing.T) {
 		t.Fatalf("claim while the scheduler is down: %v", err)
 	}
 	if len(leases) != 1 {
+		// This assertion has failed intermittently and unexplainably (see
+		// doc.go): five leases came back from a claim whose limit was 1, and
+		// five rows really did carry that call's locked_by, so it is not a bad
+		// assertion. It has never reproduced on demand. These reads cost
+		// nothing on the passing path and are the evidence the next occurrence
+		// needs - capture them rather than re-running.
+		var total, locked, ready int
+		_ = pool.QueryRow(context.Background(), `SELECT count(*) FROM deliveries`).Scan(&total)
+		_ = pool.QueryRow(context.Background(), `SELECT count(*) FROM deliveries WHERE locked_by='wrk_live'`).Scan(&locked)
+		_ = pool.QueryRow(context.Background(),
+			`SELECT count(*) FROM deliveries WHERE status IN ('pending','scheduled','queued','retrying','processing')`).Scan(&ready)
+		t.Logf("DIAG total_rows=%d locked_by_wrk_live=%d ready_set=%d leases=%d", total, locked, ready, len(leases))
+		for i, l := range leases {
+			t.Logf("DIAG lease[%d] delivery=%s project=%s", i, l.Job.DeliveryID, l.Job.ProjectID)
+		}
 		t.Fatalf("claimed %d deliveries with the scheduler down, want 1: the sweep is not on the "+
 			"critical path, the claim predicate is", len(leases))
 	}

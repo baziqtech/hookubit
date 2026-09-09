@@ -34,9 +34,17 @@
 // t.Parallel), and cross-run database theft (which the testsupport guard now
 // refuses outright, and which produces a different symptom).
 //
-// If you see it again, capture it rather than re-running: the useful evidence is
-// the row count in `deliveries` carrying the claim's locked_by immediately
-// afterwards, and pg_stat_activity for the statement as the server received it.
+// It reproduced twice more on 2026-09-09 - once in a full ./... run and once at
+// package level - and then not once in 16 consecutive attempts under the same
+// conditions. It appears only when the package runs as a whole, never for the
+// single test, which points at an interaction with the tests before it rather
+// than at the claim in isolation.
+//
+// TestScenario06 now dumps the row count, the count carrying the claim's
+// locked_by, and the size of the ready set on the failure path. Those reads cost
+// nothing while it passes. If you see it again, read that output rather than
+// re-running - and add pg_stat_activity for the statement as the server received
+// it, which is the one thing still missing.
 // A claim that overruns its limit in production would let a worker hold more
 // leases than its pool can run, which breaks the bound WORKER_CONCURRENCY is
 // supposed to give.

@@ -154,6 +154,11 @@ export class EndpointsController {
     description:
       'Refused when the endpoint has no active signing secret: the data plane fails closed ' +
       'rather than delivering unsigned, so enabling would only queue failures.\n\n' +
+      'This is also the way back from an automatic disable. It clears `disabled_reason` and ' +
+      '`disabled_at`, and brings the circuit breaker`s next probe forward to now - so recovery ' +
+      'starts immediately instead of waiting out a cooldown that has doubled to its ceiling, ' +
+      'while still admitting exactly ONE delivery until the endpoint answers. A backlog is ' +
+      'never released at an endpoint whose recovery has not been observed yet.\n\n' +
       '**Check `has_live_secret` before offering this.** It is the same condition, evaluated ' +
       'the same way, and it is false on a normal, expected state - an endpoint created by a ' +
       '`developer` stays paused with `secret_pending` because `endpoint-secrets.*` is ' +
@@ -178,8 +183,13 @@ export class EndpointsController {
   @ApiOperation({
     summary: 'Pause deliveries to an endpoint',
     description:
-      'Queued deliveries are not discarded. The circuit breaker`s own `disabled_reason` and ' +
-      '`disabled_at` are left untouched; the reason given here goes to the audit log.',
+      'Sets `status` to `paused`. `disabled_reason` and `disabled_at` are left untouched - they ' +
+      'are the record of an AUTOMATIC disable, and overwriting them here would erase why the ' +
+      'platform stopped delivering. The reason given here goes to the audit log.\n\n' +
+      'Note what the data plane does with a paused endpoint: a delivery already queued for it is ' +
+      'finished `cancelled` ("we stopped on purpose"), not retried and not failed, and new ' +
+      'events stop producing delivery rows for it. Nothing already recorded in the ledger is ' +
+      'discarded.',
   })
   @ApiOkResponse({ type: EndpointDto })
   @ApiConflictResponse({ description: 'The endpoint has been deleted.' })

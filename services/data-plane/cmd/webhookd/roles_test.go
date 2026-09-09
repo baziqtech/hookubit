@@ -383,6 +383,12 @@ func TestRunAllStopsEveryRoleWhenOneFails(t *testing.T) {
 	cfg.RedisURL = ""
 	cfg.DeliveryRateLimitAllowPerReplica = false
 
+	// Port 0 so ingest binds an ephemeral port instead of the configured one.
+	// Without this the test races: a developer (or another test) holding :8080
+	// makes INGEST the first role to fail, and the assertion below - which is
+	// about the worker's refusal specifically - fails for an unrelated reason.
+	cfg.IngestPort = 0
+
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 

@@ -37,6 +37,11 @@ function delivery(overrides: Partial<Delivery> = {}): Delivery {
   return {
     id: 'del_1',
     terminal: false,
+    // Null: this factory builds a delivery whose attempts are still on the
+    // ledger. A non-null value means retention pruned them, which is why the
+    // field exists at all - without it a pruned row reads `attempt_count: 5`
+    // with an empty attempts list, indistinguishable from one never tried.
+    attempts_pruned_at: null,
     project_id: 'proj_1',
     event_id: 'evt_1',
     endpoint_id: 'ep_1',

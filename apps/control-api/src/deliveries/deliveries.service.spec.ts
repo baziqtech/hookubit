@@ -1,9 +1,10 @@
+import { Delivery } from '@prisma/client';
 import { CROSS_TENANT_MESSAGE, MAX_PAGE_SIZE } from '../authz';
 import { IDS } from '../authz/testing/fixtures';
 import { AppError } from '../common/errors';
 import { DeliveriesService } from './deliveries.service';
 import { MAX_INLINE_ATTEMPTS } from './delivery-limits';
-import { DeliveryDetailDto } from './dto';
+import { DeliveryDetailDto, toDeliveryDto } from './dto';
 import {
   FINANCE_ATTEMPTS,
   LEDGER,
@@ -196,6 +197,40 @@ describe('fetching one delivery', () => {
     expect(first.response_headers).toEqual({ 'retry-after': '30' });
     expect(second.status).toBe('success');
     expect(second.http_status).toBe(200);
+  });
+
+  /**
+   * `attempt_count: 5` beside an empty attempt list is indistinguishable from
+   * "the platform never tried" - the single worst thing this ledger can say.
+   * Past the attempt horizon, retention reclaims the per-attempt detail and
+   * stamps `attempts_pruned_at`, and this field is what turns that silence into
+   * an answer. It must survive to the wire, on both shapes.
+   */
+  it('says when the per-attempt detail was reclaimed by retention', async () => {
+    const { deliveries, context, db } = await ledgerHarness();
+    const prunedAt = new Date('2026-06-01T00:00:00.000Z');
+    const row = rawDelivery(db, LEDGER.deliveryOrderA1);
+    db.rows('delivery').set(LEDGER.deliveryOrderA1, { ...row, attemptsPrunedAt: prunedAt });
+
+    const detail = await deliveries.get(context, LEDGER.deliveryOrderA1);
+    expect(detail.attempts_pruned_at).toBe(prunedAt.toISOString());
+
+    // And on the SUMMARY shape, which the listing and the replay response both
+    // return. `DeliveryDetailDto` extends `DeliveryDto`, so asserting the
+    // mapper covers every route that emits either.
+    const summary = toDeliveryDto(
+      db.rows('delivery').get(LEDGER.deliveryOrderA1) as unknown as Delivery,
+    );
+    expect(summary.attempts_pruned_at).toBe(prunedAt.toISOString());
+  });
+
+  it('reports a delivery whose attempt history is intact as not pruned', async () => {
+    const { deliveries, context } = await ledgerHarness();
+
+    const detail = await deliveries.get(context, LEDGER.deliveryOrderA1);
+
+    expect(detail.attempts_pruned_at).toBeNull();
+    expect(detail.attempts).not.toHaveLength(0);
   });
 
   it('redacts credential-shaped request headers but keeps the signature', async () => {

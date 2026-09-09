@@ -29,9 +29,22 @@ export class EndpointDto {
   @ApiProperty({ enum: ['active', 'paused', 'disabled', 'deleted'] }) status!: EndpointStatus;
   @ApiProperty({ description: 'Operator intent. The circuit breaker uses `status` instead.' })
   enabled!: boolean;
-  @ApiProperty({ type: String, nullable: true, description: 'Set by the circuit breaker.' })
+  @ApiProperty({
+    type: String,
+    nullable: true,
+    description:
+      'Why the PLATFORM disabled this endpoint, as a sentence, starting with `auto-disabled`. ' +
+      'Set when the circuit breaker has been open past the configured window; cleared by ' +
+      '`POST .../enable`. Null for an endpoint a human paused - that reason is in the audit ' +
+      'log - so `status === "disabled" && disabled_reason !== null` is how the two are told apart.',
+  })
   disabled_reason!: string | null;
-  @ApiProperty({ type: String, nullable: true }) disabled_at!: string | null;
+  @ApiProperty({
+    type: String,
+    nullable: true,
+    description: 'When the platform disabled it. Null unless `disabled_reason` is set.',
+  })
+  disabled_at!: string | null;
   @ApiProperty() timeout_ms!: number;
   @ApiProperty() max_concurrency!: number;
   @ApiProperty({ type: Number, nullable: true }) rate_limit!: number | null;

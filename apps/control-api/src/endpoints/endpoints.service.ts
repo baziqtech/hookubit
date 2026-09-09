@@ -64,12 +64,29 @@ type EndpointColumns = Partial<
  * ## Two flags, two owners
  *
  * `enabled` is operator intent - what a human asked for. `status` is the current
- * state, and `disabled_reason`/`disabled_at` belong to the circuit breaker in
- * the data plane. Pausing an endpoint from here therefore sets `enabled` and
- * `status` and deliberately does NOT write the breaker's columns; the reason a
- * human gave goes to the audit log, where a reason belongs. Enabling clears the
- * breaker's columns, because an operator re-enabling an auto-disabled endpoint
- * is exactly the deliberate override those columns are waiting for.
+ * state, and `disabled_reason`/`disabled_at` are the record of an AUTOMATIC
+ * disable. Pausing an endpoint from here therefore sets `enabled` and `status`
+ * and deliberately does NOT write those two columns; the reason a human gave
+ * goes to the audit log, where a reason belongs. Enabling clears them, because
+ * an operator re-enabling an auto-disabled endpoint is exactly the deliberate
+ * override they are waiting for.
+ *
+ * The automatic writer is `src/maintenance`, in THIS plane, not the data plane
+ * (which still issues no write against `endpoints` at all). Its docblock carries
+ * the argument for that split; what matters here is that the two writers never
+ * touch the same row from two processes without a predicate: the sweep's UPDATE
+ * repeats `status: 'active', enabled: true`, so an operator pause that lands
+ * first simply wins and no audit entry is filed for a disable that did not
+ * happen.
+ *
+ * ## The one thing this service writes outside `endpoints`
+ *
+ * `enable` nudges `endpoint_health.probe_after` - see `armBreakerProbe`. That
+ * table is otherwise the data plane's exclusively, and the exception is
+ * deliberately one column wide: without it, resuming a recovered endpoint means
+ * waiting out a cooldown that has doubled to its ten-minute ceiling, and with a
+ * fuller reset it means releasing the entire backlog at an endpoint whose
+ * recovery is still only a customer's assertion.
  */
 @Injectable()
 export class EndpointsService {
@@ -287,6 +304,15 @@ export class EndpointsService {
    * with none is the exact state `signing.Header` returns `ErrNoSecrets` for, so
    * enabling would not produce deliveries - it would produce a queue of
    * permanently failing ones and a customer wondering why.
+   *
+   * ## This is the way back from an automatic disable
+   *
+   * `src/maintenance` switches off an endpoint whose circuit breaker has been
+   * open past the window. Auto-disable is only defensible because this route
+   * exists and is the ordinary `endpoints.write` one - a customer does not need
+   * support, a flag or a different permission to undo it. There is deliberately
+   * no separate "re-enable an auto-disabled endpoint" route: a second way to do
+   * the same thing is a second set of preconditions to keep in step.
    */
   async enable(context: RequestContext, endpointId: string): Promise<EndpointDto> {
     const scope = this.scopes.for(context);
@@ -310,14 +336,70 @@ export class EndpointsService {
       disabledReason: null,
       disabledAt: null,
     });
+    const probeArmed = await this.armBreakerProbe(scope, endpointId);
     await this.audit.recordFor(context, {
       action: 'endpoint.enabled',
       resourceType: 'endpoint',
       resourceId: endpointId,
-      metadata: { previous_status: current.status },
+      metadata: {
+        previous_status: current.status,
+        // Both halves of "what was this endpoint's state before I pressed the
+        // button" - the automatic reason that is about to be cleared, and
+        // whether the breaker was still tripped. Without them, an endpoint
+        // that was auto-disabled and re-enabled leaves no trace of the first
+        // half anywhere a customer can read.
+        previous_disabled_reason: current.disabledReason ?? null,
+        breaker_probe_armed: probeArmed,
+      },
     });
     // Proved live a few lines up, by the check that would have refused.
     return toEndpointDto(updated, true);
+  }
+
+  /**
+   * Bring the circuit breaker's next probe forward to now, if it is tripped.
+   *
+   * ## Why re-enabling is not enough on its own
+   *
+   * `enabled`/`status` and `endpoint_health` are different facts with different
+   * owners. Clearing the first says "deliver here again"; it says nothing to the
+   * breaker, whose cooldown doubles per failure to a ten-minute ceiling. An
+   * endpoint that has been dark for days is at that ceiling, so a customer who
+   * has just fixed their consumer and pressed Resume watches nothing happen for
+   * up to ten minutes while every new delivery is claimed, refused and deferred.
+   *
+   * ## Why this is a nudge and not a reset
+   *
+   * The obvious move - set the health row back to `healthy` - is the thundering
+   * herd. `healthy` admits EVERY delivery, so the full ingest rate arrives at an
+   * endpoint whose recovery is still a customer's assertion rather than an
+   * observed fact; if they were wrong, we have just re-created the storm the
+   * breaker exists to prevent, at the worst possible moment.
+   *
+   * So this writes ONE column. The state machine is untouched, no counter is
+   * reset, and `probe_after <= now()` is precisely the condition
+   * `worker.ClaimProbe` looks for - a conditional UPDATE in which the predicate
+   * that admits a probe is also the write that withdraws the invitation. Exactly
+   * one worker wins it, exactly one delivery goes out, and the existing
+   * half-open protocol decides what happens next: one success closes the
+   * breaker and the backlog drains normally, one failure re-opens it with its
+   * cooldown intact. That is the same mechanism the breaker already uses for
+   * transient failure, borrowed rather than duplicated.
+   *
+   * `state IN ('open', 'half_open')` and nothing else. A healthy or degraded
+   * breaker is already admitting traffic and has no probe to bring forward, and
+   * the returned count is what tells the audit entry which case this was.
+   *
+   * `new Date()` is the API's clock while `probe_after <= now()` is the
+   * database's. A few seconds of skew either way costs at most one worker poll
+   * (250ms) of extra delay, which is why this is not worth a raw `now()`.
+   */
+  private async armBreakerProbe(scope: TenantScope, endpointId: string): Promise<boolean> {
+    const armed = await scope.endpointHealth.updateMany(
+      { endpointId, state: { in: ['open', 'half_open'] } },
+      { probeAfter: new Date() },
+    );
+    return armed > 0;
   }
 
   /**

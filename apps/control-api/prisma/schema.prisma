@@ -634,6 +634,21 @@ model Delivery {
   lastError      String?        @map("last_error")
   createdAt      DateTime       @default(now()) @map("created_at")
   updatedAt      DateTime       @updatedAt @map("updated_at")
+  /// When the retention sweep deleted this delivery's `delivery_attempts` rows.
+  /// Null means the attempt history is still here.
+  ///
+  /// Two horizons, not one: the attempt rows carry the bytes (two header maps
+  /// and a truncated response body each) and this row carries the answers, so
+  /// the detail is reclaimed sooner than the summary
+  /// (services/data-plane/internal/retention). This column is what makes that
+  /// possible - deleting from `delivery_attempts` changes nothing the sweep's
+  /// candidate query can see, so without a marker every pass would re-select the
+  /// same deliveries forever and delete nothing.
+  ///
+  /// It is also the difference between an honest ledger and a misleading one:
+  /// `attempt_count: 5` with an empty attempt list is indistinguishable from
+  /// "we never tried" unless something says the detail was pruned.
+  attemptsPrunedAt DateTime?    @map("attempts_pruned_at")
 
   /// Restrict, not Cascade. `delivery_attempts` is append-only and this table is
   /// the answer to "did finance ever receive this?"; a single
@@ -694,6 +709,14 @@ model Delivery {
   /// `next_attempt_at NULLS FIRST`, so NULL is not a neutral value - it is the
   /// FRONT of the queue. One stray NULL silently promotes that row ahead of
   /// retries that are actually due.
+  ///
+  /// NOTE: `deliveries_retention_idx` and `deliveries_attempt_pruning_idx` -
+  /// partial indexes over the TERMINAL set, ordered by created_at - are created
+  /// by hand in 20260909100000_delivery_retention, for the same reason: Prisma
+  /// has no partial-index syntax. They serve the two retention sweeps. Neither
+  /// is written on the fan-out INSERT (a delivery is inserted 'pending', so it
+  /// enters neither index there); both entries are made by the single UPDATE
+  /// that takes the delivery terminal.
   @@map("deliveries")
 }
 

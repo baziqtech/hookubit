@@ -78,6 +78,40 @@ export const envSchema = z.object({
    */
   TRUST_PROXY_HOPS: blankAsUnset(z.coerce.number().int().min(0).max(10).default(0)),
   CORS_ORIGINS: blankAsUnset(z.string().default('')),
+
+  /**
+   * Endpoint auto-disable (docs/FAILURE_RECOVERY.md G14).
+   *
+   * On by default. The gap this closes is that a permanently dead endpoint kept
+   * accruing a delivery row for every matching event for ever, and a reaper
+   * that has to be discovered and switched on has not closed it. Setting this
+   * false restores the old behaviour and says so loudly at boot.
+   */
+  ENDPOINT_AUTO_DISABLE_ENABLED: blankAsUnset(
+    z
+      .string()
+      .default('true')
+      .transform((v) => v !== 'false'),
+  ),
+  /**
+   * How long the circuit breaker must have been CONTINUOUSLY open first. See
+   * `DEFAULT_AUTO_DISABLE_AFTER_HOURS` for why 72.
+   *
+   * The floor is 24 hours and it is not adjustable downwards: a delivery's own
+   * wall-clock budget is `max_retry_duration`, 24h by default, so a shorter
+   * window would disable an endpoint while the deliveries it is failing are
+   * still legitimately being retried - and cancel them.
+   */
+  ENDPOINT_AUTO_DISABLE_AFTER_HOURS: blankAsUnset(
+    z.coerce.number().int().min(24).max(24 * 365).default(72),
+  ),
+  ENDPOINT_AUTO_DISABLE_INTERVAL_MINUTES: blankAsUnset(
+    z.coerce.number().int().min(1).max(1440).default(15),
+  ),
+  /** Endpoints one pass may disable. Bounds the transaction and the mistake. */
+  ENDPOINT_AUTO_DISABLE_MAX_PER_RUN: blankAsUnset(
+    z.coerce.number().int().min(1).max(10_000).default(200),
+  ),
   ALLOW_OPEN_REGISTRATION: blankAsUnset(
     z
       .string()

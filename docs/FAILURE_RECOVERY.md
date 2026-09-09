@@ -117,7 +117,7 @@ says so.
 | 17 | Two workers attempt the same delivery | `FOR UPDATE SKIP LOCKED` + lease + `locked_by` guard on every write | No | One delivery | Implemented |
 | 18 | Connection pool exhausted | Bounded pool, per-call deadlines, server-side `statement_timeout`, pre-auth ceiling, readiness sheds load | No | One pod, then its tenants | Partial — the worker still borrows `INGEST_DB_TIMEOUT_MS` (G15) |
 | 19 | Tenant creates a huge burst | Pre-auth + policy limits on ingest, batched fan-out with a durable cursor, four concurrency ceilings in the worker | No | One project, then its neighbours | **Partial — isolation is a ceiling, not a reservation (G13); fairness off by default** |
-| 20 | Endpoint permanently unhealthy | Breaker opens, cooldown doubles to a 10-minute ceiling, one probe per cycle; deferred deliveries now age out | No | One endpoint, then the claim head | Partial — no auto-disable, no retention (G14) |
+| 20 | Endpoint permanently unhealthy | Breaker opens, cooldown doubles to a 10-minute ceiling, one probe per cycle; deferred deliveries age out; an endpoint open past `ENDPOINT_AUTO_DISABLE_AFTER_HOURS` is auto-disabled and stops having delivery rows created | No | One endpoint | Implemented |
 
 ---
 
@@ -128,12 +128,7 @@ divergence from the architecture, with the code that proves it.
 
 | ID | Severity | Gap |
 |---|---|---|
-| G13 | **High** | Per-endpoint isolation is a **ceiling, not a reservation**. When the `max_concurrency` of the endpoints that can be slow sums past `WORKER_CONCURRENCY`, slow work is entitled to the whole pool and fast endpoints starve. Provisioning under the pool fixes it and is measured to pass; the rule is stated nowhere, enforced nowhere and visible in no metric. Measured, not reasoned. |
-| G14 | Medium | A permanently dead endpoint is never auto-disabled, and no retention job prunes terminal deliveries. Individual deliveries now age out (was G3), but every new event still fans out to the corpse forever. |
-| G15 | Low-Medium | The worker's database timeout is still `INGEST_DB_TIMEOUT_MS`. There is no `WORKER_DB_TIMEOUT_MS`. |
-| G16 | Low-Medium | A delivery refused by the **org or project** concurrency gate is deferred with `unknownBudget`, so the wall-clock termination added for the breaker path does not apply on that path. |
-| G17 | Low | Endpoint delivery rate limits silently fall back to per-replica when `REDIS_URL` is unset. It is logged at WARN and refused by nothing, including in production. |
-| G18 | Low | The comment at `internal/router/router.go:151-163` describes wiring that no longer exists, and tells the reader a landed fix is still outstanding. |
+| G13 | **Medium** (was High) | Per-endpoint isolation is a **ceiling, not a reservation**. When the `max_concurrency` of the endpoints that can be slow sums past `WORKER_CONCURRENCY`, slow work is entitled to the whole pool and fast endpoints starve. The rule is now *said* (startup advisories carrying the arithmetic) and *visible* (bounded gate-occupancy gauges), which is what dropped it from High — but nothing enforces it, and the reservation itself is deliberately not built. Measured, not reasoned. |
 
 ### G13 — per-endpoint isolation is a ceiling, not a reservation
 
@@ -227,7 +222,7 @@ history must pass. This is the real fix and it is a design change, not a patch.
 Not attempted here, and it should not be attempted without (a) and (b) first:
 without occupancy data, any reservation number is a guess.
 
-### G14 — no auto-disable, no retention
+### G14 — no auto-disable, no retention  (CLOSED)
 
 The first half of the old G3 is fixed: a delivery held behind an open breaker
 now evaluates its wall-clock budget and goes terminal
@@ -254,7 +249,7 @@ dashboard already renders it,
 `apps/control-api/src/endpoints/dto/endpoint-response.dto.ts:141`); then a
 retention sweep on the scheduler role, which already carries two periodic jobs.
 
-### G15 — the worker has no database timeout of its own
+### G15 — the worker has no database timeout of its own  (CLOSED)
 
 `runWorker` passes `DBTimeout: cfg.IngestDBTimeout`
 (`cmd/webhookd/roles.go:268`). There is no `WORKER_DB_TIMEOUT_MS`, so tuning the
@@ -267,7 +262,7 @@ database budget. It takes `PAYLOAD_DOWNLOAD_TIMEOUT_MS`
 `TestPayloadFetchUsesItsOwnBudgetNotTheDatabaseOne`
 (`internal/worker/defer_test.go:476`).
 
-### G16 — the tenant gate defers without a budget
+### G16 — the tenant gate defers without a budget  (CLOSED)
 
 `handle` refuses at the org/project gate before the delivery row has been read,
 and therefore defers with `unknownBudget`
@@ -290,7 +285,7 @@ carrying the frozen `max_retry_duration` alongside it would make the budget
 knowable at the tenant gate without a second query. Not attempted — it touches
 the claim SQL, which is the most load-bearing statement in the system.
 
-### G17 — the delivery limiter is fleet-wide only with Redis
+### G17 — the delivery limiter is fleet-wide only with Redis  (CLOSED)
 
 `buildDeliveryLimiter` returns nil when `REDIS_URL` is unset
 (`cmd/webhookd/roles.go:320-325`), and the worker then falls back to the
@@ -311,19 +306,6 @@ configured, and the number they get changes when we scale the Deployment.
 *Fix shape:* refuse to start a worker in production without `REDIS_URL`, or
 publish the effective multiplier on a gauge so a dashboard can show it.
 
-### G18 — a comment that describes the bug rather than the fix
-
-`internal/router/router.go:151-163` still reads "cmd/webhookd/roles.go passes
-retry.DefaultPolicy() … The right fix is one line in roles.go … Until that
-lands, a caller's ceiling is clamped rather than honoured." That fix landed:
-`roles.go:96` passes `router.DefaultOutboxBackoff()`. The clamp is still correct
-and still worth keeping as a guard rail — `TestNewClampsADeliveryScaleBackoffToTheOutboxCeiling`
-(`internal/router/router_test.go:130`) pins it — but the prose tells a reader
-that a defect is outstanding when it is not. Comment-only; no behaviour depends
-on it.
-
----
-
 ## Gaps, closed
 
 Kept because the failure mode explains the shape of the code. Each line is
@@ -338,6 +320,11 @@ what broke, and what the fix was.
 | G5 | A drain-window expiry cancelled attempts with a bare `context.Canceled`, which classifies as a retryable transport fault — so our restart wrote `context canceled` into the customer's ledger, advanced `attempt_count` and moved their breaker one failure closer to open. | `ErrWorkerShutdown` is the cancellation cause; a cut-short attempt is deferred, writes no attempt row and charges no budget. A related race was fixed with it: `LeaseKeeper.Run` used to cancel tracked attempts with a hard-coded `context.Canceled`, racing the worker on the same children — first-writer-wins, so a fraction of drains still charged the endpoint. It now inherits the parent's cause. Scenario 4. |
 | G6 | Per-endpoint delivery rate limits were per-process; N workers delivered at N x the configured rate, and the fleet-wide implementation was written but wired to nothing. | The distributed limiter is wired. Endpoint limits are fleet-wide when `REDIS_URL` is set, falling back to the in-process bucket otherwise. Residue in G17. Scenarios 12 and 19. |
 | G7 | `EGRESS_DNS_TIMEOUT_MS` was read, passed, stored on the struct and applied by nothing. An operator tuning DNS behaviour under an incident changed nothing at all. | `internal/egress/dial.go`. Resolution has its own deadline, and each address gets a *share* of the connect budget (`partialDeadline`, mirroring `net/dial.go`) so a black-holed first address cannot starve the rest. Scenarios 10 and 13. |
+| G14 | A permanently dead endpoint was never disabled, so every new event kept fanning out to the corpse forever — delivery rows created, refused by the open breaker, deferred, re-claimed, expired, at ingest rate. And nothing pruned terminal deliveries or attempts, so the ledger grew without bound. | Auto-disable in `apps/control-api/src/maintenance/`, written by the **control plane** so the data plane still issues no write against `endpoints` — one writer means one definition of "disabled", and the audit row *is* the feature. One sweep per pass under `pg_try_advisory_xact_lock`, so a horizontally scaled API needs no leader election. Re-enabling goes through the existing enable route and arms **one** breaker probe rather than resetting health, because a reset releases the whole accumulated backlog at an endpoint whose recovery is still only the customer's assertion. Retention in `internal/retention/` uses two horizons — attempts carry the bytes and go at 30 days, the summary row that answers "what happened to this event?" survives to 90 — batched under `FOR UPDATE SKIP LOCKED` so a pass never queues behind live traffic. Scenario 20. |
+| G18 | A comment in the router described wiring that no longer existed and told the reader a landed fix was still outstanding — the specific kind of staleness this document exists to remove. | Rewritten to describe what the code does, keeping the reasoning about why the outbox needs its own backoff schedule. |
+| G15 | The worker borrowed `INGEST_DB_TIMEOUT_MS` for its own database deadline, so tuning ingest silently retuned delivery. | `WORKER_DB_TIMEOUT_MS`, validated against `DATABASE_STATEMENT_TIMEOUT_MS` so the server-side backstop cannot fire first and mask it. |
+| G16 | A delivery refused by the org or project concurrency gate deferred with an unknown budget, so the wall-clock termination added for the breaker path did not apply there — the same never-terminating delivery, surviving on one path, and compounding with G13 because what keeps a delivery losing at that gate is a project saturated by slow endpoints. | A bounded consecutive-refusal tracker triggers one narrow budget read on the third refusal of the same delivery — no secrets join, no payload — so the common case still pays nothing. A failed read defers rather than terminating: a database blip must not end a delivery. |
+| G17 | Endpoint delivery rate limits degraded to per-replica whenever `REDIS_URL` was unset, multiplying a customer's configured limit by the worker replica count, logged once at WARN and refused by nothing. | The **configuration** refuses it in production unless explicitly acknowledged, mirroring `EGRESS_ALLOW_PRIVATE_NETWORKS`. The runtime is untouched: delivery still never depends on Redis and still imports no client. |
 | G8 | A 429's `Retry-After` was ignored: an endpoint that asked for an hour was retried at 5s, 10s and 20s, spending three attempts inside the first 35 seconds of a window it had explicitly closed. | Honoured on 429 and 503, both RFC 9110 forms, clamped by a one-second floor, the policy's `MaxDelay`, and the remaining wall-clock budget. Scenario 12. |
 | G9 | `queue_depth` and `egress_blocked_total` were declared and never written, so any dashboard built on them read a steady zero. | Both populated. `egress_blocked_total` is incremented at the two decision boundaries, labelled by a bounded code and never by customer-supplied text. `queue_depth` is refreshed every 15s by a collector on the scheduler role. Scenarios 14 and 20. |
 | G10 | The worker's DB timeout was `INGEST_DB_TIMEOUT_MS` and it also capped the object-storage fetch, so any `PAYLOAD_DOWNLOAD_TIMEOUT_MS` above 5s was silently truncated. | The payload fetch has its own budget. The database half is still open as G15. |

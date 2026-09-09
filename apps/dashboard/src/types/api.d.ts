@@ -455,6 +455,8 @@ export interface paths {
          * Resume deliveries to an endpoint
          * @description Refused when the endpoint has no active signing secret: the data plane fails closed rather than delivering unsigned, so enabling would only queue failures.
          *
+         *     This is also the way back from an automatic disable. It clears `disabled_reason` and `disabled_at`, and brings the circuit breaker`s next probe forward to now - so recovery starts immediately instead of waiting out a cooldown that has doubled to its ceiling, while still admitting exactly ONE delivery until the endpoint answers. A backlog is never released at an endpoint whose recovery has not been observed yet.
+         *
          *     **Check `has_live_secret` before offering this.** It is the same condition, evaluated the same way, and it is false on a normal, expected state - an endpoint created by a `developer` stays paused with `secret_pending` because `endpoint-secrets.*` is owner/admin only. Offering the action there is offering a guaranteed 409; the operator wants "rotate a secret first", not a refusal after the click.
          */
         post: operations["EndpointsController_enable"];
@@ -475,7 +477,9 @@ export interface paths {
         put?: never;
         /**
          * Pause deliveries to an endpoint
-         * @description Queued deliveries are not discarded. The circuit breaker`s own `disabled_reason` and `disabled_at` are left untouched; the reason given here goes to the audit log.
+         * @description Sets `status` to `paused`. `disabled_reason` and `disabled_at` are left untouched - they are the record of an AUTOMATIC disable, and overwriting them here would erase why the platform stopped delivering. The reason given here goes to the audit log.
+         *
+         *     Note what the data plane does with a paused endpoint: a delivery already queued for it is finished `cancelled` ("we stopped on purpose"), not retried and not failed, and new events stop producing delivery rows for it. Nothing already recorded in the ledger is discarded.
          */
         post: operations["EndpointsController_disable"];
         delete?: never;
@@ -1482,8 +1486,9 @@ export interface components {
             status: "active" | "paused" | "disabled" | "deleted";
             /** @description Operator intent. The circuit breaker uses `status` instead. */
             enabled: boolean;
-            /** @description Set by the circuit breaker. */
+            /** @description Why the PLATFORM disabled this endpoint, as a sentence, starting with `auto-disabled`. Set when the circuit breaker has been open past the configured window; cleared by `POST .../enable`. Null for an endpoint a human paused - that reason is in the audit log - so `status === "disabled" && disabled_reason !== null` is how the two are told apart. */
             disabled_reason: string | null;
+            /** @description When the platform disabled it. Null unless `disabled_reason` is set. */
             disabled_at: string | null;
             timeout_ms: number;
             max_concurrency: number;
@@ -1556,8 +1561,9 @@ export interface components {
             status: "active" | "paused" | "disabled" | "deleted";
             /** @description Operator intent. The circuit breaker uses `status` instead. */
             enabled: boolean;
-            /** @description Set by the circuit breaker. */
+            /** @description Why the PLATFORM disabled this endpoint, as a sentence, starting with `auto-disabled`. Set when the circuit breaker has been open past the configured window; cleared by `POST .../enable`. Null for an endpoint a human paused - that reason is in the audit log - so `status === "disabled" && disabled_reason !== null` is how the two are told apart. */
             disabled_reason: string | null;
+            /** @description When the platform disabled it. Null unless `disabled_reason` is set. */
             disabled_at: string | null;
             timeout_ms: number;
             max_concurrency: number;
@@ -2029,6 +2035,12 @@ export interface components {
             replayed_by: string | null;
             /** @description Shorthand for `replay_of_delivery_id !== null`. */
             is_replay: boolean;
+            /**
+             * @description When retention deleted this delivery`s per-attempt detail. Null means the attempt history is still here.
+             *
+             *     Read it before you read `attempts`. Past the attempt horizon the platform reclaims the request/response headers and bodies - which is where the bytes are - while keeping this summary row for much longer. Without this field a pruned delivery reads `attempt_count: 5` next to an empty attempt list, which is indistinguishable from "the platform never tried"; with it, the answer is "we tried five times and the detail was reclaimed on this date".
+             */
+            attempts_pruned_at: string | null;
             created_at: string;
             updated_at: string;
         };
@@ -2130,6 +2142,12 @@ export interface components {
             replayed_by: string | null;
             /** @description Shorthand for `replay_of_delivery_id !== null`. */
             is_replay: boolean;
+            /**
+             * @description When retention deleted this delivery`s per-attempt detail. Null means the attempt history is still here.
+             *
+             *     Read it before you read `attempts`. Past the attempt horizon the platform reclaims the request/response headers and bodies - which is where the bytes are - while keeping this summary row for much longer. Without this field a pruned delivery reads `attempt_count: 5` next to an empty attempt list, which is indistinguishable from "the platform never tried"; with it, the answer is "we tried five times and the detail was reclaimed on this date".
+             */
+            attempts_pruned_at: string | null;
             created_at: string;
             updated_at: string;
             event: components["schemas"]["DeliveryEventRefDto"];

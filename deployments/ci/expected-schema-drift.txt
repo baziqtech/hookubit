@@ -80,3 +80,28 @@ deliveries_ready_fifo_idx
 # An outbox row that is never claimed is an event that returned 202 and will
 # never be delivered.
 event_outbox_ready_idx
+
+# ---------------------------------------------------------------------------
+# Added by 20260909100000_delivery_retention. Both are PARTIAL indexes over the
+# TERMINAL delivery set; Prisma has no partial-index syntax, so both are drift
+# by construction, forever.
+#
+# They serve the two retention sweeps in
+# services/data-plane/internal/retention. The status list in their predicates
+# must agree with worker.State.Terminal(): a terminal status MISSING from it
+# means those rows are never pruned (a leak), and a NON-terminal status present
+# in it means a delivery is deleted while a worker is still retrying it (data
+# loss, after a 202 was already returned).
+# ---------------------------------------------------------------------------
+
+# Ordered by created_at over terminal deliveries. The candidate scan for the
+# long horizon, which deletes the delivery row itself.
+deliveries_retention_idx
+
+# The same set, narrowed to rows whose attempt detail has not been pruned yet
+# (AND attempts_pruned_at IS NULL). Deliberately a SECOND index rather than a
+# filter on the one above: a pruned row LEAVES this index, so it stays the size
+# of the arrears between the two horizons, whereas served by the broader index
+# the short sweep would scan oldest-first through a prefix of already-pruned
+# rows that grows with the retained history.
+deliveries_attempt_pruning_idx

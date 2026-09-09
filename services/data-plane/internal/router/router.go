@@ -150,19 +150,22 @@ func New(opts Options) (*Router, error) {
 	}
 	// THE OUTBOX BACKS OFF ON ITS OWN SCHEDULE, NOT THE DELIVERY SCHEDULE.
 	//
-	// The substitution above only fires on a wholly zero-valued policy, and
-	// cmd/webhookd/roles.go passes retry.DefaultPolicy() - the DELIVERY policy,
-	// whose MaxDelay is one hour - so in production DefaultOutboxBackoff never
-	// applied and a released row could wait an hour. That is wrong twice over:
-	// the failures this backs off from are database-side and resolve in seconds,
-	// and an hour-long backoff against a one-hour MaxOutboxRetryDuration would
-	// park an accepted event after one or two retries.
+	// Why the outbox needs its own schedule: the failures it backs off from are
+	// database-side (a lock wait, a failover, an exhausted pool) and resolve in
+	// seconds, whereas the delivery policy is built for customer endpoints and
+	// caps at one hour. An hour-long backoff against a one-hour
+	// MaxOutboxRetryDuration would park an accepted event after one or two
+	// retries - the row is still there, but nothing will move it again without
+	// an operator requeue.
 	//
-	// The right fix is one line in roles.go (pass router.DefaultOutboxBackoff(),
-	// or nothing at all). Until that lands, a caller's ceiling is clamped rather
-	// than honoured, and said out loud - refusing to start would take the data
-	// plane down over a misconfiguration, and honouring it silently is what
-	// caused this.
+	// Production passes the right thing: cmd/webhookd/roles.go supplies
+	// router.DefaultOutboxBackoff(). This clamp stays as a guard rail for every
+	// other caller, because the substitution above only fires on a wholly
+	// zero-valued policy - a partially-filled delivery-shaped policy would slip
+	// past it. Clamping (rather than refusing to start) is deliberate: a hard
+	// error would take the data plane down over a misconfiguration. It is said
+	// out loud at WARN, because honouring an over-long ceiling silently is what
+	// produced the parked rows in the first place.
 	if ceiling := DefaultOutboxBackoff().MaxDelay; opts.RetryBackoff.MaxDelay > ceiling {
 		opts.Logger.Warn("outbox retry backoff exceeds the outbox ceiling; clamping",
 			"configured_max_delay", opts.RetryBackoff.MaxDelay.String(),

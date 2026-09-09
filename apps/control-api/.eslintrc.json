@@ -54,7 +54,8 @@
         "src/auth/**/*.ts",
         "src/infrastructure/**/*.ts",
         "src/cli/**/*.ts",
-        "src/health/**/*.ts"
+        "src/health/**/*.ts",
+        "src/maintenance/**/*.ts"
       ],
       "rules": {
         "no-restricted-imports": "off"

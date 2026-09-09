@@ -28,6 +28,17 @@ data:
   WORKER_CLAIM_BATCH_SIZE: {{ .Values.dataPlane.worker.claimBatchSize | int64 | quote }}
   WORKER_DB_TIMEOUT_MS: {{ .Values.dataPlane.worker.dbTimeoutMs | int64 | quote }}
   DELIVERY_RATE_LIMIT_ALLOW_PER_REPLICA: {{ .Values.dataPlane.worker.allowPerReplicaRateLimits | quote }}
+  RETENTION_ENABLED: {{ .Values.dataPlane.retention.enabled | quote }}
+  RETENTION_DELIVERY_AGE_DAYS: {{ .Values.dataPlane.retention.deliveryAgeDays | int64 | quote }}
+  RETENTION_ATTEMPT_AGE_DAYS: {{ .Values.dataPlane.retention.attemptAgeDays | int64 | quote }}
+  RETENTION_INTERVAL_MS: {{ .Values.dataPlane.retention.intervalMs | int64 | quote }}
+  RETENTION_BATCH_SIZE: {{ .Values.dataPlane.retention.batchSize | int64 | quote }}
+  RETENTION_MAX_DELETES_PER_RUN: {{ .Values.dataPlane.retention.maxDeletesPerRun | int64 | quote }}
+  RETENTION_BATCH_TIMEOUT_MS: {{ .Values.dataPlane.retention.batchTimeoutMs | int64 | quote }}
+  ENDPOINT_AUTO_DISABLE_ENABLED: {{ .Values.controlApi.endpointAutoDisable.enabled | quote }}
+  ENDPOINT_AUTO_DISABLE_AFTER_HOURS: {{ .Values.controlApi.endpointAutoDisable.afterHours | int64 | quote }}
+  ENDPOINT_AUTO_DISABLE_INTERVAL_MINUTES: {{ .Values.controlApi.endpointAutoDisable.intervalMinutes | int64 | quote }}
+  ENDPOINT_AUTO_DISABLE_MAX_PER_RUN: {{ .Values.controlApi.endpointAutoDisable.maxPerRun | int64 | quote }}
   DELIVERY_LEASE_SECONDS: {{ .Values.dataPlane.worker.leaseSeconds | int64 | quote }}
   OUTBOX_POLL_INTERVAL_MS: {{ .Values.dataPlane.outbox.pollIntervalMs | int64 | quote }}
   ROUTER_MAX_OUTBOX_RETRY_DURATION_MS: {{ .Values.dataPlane.outbox.maxRetryDurationMs | int64 | quote }}

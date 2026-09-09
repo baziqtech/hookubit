@@ -378,7 +378,14 @@ export class TenantScope implements OwnershipVerifier {
 
   /**
    * Circuit-breaker state, keyed by `endpoint_id` rather than `id`. Read by the
-   * operator UI; the data plane owns the writes.
+   * operator UI.
+   *
+   * The data plane owns the state MACHINE and every transition in it. The one
+   * write this plane makes is `EndpointsService.armBreakerProbe`, which moves
+   * `probe_after` forward when an operator re-enables a tripped endpoint - a
+   * single column, no state and no counter, so the half-open protocol still
+   * decides what happens next. Its docblock has the reasoning; anything wider
+   * than that belongs in the workers.
    */
   get endpointHealth(): Repo<
     Prisma.EndpointHealthWhereInput,

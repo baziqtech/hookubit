@@ -235,6 +235,21 @@ export class DeliveryDto {
   @ApiProperty({ description: 'Shorthand for `replay_of_delivery_id !== null`.' })
   is_replay!: boolean;
 
+  @ApiProperty({
+    type: String,
+    nullable: true,
+    description:
+      'When retention deleted this delivery`s per-attempt detail. Null means the attempt ' +
+      'history is still here.\n\n' +
+      'Read it before you read `attempts`. Past the attempt horizon the platform reclaims the ' +
+      'request/response headers and bodies - which is where the bytes are - while keeping this ' +
+      'summary row for much longer. Without this field a pruned delivery reads `attempt_count: ' +
+      '5` next to an empty attempt list, which is indistinguishable from "the platform never ' +
+      'tried"; with it, the answer is "we tried five times and the detail was reclaimed on this ' +
+      'date".',
+  })
+  attempts_pruned_at!: string | null;
+
   @ApiProperty() created_at!: string;
   @ApiProperty() updated_at!: string;
 }
@@ -246,7 +261,13 @@ const TERMINAL_STATUSES: ReadonlySet<DeliveryStatus> = new Set<DeliveryStatus>([
   DeliveryStatus.cancelled,
 ]);
 
-/** Mirrors `State.Terminal()` in services/data-plane/internal/worker/state.go. */
+/**
+ * Mirrors `State.Terminal()` in services/data-plane/internal/worker/state.go -
+ * and, since it is the same four statuses, `retention.TerminalStatuses` and the
+ * predicates of `deliveries_retention_idx` and `deliveries_attempt_pruning_idx`.
+ * A delivery this returns true for is one the retention sweep may eventually
+ * prune; one it returns false for is never touched, however old.
+ */
 export function isTerminal(status: DeliveryStatus): boolean {
   return TERMINAL_STATUSES.has(status);
 }
@@ -272,6 +293,7 @@ export function toDeliveryDto(delivery: Delivery): DeliveryDto {
     replay_of_delivery_id: delivery.replayOfDeliveryId ?? null,
     replayed_by: delivery.replayedBy ?? null,
     is_replay: delivery.replayOfDeliveryId !== null && delivery.replayOfDeliveryId !== undefined,
+    attempts_pruned_at: iso(delivery.attemptsPrunedAt),
     created_at: new Date(delivery.createdAt).toISOString(),
     updated_at: new Date(delivery.updatedAt).toISOString(),
   };

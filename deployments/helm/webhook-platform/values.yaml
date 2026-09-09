@@ -184,6 +184,17 @@ serviceAccount:
 
 # --- Control plane ----------------------------------------------------------
 controlApi:
+  # A permanently dead endpoint eventually stops having delivery rows created
+  # for it. 72h clears the two long-outage-but-not-dead cases: a delivery's own
+  # max_retry_duration (24h) and a weekend maintenance window. Re-enabling is the
+  # ordinary enable endpoint, which arms ONE breaker probe rather than resetting
+  # health - a reset would release the whole accumulated backlog at an endpoint
+  # whose recovery is still only the customer's assertion.
+  endpointAutoDisable:
+    enabled: true
+    afterHours: 72
+    intervalMinutes: 15
+    maxPerRun: 200
   image:
     repository: webhook-control-api
     tag: ''            # defaults to .Chart.AppVersion
@@ -327,6 +338,7 @@ dataPlane:
     # limit by the replica count, so the worker refuses to start that way in
     # production. Set true to take the downgrade deliberately.
     allowPerReplicaRateLimits: false
+
     # A claimed delivery whose lease expires becomes reclaimable by another
     # worker. Must exceed the longest possible attempt (egress.totalTimeoutMs).
     leaseSeconds: 120
@@ -356,6 +368,25 @@ dataPlane:
       enabled: true
       # Percentage, because the replica count belongs to the HPA.
       maxUnavailable: 25%
+
+  # Delivery ledger retention, swept by the scheduler role. Two horizons: the
+  # attempt rows carry the bytes (two header maps and a truncated body each) and
+  # go first; the deliveries summary row is what answers "what happened to this
+  # event?" and stays three times as long. Both are floored at 48h in code,
+  # because a delivery is live until its max_retry_duration.
+  #
+  # Unlike every other knob here, these REFUSE to fall back to a default if
+  # malformed - a mistyped horizon deletes the ledger on a schedule nobody chose.
+  retention:
+    enabled: true
+    deliveryAgeDays: 90
+    attemptAgeDays: 30
+    intervalMs: 3600000
+    batchSize: 1000
+    # Bounds the FIRST pass against a never-pruned table so it drains over hours
+    # instead of becoming a replication-lag incident.
+    maxDeletesPerRun: 50000
+    batchTimeoutMs: 30000
 
   outbox:
     pollIntervalMs: 250

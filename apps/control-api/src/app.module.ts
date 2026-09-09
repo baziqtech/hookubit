@@ -14,6 +14,7 @@ import { DeliveriesModule } from './deliveries/deliveries.module';
 import { EndpointsModule } from './endpoints/endpoints.module';
 import { EventsModule } from './events/events.module';
 import { HealthModule } from './health/health.module';
+import { MaintenanceModule } from './maintenance/maintenance.module';
 import { PrismaModule } from './infrastructure/prisma/prisma.module';
 import { MembersModule } from './members/members.module';
 import { OrganizationsModule } from './organizations/organizations.module';
@@ -90,6 +91,12 @@ import { WebhookSubscriptionsModule } from './webhook-subscriptions/webhook-subs
     OutboxModule,
     AuditModule,
     AnalyticsModule,
+    // Periodic reconciliation with no routes of its own. It switches off
+    // endpoints whose circuit breaker has been open past the window, so a dead
+    // endpoint stops accruing a delivery row per matching event for ever, and
+    // it files the audit entry that tells the customer why. The re-enable is
+    // the endpoints module's existing `POST .../enable`.
+    MaintenanceModule,
     // Still to come: admin (platform staff, above organization owner - it needs
     // an authorization concept the tenant matrix deliberately does not have).
   ],
