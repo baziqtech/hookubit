@@ -1006,3 +1006,44 @@ comment saying why the Deployment has no `envFrom`, and
 - Helm value references use `dig "build" … .Values.dashboard`, so an operator
   who overrides `dashboard:` wholesale gets the documented default rather than a
   nil-pointer render error.
+
+## Images built and verified — 2026-09-09
+
+Docker's daemon was unavailable for this project's entire history, so every
+Dockerfile fix until now was reasoned about and never executed. All four
+targets now build locally, and the two bugs that had only ever been found by
+READING are confirmed fixed by running them:
+
+| image | size | verified |
+|---|---|---|
+| `data-plane` | 33.8 MB | builds; distroless static |
+| `control-api` | 440 MB | **`new PrismaClient()` constructs inside the image** |
+| `control-api:migrate` | 1.07 GB | **`npx prisma --version` works; engine is `libquery_engine-linux-musl-openssl-3.0.x.so.node`** |
+| `dashboard` | 76.8 MB | builds; nginx-unprivileged |
+
+The control-api check is the one that mattered. `pnpm deploy --prod` rebuilds
+`node_modules` from the content-addressable store, and `prisma generate` writes
+into the virtual store — so the generated client was NOT carried into the deploy
+tree, and every pod would have crash-looped on boot with `maxUnavailable: 0`
+meaning the rollout never completed. The second `generate` against the deploy
+tree fixes it, and the constructor call proves it.
+
+The migrate image's engine name confirms the other fix: `node:22-alpine` ships
+no openssl, so Prisma had been defaulting to the OpenSSL-1.1 musl engine, which
+cannot `dlopen` on an OpenSSL-3-only base. Adding openssl to the stage makes
+detection pick `openssl-3.0.x`.
+
+### Worth revisiting: the migrate image is 1.07 GB
+
+It is `FROM builder`, so it carries the whole build tree — full `node_modules`,
+sources, the pnpm store links — to run one command. That is defensible for a
+one-shot Job that runs once per release and is never in the request path, and it
+guarantees the CLI and the engine match the client exactly, which is the failure
+mode this whole area has already produced twice.
+
+But it is ~25x the runtime image. If it becomes a problem (registry cost, pull
+time on a cold node before migrations can run), the shape to aim for is a slim
+stage carrying only the prisma CLI, the engine binary and `prisma/`. Do NOT do
+that speculatively: the two bugs above both came from a deploy tree that was
+missing something it needed, and this image's size is the reason it has never
+had that class of failure.
