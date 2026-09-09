@@ -38,7 +38,7 @@ data:
   # a default - a mistyped horizon deletes the ledger on a schedule nobody chose.
   RETENTION_ENABLED: 'true'
   RETENTION_DELIVERY_AGE_DAYS: '90'
-  RETENTION_ATTEMPT_AGE_DAYS: '30'
+  RETENTION_ATTEMPT_AGE_DAYS: '60'
   RETENTION_INTERVAL_MS: '3600000'
   RETENTION_BATCH_SIZE: '1000'
   RETENTION_MAX_DELETES_PER_RUN: '50000'

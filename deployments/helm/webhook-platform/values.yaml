@@ -392,7 +392,7 @@ dataPlane:
   retention:
     enabled: true
     deliveryAgeDays: 90
-    attemptAgeDays: 30
+    attemptAgeDays: 60
     intervalMs: 3600000
     batchSize: 1000
     # Bounds the FIRST pass against a never-pruned table so it drains over hours

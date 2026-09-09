@@ -26,14 +26,15 @@ const (
 	DefaultDeliveryAge = 90 * 24 * time.Hour
 
 	// DefaultAttemptAge keeps the per-attempt DETAIL - request headers,
-	// response headers, response bodies - for a month.
+	// response headers, response bodies - for sixty days.
 	//
 	// This is the shorter horizon on purpose, and it is where the storage
 	// actually is: one delivery row is a few hundred bytes, its attempts carry
-	// truncated response bodies and two header maps each. Thirty days covers
-	// the debugging window ("why did this fail last week?") while the summary
-	// row survives twice as long to answer the reconciliation one.
-	DefaultAttemptAge = 30 * 24 * time.Hour
+	// truncated response bodies and two header maps each. Sixty days covers the
+	// debugging window with room for a customer who reports a problem late
+	// ("this failed last month"), while the summary row survives a further
+	// month to answer the reconciliation question.
+	DefaultAttemptAge = 60 * 24 * time.Hour
 
 	// DefaultInterval is how often a sweep runs. Retention is a background
 	// reclamation, not a deadline: running it hourly keeps each pass small
