@@ -158,15 +158,17 @@ export class AnalyticsService {
     const scope = this.scopes.for(context);
     const createdAt = range(window.from, window.to);
 
-    const ranked = await scope.deliveries.groupBy({
+    let ranked = await scope.deliveries.groupBy({
       by: ['endpointId'],
       where: { createdAt, status: { in: [...FAILING] } },
       _count: { endpointId: true },
-      // Ranked in the database. `take` is limit + 1 inside ScopedRepository, so
-      // one extra group is read purely to answer `has_more` honestly.
+      // Ranked in the database. One group beyond `limit` is read purely to
+      // answer `has_more` honestly: a page that is exactly full is not "more".
       orderBy: { _count: { endpointId: 'desc' } },
-      take: limit,
+      take: limit + 1,
     });
+    const hasMoreEndpoints = ranked.length > limit;
+    ranked = hasMoreEndpoints ? ranked.slice(0, limit) : ranked;
 
     const endpointIds = ranked
       .map((group) => group.endpointId)
@@ -227,9 +229,7 @@ export class AnalyticsService {
     return {
       window: AnalyticsService.windowDto(window),
       data,
-      // `ranked` was asked for exactly `limit` groups; ScopedRepository reads
-      // limit + 1 and slices, so a full page is the only signal available here.
-      has_more: ranked.length === limit,
+      has_more: hasMoreEndpoints,
     };
   }
 
@@ -362,21 +362,23 @@ export class AnalyticsService {
         where: { createdAt: range(window.from, window.to) },
         _count: { eventType: true },
         orderBy: { _count: { eventType: 'desc' } },
-        take: limit,
+        // One beyond the limit, so a page that is exactly full is not "more".
+        take: limit + 1,
       }),
     ]);
+    const hasMoreTypes = byType.length > limit;
 
     return {
       window: AnalyticsService.windowDto(window),
       total,
       previous_total: previousTotal,
       total_delta: total - previousTotal,
-      by_type: byType
+      by_type: (hasMoreTypes ? byType.slice(0, limit) : byType)
         .filter((group): group is Record<string, unknown> & { eventType: string } =>
           typeof group.eventType === 'string',
         )
         .map((group) => ({ event_type: group.eventType, count: countOf(group, 'eventType') })),
-      has_more: byType.length === limit,
+      has_more: hasMoreTypes,
     };
   }
 
