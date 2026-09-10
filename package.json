@@ -31,7 +31,10 @@
     "load:failing": "node tests/load/scripts/run.mjs failing-endpoints",
     "load:tenants": "node tests/load/scripts/run.mjs many-tenants",
     "load:large": "node tests/load/scripts/run.mjs large-payloads",
-    "load:all": "node tests/load/scripts/run.mjs all"
+    "load:all": "node tests/load/scripts/run.mjs all",
+    "docs:dev": "pnpm --filter @webhook/docs dev",
+    "docs:build": "pnpm --filter @webhook/docs build",
+    "docs:check": "pnpm --filter @webhook/docs exec node scripts/generate-api-reference.mjs --check"
   },
   "pnpm": {
     "overrides": {

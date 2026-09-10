@@ -1,0 +1,26 @@
+#!/usr/bin/env bash
+#
+# Serve the hookubit customer documentation as a browsable local site.
+#
+#   ./run-docs            from apps/docs
+#
+# No sign-in, no certificate, no network beyond the first dependency install:
+# the site is public by design. To read without any build at all, open the
+# markdown files in an editor - they are the same files this site renders.
+# The API reference under api/ is generated from the control plane's OpenAPI
+# document on every build; see scripts/generate-api-reference.mjs.
+#
+# Ctrl-C to stop.
+set -euo pipefail
+cd "$(dirname "${BASH_SOURCE[0]}")"
+if ! command -v pnpm >/dev/null 2>&1; then
+  echo "pnpm not found. Install Node 22 and pnpm (https://pnpm.io) and try again." >&2
+  exit 1
+fi
+if [ ! -d node_modules ]; then
+  echo "First run - installing docs dependencies (needs internet, once)..."
+  (cd ../.. && pnpm install --frozen-lockfile)
+fi
+node scripts/generate-api-reference.mjs
+echo "Docs serving on http://localhost:4000  (Ctrl-C to stop)"
+exec pnpm exec vitepress dev --port 4000 --open

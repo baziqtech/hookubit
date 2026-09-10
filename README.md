@@ -99,7 +99,26 @@ unique indexes. The migration refuses to run on anything older.
 
 Production does **not** run PostgreSQL in the stack: the Helm chart and the
 production compose file refuse to start without an external `DATABASE_URL`, and
-the chart refuses to install without an SMTP URL.
+both refuse without an SMTP URL. CI renders the chart, the raw manifests and the
+compose file and asserts what reaches each process — the worker gets the
+encryption key it decrypts endpoint secrets with, never the session key; both
+planes are told how many proxies stand in front of them.
+
+## Documentation for customers
+
+`apps/docs` is the customer-facing documentation site — the integration guide
+(publish, receive, verify, retries, rotation, replay), the dashboard guide, a
+self-hosting guide, and an API reference **generated from the control plane's
+own OpenAPI document on every build**, so a field on the site is a field the
+product has. It is public by design: no sign-in.
+
+```bash
+pnpm docs:dev        # http://localhost:4000, with search and rendered diagrams
+pnpm docs:build      # what CI runs; dead-link checking is on and fails the build
+```
+
+Read the markdown under `apps/docs/` directly if you prefer an editor — the
+site renders those same files, there is no second copy.
 
 ## Verifying it
 

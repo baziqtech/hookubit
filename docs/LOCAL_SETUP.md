@@ -246,3 +246,19 @@ curl -s localhost:9090/metrics | grep -E 'events_ingested|deliveries_|outbox_pen
   control-api log has `SMTP transport … could not be verified at boot` and a
   `Failed to send …` line per message). `curl -s localhost:8025/api/v1/messages`
   shows what the catcher actually received.
+
+## The documentation site
+
+`apps/docs` is the customer-facing documentation (VitePress). It needs nothing
+running - no database, no API:
+
+```bash
+pnpm docs:dev      # http://localhost:4000
+pnpm docs:build    # what CI runs: regenerates the API reference, then builds with dead-link checking ON
+```
+
+The API reference under `apps/docs/api/` is generated from
+`apps/control-api/openapi.json`, which `pnpm --filter @webhook/control-api openapi`
+emits from source. Do not edit the generated pages; change the DTO decorators
+and rebuild. A build failure naming a dead link is a real broken link - fix the
+link, not the check.
