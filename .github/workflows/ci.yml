@@ -86,6 +86,15 @@ jobs:
         options: >-
           --health-cmd "pg_isready -U webhook"
           --health-interval 5s --health-timeout 3s --health-retries 10
+      # Redis is the rate limiter's token store and nothing else. It is here so
+      # the live Lua tests run (REDIS_TEST_URL on the Test step); the delivery
+      # path must never depend on it, and the outage suite proves it does not.
+      redis:
+        image: redis:7-alpine
+        ports: ['6379:6379']
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s --health-timeout 3s --health-retries 10
     env:
       # Same database, two spellings. pgx forwards unknown URL query parameters
       # to the server as runtime parameters, so Prisma's `?schema=public` makes
@@ -96,12 +105,6 @@ jobs:
       # split already exists in the root package.json (`test:db:migrate` uses
       # ?schema=, `go:test:db` uses ?sslmode=).
       DATABASE_URL: postgresql://webhook:webhook@localhost:5432/webhook_platform_test?sslmode=disable
-      redis:
-        image: redis:7-alpine
-        ports: ['6379:6379']
-        options: >-
-          --health-cmd "redis-cli ping"
-          --health-interval 5s --health-timeout 3s --health-retries 10
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
