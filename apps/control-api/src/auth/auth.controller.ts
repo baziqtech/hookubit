@@ -1,6 +1,7 @@
 import { Body, Controller, Get, HttpCode, HttpStatus, Post, Req, Res, UseGuards } from '@nestjs/common';
 import { Throttle, ThrottleGuard } from '../common/throttle.guard';
 import {
+  ApiAcceptedResponse,
   ApiCookieAuth,
   ApiNoContentResponse,
   ApiOkResponse,
@@ -57,7 +58,7 @@ export class AuthController {
       'enumerate accounts. No session cookie is set: the user verifies the address from the ' +
       'email and then logs in. A taken address gets a "someone tried to register" notice instead.',
   })
-  @ApiOkResponse({ type: AcknowledgedDto })
+  @ApiAcceptedResponse({ type: AcknowledgedDto })
   async register(@Body() dto: RegisterDto, @Req() req: Request): Promise<AcknowledgedDto> {
     await this.auth.register(dto, AuthController.context(req));
     return { status: 'accepted' };
@@ -126,7 +127,7 @@ export class AuthController {
       'the same trap that was found and fixed in forgot-password. Any previous verification ' +
       'link is invalidated, so the newest email is the one that works.',
   })
-  @ApiOkResponse({ type: AcknowledgedDto })
+  @ApiAcceptedResponse({ type: AcknowledgedDto })
   async resendVerification(@Body() dto: ResendVerificationDto): Promise<AcknowledgedDto> {
     await this.auth.resendVerification(dto.email);
     return { status: 'accepted' };
@@ -139,7 +140,7 @@ export class AuthController {
     summary: 'Request a password reset link',
     description: 'Always 202, whether or not the address is registered.',
   })
-  @ApiOkResponse({ type: AcknowledgedDto })
+  @ApiAcceptedResponse({ type: AcknowledgedDto })
   async forgotPassword(@Body() dto: ForgotPasswordDto): Promise<AcknowledgedDto> {
     await this.auth.forgotPassword(dto.email);
     return { status: 'accepted' };

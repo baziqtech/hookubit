@@ -23,28 +23,19 @@
  * in CI or on a laptop with nothing up.
  */
 import { NestFactory } from '@nestjs/core';
-import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
 import { writeFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { AppModule } from './app.module';
-import { attachErrorResponses } from './common/openapi-errors';
+import { GLOBAL_PREFIX, GLOBAL_PREFIX_EXCLUDE, buildOpenApiDocument } from './common/openapi-document';
 
 async function emit(): Promise<void> {
   const app = await NestFactory.create(AppModule, { preview: true, logger: false });
 
-  // MUST match main.ts. The prefix is part of every path in the document, so a
-  // divergence here regenerates a client that calls the wrong URLs.
-  app.setGlobalPrefix('v1', { exclude: ['health/live', 'health/ready'] });
+  // Shared with main.ts: the prefix is part of every path in the document, and
+  // the builder is the same function /docs uses, so the two cannot drift.
+  app.setGlobalPrefix(GLOBAL_PREFIX, { exclude: GLOBAL_PREFIX_EXCLUDE });
 
-  const config = new DocumentBuilder()
-    .setTitle('Webhook Platform Control API')
-    .setDescription('Control plane for the webhook delivery platform.')
-    .setVersion('1.0')
-    .addBearerAuth({ type: 'http', scheme: 'bearer' }, 'apiKey')
-    .addCookieAuth('session')
-    .build();
-
-  const document = attachErrorResponses(SwaggerModule.createDocument(app, config));
+  const document = buildOpenApiDocument(app);
 
   const out = resolve(process.argv[2] ?? 'openapi.json');
   writeFileSync(out, `${JSON.stringify(document, null, 2)}\n`);

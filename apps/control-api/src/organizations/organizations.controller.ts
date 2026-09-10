@@ -119,7 +119,7 @@ export class OrganizationsController {
   @Get(':orgId')
   @Authorized('projects.read')
   @ApiOperation({ summary: 'Read one organization' })
-  @ApiParam({ name: 'orgId', example: 'org_01J...' })
+  @ApiParam({ name: 'orgId', type: String, example: 'org_01J...', description: 'Organization id, `org_…`.' })
   @ApiOkResponse({ type: OrganizationDto })
   @ApiNotFoundResponse({ description: 'Absent, or the caller is not a member. Same answer.' })
   async get(@Tenant() context: RequestContext): Promise<OrganizationDto> {
@@ -132,7 +132,7 @@ export class OrganizationsController {
     summary: 'Rename an organization or change its slug',
     description: 'Status is not settable here; suspension is a platform decision.',
   })
-  @ApiParam({ name: 'orgId', example: 'org_01J...' })
+  @ApiParam({ name: 'orgId', type: String, example: 'org_01J...', description: 'Organization id, `org_…`.' })
   @ApiOkResponse({ type: OrganizationDto })
   @ApiConflictResponse({ description: 'The requested slug is already taken.' })
   async update(
@@ -152,7 +152,7 @@ export class OrganizationsController {
       'foreign keys are ON DELETE RESTRICT. Sets status=deleted, after which every route ' +
       'under the organization answers 404 for every member.',
   })
-  @ApiParam({ name: 'orgId', example: 'org_01J...' })
+  @ApiParam({ name: 'orgId', type: String, example: 'org_01J...', description: 'Organization id, `org_…`.' })
   @ApiNoContentResponse()
   @ApiForbiddenResponse({ description: 'The caller is a member but is not an owner.' })
   async remove(@Tenant() context: RequestContext): Promise<void> {

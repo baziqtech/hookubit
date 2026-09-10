@@ -44,7 +44,7 @@ import { ProjectsService } from './projects.service';
  */
 @ApiTags('projects')
 @ApiCookieAuth('session')
-@ApiParam({ name: 'orgId', example: 'org_01J8ZK...' })
+@ApiParam({ name: 'orgId', type: String, example: 'org_01J8ZK...', description: 'Organization id, `org_…`.' })
 @ApiNotFoundResponse({
   description:
     'The organization or project is not visible to this caller - it does not exist, it is ' +
@@ -109,7 +109,7 @@ export class ProjectsController {
 
   @Get(':projectId')
   @Authorized('projects.read')
-  @ApiParam({ name: 'projectId', example: 'proj_01J8ZK...' })
+  @ApiParam({ name: 'projectId', type: String, example: 'proj_01J8ZK...', description: 'Project id, `proj_…`.' })
   @ApiOperation({ summary: 'Fetch one project' })
   @ApiOkResponse({ type: ProjectDto })
   get(
@@ -121,7 +121,7 @@ export class ProjectsController {
 
   @Patch(':projectId')
   @Authorized('projects.write')
-  @ApiParam({ name: 'projectId', example: 'proj_01J8ZK...' })
+  @ApiParam({ name: 'projectId', type: String, example: 'proj_01J8ZK...', description: 'Project id, `proj_…`.' })
   @ApiOperation({
     summary: 'Rename a project or change its slug',
     description:
@@ -140,7 +140,7 @@ export class ProjectsController {
 
   @Delete(':projectId')
   @Authorized('projects.write')
-  @ApiParam({ name: 'projectId', example: 'proj_01J8ZK...' })
+  @ApiParam({ name: 'projectId', type: String, example: 'proj_01J8ZK...', description: 'Project id, `proj_…`.' })
   @ApiOperation({
     summary: 'Soft-delete a project',
     description:

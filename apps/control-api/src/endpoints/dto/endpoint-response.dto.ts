@@ -55,12 +55,12 @@ export class EndpointDto {
   @ApiProperty({
     description:
       'Whether this endpoint has at least one signing secret that is signing RIGHT NOW - ' +
-      '`active = true AND (expires_at IS NULL OR expires_at > now())`, the same pair the data ' +
-      "plane's secret loader uses. False means `POST /enable` will refuse with 409: an enabled " +
-      'endpoint with nothing to sign with delivers nothing, because `signing.Header` fails ' +
-      'closed. Read `active` alone and the two answers disagree for the window between a ' +
-      'secret expiring and the sweep flipping its column, which is exactly when an operator ' +
-      'is looking.\n\n' +
+      'one that is active and either has no expiry or has not reached it yet, which is the ' +
+      'same test the delivery workers apply when they sign. False means `POST /enable` will ' +
+      'refuse with 409: an enabled endpoint with nothing to sign with delivers nothing, ' +
+      "because signing fails closed rather than sending an unsigned request. Read a secret's " +
+      '`active` flag alone and the two answers disagree for the window between a secret ' +
+      'expiring and its flag being swept, which is exactly when an operator is looking.\n\n' +
       'A BOOLEAN, deliberately: no id, version, prefix or expiry. This field is visible to ' +
       'anyone with `endpoints.read` (a viewer included), and reading signing secrets is ' +
       '`endpoint-secrets.read` - owner and admin only.',

@@ -43,9 +43,9 @@ export const MIN_IDEMPOTENCY_KEY_SEARCH = 3;
 export class ListEventsQueryDto {
   @ApiPropertyOptional({
     description:
-      'Exact event type, e.g. `payment.settled`. INDEX-SUPPORTED: leading columns of ' +
-      '`events_project_id_event_type_created_at_idx`. No wildcards - a prefix search would ' +
-      'silently stop using that index.',
+      'Exact event type, e.g. `payment.settled`. INDEX-SUPPORTED: cheap at any volume, and ' +
+      'with the default newest-first order it needs no sort step. No wildcards or prefixes - ' +
+      'a partial type never matches.',
   })
   @IsOptional()
   @IsString()

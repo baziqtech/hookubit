@@ -6,6 +6,7 @@ import {
   ApiNotFoundResponse,
   ApiOkResponse,
   ApiOperation,
+  ApiParam,
   ApiTags,
 } from '@nestjs/swagger';
 import { Authorized, RequestContext, Tenant } from '../authz';
@@ -65,6 +66,15 @@ const MINUTE = 60_000;
 @ApiBadRequestResponse({
   description: `\`window_hours\` was out of range - above ${MAX_WINDOW_HOURS} is REFUSED, never clamped.`,
 })
+// A controller-level route parameter is emitted with NO `parameters` entry unless
+// it is declared here, and `type: String` is not decoration: without it the
+// generated client types the parameter as `unknown`.
+@ApiParam({
+  name: 'projectId',
+  type: String,
+  example: 'proj_01J8ZK...',
+  description: 'Project id, `proj_…`. Resolved from the project row, never trusted as a claim.',
+})
 @Controller('projects/:projectId/analytics')
 @UseGuards(ThrottleGuard)
 export class AnalyticsController {
@@ -115,13 +125,14 @@ export class AnalyticsController {
   // lookup per sampled delivery. Half the budget of the others, deliberately.
   @Throttle({ name: 'analytics.latency', limit: 60, windowMs: 5 * MINUTE })
   @ApiOperation({
-    summary: 'Attempt latency percentiles (p50/p95/p99) from delivery_attempts.duration_ms',
+    summary: 'Attempt latency percentiles (p50/p95/p99) over measured attempt durations',
     description:
       'Computed over a BOUNDED SAMPLE of the most recent measured attempts in the window. ' +
       '`exact` says whether the sample was the whole window; when it is false the numbers ' +
       'describe the most recent traffic in the window, and `sample_size` says how much was ' +
       'measured. Nearest-rank, so every value returned is a duration something actually took. ' +
-      'An exact percentile needs `percentile_cont`, which is raw SQL - see HANDOFF.md.',
+      'An exact percentile over the whole window is not offered today; the sample cap is what ' +
+      'keeps this query bounded.',
   })
   @ApiOkResponse({ type: AttemptLatencyDto })
   latency(

@@ -40,8 +40,8 @@ const errorSchema: Record<string, unknown> = {
   required: ['error'],
   description:
     'The response body of EVERY non-2xx response from this API. There is no other error ' +
-    'shape: `AppExceptionFilter` is a catch-all filter, so even an unhandled exception is ' +
-    'rendered as this envelope with `code: "internal_error"`.',
+    'shape: every failure, including an unhandled internal error, is rendered as this ' +
+    'envelope - the latter with `code: "internal_error"`.',
   properties: {
     error: {
       type: 'object',
@@ -60,8 +60,8 @@ const errorSchema: Record<string, unknown> = {
         message: {
           description:
             'For a HUMAN. A STRING on most errors, but a STRING ARRAY on a validation ' +
-            'failure - `ValidationPipe` puts one entry per rejected field here, and it is ' +
-            'the only field map this API returns. Narrow before rendering it.',
+            'failure, with one entry per rejected field - and that array is the only per-field ' +
+            'breakdown this API returns. Narrow before rendering it.',
           oneOf: [
             { type: 'string' },
             { type: 'array', items: { type: 'string' } },

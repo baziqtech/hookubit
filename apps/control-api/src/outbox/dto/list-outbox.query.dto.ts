@@ -29,14 +29,15 @@ export class ListOutboxQueryDto {
     description:
       'Exact status. **`failed` is the one to ask for**: those are the PARKED rows - events that ' +
       'were accepted and will never be delivered until someone requeues them. INDEX-SUPPORTED ' +
-      '(`event_outbox_attention_idx` for `failed`/`pending`).',
+      'for `failed` and `pending`, the two states this list exists for: cheap at any volume, ' +
+      'newest first with no sort step.',
   })
   @IsOptional()
   @IsEnum(OUTBOX_STATUSES)
   status?: OutboxStatus;
 
   @ApiPropertyOptional({
-    description: 'One event. INDEX-SUPPORTED: `event_outbox_event_id_idx`.',
+    description: 'Only the outbox entries for one event. INDEX-SUPPORTED: cheap at any volume.',
   })
   @IsOptional()
   @IsString()

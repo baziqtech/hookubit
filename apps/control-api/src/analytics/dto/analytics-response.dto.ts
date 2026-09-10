@@ -210,8 +210,8 @@ export class AttemptLatencyDto {
       'TRUE when the sample IS every measured attempt in the window, so the percentiles are ' +
       'exact. FALSE when the window held more traffic than the sample cap, in which case the ' +
       'numbers describe the MOST RECENT traffic in the window, not the whole of it. This flag ' +
-      'is the honest part of the response - see HANDOFF.md for why an exact percentile is not ' +
-      'reachable through the tenant scope today.',
+      'is the honest part of the response: an exact percentile over the whole window is not ' +
+      'offered today, and the sample cap is what keeps this query bounded for every project.',
   })
   exact!: boolean;
 

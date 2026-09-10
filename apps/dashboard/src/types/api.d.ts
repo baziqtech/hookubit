@@ -1077,8 +1077,8 @@ export interface paths {
             cookie?: never;
         };
         /**
-         * Attempt latency percentiles (p50/p95/p99) from delivery_attempts.duration_ms
-         * @description Computed over a BOUNDED SAMPLE of the most recent measured attempts in the window. `exact` says whether the sample was the whole window; when it is false the numbers describe the most recent traffic in the window, and `sample_size` says how much was measured. Nearest-rank, so every value returned is a duration something actually took. An exact percentile needs `percentile_cont`, which is raw SQL - see HANDOFF.md.
+         * Attempt latency percentiles (p50/p95/p99) over measured attempt durations
+         * @description Computed over a BOUNDED SAMPLE of the most recent measured attempts in the window. `exact` says whether the sample was the whole window; when it is false the numbers describe the most recent traffic in the window, and `sample_size` says how much was measured. Nearest-rank, so every value returned is a duration something actually took. An exact percentile over the whole window is not offered today; the sample cap is what keeps this query bounded.
          */
         get: operations["AnalyticsController_latency"];
         put?: never;
@@ -1499,7 +1499,7 @@ export interface components {
                 [key: string]: string;
             } | null;
             /**
-             * @description Whether this endpoint has at least one signing secret that is signing RIGHT NOW - `active = true AND (expires_at IS NULL OR expires_at > now())`, the same pair the data plane's secret loader uses. False means `POST /enable` will refuse with 409: an enabled endpoint with nothing to sign with delivers nothing, because `signing.Header` fails closed. Read `active` alone and the two answers disagree for the window between a secret expiring and the sweep flipping its column, which is exactly when an operator is looking.
+             * @description Whether this endpoint has at least one signing secret that is signing RIGHT NOW - one that is active and either has no expiry or has not reached it yet, which is the same test the delivery workers apply when they sign. False means `POST /enable` will refuse with 409: an enabled endpoint with nothing to sign with delivers nothing, because signing fails closed rather than sending an unsigned request. Read a secret's `active` flag alone and the two answers disagree for the window between a secret expiring and its flag being swept, which is exactly when an operator is looking.
              *
              *     A BOOLEAN, deliberately: no id, version, prefix or expiry. This field is visible to anyone with `endpoints.read` (a viewer included), and reading signing secrets is `endpoint-secrets.read` - owner and admin only.
              * @example true
@@ -1574,7 +1574,7 @@ export interface components {
                 [key: string]: string;
             } | null;
             /**
-             * @description Whether this endpoint has at least one signing secret that is signing RIGHT NOW - `active = true AND (expires_at IS NULL OR expires_at > now())`, the same pair the data plane's secret loader uses. False means `POST /enable` will refuse with 409: an enabled endpoint with nothing to sign with delivers nothing, because `signing.Header` fails closed. Read `active` alone and the two answers disagree for the window between a secret expiring and the sweep flipping its column, which is exactly when an operator is looking.
+             * @description Whether this endpoint has at least one signing secret that is signing RIGHT NOW - one that is active and either has no expiry or has not reached it yet, which is the same test the delivery workers apply when they sign. False means `POST /enable` will refuse with 409: an enabled endpoint with nothing to sign with delivers nothing, because signing fails closed rather than sending an unsigned request. Read a secret's `active` flag alone and the two answers disagree for the window between a secret expiring and its flag being swept, which is exactly when an operator is looking.
              *
              *     A BOOLEAN, deliberately: no id, version, prefix or expiry. This field is visible to anyone with `endpoints.read` (a viewer included), and reading signing secrets is `endpoint-secrets.read` - owner and admin only.
              * @example true
@@ -1730,7 +1730,7 @@ export interface components {
                 [key: string]: unknown;
             } | null;
             /**
-             * @description A disabled subscription never matches - `Match()` skips it before the event-type test. This is how you stop deliveries without touching the filter.
+             * @description A disabled subscription never matches: it is skipped before its event-type filter is even evaluated. This is how you stop deliveries without touching the filter.
              * @default true
              */
             enabled?: boolean;
@@ -1921,9 +1921,9 @@ export interface components {
             id: string;
             project_id: string;
             event_type: string;
-            /** @description The producer-supplied key that made ingest idempotent (ARCHITECTURE.md 17). */
+            /** @description The idempotency key the producer published this event with, if any. Publishing again with the same key in the same project resolves to this event instead of creating another. */
             idempotency_key: string | null;
-            /** @description Opt-in serialisation key, carried onto every delivery this event fanned out to. Stored from day one; ordering enforcement is deferred (ADR-0004), so this does NOT currently guarantee anything about delivery order. */
+            /** @description Opt-in serialisation key, carried onto every delivery this event fanned out to. It is accepted and stored today so it is already in place when per-key ordering is enforced, but per-key ordering is NOT yet enforced: this field currently guarantees nothing about delivery order. */
             ordering_key: string | null;
             /**
              * @description The INGEST/fan-out state, not a delivery outcome. `processed` means the fan-out committed, which says nothing about whether any endpoint accepted it - that is what the deliveries are for.
@@ -1980,9 +1980,9 @@ export interface components {
             id: string;
             project_id: string;
             event_type: string;
-            /** @description The producer-supplied key that made ingest idempotent (ARCHITECTURE.md 17). */
+            /** @description The idempotency key the producer published this event with, if any. Publishing again with the same key in the same project resolves to this event instead of creating another. */
             idempotency_key: string | null;
-            /** @description Opt-in serialisation key, carried onto every delivery this event fanned out to. Stored from day one; ordering enforcement is deferred (ADR-0004), so this does NOT currently guarantee anything about delivery order. */
+            /** @description Opt-in serialisation key, carried onto every delivery this event fanned out to. It is accepted and stored today so it is already in place when per-key ordering is enforced, but per-key ordering is NOT yet enforced: this field currently guarantees nothing about delivery order. */
             ordering_key: string | null;
             /**
              * @description The INGEST/fan-out state, not a delivery outcome. `processed` means the fan-out committed, which says nothing about whether any endpoint accepted it - that is what the deliveries are for.
@@ -2395,7 +2395,7 @@ export interface components {
             max_ms: number | null;
             /** @description How many attempts these percentiles were computed from. */
             sample_size: number;
-            /** @description TRUE when the sample IS every measured attempt in the window, so the percentiles are exact. FALSE when the window held more traffic than the sample cap, in which case the numbers describe the MOST RECENT traffic in the window, not the whole of it. This flag is the honest part of the response - see HANDOFF.md for why an exact percentile is not reachable through the tenant scope today. */
+            /** @description TRUE when the sample IS every measured attempt in the window, so the percentiles are exact. FALSE when the window held more traffic than the sample cap, in which case the numbers describe the MOST RECENT traffic in the window, not the whole of it. This flag is the honest part of the response: an exact percentile over the whole window is not offered today, and the sample cap is what keeps this query bounded for every project. */
             exact: boolean;
             /** @description How many deliveries the sampled attempts were drawn from. */
             sampled_deliveries: number;
@@ -2417,7 +2417,7 @@ export interface components {
             /** @description True when more event types occurred than `limit`. */
             has_more: boolean;
         };
-        /** @description The response body of EVERY non-2xx response from this API. There is no other error shape: `AppExceptionFilter` is a catch-all filter, so even an unhandled exception is rendered as this envelope with `code: "internal_error"`. */
+        /** @description The response body of EVERY non-2xx response from this API. There is no other error shape: every failure, including an unhandled internal error, is rendered as this envelope - the latter with `code: "internal_error"`. */
         ApiErrorResponse: {
             error: {
                 /**
@@ -2425,7 +2425,7 @@ export interface components {
                  * @enum {string}
                  */
                 code: "invalid_request" | "unauthenticated" | "forbidden" | "email_not_verified" | "not_found" | "conflict" | "limit_exceeded" | "idempotency_key_reused" | "payload_too_large" | "rate_limited" | "internal_error";
-                /** @description For a HUMAN. A STRING on most errors, but a STRING ARRAY on a validation failure - `ValidationPipe` puts one entry per rejected field here, and it is the only field map this API returns. Narrow before rendering it. */
+                /** @description For a HUMAN. A STRING on most errors, but a STRING ARRAY on a validation failure, with one entry per rejected field - and that array is the only per-field breakdown this API returns. Narrow before rendering it. */
                 message: string | string[];
                 /**
                  * @description The correlation id, echoed from a well-formed `x-request-id` or minted here. It appears on the matching log lines; quote it in a bug report.
@@ -2469,7 +2469,7 @@ export interface operations {
             };
         };
         responses: {
-            200: {
+            202: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -2557,7 +2557,7 @@ export interface operations {
             };
         };
         responses: {
-            200: {
+            202: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -2580,7 +2580,7 @@ export interface operations {
             };
         };
         responses: {
-            200: {
+            202: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -2709,7 +2709,8 @@ export interface operations {
             query?: never;
             header?: never;
             path: {
-                orgId: unknown;
+                /** @description Organization id, `org_…`. */
+                orgId: string;
             };
             cookie?: never;
         };
@@ -2739,7 +2740,8 @@ export interface operations {
             query?: never;
             header?: never;
             path: {
-                orgId: unknown;
+                /** @description Organization id, `org_…`. */
+                orgId: string;
             };
             cookie?: never;
         };
@@ -2767,7 +2769,8 @@ export interface operations {
             query?: never;
             header?: never;
             path: {
-                orgId: unknown;
+                /** @description Organization id, `org_…`. */
+                orgId: string;
             };
             cookie?: never;
         };
@@ -2804,7 +2807,8 @@ export interface operations {
             };
             header?: never;
             path: {
-                orgId: unknown;
+                /** @description Organization id, `org_…`. */
+                orgId: string;
             };
             cookie?: never;
         };
@@ -2834,7 +2838,8 @@ export interface operations {
             query?: never;
             header?: never;
             path: {
-                orgId: unknown;
+                /** @description Organization id, `org_…`. */
+                orgId: string;
             };
             cookie?: never;
         };
@@ -2868,8 +2873,10 @@ export interface operations {
             query?: never;
             header?: never;
             path: {
+                /** @description Membership id, `mem_…`. */
                 memberId: string;
-                orgId: unknown;
+                /** @description Organization id, `org_…`. */
+                orgId: string;
             };
             cookie?: never;
         };
@@ -2906,8 +2913,10 @@ export interface operations {
             query?: never;
             header?: never;
             path: {
+                /** @description Membership id, `mem_…`. */
                 memberId: string;
-                orgId: unknown;
+                /** @description Organization id, `org_…`. */
+                orgId: string;
             };
             cookie?: never;
         };
@@ -2997,7 +3006,8 @@ export interface operations {
             };
             header?: never;
             path: {
-                orgId: unknown;
+                /** @description Organization id, `org_…`. */
+                orgId: string;
             };
             cookie?: never;
         };
@@ -3045,7 +3055,8 @@ export interface operations {
             query?: never;
             header?: never;
             path: {
-                orgId: unknown;
+                /** @description Organization id, `org_…`. */
+                orgId: string;
             };
             cookie?: never;
         };
@@ -3106,8 +3117,10 @@ export interface operations {
             query?: never;
             header?: never;
             path: {
+                /** @description Project id, `proj_…`. */
                 projectId: string;
-                orgId: unknown;
+                /** @description Organization id, `org_…`. */
+                orgId: string;
             };
             cookie?: never;
         };
@@ -3155,8 +3168,10 @@ export interface operations {
             query?: never;
             header?: never;
             path: {
+                /** @description Project id, `proj_…`. */
                 projectId: string;
-                orgId: unknown;
+                /** @description Organization id, `org_…`. */
+                orgId: string;
             };
             cookie?: never;
         };
@@ -3204,8 +3219,10 @@ export interface operations {
             query?: never;
             header?: never;
             path: {
+                /** @description Project id, `proj_…`. */
                 projectId: string;
-                orgId: unknown;
+                /** @description Organization id, `org_…`. */
+                orgId: string;
             };
             cookie?: never;
         };
@@ -3270,7 +3287,8 @@ export interface operations {
             };
             header?: never;
             path: {
-                projectId: unknown;
+                /** @description Project id, `proj_…`. */
+                projectId: string;
             };
             cookie?: never;
         };
@@ -3318,7 +3336,8 @@ export interface operations {
             query?: never;
             header?: never;
             path: {
-                projectId: unknown;
+                /** @description Project id, `proj_…`. */
+                projectId: string;
             };
             cookie?: never;
         };
@@ -3379,8 +3398,10 @@ export interface operations {
             query?: never;
             header?: never;
             path: {
+                /** @description API key id, `key_…`. */
                 apiKeyId: string;
-                projectId: unknown;
+                /** @description Project id, `proj_…`. */
+                projectId: string;
             };
             cookie?: never;
         };
@@ -3433,7 +3454,10 @@ export interface operations {
                 offset?: number;
             };
             header?: never;
-            path?: never;
+            path: {
+                /** @description Project id, `proj_…`. Resolved from the project row, never trusted as a claim. */
+                projectId: string;
+            };
             cookie?: never;
         };
         requestBody?: never;
@@ -3470,7 +3494,10 @@ export interface operations {
         parameters: {
             query?: never;
             header?: never;
-            path?: never;
+            path: {
+                /** @description Project id, `proj_…`. Resolved from the project row, never trusted as a claim. */
+                projectId: string;
+            };
             cookie?: never;
         };
         requestBody: {
@@ -3522,6 +3549,8 @@ export interface operations {
             header?: never;
             path: {
                 endpointId: string;
+                /** @description Project id, `proj_…`. Resolved from the project row, never trusted as a claim. */
+                projectId: string;
             };
             cookie?: never;
         };
@@ -3561,6 +3590,8 @@ export interface operations {
             header?: never;
             path: {
                 endpointId: string;
+                /** @description Project id, `proj_…`. Resolved from the project row, never trusted as a claim. */
+                projectId: string;
             };
             cookie?: never;
         };
@@ -3598,6 +3629,8 @@ export interface operations {
             header?: never;
             path: {
                 endpointId: string;
+                /** @description Project id, `proj_…`. Resolved from the project row, never trusted as a claim. */
+                projectId: string;
             };
             cookie?: never;
         };
@@ -3650,6 +3683,8 @@ export interface operations {
             header?: never;
             path: {
                 endpointId: string;
+                /** @description Project id, `proj_…`. Resolved from the project row, never trusted as a claim. */
+                projectId: string;
             };
             cookie?: never;
         };
@@ -3698,6 +3733,8 @@ export interface operations {
             header?: never;
             path: {
                 endpointId: string;
+                /** @description Project id, `proj_…`. Resolved from the project row, never trusted as a claim. */
+                projectId: string;
             };
             cookie?: never;
         };
@@ -3899,7 +3936,8 @@ export interface operations {
             };
             header?: never;
             path: {
-                projectId: unknown;
+                /** @description Project id, `proj_…`. */
+                projectId: string;
             };
             cookie?: never;
         };
@@ -3947,7 +3985,8 @@ export interface operations {
             query?: never;
             header?: never;
             path: {
-                projectId: unknown;
+                /** @description Project id, `proj_…`. */
+                projectId: string;
             };
             cookie?: never;
         };
@@ -4017,8 +4056,10 @@ export interface operations {
             query?: never;
             header?: never;
             path: {
+                /** @description Subscription id, `sub_…`. */
                 subscriptionId: string;
-                projectId: unknown;
+                /** @description Project id, `proj_…`. */
+                projectId: string;
             };
             cookie?: never;
         };
@@ -4066,8 +4107,10 @@ export interface operations {
             query?: never;
             header?: never;
             path: {
+                /** @description Subscription id, `sub_…`. */
                 subscriptionId: string;
-                projectId: unknown;
+                /** @description Project id, `proj_…`. */
+                projectId: string;
             };
             cookie?: never;
         };
@@ -4113,8 +4156,10 @@ export interface operations {
             query?: never;
             header?: never;
             path: {
+                /** @description Subscription id, `sub_…`. */
                 subscriptionId: string;
-                projectId: unknown;
+                /** @description Project id, `proj_…`. */
+                projectId: string;
             };
             cookie?: never;
         };
@@ -4184,8 +4229,10 @@ export interface operations {
             query?: never;
             header?: never;
             path: {
+                /** @description Subscription id, `sub_…`. */
                 subscriptionId: string;
-                projectId: unknown;
+                /** @description Project id, `proj_…`. */
+                projectId: string;
             };
             cookie?: never;
         };
@@ -4233,8 +4280,10 @@ export interface operations {
             query?: never;
             header?: never;
             path: {
+                /** @description Subscription id, `sub_…`. */
                 subscriptionId: string;
-                projectId: unknown;
+                /** @description Project id, `proj_…`. */
+                projectId: string;
             };
             cookie?: never;
         };
@@ -4290,7 +4339,10 @@ export interface operations {
                 offset?: number;
             };
             header?: never;
-            path?: never;
+            path: {
+                /** @description Project id, `proj_…`. Resolved from the project row, never trusted as a claim. */
+                projectId: string;
+            };
             cookie?: never;
         };
         requestBody?: never;
@@ -4327,7 +4379,10 @@ export interface operations {
         parameters: {
             query?: never;
             header?: never;
-            path?: never;
+            path: {
+                /** @description Project id, `proj_…`. Resolved from the project row, never trusted as a claim. */
+                projectId: string;
+            };
             cookie?: never;
         };
         requestBody: {
@@ -4379,6 +4434,8 @@ export interface operations {
             header?: never;
             path: {
                 policyId: string;
+                /** @description Project id, `proj_…`. Resolved from the project row, never trusted as a claim. */
+                projectId: string;
             };
             cookie?: never;
         };
@@ -4421,6 +4478,8 @@ export interface operations {
             header?: never;
             path: {
                 policyId: string;
+                /** @description Project id, `proj_…`. Resolved from the project row, never trusted as a claim. */
+                projectId: string;
             };
             cookie?: never;
         };
@@ -4467,6 +4526,8 @@ export interface operations {
             header?: never;
             path: {
                 policyId: string;
+                /** @description Project id, `proj_…`. Resolved from the project row, never trusted as a claim. */
+                projectId: string;
             };
             cookie?: never;
         };
@@ -4510,6 +4571,8 @@ export interface operations {
             header?: never;
             path: {
                 policyId: string;
+                /** @description Project id, `proj_…`. Resolved from the project row, never trusted as a claim. */
+                projectId: string;
             };
             cookie?: never;
         };
@@ -4553,7 +4616,10 @@ export interface operations {
                 offset?: number;
             };
             header?: never;
-            path?: never;
+            path: {
+                /** @description Project id, `proj_…`. Resolved from the project row, never trusted as a claim. */
+                projectId: string;
+            };
             cookie?: never;
         };
         requestBody?: never;
@@ -4590,7 +4656,10 @@ export interface operations {
         parameters: {
             query?: never;
             header?: never;
-            path?: never;
+            path: {
+                /** @description Project id, `proj_…`. Resolved from the project row, never trusted as a claim. */
+                projectId: string;
+            };
             cookie?: never;
         };
         requestBody: {
@@ -4642,6 +4711,8 @@ export interface operations {
             header?: never;
             path: {
                 policyId: string;
+                /** @description Project id, `proj_…`. Resolved from the project row, never trusted as a claim. */
+                projectId: string;
             };
             cookie?: never;
         };
@@ -4681,6 +4752,8 @@ export interface operations {
             header?: never;
             path: {
                 policyId: string;
+                /** @description Project id, `proj_…`. Resolved from the project row, never trusted as a claim. */
+                projectId: string;
             };
             cookie?: never;
         };
@@ -4718,6 +4791,8 @@ export interface operations {
             header?: never;
             path: {
                 policyId: string;
+                /** @description Project id, `proj_…`. Resolved from the project row, never trusted as a claim. */
+                projectId: string;
             };
             cookie?: never;
         };
@@ -4767,7 +4842,7 @@ export interface operations {
     EventsController_list: {
         parameters: {
             query?: {
-                /** @description Exact event type, e.g. `payment.settled`. INDEX-SUPPORTED: leading columns of `events_project_id_event_type_created_at_idx`. No wildcards - a prefix search would silently stop using that index. */
+                /** @description Exact event type, e.g. `payment.settled`. INDEX-SUPPORTED: cheap at any volume, and with the default newest-first order it needs no sort step. No wildcards or prefixes - a partial type never matches. */
                 event_type?: string;
                 /** @description Ingest/fan-out state, NOT a delivery outcome. **NOT INDEX-SUPPORTED**: a filter applied to whatever the project and date predicates selected. Pair it with a date range. */
                 status?: "received" | "processing" | "processed" | "failed";
@@ -4781,7 +4856,10 @@ export interface operations {
                 offset?: number;
             };
             header?: never;
-            path?: never;
+            path: {
+                /** @description Project id, `proj_…`. Resolved from the project row, never trusted as a claim. */
+                projectId: string;
+            };
             cookie?: never;
         };
         requestBody?: never;
@@ -4820,6 +4898,8 @@ export interface operations {
             header?: never;
             path: {
                 eventId: string;
+                /** @description Project id, `proj_…`. Resolved from the project row, never trusted as a claim. */
+                projectId: string;
             };
             cookie?: never;
         };
@@ -4856,13 +4936,13 @@ export interface operations {
     EventsController_deliveries: {
         parameters: {
             query?: {
-                /** @description Exact status. INDEX-SUPPORTED: leading columns of `deliveries_project_id_status_created_at_idx`. */
+                /** @description Exact status. INDEX-SUPPORTED: cheap at any volume, and with the default newest-first order it needs no sort step. */
                 status?: "pending" | "scheduled" | "queued" | "processing" | "succeeded" | "failed" | "retrying" | "exhausted" | "cancelled";
                 /** @description Everything that has failed and not recovered: `retrying`, `failed`, `exhausted`. INDEX-SUPPORTED (three scans of the same index). Cannot be combined with `status` - they would contradict each other and the API refuses rather than picking one. */
                 failing_now?: boolean;
-                /** @description INDEX-SUPPORTED: `deliveries_endpoint_id_created_at_idx`. */
+                /** @description Only deliveries to this endpoint. INDEX-SUPPORTED: cheap at any volume, and with the default newest-first order it needs no sort step. */
                 endpoint_id?: string;
-                /** @description INDEX-SUPPORTED: `deliveries_event_id_idx`. */
+                /** @description Only the deliveries fanned out from this event. INDEX-SUPPORTED: cheap at any volume. */
                 event_id?: string;
                 /** @description The event type of the event this delivery came from. **NOT INDEX-SUPPORTED**: it is a join to `events` on a column `deliveries` does not carry, so it filters rows the project/status/date predicate already selected. Always combine it with a date range or an endpoint on a busy project. */
                 event_type?: string;
@@ -4878,6 +4958,8 @@ export interface operations {
             header?: never;
             path: {
                 eventId: string;
+                /** @description Project id, `proj_…`. Resolved from the project row, never trusted as a claim. */
+                projectId: string;
             };
             cookie?: never;
         };
@@ -4917,6 +4999,8 @@ export interface operations {
             header?: never;
             path: {
                 eventId: string;
+                /** @description Project id, `proj_…`. Resolved from the project row, never trusted as a claim. */
+                projectId: string;
             };
             cookie?: never;
         };
@@ -4966,13 +5050,13 @@ export interface operations {
     DeliveriesController_list: {
         parameters: {
             query?: {
-                /** @description Exact status. INDEX-SUPPORTED: leading columns of `deliveries_project_id_status_created_at_idx`. */
+                /** @description Exact status. INDEX-SUPPORTED: cheap at any volume, and with the default newest-first order it needs no sort step. */
                 status?: "pending" | "scheduled" | "queued" | "processing" | "succeeded" | "failed" | "retrying" | "exhausted" | "cancelled";
                 /** @description Everything that has failed and not recovered: `retrying`, `failed`, `exhausted`. INDEX-SUPPORTED (three scans of the same index). Cannot be combined with `status` - they would contradict each other and the API refuses rather than picking one. */
                 failing_now?: boolean;
-                /** @description INDEX-SUPPORTED: `deliveries_endpoint_id_created_at_idx`. */
+                /** @description Only deliveries to this endpoint. INDEX-SUPPORTED: cheap at any volume, and with the default newest-first order it needs no sort step. */
                 endpoint_id?: string;
-                /** @description INDEX-SUPPORTED: `deliveries_event_id_idx`. */
+                /** @description Only the deliveries fanned out from this event. INDEX-SUPPORTED: cheap at any volume. */
                 event_id?: string;
                 /** @description The event type of the event this delivery came from. **NOT INDEX-SUPPORTED**: it is a join to `events` on a column `deliveries` does not carry, so it filters rows the project/status/date predicate already selected. Always combine it with a date range or an endpoint on a busy project. */
                 event_type?: string;
@@ -4986,7 +5070,10 @@ export interface operations {
                 offset?: number;
             };
             header?: never;
-            path?: never;
+            path: {
+                /** @description Project id, `proj_…`. Resolved from the project row, never trusted as a claim. */
+                projectId: string;
+            };
             cookie?: never;
         };
         requestBody?: never;
@@ -5025,6 +5112,8 @@ export interface operations {
             header?: never;
             path: {
                 deliveryId: string;
+                /** @description Project id, `proj_…`. Resolved from the project row, never trusted as a claim. */
+                projectId: string;
             };
             cookie?: never;
         };
@@ -5067,6 +5156,8 @@ export interface operations {
             header?: never;
             path: {
                 deliveryId: string;
+                /** @description Project id, `proj_…`. Resolved from the project row, never trusted as a claim. */
+                projectId: string;
             };
             cookie?: never;
         };
@@ -5106,6 +5197,8 @@ export interface operations {
             header?: never;
             path: {
                 deliveryId: string;
+                /** @description Project id, `proj_…`. Resolved from the project row, never trusted as a claim. */
+                projectId: string;
             };
             cookie?: never;
         };
@@ -5155,9 +5248,9 @@ export interface operations {
     OutboxController_list: {
         parameters: {
             query?: {
-                /** @description Exact status. **`failed` is the one to ask for**: those are the PARKED rows - events that were accepted and will never be delivered until someone requeues them. INDEX-SUPPORTED (`event_outbox_attention_idx` for `failed`/`pending`). */
+                /** @description Exact status. **`failed` is the one to ask for**: those are the PARKED rows - events that were accepted and will never be delivered until someone requeues them. INDEX-SUPPORTED for `failed` and `pending`, the two states this list exists for: cheap at any volume, newest first with no sort step. */
                 status?: "pending" | "processing" | "processed" | "failed";
-                /** @description One event. INDEX-SUPPORTED: `event_outbox_event_id_idx`. */
+                /** @description Only the outbox entries for one event. INDEX-SUPPORTED: cheap at any volume. */
                 event_id?: string;
                 limit?: number;
                 offset?: number;
@@ -5358,7 +5451,8 @@ export interface operations {
             };
             header?: never;
             path: {
-                orgId: unknown;
+                /** @description Organization id, `org_…`. */
+                orgId: string;
             };
             cookie?: never;
         };
@@ -5397,8 +5491,10 @@ export interface operations {
             query?: never;
             header?: never;
             path: {
+                /** @description Audit log entry id, `aud_…`. */
                 auditLogId: string;
-                orgId: unknown;
+                /** @description Organization id, `org_…`. */
+                orgId: string;
             };
             cookie?: never;
         };
@@ -5439,7 +5535,10 @@ export interface operations {
                 window_hours?: number;
             };
             header?: never;
-            path?: never;
+            path: {
+                /** @description Project id, `proj_…`. Resolved from the project row, never trusted as a claim. */
+                projectId: string;
+            };
             cookie?: never;
         };
         requestBody?: never;
@@ -5490,7 +5589,10 @@ export interface operations {
                 limit?: number;
             };
             header?: never;
-            path?: never;
+            path: {
+                /** @description Project id, `proj_…`. Resolved from the project row, never trusted as a claim. */
+                projectId: string;
+            };
             cookie?: never;
         };
         requestBody?: never;
@@ -5539,7 +5641,10 @@ export interface operations {
                 window_hours?: number;
             };
             header?: never;
-            path?: never;
+            path: {
+                /** @description Project id, `proj_…`. Resolved from the project row, never trusted as a claim. */
+                projectId: string;
+            };
             cookie?: never;
         };
         requestBody?: never;
@@ -5590,7 +5695,10 @@ export interface operations {
                 limit?: number;
             };
             header?: never;
-            path?: never;
+            path: {
+                /** @description Project id, `proj_…`. Resolved from the project row, never trusted as a claim. */
+                projectId: string;
+            };
             cookie?: never;
         };
         requestBody?: never;

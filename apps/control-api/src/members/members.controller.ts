@@ -73,7 +73,7 @@ export class MembersController {
       '`total`, `limit` and `offset` were removed. Read `has_more`; `next_offset` is null - ' +
       'never absent, never 0 - on the last page.',
   })
-  @ApiParam({ name: 'orgId', example: 'org_01J...' })
+  @ApiParam({ name: 'orgId', type: String, example: 'org_01J...', description: 'Organization id, `org_…`.' })
   @ApiOkResponse({ type: MemberListDto })
   @ApiNotFoundResponse({ description: 'Absent, or the caller is not a member. Same answer.' })
   async list(
@@ -98,7 +98,7 @@ export class MembersController {
       'created here: the invitee redeems a single-use token from their own mailbox at ' +
       'POST /v1/invitations/accept. 403 if the requested role is above the caller\'s own rank.',
   })
-  @ApiParam({ name: 'orgId', example: 'org_01J...' })
+  @ApiParam({ name: 'orgId', type: String, example: 'org_01J...', description: 'Organization id, `org_…`.' })
   @ApiAcceptedResponse({ type: InvitationAcceptedDto })
   @ApiForbiddenResponse({ description: 'The caller may not assign that role.' })
   async invite(
@@ -117,8 +117,8 @@ export class MembersController {
       'rank, never a member who outranks you, and never the last owner. The owner count is ' +
       'taken inside the same transaction as the write.',
   })
-  @ApiParam({ name: 'orgId', example: 'org_01J...' })
-  @ApiParam({ name: 'memberId', example: 'mem_01J...' })
+  @ApiParam({ name: 'orgId', type: String, example: 'org_01J...', description: 'Organization id, `org_…`.' })
+  @ApiParam({ name: 'memberId', type: String, example: 'mem_01J...', description: 'Membership id, `mem_…`.' })
   @ApiOkResponse({ type: MemberDto })
   @ApiForbiddenResponse({ description: 'The lattice refused the change.' })
   @ApiConflictResponse({ description: 'The change would leave the organization with no owner.' })
@@ -139,8 +139,8 @@ export class MembersController {
       'Removal is a role change to "no role", so the same lattice applies - including the ' +
       'last-owner rule.',
   })
-  @ApiParam({ name: 'orgId', example: 'org_01J...' })
-  @ApiParam({ name: 'memberId', example: 'mem_01J...' })
+  @ApiParam({ name: 'orgId', type: String, example: 'org_01J...', description: 'Organization id, `org_…`.' })
+  @ApiParam({ name: 'memberId', type: String, example: 'mem_01J...', description: 'Membership id, `mem_…`.' })
   @ApiNoContentResponse()
   @ApiForbiddenResponse({ description: 'The lattice refused the removal.' })
   @ApiConflictResponse({ description: 'The removal would leave the organization with no owner.' })

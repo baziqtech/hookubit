@@ -47,7 +47,9 @@ export class EventDto {
   @ApiProperty({
     type: String,
     nullable: true,
-    description: 'The producer-supplied key that made ingest idempotent (ARCHITECTURE.md 17).',
+    description:
+      'The idempotency key the producer published this event with, if any. Publishing again ' +
+      'with the same key in the same project resolves to this event instead of creating another.',
   })
   idempotency_key!: string | null;
 
@@ -55,9 +57,10 @@ export class EventDto {
     type: String,
     nullable: true,
     description:
-      'Opt-in serialisation key, carried onto every delivery this event fanned out to. Stored ' +
-      'from day one; ordering enforcement is deferred (ADR-0004), so this does NOT currently ' +
-      'guarantee anything about delivery order.',
+      'Opt-in serialisation key, carried onto every delivery this event fanned out to. It is ' +
+      'accepted and stored today so it is already in place when per-key ordering is enforced, ' +
+      'but per-key ordering is NOT yet enforced: this field currently guarantees nothing about ' +
+      'delivery order.',
   })
   ordering_key!: string | null;
 
