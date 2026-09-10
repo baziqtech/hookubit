@@ -49,23 +49,37 @@ export function AuthCard({
 }) {
   return (
     <div className="animate-fade-in">
-      {icon && <div className="mb-5">{icon}</div>}
-      <h1
-        ref={titleRef}
-        tabIndex={titleRef ? -1 : undefined}
-        className={cn(
-          'text-[1.625rem] font-semibold leading-tight tracking-tight text-ink',
-          titleRef && 'focus:outline-none focus-visible:ring-0 focus-visible:ring-offset-0',
+      {/*
+        The header block is centred and the form below it is not, because the
+        labels have to start at the same left edge as the inputs they name.
+        That is the same arrangement Convoy and Antigravity use for a centred
+        hero over left-aligned content.
+      */}
+      <div className="text-center">
+        {icon && <div className="mb-6 flex justify-center">{icon}</div>}
+        <h1
+          ref={titleRef}
+          tabIndex={titleRef ? -1 : undefined}
+          className={cn(
+            // 40px at weight 500 is Convoy's hero, near enough exactly, and it
+            // is the single decision that stops this page reading as a dialog.
+            'text-[2.5rem] font-medium leading-[1.05] tracking-[-0.03em] text-ink',
+            titleRef && 'focus:outline-none focus-visible:ring-0 focus-visible:ring-offset-0',
+          )}
+        >
+          {title}
+        </h1>
+        {description && (
+          <p className="mt-4 text-[0.9375rem] leading-relaxed text-ink-muted">
+            {description}
+          </p>
         )}
-      >
-        {title}
-      </h1>
-      {description && (
-        <p className="mt-2.5 text-base leading-relaxed text-ink-muted">{description}</p>
-      )}
-      <div className="mt-7">{children}</div>
+      </div>
+      <div className="mt-9">{children}</div>
       {footer && (
-        <div className="mt-7 border-t border-line pt-5 text-sm text-ink-muted">{footer}</div>
+        <div className="mt-8 border-t border-line pt-6 text-center text-sm text-ink-muted">
+          {footer}
+        </div>
       )}
     </div>
   );

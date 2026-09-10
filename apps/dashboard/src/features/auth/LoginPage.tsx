@@ -98,7 +98,7 @@ export function LoginPage() {
   return (
     <AuthCard
       title="Sign in"
-      description="Use your organization account to open the delivery log."
+      description="Open the delivery log for your organization."
       footer={
         <span>
           No account?{' '}

@@ -18,11 +18,12 @@ import { Button, type ButtonProps } from '../../components';
  */
 
 const CONTROL =
-  'h-11 w-full rounded-lg border bg-canvas px-3.5 text-[0.9375rem] leading-none text-ink ' +
+  // `panel` on a `canvas` page: one hairline of separation and no elevation.
+  // The page is flat on purpose, so the field is distinguished by its border
+  // and a half-step of surface, never by a shadow.
+  'h-11 w-full rounded-lg border bg-panel px-3.5 text-[0.9375rem] leading-none text-ink ' +
   'placeholder:text-ink-subtle transition-colors duration-150 ' +
-  // The global focus ring offsets against the canvas; on this screen the field
-  // sits on `panel`, and a canvas-coloured halo would be a visible seam.
-  'focus-visible:border-accent focus-visible:ring-offset-panel ' +
+  'focus-visible:border-accent focus-visible:ring-offset-canvas ' +
   'disabled:cursor-not-allowed disabled:bg-raised disabled:text-ink-subtle';
 
 function fieldTone(invalid: boolean): string {
@@ -169,10 +170,13 @@ export function AuthSubmit({ className, ...props }: ButtonProps) {
     <Button
       type="submit"
       variant="primary"
+      shape="pill"
       {...props}
       className={cn(
-        'mt-1 h-11 w-full rounded-lg text-sm font-semibold',
-        'shadow-panel transition-transform active:scale-[0.995]',
+        // No shadow: the page has no elevation anywhere, so a raised button
+        // would be the only lie on it.
+        'mt-2 h-11 w-full text-sm font-semibold shadow-none',
+        'transition-transform active:scale-[0.995]',
         className,
       )}
     />
@@ -183,8 +187,9 @@ export function AuthSubmit({ className, ...props }: ButtonProps) {
 export function AuthSecondary({ className, ...props }: ButtonProps) {
   return (
     <Button
+      shape="pill"
       {...props}
-      className={cn('h-10 rounded-lg px-3.5 text-sm font-medium', className)}
+      className={cn('h-10 px-4 text-sm font-medium', className)}
     />
   );
 }
