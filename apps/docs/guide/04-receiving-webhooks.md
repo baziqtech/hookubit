@@ -1,6 +1,6 @@
 # Receiving webhooks
 
-What arrives at your endpoint, how to prove it came from hookubit, and how to build a receiver that survives retries.
+What arrives at your endpoint, how to prove it came from HookuBit, and how to build a receiver that survives retries.
 
 ## The delivery request
 
@@ -8,7 +8,7 @@ What arrives at your endpoint, how to prove it came from hookubit, and how to bu
 POST /your/webhook/path HTTP/1.1
 Host: your-service.example.com
 Content-Type: application/json
-User-Agent: ShaQ-Webhooks/1.0
+User-Agent: HookuBit/1.0
 Accept: */*
 Webhook-Id: evt_01J…
 Webhook-Delivery-Id: del_01J…
@@ -33,13 +33,13 @@ The body is the **exact bytes the publisher sent** to the ingest API - the whole
 | `Webhook-Timestamp` | Unix seconds | When this attempt was signed. Identical to the `t` in the signature header. |
 | `Webhook-Signature` | `t=<unix>,v1=<hex>[,v1=<hex>]` | HMAC-SHA256 signature(s). See below. |
 | `Content-Type` | `application/json` | Set by the platform unless the endpoint's custom headers override it. |
-| `User-Agent` | `ShaQ-Webhooks/1.0` | For your logs and your WAF allow-list. |
+| `User-Agent` | `HookuBit/1.0` | For your logs and your WAF allow-list. |
 
 Plus any [custom headers](#custom-headers) configured on the endpoint. The `Webhook-*` names are reserved: a customer cannot set, override or remove them.
 
 ## Verifying the signature
 
-This is the part that matters. Anyone who knows your URL can `POST` to it; the signature is the only thing that proves a request came from hookubit and that the body was not altered in transit.
+This is the part that matters. Anyone who knows your URL can `POST` to it; the signature is the only thing that proves a request came from HookuBit and that the body was not altered in transit.
 
 ### The algorithm
 

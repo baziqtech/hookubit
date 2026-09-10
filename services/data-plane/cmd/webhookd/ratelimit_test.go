@@ -5,8 +5,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/shaq/webhook-platform/services/data-plane/internal/ingest"
-	"github.com/shaq/webhook-platform/services/data-plane/internal/ratelimit"
+	"github.com/shaq/hookubit/services/data-plane/internal/ingest"
+	"github.com/shaq/hookubit/services/data-plane/internal/ratelimit"
 )
 
 // The adapter is the seam that made this control inert: rate_limit_policies was

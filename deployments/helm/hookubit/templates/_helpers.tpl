@@ -1,9 +1,9 @@
 {{/* Chart name, overridable. */}}
-{{- define "webhook-platform.name" -}}
+{{- define "hookubit.name" -}}
 {{- default .Chart.Name .Values.nameOverride | trunc 63 | trimSuffix "-" -}}
 {{- end -}}
 
-{{- define "webhook-platform.fullname" -}}
+{{- define "hookubit.fullname" -}}
 {{- if .Values.fullnameOverride -}}
 {{- .Values.fullnameOverride | trunc 63 | trimSuffix "-" -}}
 {{- else -}}
@@ -16,36 +16,36 @@
 {{- end -}}
 {{- end -}}
 
-{{- define "webhook-platform.chart" -}}
+{{- define "hookubit.chart" -}}
 {{- printf "%s-%s" .Chart.Name .Chart.Version | replace "+" "_" | trunc 63 | trimSuffix "-" -}}
 {{- end -}}
 
-{{- define "webhook-platform.labels" -}}
-helm.sh/chart: {{ include "webhook-platform.chart" . }}
-app.kubernetes.io/name: {{ include "webhook-platform.name" . }}
+{{- define "hookubit.labels" -}}
+helm.sh/chart: {{ include "hookubit.chart" . }}
+app.kubernetes.io/name: {{ include "hookubit.name" . }}
 app.kubernetes.io/instance: {{ .Release.Name }}
 app.kubernetes.io/version: {{ .Chart.AppVersion | quote }}
 app.kubernetes.io/managed-by: {{ .Release.Service }}
-app.kubernetes.io/part-of: webhook-platform
+app.kubernetes.io/part-of: hookubit
 {{- end -}}
 
 {{/* Selector labels. Call with (dict "ctx" $ "component" "worker"). */}}
-{{- define "webhook-platform.selectorLabels" -}}
-app.kubernetes.io/name: {{ include "webhook-platform.name" .ctx }}
+{{- define "hookubit.selectorLabels" -}}
+app.kubernetes.io/name: {{ include "hookubit.name" .ctx }}
 app.kubernetes.io/instance: {{ .ctx.Release.Name }}
 app.kubernetes.io/component: {{ .component }}
 {{- end -}}
 
-{{- define "webhook-platform.serviceAccountName" -}}
+{{- define "hookubit.serviceAccountName" -}}
 {{- if .Values.serviceAccount.create -}}
-{{- default (include "webhook-platform.fullname" .) .Values.serviceAccount.name -}}
+{{- default (include "hookubit.fullname" .) .Values.serviceAccount.name -}}
 {{- else -}}
 {{- default "default" .Values.serviceAccount.name -}}
 {{- end -}}
 {{- end -}}
 
 {{/* Fully qualified image. Call with (dict "ctx" $ "image" .Values.x.image "defaultTag" "..."). */}}
-{{- define "webhook-platform.image" -}}
+{{- define "hookubit.image" -}}
 {{- $tag := default .defaultTag .image.tag -}}
 {{- if .ctx.Values.global.imageRegistry -}}
 {{- printf "%s/%s:%s" .ctx.Values.global.imageRegistry .image.repository $tag -}}
@@ -59,11 +59,11 @@ Environment sources, in precedence order: the chart ConfigMap, the chart Secret,
 then any Secrets you manage yourself. Later entries win on duplicate keys, so an
 existingSecret always overrides what the chart rendered.
 */}}
-{{- define "webhook-platform.envFrom" -}}
+{{- define "hookubit.envFrom" -}}
 - configMapRef:
-    name: {{ include "webhook-platform.fullname" . }}-config
+    name: {{ include "hookubit.fullname" . }}-config
 - secretRef:
-    name: {{ include "webhook-platform.fullname" . }}-secrets
+    name: {{ include "hookubit.fullname" . }}-secrets
 {{- with .Values.externalDatabase.existingSecret }}
 - secretRef:
     name: {{ . }}
@@ -92,15 +92,15 @@ data plane does read those. If you keep ENCRYPTION_KEY in your own Secret
 rather than secrets.encryptionKey, put it in externalDatabase.existingSecret
 (which both planes read) or set dataPlane.separateSecret=false.
 */}}
-{{- define "webhook-platform.dataPlaneEnvFrom" -}}
+{{- define "hookubit.dataPlaneEnvFrom" -}}
 - configMapRef:
-    name: {{ include "webhook-platform.fullname" . }}-config
+    name: {{ include "hookubit.fullname" . }}-config
 {{- if .Values.dataPlane.separateSecret }}
 - secretRef:
-    name: {{ include "webhook-platform.fullname" . }}-data-plane-secrets
+    name: {{ include "hookubit.fullname" . }}-data-plane-secrets
 {{- else }}
 - secretRef:
-    name: {{ include "webhook-platform.fullname" . }}-secrets
+    name: {{ include "hookubit.fullname" . }}-secrets
 {{- end }}
 {{- with .Values.externalDatabase.existingSecret }}
 - secretRef:
@@ -119,7 +119,7 @@ rather than secrets.encryptionKey, put it in externalDatabase.existingSecret
 {{- end -}}
 
 {{/* Pod-level security context. Call with (dict "uid" 65532). */}}
-{{- define "webhook-platform.podSecurityContext" -}}
+{{- define "hookubit.podSecurityContext" -}}
 runAsNonRoot: true
 runAsUser: {{ .uid }}
 runAsGroup: {{ .uid }}
@@ -127,7 +127,7 @@ seccompProfile:
   type: RuntimeDefault
 {{- end -}}
 
-{{- define "webhook-platform.containerSecurityContext" -}}
+{{- define "hookubit.containerSecurityContext" -}}
 allowPrivilegeEscalation: false
 readOnlyRootFilesystem: true
 capabilities:
@@ -139,7 +139,7 @@ capabilities:
 Guard: this platform has no default credentials (ADR-0006). Failing here beats
 failing at pod start with an unreadable config-validation stack trace.
 */}}
-{{- define "webhook-platform.validate" -}}
+{{- define "hookubit.validate" -}}
 {{- if and (not .Values.secrets.existingSecret) (not .Values.secrets.jwtSecret) -}}
 {{- fail "secrets.jwtSecret is empty and secrets.existingSecret is unset. Generate one (openssl rand -base64 48) or point at a Secret you manage. This chart creates no default credentials." -}}
 {{- end -}}

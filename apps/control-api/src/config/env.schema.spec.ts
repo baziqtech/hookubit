@@ -12,7 +12,7 @@ const baseEnv = (): Record<string, unknown> => ({
 
 const smtpEnv = (): Record<string, unknown> => ({
   SMTP_URL: 'smtp://mailer:secret@mail.example.com:587',
-  MAIL_FROM: 'Hookubit <no-reply@example.com>',
+  MAIL_FROM: 'HookuBit <no-reply@example.com>',
 });
 
 describe('validateEnv', () => {
@@ -175,7 +175,7 @@ describe('validateEnv', () => {
     it('defaults the service identity', () => {
       const env = validateEnv(baseEnv());
       expect(env.OTEL_SERVICE_NAME).toBe('control-api');
-      expect(env.OTEL_SERVICE_NAMESPACE).toBe('webhook-platform');
+      expect(env.OTEL_SERVICE_NAMESPACE).toBe('hookubit');
     });
 
     it('defaults the sampler to 1 - the control plane is not the hot path', () => {
@@ -237,14 +237,14 @@ describe('validateEnv', () => {
       ).toThrow(/MAIL_FROM/);
     });
 
-    it.each(['Hookubit <no-reply@example.com>', 'no-reply@example.com', 'no-reply@localhost'])(
+    it.each(['HookuBit <no-reply@example.com>', 'no-reply@example.com', 'no-reply@localhost'])(
       'accepts MAIL_FROM %j',
       (value) => {
         expect(validateEnv({ ...baseEnv(), ...smtpEnv(), MAIL_FROM: value }).MAIL_FROM).toBe(value);
       },
     );
 
-    it.each(['Hookubit', 'Hookubit <not-an-address>', 'a@b, c@d'])('REFUSES MAIL_FROM %j', (value) => {
+    it.each(['HookuBit', 'HookuBit <not-an-address>', 'a@b, c@d'])('REFUSES MAIL_FROM %j', (value) => {
       expect(() => validateEnv({ ...baseEnv(), ...smtpEnv(), MAIL_FROM: value })).toThrow(/MAIL_FROM/);
     });
 

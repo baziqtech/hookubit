@@ -7,16 +7,16 @@
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: webhook-platform-config
-  namespace: webhook-platform
+  name: hookubit-config
+  namespace: hookubit
   labels:
-    app.kubernetes.io/name: webhook-platform
-    app.kubernetes.io/part-of: webhook-platform
+    app.kubernetes.io/name: hookubit
+    app.kubernetes.io/part-of: hookubit
 data:
   APP_ENV: 'production'
   # Sender for outbound mail. Required whenever SMTP_URL (a Secret) is set; the
   # display name doubles as the product name in subjects and bodies.
-  MAIL_FROM: 'Hookubit <no-reply@example.com>'
+  MAIL_FROM: 'HookuBit <no-reply@example.com>'
   LOG_LEVEL: 'info'
 
   # EXACT number of reverse proxies in front of the pods, never inferred. 1 is
@@ -116,7 +116,7 @@ data:
   PAYLOAD_MAX_BYTES: '1048576'
 
   # Observability
-  OTEL_SERVICE_NAMESPACE: 'webhook-platform'
+  OTEL_SERVICE_NAMESPACE: 'hookubit'
   OTEL_EXPORTER_OTLP_ENDPOINT: ''
   # Scheme required and validated: 'otel-collector:4318' parses as a URL whose
   # scheme is the hostname, and would boot cleanly while exporting nothing.

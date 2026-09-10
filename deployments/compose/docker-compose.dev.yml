@@ -4,21 +4,21 @@
 # platform ships one. Production must never run PostgreSQL inside this stack
 # (ARCHITECTURE.md 36, engineering rule 4) - see docker-compose.prod.yml, which
 # has no postgres service and will not start without an external DATABASE_URL.
-name: webhook-platform-dev
+name: hookubit-dev
 
 services:
   postgres:
     image: postgres:16-alpine
     environment:
-      POSTGRES_USER: webhook
-      POSTGRES_PASSWORD: webhook
-      POSTGRES_DB: webhook_platform
+      POSTGRES_USER: hookubit
+      POSTGRES_PASSWORD: hookubit
+      POSTGRES_DB: hookubit
     ports:
       - '5432:5432'
     volumes:
       - postgres-data:/var/lib/postgresql/data
     healthcheck:
-      test: ['CMD-SHELL', 'pg_isready -U webhook -d webhook_platform']
+      test: ['CMD-SHELL', 'pg_isready -U hookubit -d hookubit']
       interval: 5s
       timeout: 3s
       retries: 10

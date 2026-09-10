@@ -12,12 +12,12 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	dto "github.com/prometheus/client_model/go"
 
-	"github.com/shaq/webhook-platform/services/data-plane/internal/config"
-	"github.com/shaq/webhook-platform/services/data-plane/internal/egress"
-	"github.com/shaq/webhook-platform/services/data-plane/internal/metrics"
-	"github.com/shaq/webhook-platform/services/data-plane/internal/ratelimit"
-	"github.com/shaq/webhook-platform/services/data-plane/internal/testsupport"
-	"github.com/shaq/webhook-platform/services/data-plane/internal/worker"
+	"github.com/shaq/hookubit/services/data-plane/internal/config"
+	"github.com/shaq/hookubit/services/data-plane/internal/egress"
+	"github.com/shaq/hookubit/services/data-plane/internal/metrics"
+	"github.com/shaq/hookubit/services/data-plane/internal/ratelimit"
+	"github.com/shaq/hookubit/services/data-plane/internal/testsupport"
+	"github.com/shaq/hookubit/services/data-plane/internal/worker"
 )
 
 // gaugeValue reads one queue_depth series without a registry round trip.

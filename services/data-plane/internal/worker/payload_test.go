@@ -9,8 +9,8 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/shaq/webhook-platform/services/data-plane/internal/ingest"
-	"github.com/shaq/webhook-platform/services/data-plane/internal/payloadstore"
+	"github.com/shaq/hookubit/services/data-plane/internal/ingest"
+	"github.com/shaq/hookubit/services/data-plane/internal/payloadstore"
 )
 
 // fakeFetcher stands in for object storage on the delivery path.

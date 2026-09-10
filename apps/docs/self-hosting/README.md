@@ -1,6 +1,6 @@
-# Self-hosting hookubit
+# Self-hosting HookuBit
 
-hookubit runs as a hosted service or on your own infrastructure against your own
+HookuBit runs as a hosted service or on your own infrastructure against your own
 PostgreSQL. This section is for the operator who runs it: what the platform
 ships, what you have to bring, which deployment shape to pick, and the traps
 each one has.
@@ -76,4 +76,4 @@ Each deployment page ends with the bootstrap step that creates it.
 
 ---
 
-**Where this comes from.** `deployments/HANDOFF.md`, `deployments/helm/webhook-platform/Chart.yaml` and `values.yaml`, `deployments/docker/*.Dockerfile`, `docs/adr/0006-no-default-credentials.md`.
+**Where this comes from.** `deployments/HANDOFF.md`, `deployments/helm/hookubit/Chart.yaml` and `values.yaml`, `deployments/docker/*.Dockerfile`, `docs/adr/0006-no-default-credentials.md`.

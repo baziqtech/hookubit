@@ -4,7 +4,7 @@ WORKDIR /app
 RUN corepack enable
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
 COPY apps/dashboard/package.json apps/dashboard/
-RUN pnpm install --frozen-lockfile --filter @webhook/dashboard...
+RUN pnpm install --frozen-lockfile --filter @hookubit/dashboard...
 COPY apps/dashboard/ apps/dashboard/
 
 # Which API the bundle talks to. Vite inlines this at BUILD time, so it cannot
@@ -66,7 +66,7 @@ ARG VITE_INGEST_BASE_URL=
 RUN echo "Building dashboard with VITE_API_TRANSPORT=${VITE_API_TRANSPORT} VITE_INGEST_BASE_URL=${VITE_INGEST_BASE_URL:-<unset: bundle falls back to http://localhost:8080>}" \
  && env VITE_API_TRANSPORT="${VITE_API_TRANSPORT}" \
         ${VITE_INGEST_BASE_URL:+VITE_INGEST_BASE_URL="${VITE_INGEST_BASE_URL}"} \
-        pnpm --filter @webhook/dashboard build
+        pnpm --filter @hookubit/dashboard build
 
 FROM nginxinc/nginx-unprivileged:1.27-alpine AS runtime
 COPY --from=builder /app/apps/dashboard/dist /usr/share/nginx/html

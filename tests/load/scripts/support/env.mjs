@@ -74,7 +74,7 @@ export const config = {
   databaseUrl: process.env.LOAD_DATABASE_URL ?? process.env.DATABASE_URL,
 
   /** Everything the suite creates lives under this one organization. */
-  orgName: process.env.LOAD_ORG_NAME ?? 'Hookubit Load Tests',
+  orgName: process.env.LOAD_ORG_NAME ?? 'HookuBit Load Tests',
   orgSlug: process.env.LOAD_ORG_SLUG ?? 'hookubit-load-tests',
 
   /**

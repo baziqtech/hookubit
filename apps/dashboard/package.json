@@ -1,5 +1,5 @@
 {
-  "name": "@webhook/dashboard",
+  "name": "@hookubit/dashboard",
   "version": "0.1.0",
   "private": true,
   "type": "module",
@@ -9,7 +9,7 @@
     "preview": "vite preview",
     "lint": "eslint src --ext ts,tsx",
     "test": "vitest run --passWithNoTests",
-    "generate:api": "pnpm --filter @webhook/control-api build && node ../control-api/dist/openapi.js ../control-api/openapi.json && openapi-typescript ../control-api/openapi.json --default-non-nullable false -o src/types/api.d.ts",
+    "generate:api": "pnpm --filter @hookubit/control-api build && node ../control-api/dist/openapi.js ../control-api/openapi.json && openapi-typescript ../control-api/openapi.json --default-non-nullable false -o src/types/api.d.ts",
     "test:e2e": "playwright test"
   },
   "dependencies": {

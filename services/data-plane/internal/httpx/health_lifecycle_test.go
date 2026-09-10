@@ -7,7 +7,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/shaq/webhook-platform/services/data-plane/internal/httpx"
+	"github.com/shaq/hookubit/services/data-plane/internal/httpx"
 )
 
 func readyBody(t *testing.T, h http.Handler) (int, string) {

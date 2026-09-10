@@ -22,9 +22,9 @@ loses nothing.
 apiVersion: policy/v1
 kind: PodDisruptionBudget
 metadata:
-  name: {{ include "webhook-platform.fullname" $root }}-{{ $c.name }}
+  name: {{ include "hookubit.fullname" $root }}-{{ $c.name }}
   labels:
-    {{- include "webhook-platform.labels" $root | nindent 4 }}
+    {{- include "hookubit.labels" $root | nindent 4 }}
     app.kubernetes.io/component: {{ $c.name }}
 spec:
   {{- if hasKey $c.cfg "maxUnavailable" }}
@@ -34,6 +34,6 @@ spec:
   {{- end }}
   selector:
     matchLabels:
-      {{- include "webhook-platform.selectorLabels" (dict "ctx" $root "component" $c.name) | nindent 6 }}
+      {{- include "hookubit.selectorLabels" (dict "ctx" $root "component" $c.name) | nindent 6 }}
 {{- end }}
 {{- end }}

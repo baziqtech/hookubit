@@ -9,7 +9,7 @@
  *
  * Usage:
  *   BOOTSTRAP_EMAIL=... BOOTSTRAP_PASSWORD=... BOOTSTRAP_ORG="Acme" \
- *     pnpm --filter @webhook/control-api bootstrap
+ *     pnpm --filter @hookubit/control-api bootstrap
  */
 import { Prisma, PrismaClient } from '@prisma/client';
 import { newId } from '../common/ids';

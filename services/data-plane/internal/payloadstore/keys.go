@@ -19,7 +19,7 @@ import (
 
 	"github.com/oklog/ulid/v2"
 
-	"github.com/shaq/webhook-platform/services/data-plane/internal/ids"
+	"github.com/shaq/hookubit/services/data-plane/internal/ids"
 )
 
 // DefaultPrefix is the top-level key namespace. Everything the platform writes

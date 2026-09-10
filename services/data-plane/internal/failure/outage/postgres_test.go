@@ -7,9 +7,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/shaq/webhook-platform/services/data-plane/internal/ids"
-	"github.com/shaq/webhook-platform/services/data-plane/internal/ingest"
-	"github.com/shaq/webhook-platform/services/data-plane/internal/testsupport"
+	"github.com/shaq/hookubit/services/data-plane/internal/ids"
+	"github.com/shaq/hookubit/services/data-plane/internal/ingest"
+	"github.com/shaq/hookubit/services/data-plane/internal/testsupport"
 )
 
 // TestScenario08_PostgresUnavailable_NeverReturnsAFalseAccept covers

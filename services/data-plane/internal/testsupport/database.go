@@ -53,7 +53,7 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"github.com/shaq/webhook-platform/services/data-plane/internal/db"
+	"github.com/shaq/hookubit/services/data-plane/internal/db"
 )
 
 // maxIdentifier is PostgreSQL's NAMEDATALEN - 1.

@@ -1,4 +1,4 @@
-# hookubit
+# HookuBit
 
 Multi-tenant webhook infrastructure: durable event ingestion, materialised
 fan-out to subscribed endpoints, retries with backoff, per-endpoint circuit
@@ -8,6 +8,18 @@ without opening psql.
 
 Runs as hosted SaaS or as a self-hosted Docker/Kubernetes deployment against
 **the customer's own PostgreSQL**.
+
+> **Renamed to HookuBit.** The npm scope is `@hookubit/*`, the Go module is
+> `github.com/shaq/hookubit/services/data-plane`, the Helm chart is
+> `deployments/helm/hookubit`, and Kubernetes objects are `hookubit-*` in a
+> `hookubit` namespace. A Kubernetes selector is immutable, so an existing
+> install is an **uninstall and reinstall**, not an upgrade — keep the same
+> `ENCRYPTION_KEY` or the signing secrets already in your database cannot be
+> decrypted. The delivery wire contract is deliberately unchanged: the
+> `Webhook-Id` / `Webhook-Signature` / `Webhook-Timestamp` headers and the
+> `whsec_` and `wk_live_` prefixes are exactly what they were, so no consumer's
+> verification code has to change. The outbound `User-Agent` is now
+> `HookuBit/1.0` — only relevant if a partner allowlisted the old value.
 
 ## Reading order
 
@@ -141,7 +153,7 @@ pauses, rotates a secret, creates policies, invites, renames, revokes and
 deletes - every control the dashboard offers.
 
 ```bash
-pnpm --filter @webhook/dashboard test:e2e     # needs the stack running; see docs/LOCAL_SETUP.md 9
+pnpm --filter @hookubit/dashboard test:e2e     # needs the stack running; see docs/LOCAL_SETUP.md 9
 ```
 
 ## Status

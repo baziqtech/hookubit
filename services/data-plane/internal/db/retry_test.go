@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/shaq/webhook-platform/services/data-plane/internal/db"
+	"github.com/shaq/hookubit/services/data-plane/internal/db"
 )
 
 // closedPortDSN returns a DSN pointing at a port that was bound and then

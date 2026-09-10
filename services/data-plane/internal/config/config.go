@@ -10,11 +10,11 @@ import (
 	"strings"
 	"time"
 
-	"github.com/shaq/webhook-platform/services/data-plane/internal/ingest"
-	"github.com/shaq/webhook-platform/services/data-plane/internal/payloadstore"
-	"github.com/shaq/webhook-platform/services/data-plane/internal/queue"
-	"github.com/shaq/webhook-platform/services/data-plane/internal/ratelimit"
-	"github.com/shaq/webhook-platform/services/data-plane/internal/router"
+	"github.com/shaq/hookubit/services/data-plane/internal/ingest"
+	"github.com/shaq/hookubit/services/data-plane/internal/payloadstore"
+	"github.com/shaq/hookubit/services/data-plane/internal/queue"
+	"github.com/shaq/hookubit/services/data-plane/internal/ratelimit"
+	"github.com/shaq/hookubit/services/data-plane/internal/router"
 )
 
 // ShutdownGrace is the TOTAL budget from SIGTERM to process exit, and

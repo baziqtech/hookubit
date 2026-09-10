@@ -13,9 +13,9 @@ fails loudly rather than silently doing nothing (Jobs are immutable).
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: {{ include "webhook-platform.fullname" . }}-migrate-{{ .Release.Revision }}
+  name: {{ include "hookubit.fullname" . }}-migrate-{{ .Release.Revision }}
   labels:
-    {{- include "webhook-platform.labels" . | nindent 4 }}
+    {{- include "hookubit.labels" . | nindent 4 }}
     app.kubernetes.io/component: migrate
 spec:
   backoffLimit: {{ .Values.migrations.backoffLimit }}
@@ -23,25 +23,25 @@ spec:
   template:
     metadata:
       labels:
-        {{- include "webhook-platform.labels" . | nindent 8 }}
+        {{- include "hookubit.labels" . | nindent 8 }}
         app.kubernetes.io/component: migrate
     spec:
       restartPolicy: Never
-      serviceAccountName: {{ include "webhook-platform.serviceAccountName" . }}
+      serviceAccountName: {{ include "hookubit.serviceAccountName" . }}
       automountServiceAccountToken: false
       {{- with .Values.global.imagePullSecrets }}
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
       {{- end }}
       securityContext:
-        {{- include "webhook-platform.podSecurityContext" (dict "uid" 1000) | nindent 8 }}
+        {{- include "hookubit.podSecurityContext" (dict "uid" 1000) | nindent 8 }}
         fsGroup: 1000
       containers:
         - name: migrate
           # The `migrate` target of control-api.Dockerfile. The pruned runtime
           # image has no Prisma CLI (it is a devDependency) and would try to
           # fetch it from npm at run time.
-          image: {{ include "webhook-platform.image" (dict "ctx" . "image" .Values.migrations.image "defaultTag" (printf "%s-migrate" .Chart.AppVersion)) }}
+          image: {{ include "hookubit.image" (dict "ctx" . "image" .Values.migrations.image "defaultTag" (printf "%s-migrate" .Chart.AppVersion)) }}
           imagePullPolicy: {{ .Values.migrations.image.pullPolicy }}
           # --no-install: npx in a non-TTY silently fetches a missing package
           # from the registry. Without it, an image built without the CLI would
@@ -50,7 +50,7 @@ spec:
           command: ["npx", "--no-install", "prisma", "migrate", "deploy"]
           workingDir: /app/apps/control-api
           envFrom:
-            {{- include "webhook-platform.envFrom" . | nindent 12 }}
+            {{- include "hookubit.envFrom" . | nindent 12 }}
           env:
             # There is deliberately NO DATABASE_URL override here.
             #
@@ -74,7 +74,7 @@ spec:
           resources:
             {{- toYaml .Values.migrations.resources | nindent 12 }}
           securityContext:
-            {{- include "webhook-platform.containerSecurityContext" . | nindent 12 }}
+            {{- include "hookubit.containerSecurityContext" . | nindent 12 }}
           volumeMounts:
             - name: tmp
               mountPath: /tmp

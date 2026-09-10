@@ -31,7 +31,7 @@ A single JSON object with these fields and **no others** - an unknown field (a m
 | Field | Required | Rules |
 |---|---|---|
 | `event_type` | yes | 1-255 characters from `A-Z a-z 0-9 . _ - :`. May not begin or end with `.`. Dots are the segment separator that subscription patterns such as `payment.*` match on. |
-| `data` | yes | Any JSON value; in practice an object. This is your contract with your receivers - hookubit never parses it, never re-serialises it, and never sends anything but the bytes you sent. |
+| `data` | yes | Any JSON value; in practice an object. This is your contract with your receivers - HookuBit never parses it, never re-serialises it, and never sends anything but the bytes you sent. |
 | `ordering_key` | no | Up to 255 printable ASCII characters. Stored on the event and carried onto every delivery. **Not yet enforced**: it does not serialise delivery today. |
 
 The whole body may not contain a NUL character, either as a raw byte or as the JSON escape `\u0000`; it cannot be stored and is refused as `invalid_request`.
@@ -60,7 +60,7 @@ Conversely, if you did not get a 202 - a timeout, a dropped connection, a `5xx` 
 
 Send an `Idempotency-Key` that is unique per logical event - `order_123_created`, not `order_123` - and retry with the same key whenever you are unsure whether a publish landed.
 
-| You send | hookubit answers |
+| You send | HookuBit answers |
 |---|---|
 | A key it has not seen | Creates the event. `202` with a new `id`. |
 | The same key with **the same body** | Returns the **original** event's `id` with `202`. No second event, no second fan-out. |
@@ -72,7 +72,7 @@ Send an `Idempotency-Key` that is unique per logical event - `order_123_created`
 Keys are remembered for **24 hours by default**, scoped to the project. After that a key may be reused and produces a new event.
 
 ::: warning Without the header, a retry is a second event
-If you retry a publish without an `Idempotency-Key`, hookubit has no way to know it is a retry. It creates a second event, which fans out to the same endpoints as a second set of deliveries. This is the most common source of "unexpected duplicates" and it is not a retry-engine defect.
+If you retry a publish without an `Idempotency-Key`, HookuBit has no way to know it is a retry. It creates a second event, which fans out to the same endpoints as a second set of deliveries. This is the most common source of "unexpected duplicates" and it is not a retry-engine defect.
 :::
 
 ## Order of checks
@@ -100,7 +100,7 @@ If the installation has no object storage configured, the effective maximum is o
 
 ## Rate limiting
 
-A refused request answers `429` with both a header and a body field, so a generic HTTP client backs off without knowing anything about hookubit's error envelope:
+A refused request answers `429` with both a header and a body field, so a generic HTTP client backs off without knowing anything about HookuBit's error envelope:
 
 ```http
 HTTP/1.1 429 Too Many Requests

@@ -731,7 +731,7 @@ ready, `draining` after. The health check reports `postgres: connecting` while
 the pool is nil, which is a different operator story from one that opened and
 then failed (`main.go:76-89`). Every role carries a `startupProbe` on
 `/health/live` — in the chart
-(`deployments/helm/webhook-platform/templates/data-plane.yaml:110-114`, on by
+(`deployments/helm/hookubit/templates/data-plane.yaml:110-114`, on by
 default, with `values.schema.json` entries) and in the raw manifests
 (`deployments/kubernetes/30-ingest.yaml:86`, `31-router.yaml:71`,
 `32-scheduler.yaml:74`, `33-worker.yaml:83`).
@@ -1739,7 +1739,7 @@ reading once because each one would have sent an operator the wrong way:
 - `OUTBOX_BATCH_SIZE` is gone. It was loaded and read by nothing;
   `runRouter` uses `ROUTER_BATCH_SIZE` (`cmd/webhookd/roles.go:85`). The Helm
   values file records the removal at
-  `deployments/helm/webhook-platform/values.yaml:356` so an operator upgrading
+  `deployments/helm/hookubit/values.yaml:356` so an operator upgrading
   does not go looking for it.
 
 **Load-test results have a before and an after.** Any isolation number measured

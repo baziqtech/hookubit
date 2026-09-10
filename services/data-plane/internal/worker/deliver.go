@@ -14,12 +14,12 @@ import (
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
 
-	"github.com/shaq/webhook-platform/services/data-plane/internal/egress"
-	"github.com/shaq/webhook-platform/services/data-plane/internal/metrics"
-	"github.com/shaq/webhook-platform/services/data-plane/internal/queue"
-	"github.com/shaq/webhook-platform/services/data-plane/internal/retry"
-	"github.com/shaq/webhook-platform/services/data-plane/internal/signing"
-	"github.com/shaq/webhook-platform/services/data-plane/internal/tracing"
+	"github.com/shaq/hookubit/services/data-plane/internal/egress"
+	"github.com/shaq/hookubit/services/data-plane/internal/metrics"
+	"github.com/shaq/hookubit/services/data-plane/internal/queue"
+	"github.com/shaq/hookubit/services/data-plane/internal/retry"
+	"github.com/shaq/hookubit/services/data-plane/internal/signing"
+	"github.com/shaq/hookubit/services/data-plane/internal/tracing"
 )
 
 // deferBaseDelay is how long a delivery waits after being turned away by a

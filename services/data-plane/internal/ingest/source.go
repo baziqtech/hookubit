@@ -6,7 +6,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/shaq/webhook-platform/services/data-plane/internal/ratelimit"
+	"github.com/shaq/hookubit/services/data-plane/internal/ratelimit"
 )
 
 // SourceLimiter is the PRE-AUTH ceiling: the only thing standing between an

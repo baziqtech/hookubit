@@ -1,19 +1,19 @@
 # Dashboard
 
-The hookubit dashboard is the operator surface: the place a team lead, an
+The HookuBit dashboard is the operator surface: the place a team lead, an
 integration engineer or the person on call goes to set a project up, to see
 what happened to an event, and to put things right when a consumer is down.
 Everything it shows is read live from the control API; nothing on it is a
 cached summary that can disagree with the rows underneath.
 
-This section is written for the people who administer and operate hookubit
+This section is written for the people who administer and operate HookuBit
 through the dashboard. The API reference under [API reference](/api/) covers
 the same operations for scripts and integrations, and the
 [Guide](/guide/04-receiving-webhooks) covers what your consumer has to do.
 
 ## What lives where
 
-hookubit has a three-level hierarchy, and it is in the URL:
+HookuBit has a three-level hierarchy, and it is in the URL:
 
 ```
 /orgs/:orgId                                   organization landing (forwards to a project)

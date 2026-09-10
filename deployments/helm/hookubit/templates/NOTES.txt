@@ -5,6 +5,31 @@ stateless workloads and NO database - delete every pod, reinstall against the
 same PostgreSQL, and every event, delivery and attempt is still there.
 
 ────────────────────────────────────────────────────────────────────────────
+COMING FROM THE `webhook-platform` CHART? THIS IS NOT AN UPGRADE.
+────────────────────────────────────────────────────────────────────────────
+This chart was renamed webhook-platform -> hookubit. Every workload's
+`app.kubernetes.io/name` label changed with it, and `spec.selector` is IMMUTABLE
+on a Deployment and on a Job - the API server rejects the patch outright. So
+`helm upgrade` from a webhook-platform release FAILS mid-apply and leaves the
+release half-converted; it is not a thing to retry.
+
+Uninstall the old release and install this one. Nothing is lost by doing so:
+PostgreSQL is external and this chart owns no storage, so the delivery ledger
+outlives both releases. There IS a gap in delivery while no worker is running -
+the queue drains once the new pods are up, it does not discard.
+
+  helm uninstall <old-release> -n <old-namespace>
+  kubectl -n <old-namespace> wait --for=delete pod -l app.kubernetes.io/part-of=webhook-platform --timeout=5m
+  helm install {{ .Release.Name }} . -n {{ .Release.Namespace }} --create-namespace [...your values...]
+
+Keep the SAME externalDatabase.url and the SAME ENCRYPTION_KEY. A different
+encryption key cannot decrypt the endpoint signing secrets already in the
+database, and every delivery would fail to sign.
+
+If the namespace changed too (webhook-platform -> hookubit), Secrets you created
+yourself do not move with it - recreate them in the new namespace first.
+
+────────────────────────────────────────────────────────────────────────────
 THE SIX-STEP INSTALL (ARCHITECTURE.md 38)
 ────────────────────────────────────────────────────────────────────────────
 
@@ -13,8 +38,8 @@ THE SIX-STEP INSTALL (ARCHITECTURE.md 38)
    Production topology is  app -> PgBouncer -> PostgreSQL.
 
 2. PROVIDE DATABASE_URL
-     --set externalDatabase.url='postgresql://user:pass@pgbouncer:6432/webhook_platform?schema=public&sslmode=require'
-     --set externalDatabase.directUrl='postgresql://user:pass@db:5432/webhook_platform?schema=public&sslmode=require'
+     --set externalDatabase.url='postgresql://user:pass@pgbouncer:6432/hookubit?schema=public&sslmode=require'
+     --set externalDatabase.directUrl='postgresql://user:pass@db:5432/hookubit?schema=public&sslmode=require'
    directUrl must BYPASS the pooler - transaction pooling breaks Prisma's DDL.
    The install you just ran could not have succeeded without step 2:
    values.schema.json requires it.
@@ -24,11 +49,11 @@ THE SIX-STEP INSTALL (ARCHITECTURE.md 38)
    Cache and coordination only. Wipe it and you lose throughput, not data.
 
 4. CONFIGURE SECRETS - there are no defaults, ever (ADR-0006).
-     kubectl -n {{ .Release.Namespace }} create secret generic webhook-secrets \
+     kubectl -n {{ .Release.Namespace }} create secret generic hookubit-secrets \
        --from-literal=JWT_SECRET="$(openssl rand -base64 48)" \
        --from-literal=SESSION_SECRET="$(openssl rand -base64 48)" \
        --from-literal=ENCRYPTION_KEY="$(openssl rand -base64 32)"
-     helm upgrade ... --set secrets.existingSecret=webhook-secrets
+     helm upgrade ... --set secrets.existingSecret=hookubit-secrets
    ENCRYPTION_KEY must decode to exactly 32 bytes. Rotating it without
    re-encrypting endpoint secrets makes every stored secret unreadable.
 
@@ -40,20 +65,20 @@ THE SIX-STEP INSTALL (ARCHITECTURE.md 38)
        --set migrations.enabled=true --reuse-values
 
      kubectl -n {{ .Release.Namespace }} wait --for=condition=complete --timeout=10m \
-       job/{{ include "webhook-platform.fullname" . }}-migrate-{{ .Release.Revision }}
+       job/{{ include "hookubit.fullname" . }}-migrate-{{ .Release.Revision }}
 
    Then set migrations.enabled=false again so the job is not part of the
    steady-state release.
 
 6. DEPLOY / VERIFY
 
-     kubectl -n {{ .Release.Namespace }} rollout status deploy/{{ include "webhook-platform.fullname" . }}-control-api
+     kubectl -n {{ .Release.Namespace }} rollout status deploy/{{ include "hookubit.fullname" . }}-control-api
      kubectl -n {{ .Release.Namespace }} get pods -l app.kubernetes.io/instance={{ .Release.Name }}
 
 {{- if not .Values.ingress.enabled }}
 
    Ingress is disabled. Reach the dashboard locally with:
-     kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "webhook-platform.fullname" . }}-dashboard 8088:8080
+     kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "hookubit.fullname" . }}-dashboard 8088:8080
    Enable it with --set ingress.enabled=true --set ingress.appHost=... --set ingress.ingestHost=...
 {{- else }}
 
@@ -88,7 +113,7 @@ THE SIX-STEP INSTALL (ARCHITECTURE.md 38)
 
    Put them in a Secret and run ONE Job that sources them, then delete both:
 
-     kubectl -n {{ .Release.Namespace }} create secret generic webhook-bootstrap \
+     kubectl -n {{ .Release.Namespace }} create secret generic hookubit-bootstrap \
        --from-literal=BOOTSTRAP_EMAIL='owner@example.com' \
        --from-literal=BOOTSTRAP_ORG='Acme' \
        --from-literal=BOOTSTRAP_PASSWORD="$(openssl rand -base64 24)"
@@ -97,7 +122,7 @@ THE SIX-STEP INSTALL (ARCHITECTURE.md 38)
      apiVersion: batch/v1
      kind: Job
      metadata:
-       name: webhook-bootstrap
+       name: hookubit-bootstrap
      spec:
        backoffLimit: 0
        ttlSecondsAfterFinished: 3600
@@ -111,27 +136,27 @@ THE SIX-STEP INSTALL (ARCHITECTURE.md 38)
              seccompProfile: { type: RuntimeDefault }
            containers:
              - name: bootstrap
-               image: {{ include "webhook-platform.image" (dict "ctx" . "image" .Values.controlApi.image "defaultTag" .Chart.AppVersion) }}
+               image: {{ include "hookubit.image" (dict "ctx" . "image" .Values.controlApi.image "defaultTag" .Chart.AppVersion) }}
                command: ["node", "dist/cli/bootstrap.js"]
                envFrom:
-                 - configMapRef: { name: {{ include "webhook-platform.fullname" . }}-config }
-                 - secretRef:    { name: {{ include "webhook-platform.fullname" . }}-secrets }
+                 - configMapRef: { name: {{ include "hookubit.fullname" . }}-config }
+                 - secretRef:    { name: {{ include "hookubit.fullname" . }}-secrets }
 {{- with .Values.secrets.existingSecret }}
                  - secretRef:    { name: {{ . }} }
 {{- end }}
-                 - secretRef:    { name: webhook-bootstrap }
+                 - secretRef:    { name: hookubit-bootstrap }
                securityContext:
                  allowPrivilegeEscalation: false
                  readOnlyRootFilesystem: true
                  capabilities: { drop: ["ALL"] }
      EOF
 
-     kubectl -n {{ .Release.Namespace }} wait --for=condition=complete --timeout=5m job/webhook-bootstrap
-     kubectl -n {{ .Release.Namespace }} logs job/webhook-bootstrap
+     kubectl -n {{ .Release.Namespace }} wait --for=condition=complete --timeout=5m job/hookubit-bootstrap
+     kubectl -n {{ .Release.Namespace }} logs job/hookubit-bootstrap
 
    Then clean up - the password Secret has no reason to outlive the Job:
 
-     kubectl -n {{ .Release.Namespace }} delete job/webhook-bootstrap secret/webhook-bootstrap
+     kubectl -n {{ .Release.Namespace }} delete job/hookubit-bootstrap secret/hookubit-bootstrap
 
    Hand the password to the owner out of band and have them change it.
 

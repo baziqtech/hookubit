@@ -39,7 +39,7 @@ export const API_KEY_SECURITY_SCHEME = 'apiKey';
 
 export function buildOpenApiDocument(app: INestApplication): OpenAPIObject {
   const config = new DocumentBuilder()
-    .setTitle('Webhook Platform Control API')
+    .setTitle('HookuBit Control API')
     .setDescription('Control plane for the webhook delivery platform.')
     .setVersion('1.0')
     .addBearerAuth({ type: 'http', scheme: 'bearer' }, API_KEY_SECURITY_SCHEME)

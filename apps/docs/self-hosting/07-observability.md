@@ -41,7 +41,7 @@ today and the dashboard is static files.
 Scraping: every data-plane pod carries `prometheus.io/scrape: "true"`,
 `prometheus.io/port: "9090"` and `prometheus.io/path: /metrics`. The release
 ships an annotation-driven `scrape_configs` entry and an equivalent
-`PodMonitor` (select on `app.kubernetes.io/name: webhook-platform`, port
+`PodMonitor` (select on `app.kubernetes.io/name: HookuBit`, port
 `probes`, 30 s interval). Scrape at 30 s, not 15 s: the histograms are read
 over minutes and queue depth refreshes on its own 15 s ticker. Rewrite the
 address to the annotated port; discovery otherwise targets the ingest pod's
@@ -169,4 +169,4 @@ Lines worth searching for:
 
 ---
 
-**Where this comes from.** `services/data-plane/internal/httpx/health.go`, `services/data-plane/cmd/webhookd/main.go` (readiness checks, shutdown), `apps/control-api/src/health/health.controller.ts`, `deployments/observability/README.md`, `deployments/observability/prometheus/{alerts,scrape-config}.yaml`, `docs/FAILURE_RECOVERY.md` Appendix B, `deployments/helm/webhook-platform/dashboards/webhook-platform.json` (panel titles), `services/data-plane/internal/tracing/{tracing,context}.go`, `services/data-plane/internal/logging/logging.go`, `apps/control-api/src/config/env.schema.ts` (OTEL keys).
+**Where this comes from.** `services/data-plane/internal/httpx/health.go`, `services/data-plane/cmd/webhookd/main.go` (readiness checks, shutdown), `apps/control-api/src/health/health.controller.ts`, `deployments/observability/README.md`, `deployments/observability/prometheus/{alerts,scrape-config}.yaml`, `docs/FAILURE_RECOVERY.md` Appendix B, `deployments/helm/hookubit/dashboards/hookubit.json` (panel titles), `services/data-plane/internal/tracing/{tracing,context}.go`, `services/data-plane/internal/logging/logging.go`, `apps/control-api/src/config/env.schema.ts` (OTEL keys).

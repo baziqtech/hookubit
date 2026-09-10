@@ -100,7 +100,7 @@ describe('readTracingSettings', () => {
       new ConfigService({ OTEL_EXPORTER_OTLP_ENDPOINT: 'http://collector:4318' }),
     );
     expect(settings.serviceName).toBe('control-api');
-    expect(settings.serviceNamespace).toBe('webhook-platform');
+    expect(settings.serviceNamespace).toBe('hookubit');
     expect(settings.deploymentEnvironment).toBe('development');
     expect(settings.samplerRatio).toBe(1);
   });

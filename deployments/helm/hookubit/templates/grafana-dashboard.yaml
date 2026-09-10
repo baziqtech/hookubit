@@ -22,9 +22,9 @@ so the Grafana legend syntax inside it survives intact.
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: {{ include "webhook-platform.fullname" . }}-grafana-dashboard
+  name: {{ include "hookubit.fullname" . }}-grafana-dashboard
   labels:
-    {{- include "webhook-platform.labels" . | nindent 4 }}
+    {{- include "hookubit.labels" . | nindent 4 }}
     app.kubernetes.io/component: observability
     {{ .Values.observability.grafanaDashboard.label }}: {{ .Values.observability.grafanaDashboard.labelValue | quote }}
   {{- with .Values.observability.grafanaDashboard.folder }}
@@ -32,6 +32,6 @@ metadata:
     {{ $.Values.observability.grafanaDashboard.folderAnnotation }}: {{ . | quote }}
   {{- end }}
 data:
-  webhook-platform.json: |-
-    {{- .Files.Get "dashboards/webhook-platform.json" | nindent 4 }}
+  hookubit.json: |-
+    {{- .Files.Get "dashboards/hookubit.json" | nindent 4 }}
 {{- end }}

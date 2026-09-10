@@ -1610,8 +1610,8 @@
   "refresh": "30s",
   "schemaVersion": 39,
   "tags": [
-    "webhook-platform",
-    "hookubit"
+    "hookubit",
+    "delivery"
   ],
   "templating": {
     "list": [
@@ -1632,8 +1632,8 @@
   },
   "timepicker": {},
   "timezone": "",
-  "title": "Webhook platform - delivery",
-  "uid": "webhook-platform-delivery",
+  "title": "HookuBit - delivery",
+  "uid": "hookubit-delivery",
   "version": 1,
   "description": "Every panel is backed by a metric this platform actually exports (services/data-plane/internal/metrics and internal/router/metrics.go). There are deliberately no panels for series that do not exist - notably there is no 'breakers currently open' gauge, only the rate of transitions into open."
 }

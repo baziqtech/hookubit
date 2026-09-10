@@ -9,7 +9,7 @@ import (
 	"log/slog"
 	"time"
 
-	"github.com/shaq/webhook-platform/services/data-plane/internal/metrics"
+	"github.com/shaq/hookubit/services/data-plane/internal/metrics"
 )
 
 // PayloadStore offloads payloads too large to sit inline in PostgreSQL

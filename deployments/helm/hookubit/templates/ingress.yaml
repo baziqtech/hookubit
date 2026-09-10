@@ -8,9 +8,9 @@ at the UI.
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
-  name: {{ include "webhook-platform.fullname" . }}
+  name: {{ include "hookubit.fullname" . }}
   labels:
-    {{- include "webhook-platform.labels" . | nindent 4 }}
+    {{- include "hookubit.labels" . | nindent 4 }}
   {{- with .Values.ingress.annotations }}
   annotations:
     {{- toYaml . | nindent 4 }}
@@ -31,30 +31,30 @@ spec:
             pathType: Prefix
             backend:
               service:
-                name: {{ include "webhook-platform.fullname" . }}-control-api
+                name: {{ include "hookubit.fullname" . }}-control-api
                 port:
                   name: http
           - path: /docs
             pathType: Prefix
             backend:
               service:
-                name: {{ include "webhook-platform.fullname" . }}-control-api
+                name: {{ include "hookubit.fullname" . }}-control-api
                 port:
                   name: http
           - path: /
             pathType: Prefix
             backend:
               service:
-                name: {{ include "webhook-platform.fullname" . }}-dashboard
+                name: {{ include "hookubit.fullname" . }}-dashboard
                 port:
                   name: http
 ---
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
-  name: {{ include "webhook-platform.fullname" . }}-ingest
+  name: {{ include "hookubit.fullname" . }}-ingest
   labels:
-    {{- include "webhook-platform.labels" . | nindent 4 }}
+    {{- include "hookubit.labels" . | nindent 4 }}
     app.kubernetes.io/component: ingest
   annotations:
     # payload.maxBytes is 1 MiB; the proxy cap sits just above it so an
@@ -80,7 +80,7 @@ spec:
             pathType: Prefix
             backend:
               service:
-                name: {{ include "webhook-platform.fullname" . }}-ingest
+                name: {{ include "hookubit.fullname" . }}-ingest
                 port:
                   name: http
 {{- end }}

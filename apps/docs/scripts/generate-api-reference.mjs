@@ -242,9 +242,9 @@ function loadDocument() {
   if (!fs.existsSync(SOURCE)) {
     process.stderr.write(
       `generate-api-reference: ${rel(SOURCE)} is missing; emitting it with ` +
-        '`pnpm --filter @webhook/control-api openapi`...\n',
+        '`pnpm --filter @hookubit/control-api openapi`...\n',
     );
-    const result = spawnSync('pnpm', ['--filter', '@webhook/control-api', 'openapi'], {
+    const result = spawnSync('pnpm', ['--filter', '@hookubit/control-api', 'openapi'], {
       cwd: REPO_ROOT,
       stdio: 'inherit',
     });
@@ -252,7 +252,7 @@ function loadDocument() {
       fail(
         `could not produce ${rel(SOURCE)}.\n` +
           '  The control plane emits it from source: run\n' +
-          '    pnpm --filter @webhook/control-api build && pnpm --filter @webhook/control-api openapi\n' +
+          '    pnpm --filter @hookubit/control-api build && pnpm --filter @hookubit/control-api openapi\n' +
           '  from the repository root, then re-run this script.',
       );
     }
@@ -344,7 +344,7 @@ function checkDrift(pages) {
     `generate-api-reference: the committed API reference does not match ${rel(SOURCE)}\n\n` +
       `${problems.join('\n')}\n\n` +
       'Regenerate and commit the result:\n' +
-      '  pnpm --filter @webhook/docs generate:api\n',
+      '  pnpm --filter @hookubit/docs generate:api\n',
   );
   return 1;
 }

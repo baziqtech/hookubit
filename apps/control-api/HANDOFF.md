@@ -1061,7 +1061,7 @@ Three that will surprise a client written against a normal CRUD API:
 
 ### Verified
 
-`lint`, `build` and `test` all pass for `@webhook/control-api`: **671 tests, 32
+`lint`, `build` and `test` all pass for `@hookubit/control-api`: **671 tests, 32
 suites** across the whole package, of which **85 in 4 suites** are new here
 (`organizations.service.spec.ts`, `organizations.http.spec.ts`,
 `members.service.spec.ts`, `members.http.spec.ts`). Still no live database —
@@ -1361,7 +1361,7 @@ the consumer a signature the platform never computed, next to one it did.
 
 ### Verified
 
-`pnpm --filter @webhook/control-api lint`, `build` and `test` all pass with
+`pnpm --filter @hookubit/control-api lint`, `build` and `test` all pass with
 everything in the tree — **671 tests, 32 suites**, of which 112 in 5 new suites
 here: `endpoints/endpoint-url.spec.ts` (40 cases, lifted from
 `egress/ssrf_test.go`), `endpoints/endpoint-headers.spec.ts`,
@@ -1691,7 +1691,7 @@ added here, the idiom is
 
 ### Verified
 
-`pnpm --filter @webhook/control-api lint && build && test` — all three pass,
+`pnpm --filter @hookubit/control-api lint && build && test` — all three pass,
 once the concurrent `src/organizations`, `src/members`, `src/endpoints` and
 `src/endpoint-secrets` work had landed. **33 suites, 724 tests, all passing.**
 
@@ -2185,7 +2185,7 @@ whole ingest budget.
 
 ### Verified
 
-`pnpm --filter @webhook/control-api lint`, `build` and `test` all pass with
+`pnpm --filter @hookubit/control-api lint`, `build` and `test` all pass with
 everything in the tree — **1091 tests, 48 suites**, of which 170 in 7 new suites
 here:
 
@@ -2248,9 +2248,9 @@ found in `apps/control-api/HANDOFF.md`, `services/data-plane/HANDOFF.md` and
 ### To apply
 
 ```bash
-pnpm --filter @webhook/control-api prisma:generate
+pnpm --filter @hookubit/control-api prisma:generate
 DATABASE_URL=... DIRECT_DATABASE_URL=... \
-  pnpm --filter @webhook/control-api prisma:deploy
+  pnpm --filter @hookubit/control-api prisma:deploy
 ```
 
 `prisma:deploy` applies `20260906000000_init`, then `20260906010000_review_fixes`,
@@ -2371,9 +2371,9 @@ second loop. Do not paste constraint names into the existing one.
 
 ### Verified, and not
 
-- `pnpm --filter @webhook/control-api prisma:generate` — **passes** (client v5.22.0).
+- `pnpm --filter @hookubit/control-api prisma:generate` — **passes** (client v5.22.0).
 - `npx prisma validate` — **passes**.
-- `pnpm --filter @webhook/control-api build` — **passes**.
+- `pnpm --filter @hookubit/control-api build` — **passes**.
 - `src/infrastructure/prisma/schema.spec.ts` — 21 tests, **pass** (it asserts the
   `review_fixes` SQL text; nothing there was touched).
 - **The SQL has NOT been executed.** No database is reachable: Docker is down and
@@ -2694,7 +2694,7 @@ twice.
 
 ### Verified
 
-`pnpm --filter @webhook/control-api lint`, `build` and `test` all pass with
+`pnpm --filter @hookubit/control-api lint`, `build` and `test` all pass with
 everything in the tree — **1321 tests, 57 suites**, of which 130 in 5 new suites
 here:
 

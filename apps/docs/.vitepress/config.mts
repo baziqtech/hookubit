@@ -3,7 +3,7 @@ import { withMermaid } from 'vitepress-plugin-mermaid'
 import { buildNav, buildSidebar } from './sidebar.mts'
 
 /**
- * Customer-facing documentation for hookubit.
+ * Customer-facing documentation for HookuBit.
  *
  * The site renders the markdown in this directory and nothing else - there is
  * no second copy to keep in sync, and the markdown is readable in an editor
@@ -18,7 +18,7 @@ import { buildNav, buildSidebar } from './sidebar.mts'
  */
 export default withMermaid(
   defineConfig({
-    title: 'hookubit',
+    title: 'HookuBit',
     description: 'Reliable webhook delivery: durable ingestion, materialised fan-out, retries, signing, and a delivery log you can answer questions from.',
     srcDir: '.',
     // Repo-facing file for people browsing the folder rather than the site.
@@ -33,7 +33,7 @@ export default withMermaid(
     // Dead-link checking stays ON. A build failure here is a real broken link:
     // fix the link, not this setting.
     themeConfig: {
-      siteTitle: 'hookubit docs',
+      siteTitle: 'HookuBit docs',
       nav: buildNav(),
       sidebar: buildSidebar(),
       search: { provider: 'local' },

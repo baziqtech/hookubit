@@ -12,9 +12,9 @@ import (
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 	"go.opentelemetry.io/otel/trace"
 
-	"github.com/shaq/webhook-platform/services/data-plane/internal/queue"
-	"github.com/shaq/webhook-platform/services/data-plane/internal/tracing"
-	"github.com/shaq/webhook-platform/services/data-plane/internal/tracing/tracingtest"
+	"github.com/shaq/hookubit/services/data-plane/internal/queue"
+	"github.com/shaq/hookubit/services/data-plane/internal/tracing"
+	"github.com/shaq/hookubit/services/data-plane/internal/tracing/tracingtest"
 )
 
 // routerTraceparent is what the router stamped on the delivery row.

@@ -498,9 +498,9 @@ func TestTheDataPlaneDoesNotInheritTheControlPlanesIdentityOrSamplingRatio(t *te
 	}
 
 	// The namespace IS shared, and correctly so: both planes belong to it.
-	t.Setenv("OTEL_SERVICE_NAMESPACE", "webhook-platform")
-	if got := FromEnv("worker", "wrk_1", "production").ServiceNamespace; got != "webhook-platform" {
-		t.Fatalf("service namespace = %q, want the shared webhook-platform", got)
+	t.Setenv("OTEL_SERVICE_NAMESPACE", "hookubit")
+	if got := FromEnv("worker", "wrk_1", "production").ServiceNamespace; got != "hookubit" {
+		t.Fatalf("service namespace = %q, want the shared hookubit", got)
 	}
 }
 

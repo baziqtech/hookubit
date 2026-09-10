@@ -10,17 +10,17 @@ import (
 
 	"fmt"
 
-	"github.com/shaq/webhook-platform/services/data-plane/internal/config"
-	"github.com/shaq/webhook-platform/services/data-plane/internal/egress"
-	"github.com/shaq/webhook-platform/services/data-plane/internal/ids"
-	"github.com/shaq/webhook-platform/services/data-plane/internal/ingest"
-	"github.com/shaq/webhook-platform/services/data-plane/internal/metrics"
-	"github.com/shaq/webhook-platform/services/data-plane/internal/payloadstore"
-	"github.com/shaq/webhook-platform/services/data-plane/internal/queue"
-	"github.com/shaq/webhook-platform/services/data-plane/internal/ratelimit"
-	"github.com/shaq/webhook-platform/services/data-plane/internal/retention"
-	"github.com/shaq/webhook-platform/services/data-plane/internal/router"
-	"github.com/shaq/webhook-platform/services/data-plane/internal/worker"
+	"github.com/shaq/hookubit/services/data-plane/internal/config"
+	"github.com/shaq/hookubit/services/data-plane/internal/egress"
+	"github.com/shaq/hookubit/services/data-plane/internal/ids"
+	"github.com/shaq/hookubit/services/data-plane/internal/ingest"
+	"github.com/shaq/hookubit/services/data-plane/internal/metrics"
+	"github.com/shaq/hookubit/services/data-plane/internal/payloadstore"
+	"github.com/shaq/hookubit/services/data-plane/internal/queue"
+	"github.com/shaq/hookubit/services/data-plane/internal/ratelimit"
+	"github.com/shaq/hookubit/services/data-plane/internal/retention"
+	"github.com/shaq/hookubit/services/data-plane/internal/router"
+	"github.com/shaq/hookubit/services/data-plane/internal/worker"
 )
 
 // slogLogger is an alias kept so main.go reads cleanly.

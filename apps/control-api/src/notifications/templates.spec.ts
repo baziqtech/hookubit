@@ -9,7 +9,7 @@ import {
   registrationAttemptMail,
 } from './templates';
 
-const ctx = { productName: 'Hookubit', dashboardUrl: 'https://app.example.com' };
+const ctx = { productName: 'HookuBit', dashboardUrl: 'https://app.example.com' };
 const TOKEN = 'Zm9yZ2VkLXRva2VuLXRoYXQtdW5sb2Nrcy10aGUtYWNjb3VudA';
 
 describe('buildDashboardLink', () => {
@@ -45,7 +45,7 @@ describe('templates', () => {
   it('email verification carries the link in both parts and states the real lifetime', () => {
     const link = `https://app.example.com/verify-email?token=${TOKEN}`;
     const mail = emailVerificationMail(ctx, link);
-    expect(mail.subject).toBe('Confirm your email address for Hookubit');
+    expect(mail.subject).toBe('Confirm your email address for HookuBit');
     expect(mail.text).toContain(link);
     expect(mail.html).toContain(`href="${link}"`);
     expect(mail.text).toContain(describeDuration(TOKEN_TTL_MS.email_verification));
@@ -54,7 +54,7 @@ describe('templates', () => {
   it('password reset states the backend lifetime, not a number typed into the template', () => {
     const mail = passwordResetMail(ctx, 'https://app.example.com/reset-password?token=t');
     expect(mail.text).toContain(`expires in ${describeDuration(TOKEN_TTL_MS.password_reset)}`);
-    expect(mail.subject).toBe('Reset your Hookubit password');
+    expect(mail.subject).toBe('Reset your HookuBit password');
   });
 
   it('the registration-attempt notice carries no token and points at login and forgot-password', () => {
@@ -74,7 +74,7 @@ describe('templates', () => {
       email: 'new@acme.example',
       link,
     });
-    expect(mail.subject).toBe('owner@acme.example invited you to Acme Corp on Hookubit');
+    expect(mail.subject).toBe('owner@acme.example invited you to Acme Corp on HookuBit');
     expect(mail.text).toContain('as developer');
     expect(mail.text).toContain('signed in as new@acme.example');
     expect(mail.text).toContain(link);

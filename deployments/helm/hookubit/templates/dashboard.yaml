@@ -1,9 +1,9 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: {{ include "webhook-platform.fullname" . }}-dashboard
+  name: {{ include "hookubit.fullname" . }}-dashboard
   labels:
-    {{- include "webhook-platform.labels" . | nindent 4 }}
+    {{- include "hookubit.labels" . | nindent 4 }}
     app.kubernetes.io/component: dashboard
   annotations:
     # WHAT THE IMAGE WAS BUILT WITH, not what this chart configures. The bundle
@@ -11,8 +11,8 @@ metadata:
     # environment, so nothing at deploy time can change them (values.yaml,
     # dashboard.build). Recorded here so `kubectl describe` answers "why does
     # the get-started curl point at localhost" without unpacking the image.
-    webhook-platform.shaq.io/built-with-ingest-base-url: {{ dig "build" "ingestBaseUrl" "" .Values.dashboard | default "<unset: bundle falls back to http://localhost:8080>" | quote }}
-    webhook-platform.shaq.io/built-with-api-transport: {{ dig "build" "apiTransport" "" .Values.dashboard | default "<unset: bundle default is mock>" | quote }}
+    hookubit.shaq.io/built-with-ingest-base-url: {{ dig "build" "ingestBaseUrl" "" .Values.dashboard | default "<unset: bundle falls back to http://localhost:8080>" | quote }}
+    hookubit.shaq.io/built-with-api-transport: {{ dig "build" "apiTransport" "" .Values.dashboard | default "<unset: bundle default is mock>" | quote }}
 spec:
   replicas: {{ .Values.dashboard.replicaCount }}
   revisionHistoryLimit: 5
@@ -23,14 +23,14 @@ spec:
       maxUnavailable: 0
   selector:
     matchLabels:
-      {{- include "webhook-platform.selectorLabels" (dict "ctx" . "component" "dashboard") | nindent 6 }}
+      {{- include "hookubit.selectorLabels" (dict "ctx" . "component" "dashboard") | nindent 6 }}
   template:
     metadata:
       labels:
-        {{- include "webhook-platform.labels" . | nindent 8 }}
+        {{- include "hookubit.labels" . | nindent 8 }}
         app.kubernetes.io/component: dashboard
     spec:
-      serviceAccountName: {{ include "webhook-platform.serviceAccountName" . }}
+      serviceAccountName: {{ include "hookubit.serviceAccountName" . }}
       automountServiceAccountToken: false
       {{- with .Values.global.imagePullSecrets }}
       imagePullSecrets:
@@ -39,10 +39,10 @@ spec:
       terminationGracePeriodSeconds: 30
       securityContext:
         # nginx-unprivileged runs as uid 101.
-        {{- include "webhook-platform.podSecurityContext" (dict "uid" 101) | nindent 8 }}
+        {{- include "hookubit.podSecurityContext" (dict "uid" 101) | nindent 8 }}
       containers:
         - name: dashboard
-          image: {{ include "webhook-platform.image" (dict "ctx" . "image" .Values.dashboard.image "defaultTag" .Chart.AppVersion) }}
+          image: {{ include "hookubit.image" (dict "ctx" . "image" .Values.dashboard.image "defaultTag" .Chart.AppVersion) }}
           imagePullPolicy: {{ .Values.dashboard.image.pullPolicy }}
           ports:
             - name: http
@@ -63,7 +63,7 @@ spec:
           resources:
             {{- toYaml .Values.dashboard.resources | nindent 12 }}
           securityContext:
-            {{- include "webhook-platform.containerSecurityContext" . | nindent 12 }}
+            {{- include "hookubit.containerSecurityContext" . | nindent 12 }}
           volumeMounts:
             # nginx-unprivileged keeps its pid file and temp bodies in /tmp and
             # its caches in /var/cache/nginx; both must be writable even though
@@ -89,9 +89,9 @@ spec:
 apiVersion: v1
 kind: Service
 metadata:
-  name: {{ include "webhook-platform.fullname" . }}-dashboard
+  name: {{ include "hookubit.fullname" . }}-dashboard
   labels:
-    {{- include "webhook-platform.labels" . | nindent 4 }}
+    {{- include "hookubit.labels" . | nindent 4 }}
     app.kubernetes.io/component: dashboard
 spec:
   type: ClusterIP
@@ -101,4 +101,4 @@ spec:
       targetPort: http
       protocol: TCP
   selector:
-    {{- include "webhook-platform.selectorLabels" (dict "ctx" . "component" "dashboard") | nindent 4 }}
+    {{- include "hookubit.selectorLabels" (dict "ctx" . "component" "dashboard") | nindent 4 }}

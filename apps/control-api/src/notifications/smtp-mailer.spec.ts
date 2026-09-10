@@ -25,7 +25,7 @@ describe('SmtpMailer', () => {
 
   beforeEach(() => {
     transport = new RecordingTransport();
-    mailer = new SmtpMailer(transport, { productName: 'Hookubit', dashboardUrl: DASHBOARD });
+    mailer = new SmtpMailer(transport, { productName: 'HookuBit', dashboardUrl: DASHBOARD });
     logged = [];
     errors = [];
     jest.spyOn(Logger.prototype, 'log').mockImplementation((message: unknown) => {

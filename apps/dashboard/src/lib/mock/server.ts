@@ -1,7 +1,7 @@
 /**
  * In-memory stand-in for the control API.
  *
- * It exists because the dashboard and @webhook/control-api are being built in
+ * It exists because the dashboard and @hookubit/control-api are being built in
  * parallel. It implements the paths in docs/API.md and returns the same error
  * envelope, so features written against it need no change when the real client
  * arrives — see the transport switch in `lib/api.ts`, which is the single file

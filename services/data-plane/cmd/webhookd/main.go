@@ -28,12 +28,12 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"github.com/shaq/webhook-platform/services/data-plane/internal/config"
-	"github.com/shaq/webhook-platform/services/data-plane/internal/db"
-	"github.com/shaq/webhook-platform/services/data-plane/internal/httpx"
-	"github.com/shaq/webhook-platform/services/data-plane/internal/ids"
-	"github.com/shaq/webhook-platform/services/data-plane/internal/logging"
-	"github.com/shaq/webhook-platform/services/data-plane/internal/tracing"
+	"github.com/shaq/hookubit/services/data-plane/internal/config"
+	"github.com/shaq/hookubit/services/data-plane/internal/db"
+	"github.com/shaq/hookubit/services/data-plane/internal/httpx"
+	"github.com/shaq/hookubit/services/data-plane/internal/ids"
+	"github.com/shaq/hookubit/services/data-plane/internal/logging"
+	"github.com/shaq/hookubit/services/data-plane/internal/tracing"
 )
 
 // shutdownGrace bounds the whole shutdown, from signal to exit. The arithmetic

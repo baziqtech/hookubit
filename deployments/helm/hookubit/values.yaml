@@ -1,5 +1,5 @@
 # ---------------------------------------------------------------------------
-# webhook-platform
+# hookubit
 #
 # THE RULE: containers are disposable, customer data is not.
 #
@@ -26,7 +26,7 @@ global:
 # There is no default. values.schema.json rejects an install without a url, on
 # purpose: a chart that starts without a database only fails later, in the dark.
 externalDatabase:
-  # url: 'postgresql://user:pass@pgbouncer.internal:6432/webhook_platform?schema=public&sslmode=require'
+  # url: 'postgresql://user:pass@pgbouncer.internal:6432/hookubit?schema=public&sslmode=require'
   #
   # Production topology is app -> PgBouncer -> PostgreSQL (ARCHITECTURE.md 36).
   # Point `url` at the pooler.
@@ -101,7 +101,7 @@ app:
   publicUrl: 'https://webhooks.example.com'
   # Sender for every outbound mail. Required whenever secrets.smtpUrl is set; the
   # display name doubles as the product name in subjects and bodies.
-  mailFrom: 'Hookubit <no-reply@example.com>'
+  mailFrom: 'HookuBit <no-reply@example.com>'
 
 # Outbound HTTP limits (ARCHITECTURE.md 31). Never unbounded.
 egress:
@@ -158,7 +158,7 @@ payload:
 
 observability:
   otlpEndpoint: ''
-  serviceNamespace: webhook-platform
+  serviceNamespace: hookubit
   # Separates two deployments sharing one collector.
   serviceName: control-api
   # Head sampling ratio, 0..1. A REMOTE traceparent is capped at this rather
@@ -174,7 +174,7 @@ observability:
   # Adds prometheus.io/scrape annotations to data-plane pods.
   prometheusAnnotations: true
 
-  # Ships dashboards/webhook-platform.json as a ConfigMap for the Grafana
+  # Ships dashboards/hookubit.json as a ConfigMap for the Grafana
   # sidecar (kiwigrid/k8s-sidecar, which the kube-prometheus-stack and Grafana
   # charts both run) to load. Off by default because it is inert without that
   # sidecar and invisible if the label does not match the one your Grafana
@@ -216,7 +216,7 @@ controlApi:
     intervalMinutes: 15
     maxPerRun: 200
   image:
-    repository: webhook-control-api
+    repository: hookubit-control-api
     tag: ''            # defaults to .Chart.AppVersion
     pullPolicy: IfNotPresent
   replicaCount: 2
@@ -234,7 +234,7 @@ controlApi:
 
 dashboard:
   image:
-    repository: webhook-dashboard
+    repository: hookubit-dashboard
     tag: ''
     pullPolicy: IfNotPresent
 
@@ -284,7 +284,7 @@ dashboard:
 # All four roles run the SAME image and differ only by argv (ADR-0005).
 dataPlane:
   image:
-    repository: webhook-data-plane
+    repository: hookubit-data-plane
     tag: ''
     pullPolicy: IfNotPresent
 
@@ -441,8 +441,8 @@ ingress:
   ingestHost: ingest.example.com
   tls:
     enabled: true
-    appSecretName: webhook-platform-tls
-    ingestSecretName: webhook-platform-ingest-tls
+    appSecretName: hookubit-tls
+    ingestSecretName: hookubit-ingest-tls
 
 # --- Migrations -------------------------------------------------------------
 # Disabled by default and NOT a Helm hook, on purpose. Migrations are an
@@ -453,7 +453,7 @@ migrations:
   image:
     # The pruned runtime image has no Prisma CLI (it is a devDependency), so the
     # job runs the `migrate` target of control-api.Dockerfile.
-    repository: webhook-control-api
+    repository: hookubit-control-api
     tag: ''            # defaults to "<appVersion>-migrate"
     pullPolicy: IfNotPresent
   backoffLimit: 2

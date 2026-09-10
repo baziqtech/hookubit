@@ -1,6 +1,6 @@
 # Concepts and guarantees
 
-What the words mean, what hookubit promises, and the path one event takes from your `POST` to your receiver's `200`.
+What the words mean, what HookuBit promises, and the path one event takes from your `POST` to your receiver's `200`.
 
 ## The hierarchy
 

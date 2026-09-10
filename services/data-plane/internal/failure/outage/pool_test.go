@@ -8,9 +8,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/shaq/webhook-platform/services/data-plane/internal/db"
-	"github.com/shaq/webhook-platform/services/data-plane/internal/ingest"
-	"github.com/shaq/webhook-platform/services/data-plane/internal/testsupport"
+	"github.com/shaq/hookubit/services/data-plane/internal/db"
+	"github.com/shaq/hookubit/services/data-plane/internal/ingest"
+	"github.com/shaq/hookubit/services/data-plane/internal/testsupport"
 )
 
 // TestScenario18_ConnectionPoolExhausted_DegradesInsteadOfLying covers

@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/shaq/webhook-platform/services/data-plane/internal/ingest"
+	"github.com/shaq/hookubit/services/data-plane/internal/ingest"
 )
 
 // fieldsOf turns an Advisory's slog pairs into a map so a test can assert on

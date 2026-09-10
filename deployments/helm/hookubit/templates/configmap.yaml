@@ -1,10 +1,10 @@
-{{- include "webhook-platform.validate" . -}}
+{{- include "hookubit.validate" . -}}
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: {{ include "webhook-platform.fullname" . }}-config
+  name: {{ include "hookubit.fullname" . }}-config
   labels:
-    {{- include "webhook-platform.labels" . | nindent 4 }}
+    {{- include "hookubit.labels" . | nindent 4 }}
 # Integer knobs go through `int64` before `quote`. Helm parses YAML numbers as
 # float64, so a bare `| quote` renders 1048576 as "1.048576e+06" - which Go's
 # strconv.Atoi rejects, so envInt silently falls back to its DEFAULT. The

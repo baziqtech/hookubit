@@ -71,7 +71,7 @@ Exactly one JSON object. Unknown fields are refused, so a misspelt
 | Field | Type | Required | Rules |
 |---|---|---|---|
 | `event_type` | string | yes | 1 to 255 characters from `A-Z a-z 0-9 . _ - :`. May not begin or end with a dot. Subscriptions match on this, exactly or by a `prefix.*` pattern, so it is the routing key: use dot-separated, lower-case nouns and verbs (`payment.settled`), and keep identifiers out of it. |
-| `data` | any JSON value | yes | The payload your endpoints receive. Conventionally an object. Delivered byte-for-byte as received - hookubit signs the exact bytes, and never re-serialises your JSON. |
+| `data` | any JSON value | yes | The payload your endpoints receive. Conventionally an object. Delivered byte-for-byte as received - HookuBit signs the exact bytes, and never re-serialises your JSON. |
 | `ordering_key` | string | no | Up to 255 printable ASCII characters. Stored on the event and carried onto every delivery. **Ordering is not enforced yet**: today this key guarantees nothing about delivery order and is accepted so that producers can start sending it ahead of the feature. |
 
 Two whole-body rules:
@@ -215,7 +215,7 @@ X-Request-Id: req_01J9Z0HA...
 
 Wait `Retry-After` seconds and resend the same request with the same
 `Idempotency-Key`. Which ceiling refused is not disclosed. If the rate limiter's
-own store is unavailable, the policy limit **fails open** - hookubit would
+own store is unavailable, the policy limit **fails open** - HookuBit would
 rather accept your event than refuse it because of its own outage - while the
 per-address ceiling, which is in-process, keeps working.
 

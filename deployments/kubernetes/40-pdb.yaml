@@ -8,26 +8,26 @@ apiVersion: policy/v1
 kind: PodDisruptionBudget
 metadata:
   name: control-api
-  namespace: webhook-platform
-  labels: { app.kubernetes.io/name: webhook-platform, app.kubernetes.io/part-of: webhook-platform }
+  namespace: hookubit
+  labels: { app.kubernetes.io/name: hookubit, app.kubernetes.io/part-of: hookubit }
 spec:
   minAvailable: 1
   selector:
     matchLabels:
-      app.kubernetes.io/name: webhook-platform
+      app.kubernetes.io/name: hookubit
       app.kubernetes.io/component: control-api
 ---
 apiVersion: policy/v1
 kind: PodDisruptionBudget
 metadata:
   name: dashboard
-  namespace: webhook-platform
-  labels: { app.kubernetes.io/name: webhook-platform, app.kubernetes.io/part-of: webhook-platform }
+  namespace: hookubit
+  labels: { app.kubernetes.io/name: hookubit, app.kubernetes.io/part-of: hookubit }
 spec:
   minAvailable: 1
   selector:
     matchLabels:
-      app.kubernetes.io/name: webhook-platform
+      app.kubernetes.io/name: hookubit
       app.kubernetes.io/component: dashboard
 ---
 # Ingest is the write path. If it is all gone, publishers get connection errors
@@ -37,26 +37,26 @@ apiVersion: policy/v1
 kind: PodDisruptionBudget
 metadata:
   name: ingest
-  namespace: webhook-platform
-  labels: { app.kubernetes.io/name: webhook-platform, app.kubernetes.io/part-of: webhook-platform }
+  namespace: hookubit
+  labels: { app.kubernetes.io/name: hookubit, app.kubernetes.io/part-of: hookubit }
 spec:
   minAvailable: 1
   selector:
     matchLabels:
-      app.kubernetes.io/name: webhook-platform
+      app.kubernetes.io/name: hookubit
       app.kubernetes.io/component: ingest
 ---
 apiVersion: policy/v1
 kind: PodDisruptionBudget
 metadata:
   name: router
-  namespace: webhook-platform
-  labels: { app.kubernetes.io/name: webhook-platform, app.kubernetes.io/part-of: webhook-platform }
+  namespace: hookubit
+  labels: { app.kubernetes.io/name: hookubit, app.kubernetes.io/part-of: hookubit }
 spec:
   minAvailable: 1
   selector:
     matchLabels:
-      app.kubernetes.io/name: webhook-platform
+      app.kubernetes.io/name: hookubit
       app.kubernetes.io/component: router
 ---
 # Percentage, not a count: the worker replica count is owned by the HPA, so a
@@ -65,11 +65,11 @@ apiVersion: policy/v1
 kind: PodDisruptionBudget
 metadata:
   name: worker
-  namespace: webhook-platform
-  labels: { app.kubernetes.io/name: webhook-platform, app.kubernetes.io/part-of: webhook-platform }
+  namespace: hookubit
+  labels: { app.kubernetes.io/name: hookubit, app.kubernetes.io/part-of: hookubit }
 spec:
   maxUnavailable: 25%
   selector:
     matchLabels:
-      app.kubernetes.io/name: webhook-platform
+      app.kubernetes.io/name: hookubit
       app.kubernetes.io/component: worker

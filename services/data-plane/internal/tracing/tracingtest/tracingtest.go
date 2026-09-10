@@ -14,7 +14,7 @@ import (
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 
-	"github.com/shaq/webhook-platform/services/data-plane/internal/tracing"
+	"github.com/shaq/hookubit/services/data-plane/internal/tracing"
 )
 
 // Record installs a provider that records every span and samples everything,

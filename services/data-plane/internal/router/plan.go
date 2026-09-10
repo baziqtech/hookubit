@@ -3,7 +3,7 @@ package router
 import (
 	"time"
 
-	"github.com/shaq/webhook-platform/services/data-plane/internal/retry"
+	"github.com/shaq/hookubit/services/data-plane/internal/retry"
 )
 
 // Event is the routing-relevant projection of an events row. It carries no

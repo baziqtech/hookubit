@@ -11,10 +11,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/shaq/webhook-platform/services/data-plane/internal/ids"
-	"github.com/shaq/webhook-platform/services/data-plane/internal/ingest"
-	"github.com/shaq/webhook-platform/services/data-plane/internal/payloadstore"
-	"github.com/shaq/webhook-platform/services/data-plane/internal/signing"
+	"github.com/shaq/hookubit/services/data-plane/internal/ids"
+	"github.com/shaq/hookubit/services/data-plane/internal/ingest"
+	"github.com/shaq/hookubit/services/data-plane/internal/payloadstore"
+	"github.com/shaq/hookubit/services/data-plane/internal/signing"
 )
 
 // requireLivePayloadStore gates on a real S3-compatible endpoint, exactly as

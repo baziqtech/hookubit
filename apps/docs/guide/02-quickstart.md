@@ -78,7 +78,7 @@ Within a second or two your endpoint receives:
 ```http
 POST /your/webhook/path HTTP/1.1
 Content-Type: application/json
-User-Agent: ShaQ-Webhooks/1.0
+User-Agent: HookuBit/1.0
 Webhook-Id: evt_01J…
 Webhook-Delivery-Id: del_01J…
 Webhook-Event-Type: order.created

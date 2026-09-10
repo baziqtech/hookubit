@@ -35,7 +35,7 @@ Apply with `kubectl apply -k deployments/kubernetes`.
 | `41-ingress.yaml` | Two Ingresses: app host and ingest host |
 | `50-networkpolicy.yaml` | Default-deny + five allow policies. **In the kustomization** — read its header before applying |
 
-All four Go roles run **one image**, `ghcr.io/shaq/webhook-data-plane`, and
+All four Go roles run **one image**, `ghcr.io/shaq/hookubit-data-plane`, and
 differ only by argv (ADR-0005).
 
 Security posture on every pod: `runAsNonRoot`, explicit uid (1000 node, 101
@@ -56,7 +56,7 @@ Grace periods sit above the 25s in-process drain in `cmd/webhookd/main.go`:
 delivery waits out `DELIVERY_LEASE_SECONDS` before another worker reclaims it),
 45s control API, 30s dashboard.
 
-### `deployments/helm/webhook-platform/` — Helm chart
+### `deployments/helm/hookubit/` — Helm chart
 
 `Chart.yaml` (v0.1.0, `kubeVersion >=1.25`, **no dependencies** — a bundled
 PostgreSQL subchart is the fastest way to lose delivery history to a
@@ -117,32 +117,32 @@ The workflow carries a top-level `permissions: { contents: read }`.
 #    Production topology: app -> PgBouncer -> PostgreSQL.
 # 2 + 3. DATABASE_URL, and optionally Redis.
 # 4. Secrets - there are no defaults.
-kubectl create namespace webhook-platform
-kubectl -n webhook-platform create secret generic webhook-secrets \
+kubectl create namespace hookubit
+kubectl -n hookubit create secret generic hookubit-secrets \
   --from-literal=JWT_SECRET="$(openssl rand -base64 48)" \
   --from-literal=SESSION_SECRET="$(openssl rand -base64 48)" \
   --from-literal=ENCRYPTION_KEY="$(openssl rand -base64 32)"
 
-helm upgrade --install webhooks deployments/helm/webhook-platform \
-  -n webhook-platform \
-  --set externalDatabase.url='postgresql://u:p@pgbouncer:6432/webhook_platform?schema=public&sslmode=require' \
-  --set externalDatabase.directUrl='postgresql://u:p@db:5432/webhook_platform?schema=public&sslmode=require' \
+helm upgrade --install webhooks deployments/helm/hookubit \
+  -n hookubit \
+  --set externalDatabase.url='postgresql://u:p@pgbouncer:6432/hookubit?schema=public&sslmode=require' \
+  --set externalDatabase.directUrl='postgresql://u:p@db:5432/hookubit?schema=public&sslmode=require' \
   --set externalRedis.url='rediss://redis:6379/0' \
-  --set secrets.existingSecret=webhook-secrets \
+  --set secrets.existingSecret=hookubit-secrets \
   --set ingress.enabled=true \
   --set ingress.appHost=webhooks.example.com \
   --set ingress.ingestHost=ingest.example.com
 
 # 5. Migrations - explicit, separate, never on app start.
-helm upgrade webhooks deployments/helm/webhook-platform -n webhook-platform \
+helm upgrade webhooks deployments/helm/hookubit -n hookubit \
   --reuse-values --set migrations.enabled=true
-kubectl -n webhook-platform wait --for=condition=complete --timeout=10m \
+kubectl -n hookubit wait --for=condition=complete --timeout=10m \
   job -l app.kubernetes.io/component=migrate
-helm upgrade webhooks deployments/helm/webhook-platform -n webhook-platform \
+helm upgrade webhooks deployments/helm/hookubit -n hookubit \
   --reuse-values --set migrations.enabled=false
 
 # 6. Verify, then create the first owner explicitly (ADR-0006).
-kubectl -n webhook-platform rollout status deploy/webhooks-webhook-platform-control-api
+kubectl -n hookubit rollout status deploy/webhooks-hookubit-control-api
 # bootstrap.js reads BOOTSTRAP_EMAIL / BOOTSTRAP_PASSWORD / BOOTSTRAP_ORG from
 # its environment and exits without them, so `kubectl exec` alone cannot work -
 # and passing them as `exec -- env VAR=...` puts the owner password in shell
@@ -158,7 +158,7 @@ in `kustomization.yaml`, then
 
 ```bash
 kubectl apply -k deployments/kubernetes
-kubectl -n webhook-platform create -f deployments/kubernetes/10-migration-job.yaml
+kubectl -n hookubit create -f deployments/kubernetes/10-migration-job.yaml
 ```
 
 ### Scaling
@@ -313,8 +313,8 @@ deleted afterwards.
 `SESSION_SECRET`,** which `internal/config/config.go` never reads. The worker
 makes arbitrary outbound HTTP to customer-controlled URLs and is the worst place
 in the system to hold the session-forgery key. The data plane now has its own
-`secretRef` (`webhook-platform.dataPlaneEnvFrom`, chart value
-`dataPlane.separateSecret: true`; `webhook-platform-data-plane` in the raw
+`secretRef` (`hookubit.dataPlaneEnvFrom`, chart value
+`dataPlane.separateSecret: true`; `hookubit-data-plane` in the raw
 manifests) carrying only `DATABASE_URL`, `REDIS_URL` and the S3 credentials.
 
 > If the data plane ever gains payload encryption or endpoint-secret decryption,
@@ -331,11 +331,11 @@ v0.6.7 were downloaded to a scratch directory and really ran; so did `pnpm`,
 Actually executed:
 
 - **The Prisma defect was reproduced and the fix proven at the pnpm level.**
-  `pnpm deploy --filter @webhook/control-api --prod <tmp>` built a real deploy
+  `pnpm deploy --filter @hookubit/control-api --prod <tmp>` built a real deploy
   tree; `require('@prisma/client')` in it threw
   `Cannot find module '.prisma/client/default'`, and there was no `prisma` CLI
   anywhere in the tree to regenerate with. Running
-  `pnpm --filter @webhook/control-api exec prisma generate --schema=<tmp>/prisma/schema.prisma`
+  `pnpm --filter @hookubit/control-api exec prisma generate --schema=<tmp>/prisma/schema.prisma`
   wrote the client into that tree's virtual store, after which
   `new PrismaClient()` constructed successfully — including under `env -i`, with
   no `DATABASE_URL` and no cwd, which is what the Dockerfile's build-time
@@ -453,14 +453,14 @@ Re-verified against the current control API (six new modules, a new authz
 layer), by reproducing the deploy tree with pnpm exactly as the earlier review
 did:
 
-- `pnpm deploy --filter @webhook/control-api --prod <tmp>` — the tree contains
+- `pnpm deploy --filter @hookubit/control-api --prod <tmp>` — the tree contains
   **no `prisma` CLI** (`node_modules/.bin` has none), confirming `--prod` still
   strips it.
 - `require('@prisma/client')` in that tree still throws
   `Cannot find module '.prisma/client/default'`. **The defect is unchanged and
   the Dockerfile's second `prisma generate` is still load-bearing.**
 - Running the Dockerfile's exact repair —
-  `pnpm --filter @webhook/control-api exec prisma generate --schema=<tmp>/prisma/schema.prisma`
+  `pnpm --filter @hookubit/control-api exec prisma generate --schema=<tmp>/prisma/schema.prisma`
   — then `new PrismaClient()` under `env -i` with cwd `/` (no `DATABASE_URL`,
   no cwd, which is what the build-time `node --eval` assertion does):
   **constructs, with 24 model delegates.**
@@ -474,7 +474,7 @@ separate migrate image in compose.
 ### 4. NetworkPolicies — default-deny, on by default
 
 Was follow-up 5. `deployments/kubernetes/50-networkpolicy.yaml` (in the
-kustomization) and `deployments/helm/webhook-platform/templates/networkpolicy.yaml`
+kustomization) and `deployments/helm/hookubit/templates/networkpolicy.yaml`
 (`networkPolicy.enabled: true`).
 
 **Why on by default.** `internal/egress/ssrf.go` is good code and it is one
@@ -666,7 +666,7 @@ looking. The only path entries are `dist/`, `node_modules/`, `.pnpm-store/` and
    publishing must push that target too, not just `runtime`.
 4. **No image publishing.** CI builds but never pushes. Someone has to decide
    the registry, the tagging scheme and the release trigger. The manifests
-   currently reference `ghcr.io/shaq/webhook-*:0.1.0`, which does not exist yet.
+   currently reference `ghcr.io/shaq/hookubit-*:0.1.0`, which does not exist yet.
 5. ~~**No NetworkPolicies.**~~ **DONE, but never applied to a cluster** — see
    "NetworkPolicies" above. Six policies in both the raw manifests and the
    chart, on by default, with a CI guard that stops the metadata range being
@@ -696,7 +696,7 @@ looking. The only path entries are `dist/`, `node_modules/`, `.pnpm-store/` and
 
 10. **The data plane's Secret is scoped to what it reads today.** If
     `services/data-plane` ever gains payload encryption or endpoint-secret
-    decryption, `ENCRYPTION_KEY` must be added to `webhook-platform-data-plane`
+    decryption, `ENCRYPTION_KEY` must be added to `hookubit-data-plane`
     and to the chart's `-data-plane-secrets`. `JWT_SECRET` and `SESSION_SECRET`
     should never go back in.
 11. **`deployments/ci/expected-schema-drift.txt` is a fixture with teeth but no
@@ -921,7 +921,7 @@ non-empty**:
 RUN echo "..." \
  && env VITE_API_TRANSPORT="${VITE_API_TRANSPORT}" \
         ${VITE_INGEST_BASE_URL:+VITE_INGEST_BASE_URL="${VITE_INGEST_BASE_URL}"} \
-        pnpm --filter @webhook/dashboard build
+        pnpm --filter @hookubit/dashboard build
 ```
 
 `env` rather than a bare command prefix on purpose: a `NAME=value` prefix
@@ -972,7 +972,7 @@ dashboard:
 They do exactly three things, all documentation:
 
 - render as annotations on the dashboard Deployment
-  (`webhook-platform.shaq.io/built-with-ingest-base-url` and
+  (`hookubit.shaq.io/built-with-ingest-base-url` and
   `…-api-transport`), so `kubectl describe deploy …-dashboard` answers "why
   does the curl point at localhost" without unpacking the image;
 - drive three `NOTES.txt` warnings — empty `ingestBaseUrl`, an `ingestBaseUrl`
@@ -1101,7 +1101,7 @@ other three roles it is a status signal, not a traffic one.
 ### 2. Prometheus and Grafana (ARCHITECTURE.md Phase 6)
 
 New: `deployments/observability/` (scrape config, alert rules, README) and
-`deployments/helm/webhook-platform/dashboards/webhook-platform.json`, rendered as
+`deployments/helm/hookubit/dashboards/hookubit.json`, rendered as
 a ConfigMap for the Grafana sidecar when
 `observability.grafanaDashboard.enabled=true` (off by default — it is inert
 without a sidecar and invisible if the label does not match the one your Grafana

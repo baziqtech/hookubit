@@ -5,9 +5,9 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/shaq/webhook-platform/services/data-plane/internal/ingest"
-	"github.com/shaq/webhook-platform/services/data-plane/internal/metrics"
-	"github.com/shaq/webhook-platform/services/data-plane/internal/payloadstore"
+	"github.com/shaq/hookubit/services/data-plane/internal/ingest"
+	"github.com/shaq/hookubit/services/data-plane/internal/metrics"
+	"github.com/shaq/hookubit/services/data-plane/internal/payloadstore"
 )
 
 // PayloadFetcher reads an offloaded payload back out of object storage.

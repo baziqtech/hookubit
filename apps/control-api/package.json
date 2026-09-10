@@ -1,5 +1,5 @@
 {
-  "name": "@webhook/control-api",
+  "name": "@hookubit/control-api",
   "version": "0.1.0",
   "private": true,
   "scripts": {

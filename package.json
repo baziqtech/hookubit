@@ -1,5 +1,5 @@
 {
-  "name": "webhook-platform",
+  "name": "hookubit",
   "private": true,
   "packageManager": "pnpm@9.12.3",
   "engines": {
@@ -8,12 +8,12 @@
   "scripts": {
     "dev:infra": "docker compose -f deployments/compose/docker-compose.dev.yml up -d",
     "dev:infra:down": "docker compose -f deployments/compose/docker-compose.dev.yml down",
-    "dev:api": "pnpm --filter @webhook/control-api start:dev",
-    "dev:dashboard": "pnpm --filter @webhook/dashboard dev",
+    "dev:api": "pnpm --filter @hookubit/control-api start:dev",
+    "dev:dashboard": "pnpm --filter @hookubit/dashboard dev",
     "dev:data-plane": "cd services/data-plane && go run ./cmd/webhookd all",
-    "migrate": "pnpm --filter @webhook/control-api prisma:migrate",
-    "migrate:deploy": "pnpm --filter @webhook/control-api prisma:deploy",
-    "generate": "pnpm --filter @webhook/control-api prisma:generate",
+    "migrate": "pnpm --filter @hookubit/control-api prisma:migrate",
+    "migrate:deploy": "pnpm --filter @hookubit/control-api prisma:deploy",
+    "generate": "pnpm --filter @hookubit/control-api prisma:generate",
     "build": "pnpm -r build",
     "test": "pnpm -r test",
     "lint": "pnpm -r lint",
@@ -32,9 +32,9 @@
     "load:tenants": "node tests/load/scripts/run.mjs many-tenants",
     "load:large": "node tests/load/scripts/run.mjs large-payloads",
     "load:all": "node tests/load/scripts/run.mjs all",
-    "docs:dev": "pnpm --filter @webhook/docs dev",
-    "docs:build": "pnpm --filter @webhook/docs build",
-    "docs:check": "pnpm --filter @webhook/docs exec node scripts/generate-api-reference.mjs --check"
+    "docs:dev": "pnpm --filter @hookubit/docs dev",
+    "docs:build": "pnpm --filter @hookubit/docs build",
+    "docs:check": "pnpm --filter @hookubit/docs exec node scripts/generate-api-reference.mjs --check"
   },
   "pnpm": {
     "overrides": {

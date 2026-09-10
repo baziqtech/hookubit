@@ -19,12 +19,27 @@ this is the one hard requirement.
 
 Redis you already have. Node 20+, pnpm, and Go 1.21+ are also needed.
 
+**If you cloned before the HookuBit rename**, the dev compose file's Postgres
+role, password and database are all `hookubit` now (they were `webhook` /
+`webhook_platform`), and the compose project is `hookubit-dev`. Postgres only
+runs initdb on an EMPTY data directory, so an existing volume keeps the old
+role and the new `DATABASE_URL` fails to authenticate against a server that
+looks healthy. Reset it once:
+
+```bash
+docker compose -f deployments/compose/docker-compose.dev.yml down -v
+```
+
+That deletes only the throwaway dev volume. If you run PostgreSQL natively
+instead, nothing changes — point `DATABASE_URL` at whatever role you already
+created.
+
 ## 1. Create the role and database
 
 ```bash
 psql -h localhost -U postgres <<'SQL'
-CREATE ROLE webhook WITH LOGIN PASSWORD 'webhook';
-CREATE DATABASE webhook_platform OWNER webhook;
+CREATE ROLE hookubit WITH LOGIN PASSWORD 'hookubit';
+CREATE DATABASE hookubit OWNER hookubit;
 SQL
 ```
 
@@ -52,8 +67,8 @@ EOT
 Then edit `.env` and confirm:
 
 ```
-DATABASE_URL=postgresql://webhook:webhook@localhost:5432/webhook_platform?schema=public
-DIRECT_DATABASE_URL=postgresql://webhook:webhook@localhost:5432/webhook_platform?schema=public
+DATABASE_URL=postgresql://hookubit:hookubit@localhost:5432/hookubit?schema=public
+DIRECT_DATABASE_URL=postgresql://hookubit:hookubit@localhost:5432/hookubit?schema=public
 REDIS_URL=redis://localhost:6379/0
 APP_ENV=development
 ALLOW_OPEN_REGISTRATION=false
@@ -75,12 +90,12 @@ would try to author a new one.
 There is no default account, by design. Build first — the CLI runs from `dist/`:
 
 ```bash
-pnpm --filter @webhook/control-api build
+pnpm --filter @hookubit/control-api build
 
 BOOTSTRAP_EMAIL='you@example.com' \
 BOOTSTRAP_PASSWORD='a-real-password-12+' \
 BOOTSTRAP_ORG='ShaQ Express' \
-pnpm --filter @webhook/control-api bootstrap
+pnpm --filter @hookubit/control-api bootstrap
 ```
 
 It refuses to run twice, and creates the organization, the owner and the
@@ -157,7 +172,7 @@ Add to `.env` and restart `pnpm dev:api`:
 
 ```
 SMTP_URL=smtp://localhost:1025
-MAIL_FROM="Hookubit <no-reply@localhost>"
+MAIL_FROM="HookuBit <no-reply@localhost>"
 ```
 
 Every message lands in the inbox at http://localhost:8025; nothing leaves your
@@ -239,8 +254,8 @@ the verification link from Mailpit), and `EGRESS_ALLOW_PRIVATE_NETWORKS=true`
 on both planes (the receiver is a loopback address).
 
 ```bash
-pnpm --filter @webhook/dashboard test:e2e
-pnpm --filter @webhook/dashboard exec playwright show-report   # traces and video for any failure
+pnpm --filter @hookubit/dashboard test:e2e
+pnpm --filter @hookubit/dashboard exec playwright show-report   # traces and video for any failure
 ```
 
 Two things bite on repeated runs from one machine. Registration is throttled at
@@ -282,7 +297,7 @@ pnpm docs:build    # what CI runs: regenerates the API reference, then builds wi
 ```
 
 The API reference under `apps/docs/api/` is generated from
-`apps/control-api/openapi.json`, which `pnpm --filter @webhook/control-api openapi`
+`apps/control-api/openapi.json`, which `pnpm --filter @hookubit/control-api openapi`
 emits from source. Do not edit the generated pages; change the DTO decorators
 and rebuild. A build failure naming a dead link is a real broken link - fix the
 link, not the check.

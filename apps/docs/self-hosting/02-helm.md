@@ -1,7 +1,7 @@
 # Helm
 
-The recommended way to run hookubit on Kubernetes. The chart is
-`deployments/helm/webhook-platform` in the release; it installs six stateless
+The recommended way to run HookuBit on Kubernetes. The chart is
+`deployments/helm/hookubit` in the release; it installs six stateless
 workloads, no database, and refuses to install without the things it cannot
 run without.
 
@@ -16,35 +16,35 @@ history to `helm uninstall`.
 #    Production topology: app -> PgBouncer -> PostgreSQL.
 
 # 2-4. Secrets. There are no defaults, ever.
-kubectl create namespace webhook-platform
-kubectl -n webhook-platform create secret generic webhook-secrets \
+kubectl create namespace HookuBit
+kubectl -n HookuBit create secret generic hookubit-secrets \
   --from-literal=JWT_SECRET="$(openssl rand -base64 48)" \
   --from-literal=SESSION_SECRET="$(openssl rand -base64 48)" \
   --from-literal=ENCRYPTION_KEY="$(openssl rand -base64 32)" \
   --from-literal=SMTP_URL='smtp://user:pass@mail.example.com:587'
 
-helm upgrade --install webhooks deployments/helm/webhook-platform \
-  -n webhook-platform \
-  --set externalDatabase.url='postgresql://u:p@pgbouncer:6432/webhook_platform?schema=public&sslmode=require' \
-  --set externalDatabase.directUrl='postgresql://u:p@db:5432/webhook_platform?schema=public&sslmode=require' \
+helm upgrade --install webhooks deployments/helm/hookubit \
+  -n HookuBit \
+  --set externalDatabase.url='postgresql://u:p@pgbouncer:6432/hookubit?schema=public&sslmode=require' \
+  --set externalDatabase.directUrl='postgresql://u:p@db:5432/hookubit?schema=public&sslmode=require' \
   --set externalRedis.url='rediss://redis:6379/0' \
-  --set secrets.existingSecret=webhook-secrets \
+  --set secrets.existingSecret=hookubit-secrets \
   --set app.publicUrl=https://webhooks.example.com \
-  --set app.mailFrom='Hookubit <no-reply@example.com>' \
+  --set app.mailFrom='HookuBit <no-reply@example.com>' \
   --set ingress.enabled=true \
   --set ingress.appHost=webhooks.example.com \
   --set ingress.ingestHost=ingest.example.com
 
 # 5. Migrations: explicit, separate, never on application start.
-helm upgrade webhooks deployments/helm/webhook-platform -n webhook-platform \
+helm upgrade webhooks deployments/helm/hookubit -n HookuBit \
   --reuse-values --set migrations.enabled=true
-kubectl -n webhook-platform wait --for=condition=complete --timeout=10m \
+kubectl -n HookuBit wait --for=condition=complete --timeout=10m \
   job -l app.kubernetes.io/component=migrate
-helm upgrade webhooks deployments/helm/webhook-platform -n webhook-platform \
+helm upgrade webhooks deployments/helm/hookubit -n HookuBit \
   --reuse-values --set migrations.enabled=false
 
 # 6. Verify, then create the first owner.
-kubectl -n webhook-platform rollout status deploy/webhooks-webhook-platform-control-api
+kubectl -n HookuBit rollout status deploy/webhooks-hookubit-control-api
 ```
 
 `helm install` prints the full notes, including a ready-to-paste bootstrap Job
@@ -357,7 +357,7 @@ environment reference is in [Configuration](/self-hosting/05-configuration).
 | `app.logLevel` | `info` | `LOG_LEVEL` for both planes. |
 | `app.allowOpenRegistration` | `false` | Self-serve signup (`ALLOW_OPEN_REGISTRATION`). Keep false on anything internet-facing; create the first owner with the bootstrap job. |
 | `app.publicUrl` | `'https://webhooks.example.com'` | Public origin of the dashboard and control API. Becomes `CONTROL_API_URL`, `DASHBOARD_URL` (base of every link in outbound mail) and `CORS_ORIGINS`. |
-| `app.mailFrom` | `'Hookubit <no-reply@example.com>'` | `MAIL_FROM`: the From header, e.g. `Hookubit <no-reply@example.com>`. Required whenever SMTP is set; the display name is the product name in subjects. |
+| `app.mailFrom` | `'HookuBit <no-reply@example.com>'` | `MAIL_FROM`: the From header, e.g. `HookuBit <no-reply@example.com>`. Required whenever SMTP is set; the display name is the product name in subjects. |
 
 ### Outbound HTTP (egress)
 
@@ -395,7 +395,7 @@ environment reference is in [Configuration](/self-hosting/05-configuration).
 | Key | Default | What it does |
 |---|---|---|
 | `observability.otlpEndpoint` | `''` | OTLP/HTTP collector base URL (`http://` or `https://` required). Empty disables tracing entirely. |
-| `observability.serviceNamespace` | `webhook-platform` | `service.namespace` on every span; separates two installs sharing a collector. |
+| `observability.serviceNamespace` | `hookubit` | `service.namespace` on every span; separates two installs sharing a collector. |
 | `observability.serviceName` | `control-api` | `service.name` for the control API. |
 | `observability.tracesSamplerArg` | `1` | Control-plane head sampling ratio, 0..1. A remote `traceparent` is capped at it, not obeyed. |
 | `observability.dataPlaneServiceName` | `data-plane` | `service.name` for the four Go roles. No fallback to `serviceName`. |
@@ -543,8 +543,8 @@ environment reference is in [Configuration](/self-hosting/05-configuration).
 | `ingress.appHost` | `webhooks.example.com` | Browser host: dashboard at `/`, control API at `/v1` and `/docs`. |
 | `ingress.ingestHost` | `ingest.example.com` | Publisher host for the ingest API. Separate on purpose so bursts and browser traffic scale and rate-limit independently. |
 | `ingress.tls.enabled` | `true` | Add `tls:` blocks. |
-| `ingress.tls.appSecretName` | `webhook-platform-tls` | TLS Secret for `appHost`. |
-| `ingress.tls.ingestSecretName` | `webhook-platform-ingest-tls` | TLS Secret for `ingestHost`. |
+| `ingress.tls.appSecretName` | `hookubit-tls` | TLS Secret for `appHost`. |
+| `ingress.tls.ingestSecretName` | `hookubit-ingest-tls` | TLS Secret for `ingestHost`. |
 
 ### Migrations
 
@@ -576,4 +576,4 @@ environment reference is in [Configuration](/self-hosting/05-configuration).
 
 ---
 
-**Where this comes from.** `deployments/helm/webhook-platform/{values.yaml,values.schema.json,Chart.yaml}`, `templates/{_helpers.tpl,configmap.yaml,secret.yaml,data-plane.yaml,control-api.yaml,migration-job.yaml,worker-hpa.yaml,networkpolicy.yaml,grafana-dashboard.yaml,NOTES.txt}`, `deployments/HANDOFF.md`, `services/data-plane/cmd/webhookd/roles.go` (`runWorker`, the keyring). The values table is produced by a generator from `values.yaml`; regenerate it when the chart changes.
+**Where this comes from.** `deployments/helm/hookubit/{values.yaml,values.schema.json,Chart.yaml}`, `templates/{_helpers.tpl,configmap.yaml,secret.yaml,data-plane.yaml,control-api.yaml,migration-job.yaml,worker-hpa.yaml,networkpolicy.yaml,grafana-dashboard.yaml,NOTES.txt}`, `deployments/HANDOFF.md`, `services/data-plane/cmd/webhookd/roles.go` (`runWorker`, the keyring). The values table is produced by a generator from `values.yaml`; regenerate it when the chart changes.

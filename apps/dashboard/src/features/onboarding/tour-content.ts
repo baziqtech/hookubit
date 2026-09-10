@@ -36,7 +36,7 @@ export const TOUR_STEPS: TourStep[] = [
     label: 'What this is',
     title: 'Webhooks that arrive, or tell you why they did not',
     body: [
-      'Your system publishes an event once. hookubit gets it to every consumer that asked for it — retrying failures, signing each request, and keeping a permanent record of every attempt.',
+      'Your system publishes an event once. HookuBit gets it to every consumer that asked for it — retrying failures, signing each request, and keeping a permanent record of every attempt.',
       'The record is the product. When someone asks at 2am whether finance ever received a settlement, the answer is on a page here rather than in a database query.',
     ],
   },

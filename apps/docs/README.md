@@ -1,13 +1,13 @@
-# hookubit documentation
+# HookuBit documentation
 
-Customer-facing documentation for hookubit, plus a VitePress site to read it in a browser.
+Customer-facing documentation for HookuBit, plus a VitePress site to read it in a browser.
 
 ```
 apps/docs/
   index.md            landing page
-  guide/              integrating with hookubit: publish, receive, verify, retry, rotate, replay
+  guide/              integrating with HookuBit: publish, receive, verify, retry, rotate, replay
   api/                the API reference - GENERATED from apps/control-api/openapi.json, do not edit
-  self-hosting/       running hookubit against your own PostgreSQL
+  self-hosting/       running HookuBit against your own PostgreSQL
   scripts/            the API reference generator
   .vitepress/         site config and the sidebar generator (walks the folders; no config edit to add a page)
   wrangler.jsonc      Cloudflare static-assets deploy, no gate

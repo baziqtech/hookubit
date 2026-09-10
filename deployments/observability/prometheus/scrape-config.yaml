@@ -1,4 +1,4 @@
-# Prometheus scrape configuration for the webhook platform.
+# Prometheus scrape configuration for HookuBit.
 #
 # Drop these entries into the `scrape_configs:` list of a Prometheus you already
 # run. This file is NOT applied to the cluster and is not part of the Helm
@@ -28,25 +28,25 @@
 #   apiVersion: monitoring.coreos.com/v1
 #   kind: PodMonitor
 #   metadata:
-#     name: webhook-platform-data-plane
-#     namespace: webhook-platform
+#     name: hookubit-data-plane
+#     namespace: hookubit
 #   spec:
 #     selector:
 #       matchLabels:
-#         app.kubernetes.io/name: webhook-platform
+#         app.kubernetes.io/name: hookubit
 #     podMetricsEndpoints:
 #       - port: probes          # named port, 9090
 #         path: /metrics
 #         interval: 30s
 #     namespaceSelector:
-#       matchNames: [webhook-platform]
+#       matchNames: [hookubit]
 #
 # Note the selector matches the platform's own label, NOT the component label -
 # one PodMonitor covers all four roles, and the `component` label arrives on
 # every series through the pod-label relabelling below.
 
 scrape_configs:
-  - job_name: webhook-platform-data-plane
+  - job_name: hookubit-data-plane
     # 30s, not 15s. Nothing here is a fast-moving signal: the delivery
     # histograms are aggregated over minutes and queue_depth is refreshed by a
     # collector on its own ticker. Halving the interval doubles the storage for
@@ -56,7 +56,7 @@ scrape_configs:
     kubernetes_sd_configs:
       - role: pod
         namespaces:
-          names: [webhook-platform]
+          names: [hookubit]
 
     relabel_configs:
       # Honour the annotations the manifests already carry.

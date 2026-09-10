@@ -8,7 +8,7 @@ import (
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
 
-	"github.com/shaq/webhook-platform/services/data-plane/internal/tracing"
+	"github.com/shaq/hookubit/services/data-plane/internal/tracing"
 )
 
 // eventsRoute is the low-cardinality route template used as the span name and

@@ -12,12 +12,12 @@ Cilium, Antrea and Weave do. Stock EKS (amazon-vpc-cni with no policy agent),
 flannel and a default kind/minikube ACCEPT these objects and ignore them.
 */}}
 {{- if .Values.networkPolicy.enabled }}
-{{- $fullName := include "webhook-platform.fullname" . }}
+{{- $fullName := include "hookubit.fullname" . }}
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
   name: {{ $fullName }}-default-deny
-  labels: {{- include "webhook-platform.labels" . | nindent 4 }}
+  labels: {{- include "hookubit.labels" . | nindent 4 }}
 spec:
   # Every pod in the namespace, both directions. A workload added later is
   # denied by default rather than allowed by omission.
@@ -32,7 +32,7 @@ apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
   name: {{ $fullName }}-allow-dns
-  labels: {{- include "webhook-platform.labels" . | nindent 4 }}
+  labels: {{- include "hookubit.labels" . | nindent 4 }}
 spec:
   podSelector: {}
   policyTypes: [Egress]
@@ -62,7 +62,7 @@ apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
   name: {{ $fullName }}-allow-datastore-egress
-  labels: {{- include "webhook-platform.labels" . | nindent 4 }}
+  labels: {{- include "hookubit.labels" . | nindent 4 }}
 spec:
   podSelector:
     matchExpressions:
@@ -89,7 +89,7 @@ apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
   name: {{ $fullName }}-allow-extra-egress
-  labels: {{- include "webhook-platform.labels" $ | nindent 4 }}
+  labels: {{- include "hookubit.labels" $ | nindent 4 }}
 spec:
   podSelector: {}
   policyTypes: [Egress]
@@ -118,10 +118,10 @@ apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
   name: {{ $fullName }}-allow-worker-public-egress
-  labels: {{- include "webhook-platform.labels" . | nindent 4 }}
+  labels: {{- include "hookubit.labels" . | nindent 4 }}
 spec:
   podSelector:
-    matchLabels: {{- include "webhook-platform.selectorLabels" (dict "ctx" . "component" "worker") | nindent 6 }}
+    matchLabels: {{- include "hookubit.selectorLabels" (dict "ctx" . "component" "worker") | nindent 6 }}
   policyTypes: [Egress]
   egress:
     - to:
@@ -142,7 +142,7 @@ apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
   name: {{ $fullName }}-allow-http-ingress
-  labels: {{- include "webhook-platform.labels" . | nindent 4 }}
+  labels: {{- include "hookubit.labels" . | nindent 4 }}
 spec:
   podSelector:
     matchExpressions:
@@ -173,7 +173,7 @@ apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
   name: {{ $fullName }}-allow-metrics-scrape
-  labels: {{- include "webhook-platform.labels" . | nindent 4 }}
+  labels: {{- include "hookubit.labels" . | nindent 4 }}
 spec:
   podSelector:
     matchExpressions:

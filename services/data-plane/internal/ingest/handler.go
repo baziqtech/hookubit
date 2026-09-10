@@ -13,9 +13,9 @@ import (
 
 	"go.opentelemetry.io/otel/trace"
 
-	"github.com/shaq/webhook-platform/services/data-plane/internal/ids"
-	"github.com/shaq/webhook-platform/services/data-plane/internal/metrics"
-	"github.com/shaq/webhook-platform/services/data-plane/internal/tracing"
+	"github.com/shaq/hookubit/services/data-plane/internal/ids"
+	"github.com/shaq/hookubit/services/data-plane/internal/metrics"
+	"github.com/shaq/hookubit/services/data-plane/internal/tracing"
 )
 
 // requestIDPrefix matches the `req_...` shape quoted in error bodies and on

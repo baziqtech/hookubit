@@ -1,6 +1,6 @@
 # Integration guide
 
-How to publish events to hookubit and receive them as signed webhooks, what the platform guarantees while doing it, and what to do when a delivery does not arrive.
+How to publish events to HookuBit and receive them as signed webhooks, what the platform guarantees while doing it, and what to do when a delivery does not arrive.
 
 This guide is written for the developer on either side of the pipe: the service that publishes events, and the service that receives webhooks. It assumes nothing about the dashboard beyond what it says here; the dashboard has [its own section](/dashboard/), and every field and route mentioned in this guide is specified in the [API reference](/api/).
 
@@ -28,7 +28,7 @@ Read 01 first. After that, 03 if you publish, 04 if you receive, and the rest wh
 | `wk_test_…` / `wk_live_…` | An ingest API key for a `test` or `live` project. The prefix is part of the key. |
 | `whsec_…` | An endpoint signing secret. The prefix is part of the secret: store the whole string. |
 | "by default" | The value is set by the operator of your installation; the number given is what ships. |
-| `Webhook-*` | The request headers hookubit sets on every delivery. A receiver verifies against these names. |
+| `Webhook-*` | The request headers HookuBit sets on every delivery. A receiver verifies against these names. |
 
 Two surfaces are involved, and they are separate services with separate base URLs:
 

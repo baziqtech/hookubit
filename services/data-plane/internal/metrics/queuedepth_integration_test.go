@@ -4,7 +4,7 @@ import (
 	"context"
 	"testing"
 
-	"github.com/shaq/webhook-platform/services/data-plane/internal/testsupport"
+	"github.com/shaq/hookubit/services/data-plane/internal/testsupport"
 )
 
 // The depth query names five status values, three columns and one table, and

@@ -9,8 +9,8 @@ import (
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 	"go.opentelemetry.io/otel/trace"
 
-	"github.com/shaq/webhook-platform/services/data-plane/internal/tracing"
-	"github.com/shaq/webhook-platform/services/data-plane/internal/tracing/tracingtest"
+	"github.com/shaq/hookubit/services/data-plane/internal/tracing"
+	"github.com/shaq/hookubit/services/data-plane/internal/tracing/tracingtest"
 )
 
 const ingestTraceparent = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"

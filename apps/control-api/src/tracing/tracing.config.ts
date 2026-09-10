@@ -54,7 +54,7 @@ export function readTracingSettings(config: ConfigService): TracingSettings {
     enabled,
     tracesUrl: enabled ? resolveTracesUrl(endpoint as string) : null,
     serviceName: config.get<string>('OTEL_SERVICE_NAME') ?? 'control-api',
-    serviceNamespace: config.get<string>('OTEL_SERVICE_NAMESPACE') ?? 'webhook-platform',
+    serviceNamespace: config.get<string>('OTEL_SERVICE_NAMESPACE') ?? 'hookubit',
     deploymentEnvironment: config.get<string>('APP_ENV') ?? 'development',
     samplerRatio: clampRatio(ratio),
   };

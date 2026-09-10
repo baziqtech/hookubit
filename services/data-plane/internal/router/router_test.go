@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/shaq/webhook-platform/services/data-plane/internal/retry"
+	"github.com/shaq/hookubit/services/data-plane/internal/retry"
 )
 
 func quietLogger() *slog.Logger {

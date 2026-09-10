@@ -20,15 +20,15 @@ than on load, adding pods that do not help and pinning pods that are idle.
 apiVersion: autoscaling/v2
 kind: HorizontalPodAutoscaler
 metadata:
-  name: {{ include "webhook-platform.fullname" . }}-worker
+  name: {{ include "hookubit.fullname" . }}-worker
   labels:
-    {{- include "webhook-platform.labels" . | nindent 4 }}
+    {{- include "hookubit.labels" . | nindent 4 }}
     app.kubernetes.io/component: worker
 spec:
   scaleTargetRef:
     apiVersion: apps/v1
     kind: Deployment
-    name: {{ include "webhook-platform.fullname" . }}-worker
+    name: {{ include "hookubit.fullname" . }}-worker
   minReplicas: {{ .Values.dataPlane.worker.autoscaling.minReplicas }}
   maxReplicas: {{ .Values.dataPlane.worker.autoscaling.maxReplicas }}
   metrics:

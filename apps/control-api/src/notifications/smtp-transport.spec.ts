@@ -6,7 +6,7 @@ import { NodemailerSmtpTransport, SMTP_TIMEOUTS_MS } from './smtp-transport';
 jest.mock('nodemailer', () => ({ createTransport: jest.fn() }));
 
 const SMTP_URL = 'smtp://mailer:hunter2@mail.example.com:587';
-const FROM = 'Hookubit <no-reply@example.com>';
+const FROM = 'HookuBit <no-reply@example.com>';
 
 const mail: OutboundMail = {
   kind: 'email_verification',

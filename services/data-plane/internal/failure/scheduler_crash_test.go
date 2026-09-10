@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/shaq/webhook-platform/services/data-plane/internal/queue"
+	"github.com/shaq/hookubit/services/data-plane/internal/queue"
 )
 
 // runSchedulerSweep mirrors the body of runScheduler in cmd/webhookd/roles.go:

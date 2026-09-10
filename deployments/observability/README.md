@@ -11,7 +11,7 @@ Prometheus is a second thing to operate and the first thing to be out of date.
 |---|---|---|
 | `prometheus/scrape-config.yaml` | `scrape_configs` entry for the four Go roles | Paste into your Prometheus. A PodMonitor equivalent is in the header, for prometheus-operator |
 | `prometheus/alerts.yaml` | Rule groups | `rule_files:`, or the `spec:` of a PrometheusRule |
-| `../helm/webhook-platform/dashboards/webhook-platform.json` | The delivery dashboard | Import into Grafana, or set `observability.grafanaDashboard.enabled=true` and let the Grafana sidecar load it |
+| `../helm/hookubit/dashboards/hookubit.json` | The delivery dashboard | Import into Grafana, or set `observability.grafanaDashboard.enabled=true` and let the Grafana sidecar load it |
 
 The dashboard JSON lives inside the chart because Helm's `.Files.Get` can only
 read files under the chart directory, and one copy that both paths use beats two

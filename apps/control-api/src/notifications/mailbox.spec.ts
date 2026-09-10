@@ -2,8 +2,8 @@ import { parseMailbox } from './mailbox';
 
 describe('parseMailbox', () => {
   it('parses a display name plus address', () => {
-    expect(parseMailbox('Hookubit <no-reply@hookubit.io>')).toEqual({
-      name: 'Hookubit',
+    expect(parseMailbox('HookuBit <no-reply@hookubit.io>')).toEqual({
+      name: 'HookuBit',
       address: 'no-reply@hookubit.io',
     });
   });
@@ -27,7 +27,7 @@ describe('parseMailbox', () => {
     expect(parseMailbox('<no-reply@example.com>')).toEqual({ name: null, address: 'no-reply@example.com' });
   });
 
-  it.each(['', 'no-reply', 'Hookubit <not an address>', 'Hookubit <a@b@c>', 'a@b, c@d', '<>'])(
+  it.each(['', 'no-reply', 'HookuBit <not an address>', 'HookuBit <a@b@c>', 'a@b, c@d', '<>'])(
     'rejects %j',
     (value) => {
       expect(parseMailbox(value)).toBeNull();

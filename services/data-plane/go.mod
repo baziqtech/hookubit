@@ -1,4 +1,4 @@
-module github.com/shaq/webhook-platform/services/data-plane
+module github.com/shaq/hookubit/services/data-plane
 
 // The `go` directive is a MINIMUM language version, not a pin. Nothing in this
 // module uses a post-1.21 language feature, so raising it only excludes

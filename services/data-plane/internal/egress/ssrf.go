@@ -11,7 +11,7 @@ import (
 	"strings"
 	"syscall"
 
-	"github.com/shaq/webhook-platform/services/data-plane/internal/metrics"
+	"github.com/shaq/hookubit/services/data-plane/internal/metrics"
 )
 
 // BlockedTargetError is returned when a destination violates egress policy.

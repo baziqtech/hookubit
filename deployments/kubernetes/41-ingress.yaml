@@ -7,11 +7,11 @@
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
-  name: webhook-platform
-  namespace: webhook-platform
+  name: hookubit
+  namespace: hookubit
   labels:
-    app.kubernetes.io/name: webhook-platform
-    app.kubernetes.io/part-of: webhook-platform
+    app.kubernetes.io/name: hookubit
+    app.kubernetes.io/part-of: hookubit
   annotations:
     # cert-manager.io/cluster-issuer: letsencrypt-prod
     nginx.ingress.kubernetes.io/proxy-body-size: 2m
@@ -20,7 +20,7 @@ spec:
   ingressClassName: nginx
   tls:
     - hosts: ['webhooks.example.com']
-      secretName: webhook-platform-tls
+      secretName: hookubit-tls
   rules:
     - host: webhooks.example.com
       http:
@@ -47,12 +47,12 @@ spec:
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
-  name: webhook-platform-ingest
-  namespace: webhook-platform
+  name: hookubit-ingest
+  namespace: hookubit
   labels:
-    app.kubernetes.io/name: webhook-platform
+    app.kubernetes.io/name: hookubit
     app.kubernetes.io/component: ingest
-    app.kubernetes.io/part-of: webhook-platform
+    app.kubernetes.io/part-of: hookubit
   annotations:
     # cert-manager.io/cluster-issuer: letsencrypt-prod
     # PAYLOAD_MAX_BYTES is 1 MiB; the proxy cap sits just above it so an
@@ -64,7 +64,7 @@ spec:
   ingressClassName: nginx
   tls:
     - hosts: ['ingest.example.com']
-      secretName: webhook-platform-ingest-tls
+      secretName: hookubit-ingest-tls
   rules:
     - host: ingest.example.com
       http:

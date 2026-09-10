@@ -12,7 +12,7 @@ reinstall, keep your history" true. Provision PostgreSQL 15 or newer first
 (see [Requirements](/self-hosting/01-requirements)), then:
 
 ```bash
-export DATABASE_URL='postgresql://u:p@db.example.com:5432/webhook_platform?schema=public&sslmode=require'
+export DATABASE_URL='postgresql://u:p@db.example.com:5432/hookubit?schema=public&sslmode=require'
 export ENCRYPTION_KEY="$(openssl rand -base64 32)"
 export JWT_SECRET="$(openssl rand -base64 48)"
 export SESSION_SECRET="$(openssl rand -base64 48)"
@@ -40,7 +40,7 @@ The file reads its configuration from the host environment (or an `--env-file`).
 | `JWT_SECRET` | `JWT_SECRET is required` |
 | `SESSION_SECRET` | `SESSION_SECRET is required` |
 | `SMTP_URL` | `SMTP_URL is required in production (smtp://user:pass@mail.example.com:587) - the control API refuses to start without a mail transport` |
-| `MAIL_FROM` | `MAIL_FROM is required with SMTP_URL, e.g. "Hookubit <no-reply@example.com>"` |
+| `MAIL_FROM` | `MAIL_FROM is required with SMTP_URL, e.g. "HookuBit <no-reply@example.com>"` |
 | `DASHBOARD_URL` | `DASHBOARD_URL is required - the origin the dashboard is served from, e.g. https://webhooks.example.com` |
 
 **Optional, passed through.** These are forwarded only when the host sets them.

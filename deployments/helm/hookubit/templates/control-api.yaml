@@ -1,9 +1,9 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: {{ include "webhook-platform.fullname" . }}-control-api
+  name: {{ include "hookubit.fullname" . }}-control-api
   labels:
-    {{- include "webhook-platform.labels" . | nindent 4 }}
+    {{- include "hookubit.labels" . | nindent 4 }}
     app.kubernetes.io/component: control-api
 spec:
   replicas: {{ .Values.controlApi.replicaCount }}
@@ -15,11 +15,11 @@ spec:
       maxUnavailable: 0
   selector:
     matchLabels:
-      {{- include "webhook-platform.selectorLabels" (dict "ctx" . "component" "control-api") | nindent 6 }}
+      {{- include "hookubit.selectorLabels" (dict "ctx" . "component" "control-api") | nindent 6 }}
   template:
     metadata:
       labels:
-        {{- include "webhook-platform.labels" . | nindent 8 }}
+        {{- include "hookubit.labels" . | nindent 8 }}
         app.kubernetes.io/component: control-api
       annotations:
         # Roll the pods when configuration changes, so a value edit actually
@@ -27,7 +27,7 @@ spec:
         checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
         checksum/secret: {{ include (print $.Template.BasePath "/secret.yaml") . | sha256sum }}
     spec:
-      serviceAccountName: {{ include "webhook-platform.serviceAccountName" . }}
+      serviceAccountName: {{ include "hookubit.serviceAccountName" . }}
       automountServiceAccountToken: false
       {{- with .Values.global.imagePullSecrets }}
       imagePullSecrets:
@@ -35,18 +35,18 @@ spec:
       {{- end }}
       terminationGracePeriodSeconds: 45
       securityContext:
-        {{- include "webhook-platform.podSecurityContext" (dict "uid" 1000) | nindent 8 }}
+        {{- include "hookubit.podSecurityContext" (dict "uid" 1000) | nindent 8 }}
         fsGroup: 1000
       containers:
         - name: control-api
-          image: {{ include "webhook-platform.image" (dict "ctx" . "image" .Values.controlApi.image "defaultTag" .Chart.AppVersion) }}
+          image: {{ include "hookubit.image" (dict "ctx" . "image" .Values.controlApi.image "defaultTag" .Chart.AppVersion) }}
           imagePullPolicy: {{ .Values.controlApi.image.pullPolicy }}
           ports:
             - name: http
               containerPort: 3000
               protocol: TCP
           envFrom:
-            {{- include "webhook-platform.envFrom" . | nindent 12 }}
+            {{- include "hookubit.envFrom" . | nindent 12 }}
           # Liveness must never depend on PostgreSQL (ARCHITECTURE.md 46): a
           # database blip that restarts every pod turns a recoverable incident
           # into an outage.
@@ -69,7 +69,7 @@ spec:
           resources:
             {{- toYaml .Values.controlApi.resources | nindent 12 }}
           securityContext:
-            {{- include "webhook-platform.containerSecurityContext" . | nindent 12 }}
+            {{- include "hookubit.containerSecurityContext" . | nindent 12 }}
           volumeMounts:
             - name: tmp
               mountPath: /tmp
@@ -92,9 +92,9 @@ spec:
 apiVersion: v1
 kind: Service
 metadata:
-  name: {{ include "webhook-platform.fullname" . }}-control-api
+  name: {{ include "hookubit.fullname" . }}-control-api
   labels:
-    {{- include "webhook-platform.labels" . | nindent 4 }}
+    {{- include "hookubit.labels" . | nindent 4 }}
     app.kubernetes.io/component: control-api
 spec:
   type: ClusterIP
@@ -104,4 +104,4 @@ spec:
       targetPort: http
       protocol: TCP
   selector:
-    {{- include "webhook-platform.selectorLabels" (dict "ctx" . "component" "control-api") | nindent 4 }}
+    {{- include "hookubit.selectorLabels" (dict "ctx" . "component" "control-api") | nindent 4 }}

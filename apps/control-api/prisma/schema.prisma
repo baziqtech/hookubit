@@ -1,5 +1,5 @@
 // ---------------------------------------------------------------------------
-// Webhook Platform - PostgreSQL schema
+// HookuBit - PostgreSQL schema
 //
 // Prisma owns all DDL for this database (ADR-0002). The Go data plane reads and
 // writes these tables with hand-written SQL via pgx; it never runs migrations.

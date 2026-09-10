@@ -63,7 +63,7 @@ pnpm load:verify slow-endpoints --since 2026-09-09T10:00:00Z
 
 ## 2. What gets created, and where
 
-Everything lives under one organization, **Hookubit Load Tests**, created
+Everything lives under one organization, **HookuBit Load Tests**, created
 through the real REST API by an operator account the seed owns
 (`load-test@hookubit.invalid`). One project per scenario — `load-fanout`,
 `load-slow-endpoints`, `load-failing-endpoints`, `load-tenant-1..5`,
@@ -84,7 +84,7 @@ HTTP. It never touches an account it did not create.
 
 **Which database.** Whatever `DATABASE_URL` in `.env` points at, because that is
 where the running services write; a load test against a different database than
-the data plane is not a load test. On a normal dev box that is `hookubit`. It is
+the data plane is not a load test. On a normal dev box that is `HookuBit`. It is
 **not** `hookubit_test` — that belongs to the Go and Nest suites, and dropping a
 load run into it will make somebody's integration test fail for reasons they
 will not enjoy chasing. Point `LOAD_DATABASE_URL` and the service URLs at an

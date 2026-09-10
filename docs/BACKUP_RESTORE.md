@@ -92,7 +92,7 @@ pg_restore --no-owner --no-acl --dbname hookubit_restored hookubit-<stamp>.dump
 # 2. Bring the schema to the code's expectation. Safe on a current backup and
 #    necessary on an older one; the data plane never runs migrations (ADR-0002).
 DATABASE_URL=postgresql://.../hookubit_restored \
-  pnpm --filter @webhook/control-api prisma:deploy
+  pnpm --filter @hookubit/control-api prisma:deploy
 
 # 3. Point the services at it, with the ENCRYPTION_KEY that matches the backup.
 ```

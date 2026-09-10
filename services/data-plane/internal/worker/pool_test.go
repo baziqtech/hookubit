@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/shaq/webhook-platform/services/data-plane/internal/queue"
+	"github.com/shaq/hookubit/services/data-plane/internal/queue"
 )
 
 // leaseFor builds a lease for a job the fake store will serve.

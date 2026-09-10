@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/shaq/webhook-platform/services/data-plane/internal/worker"
+	"github.com/shaq/hookubit/services/data-plane/internal/worker"
 )
 
 func quiet() *slog.Logger {

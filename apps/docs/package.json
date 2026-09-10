@@ -1,9 +1,9 @@
 {
-  "name": "@webhook/docs",
+  "name": "@hookubit/docs",
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Customer-facing documentation for hookubit: integrating, operating, self-hosting, and the API reference.",
+  "description": "Customer-facing documentation for HookuBit: integrating, operating, self-hosting, and the API reference.",
   "scripts": {
     "dev": "vitepress dev --port 4000",
     "build": "node scripts/generate-api-reference.mjs && vitepress build",
@@ -12,7 +12,7 @@
     "deploy": "pnpm build && pnpm dlx wrangler@4 deploy"
   },
   "devDependencies": {
-    "@webhook/control-api": "workspace:*",
+    "@hookubit/control-api": "workspace:*",
     "mermaid": "^11.4.1",
     "vitepress": "^1.5.0",
     "vitepress-plugin-mermaid": "^2.0.17"

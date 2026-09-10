@@ -3,7 +3,7 @@
  *
  * Everything above this file — hooks, features, pages — calls `api.get/post/…`
  * with a path from docs/API.md and never knows which transport served it.
- * Today that is the in-memory mock, because @webhook/control-api is being
+ * Today that is the in-memory mock, because @hookubit/control-api is being
  * built in parallel; tomorrow it is `fetch`.
  *
  * TO SWAP IN THE REAL CLIENT: set `VITE_API_TRANSPORT=http` (or flip the

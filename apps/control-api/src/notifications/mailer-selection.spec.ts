@@ -18,8 +18,8 @@ describe('selectMailer', () => {
   it.each(['development', 'test', 'staging', 'production'])(
     'uses SMTP whenever a transport exists, including under APP_ENV=%s',
     (appEnv) => {
-      const config = configOf({ APP_ENV: appEnv, MAIL_FROM: 'Hookubit <no-reply@example.com>' });
-      expect(selectMailer(config, transport, choices)).toBe('smtp:Hookubit:true');
+      const config = configOf({ APP_ENV: appEnv, MAIL_FROM: 'HookuBit <no-reply@example.com>' });
+      expect(selectMailer(config, transport, choices)).toBe('smtp:HookuBit:true');
     },
   );
 
@@ -49,7 +49,7 @@ describe('createMailTransport', () => {
 
   it('builds the SMTP transport from SMTP_URL and MAIL_FROM', () => {
     const built = createMailTransport(
-      configOf({ SMTP_URL: 'smtp://127.0.0.1:1025', MAIL_FROM: 'Hookubit <no-reply@localhost>' }),
+      configOf({ SMTP_URL: 'smtp://127.0.0.1:1025', MAIL_FROM: 'HookuBit <no-reply@localhost>' }),
     );
     expect(built).toBeInstanceOf(NodemailerSmtpTransport);
   });

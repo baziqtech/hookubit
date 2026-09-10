@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/shaq/webhook-platform/services/data-plane/internal/ids"
+	"github.com/shaq/hookubit/services/data-plane/internal/ids"
 )
 
 func TestKeyLayoutIsPrefixProjectEvent(t *testing.T) {

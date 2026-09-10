@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/shaq/webhook-platform/services/data-plane/internal/payloadstore"
+	"github.com/shaq/hookubit/services/data-plane/internal/payloadstore"
 )
 
 // unreachableEndpoint is a server that fails the test if it is ever contacted.

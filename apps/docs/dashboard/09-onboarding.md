@@ -17,7 +17,7 @@ Five steps:
 
 | Step | What it says |
 |---|---|
-| What this is | Your system publishes an event once; hookubit gets it to every consumer that asked, retrying, signing and keeping a permanent record of every attempt. The record is the product. |
+| What this is | Your system publishes an event once; HookuBit gets it to every consumer that asked, retrying, signing and keeping a permanent record of every attempt. The record is the product. |
 | Fan-out | One event becomes one delivery per matching subscription, created up front so the table is the record of what should arrive. Each delivery retries on its own, and either can be replayed alone. |
 | Signing | Every request carries a `Webhook-Signature`, an HMAC over the timestamp and the exact body bytes. Rotating a secret emits both old and new signatures for an overlap window. |
 | Retries | Timeouts, 429s and 5xx are retried with backoff; other 4xx are permanent. An endpoint that fails consistently trips its circuit breaker and is set aside so it cannot starve the others. |

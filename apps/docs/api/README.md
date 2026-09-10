@@ -13,7 +13,7 @@ in the product's own declarations, not in this site.
 
 ## Two surfaces
 
-hookubit is two processes with two jobs, and the API follows that split.
+HookuBit is two processes with two jobs, and the API follows that split.
 
 | Surface | What it is for | Where |
 |---|---|---|
@@ -26,7 +26,7 @@ still answers. Do not assume they share a hostname.
 
 ## Base URLs
 
-hookubit is self-hosted, so the base URLs are whatever your operator
+HookuBit is self-hosted, so the base URLs are whatever your operator
 configured: the ingest listener and the control API are separate processes,
 usually behind separate hostnames, and nothing in this reference hard-codes
 either. Every path here is relative to the base of the surface it belongs to.
@@ -48,7 +48,7 @@ Authorization: Bearer wk_live_3xAmPl3S3cr3tK3yV4lu3Chars32Aa
 ```
 
 - Minted under a project with [`POST /v1/projects/{projectId}/api-keys`](./05-api-keys.md#post-v1-projects-projectid-api-keys).
-  The plaintext is in that response and nowhere else; hookubit stores a hash.
+  The plaintext is in that response and nowhere else; HookuBit stores a hash.
 - The prefix encodes the environment: `wk_live_` for a live project, `wk_test_`
   for a test project. A key only authenticates against its own project, and
   only while the project is active and the environments agree.

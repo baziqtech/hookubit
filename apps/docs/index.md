@@ -2,7 +2,7 @@
 layout: home
 
 hero:
-  name: hookubit
+  name: HookuBit
   text: Webhooks that arrive.
   tagline: Durable ingestion, materialised fan-out, retries with backoff, signed deliveries, and a delivery log that answers "what happened to this event?" — without a support ticket.
   actions:
@@ -30,14 +30,14 @@ features:
     link: /api/
     linkText: Browse the API
   - title: Self-hosting
-    details: Run hookubit against your own PostgreSQL — Helm chart, raw manifests or Compose, every configuration key, mail, observability, backup and upgrades.
+    details: Run HookuBit against your own PostgreSQL — Helm chart, raw manifests or Compose, every configuration key, mail, observability, backup and upgrades.
     link: /self-hosting/
     linkText: Deploy it yourself
 ---
 
-## What hookubit does
+## What HookuBit does
 
-You publish an event once. hookubit stores it durably before it answers, works
+You publish an event once. HookuBit stores it durably before it answers, works
 out which of your endpoints subscribed to it, and delivers to each one
 independently — with its own retry chain, its own signature, its own attempt
 history. If an endpoint is down for an hour you lose time, not events. If it

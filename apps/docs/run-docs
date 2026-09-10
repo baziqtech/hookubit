@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Serve the hookubit customer documentation as a browsable local site.
+# Serve the HookuBit customer documentation as a browsable local site.
 #
 #   ./run-docs            from apps/docs
 #

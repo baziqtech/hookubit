@@ -72,7 +72,7 @@ import (
 func NewSampler(ratio float64) sdktrace.Sampler {
 	return sdktrace.ParentBased(stageSampler{
 		ratio: sdktrace.TraceIDRatioBased(ratio),
-		desc:  fmt.Sprintf("HookubitStage{ratio:%g,sample_in:always}", ratio),
+		desc:  fmt.Sprintf("HookuBitStage{ratio:%g,sample_in:always}", ratio),
 	})
 }
 

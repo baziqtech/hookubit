@@ -3,7 +3,7 @@ package router
 import (
 	"testing"
 
-	"github.com/shaq/webhook-platform/services/data-plane/internal/retry"
+	"github.com/shaq/hookubit/services/data-plane/internal/retry"
 )
 
 const (

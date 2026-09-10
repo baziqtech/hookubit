@@ -11,10 +11,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/shaq/webhook-platform/services/data-plane/internal/egress"
-	"github.com/shaq/webhook-platform/services/data-plane/internal/ids"
-	"github.com/shaq/webhook-platform/services/data-plane/internal/retry"
-	"github.com/shaq/webhook-platform/services/data-plane/internal/worker"
+	"github.com/shaq/hookubit/services/data-plane/internal/egress"
+	"github.com/shaq/hookubit/services/data-plane/internal/ids"
+	"github.com/shaq/hookubit/services/data-plane/internal/retry"
+	"github.com/shaq/hookubit/services/data-plane/internal/worker"
 )
 
 // countingListener is a real TCP listener that records every connection it

@@ -10,11 +10,11 @@ import (
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/trace"
 
-	"github.com/shaq/webhook-platform/services/data-plane/internal/ids"
-	"github.com/shaq/webhook-platform/services/data-plane/internal/ingest"
-	"github.com/shaq/webhook-platform/services/data-plane/internal/router"
-	"github.com/shaq/webhook-platform/services/data-plane/internal/tracing"
-	"github.com/shaq/webhook-platform/services/data-plane/internal/tracing/tracingtest"
+	"github.com/shaq/hookubit/services/data-plane/internal/ids"
+	"github.com/shaq/hookubit/services/data-plane/internal/ingest"
+	"github.com/shaq/hookubit/services/data-plane/internal/router"
+	"github.com/shaq/hookubit/services/data-plane/internal/tracing"
+	"github.com/shaq/hookubit/services/data-plane/internal/tracing/tracingtest"
 )
 
 // TestTraceContextSurvivesTheThreeProcessBoundaries is the whole point of this

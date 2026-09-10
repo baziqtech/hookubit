@@ -39,7 +39,7 @@ away by being acknowledged. The quieter `MockBanner` that used to live inside
 **To turn it off:** build with the real transport.
 
 ```sh
-VITE_API_TRANSPORT=http pnpm --filter @webhook/dashboard build
+VITE_API_TRANSPORT=http pnpm --filter @hookubit/dashboard build
 ```
 
 `usingMockApi` in `src/lib/api.ts` is the single source of that signal — the
@@ -569,7 +569,7 @@ Two changes to `src/lib/mock/`, both of which make the mock **more** faithful:
 
 # The types are generated now, and here is everything that was wrong
 
-`src/types/api.d.ts` is written by `pnpm --filter @webhook/dashboard
+`src/types/api.d.ts` is written by `pnpm --filter @hookubit/dashboard
 generate:api` from the control API's live `/docs-json` — 42 paths, 68 schemas.
 `src/types/api.ts` no longer states a single field name or field type by hand:
 every domain type is `components['schemas'][…]`, so a rename on the wire is now

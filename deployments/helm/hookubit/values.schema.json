@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft-07/schema#",
-  "title": "webhook-platform values",
+  "title": "hookubit values",
   "description": "The one hard requirement is externalDatabase.url. This chart ships no database and must not be installable without one.",
   "type": "object",
   "required": [
@@ -18,7 +18,7 @@
           "type": "string",
           "minLength": 1,
           "pattern": "^postgres(ql)?://",
-          "description": "REQUIRED. PostgreSQL connection URL, e.g. postgresql://user:pass@host:6432/webhook_platform?schema=public&sslmode=require. Point at PgBouncer in production."
+          "description": "REQUIRED. PostgreSQL connection URL, e.g. postgresql://user:pass@host:6432/hookubit?schema=public&sslmode=require. Point at PgBouncer in production."
         },
         "directUrl": {
           "type": "string",
@@ -263,7 +263,7 @@
         },
         "grafanaDashboard": {
           "type": "object",
-          "description": "Renders dashboards/webhook-platform.json as a ConfigMap for the Grafana sidecar to pick up. Off by default: without a sidecar watching for the label it is an inert object, and with the wrong label it is an invisible one.",
+          "description": "Renders dashboards/hookubit.json as a ConfigMap for the Grafana sidecar to pick up. Off by default: without a sidecar watching for the label it is an inert object, and with the wrong label it is an invisible one.",
           "properties": {
             "enabled": {
               "type": "boolean"

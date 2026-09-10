@@ -14,14 +14,14 @@ import (
 // convenience.
 func TestPackageSuffixNamesThePackageUnderTest(t *testing.T) {
 	cases := map[string]string{
-		"github.com/shaq/webhook-platform/services/data-plane/internal/router": "internal_router",
-		"github.com/shaq/webhook-platform/services/data-plane/internal/queue":  "internal_queue",
+		"github.com/shaq/hookubit/services/data-plane/internal/router": "internal_router",
+		"github.com/shaq/hookubit/services/data-plane/internal/queue":  "internal_queue",
 		// The compiler names an external test package `<pkg>_test`; it must share
 		// the database of the package it tests rather than take a second copy.
-		"github.com/shaq/webhook-platform/services/data-plane/internal/db_test": "internal_db",
+		"github.com/shaq/hookubit/services/data-plane/internal/db_test": "internal_db",
 		// Two packages with the same base name in different directories stay
 		// apart, because the path below the module root is kept.
-		"github.com/shaq/webhook-platform/services/data-plane/internal/egress/store": "internal_egress_store",
+		"github.com/shaq/hookubit/services/data-plane/internal/egress/store": "internal_egress_store",
 		"example.com/mod/toplevel": "toplevel",
 	}
 	for in, want := range cases {

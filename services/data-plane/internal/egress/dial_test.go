@@ -18,7 +18,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	dto "github.com/prometheus/client_model/go"
 
-	"github.com/shaq/webhook-platform/services/data-plane/internal/metrics"
+	"github.com/shaq/hookubit/services/data-plane/internal/metrics"
 )
 
 // blockedCount reads one series of egress_blocked_total. Calling it also

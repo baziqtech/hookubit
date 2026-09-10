@@ -1,4 +1,4 @@
-# Alert rules for the webhook platform.
+# Alert rules for HookuBit.
 #
 # Plain Prometheus rule groups: point `rule_files:` at this, or paste the
 # `groups:` block into a PrometheusRule CRD's `spec:` if you run
@@ -15,7 +15,7 @@
 # written is a rule that never fires and always looks healthy.
 
 groups:
-  - name: webhook-platform-delivery
+  - name: hookubit-delivery
     interval: 30s
     rules:
       # ── The backlog ────────────────────────────────────────────────────
@@ -82,7 +82,7 @@ groups:
             shows it. Check the router pods and router_events_routed_total for `parked`
             or `retried` outcomes.
 
-  - name: webhook-platform-safety
+  - name: hookubit-safety
     interval: 30s
     rules:
       # ── The security one ───────────────────────────────────────────────

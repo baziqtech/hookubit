@@ -12,7 +12,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/shaq/webhook-platform/services/data-plane/internal/retry"
+	"github.com/shaq/hookubit/services/data-plane/internal/retry"
 )
 
 // State is a delivery lifecycle state (ARCHITECTURE.md 19). The values are the

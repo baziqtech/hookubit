@@ -189,7 +189,7 @@ broken.
 | Variable | Rule |
 |---|---|
 | `SMTP_URL` | `smtp://user:pass@host:587` or `smtps://...`. **The scheme is mandatory**: `host:587` parses as a URL whose scheme is the hostname and is refused. Query options such as `?pool=true` or `?ignoreTLS=true` pass through to the mailer. |
-| `MAIL_FROM` | Required whenever `SMTP_URL` is set. `Hookubit <no-reply@example.com>` or a bare address. The display name is also the product name in subjects and bodies. |
+| `MAIL_FROM` | Required whenever `SMTP_URL` is set. `HookuBit <no-reply@example.com>` or a bare address. The display name is also the product name in subjects and bodies. |
 | `DASHBOARD_URL` | The base of every link in every message. Wrong here means mail full of dead links. |
 
 [Mail](/self-hosting/06-mail) covers what is sent and how to test it with a
@@ -235,4 +235,4 @@ a rule.
 
 ---
 
-**Where this comes from.** `.env.example`, `docs/LOCAL_SETUP.md` §0, `docs/LOAD_TESTING.md` §3 and §7, `deployments/helm/webhook-platform/values.yaml`, `services/data-plane/internal/config/{config,isolation}.go`, `services/data-plane/internal/payloadstore/{keys,reconcile}.go`, `services/data-plane/cmd/webhookd/roles.go` (`buildPayloadStore`, `buildDeliveryLimiter`), `apps/control-api/src/config/env.schema.ts`, `deployments/kubernetes/50-networkpolicy.yaml`.
+**Where this comes from.** `.env.example`, `docs/LOCAL_SETUP.md` §0, `docs/LOAD_TESTING.md` §3 and §7, `deployments/helm/hookubit/values.yaml`, `services/data-plane/internal/config/{config,isolation}.go`, `services/data-plane/internal/payloadstore/{keys,reconcile}.go`, `services/data-plane/cmd/webhookd/roles.go` (`buildPayloadStore`, `buildDeliveryLimiter`), `apps/control-api/src/config/env.schema.ts`, `deployments/kubernetes/50-networkpolicy.yaml`.

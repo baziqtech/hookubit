@@ -6,8 +6,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/shaq/webhook-platform/services/data-plane/internal/db"
-	"github.com/shaq/webhook-platform/services/data-plane/internal/testsupport"
+	"github.com/shaq/hookubit/services/data-plane/internal/db"
+	"github.com/shaq/hookubit/services/data-plane/internal/testsupport"
 )
 
 // These two tests open a real pool. They live in the EXTERNAL test package so

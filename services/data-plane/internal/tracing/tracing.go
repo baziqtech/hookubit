@@ -63,7 +63,7 @@ import (
 // ScopeName is the instrumentation scope every data-plane span is emitted
 // under. One scope for the whole service: the span NAME says which stage
 // produced it, and splitting the scope would only make a backend query harder.
-const ScopeName = "github.com/shaq/webhook-platform/services/data-plane"
+const ScopeName = "github.com/shaq/hookubit/services/data-plane"
 
 // Defaults. Each is a bound, and each is here rather than implicit.
 const (

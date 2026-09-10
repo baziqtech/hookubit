@@ -16,9 +16,9 @@ scalable, which is the property that actually matters.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: {{ include "webhook-platform.fullname" $root }}-{{ $role.name }}
+  name: {{ include "hookubit.fullname" $root }}-{{ $role.name }}
   labels:
-    {{- include "webhook-platform.labels" $root | nindent 4 }}
+    {{- include "hookubit.labels" $root | nindent 4 }}
     app.kubernetes.io/component: {{ $role.name }}
 spec:
   {{- if not $autoscaled }}
@@ -34,11 +34,11 @@ spec:
     {{- end }}
   selector:
     matchLabels:
-      {{- include "webhook-platform.selectorLabels" (dict "ctx" $root "component" $role.name) | nindent 6 }}
+      {{- include "hookubit.selectorLabels" (dict "ctx" $root "component" $role.name) | nindent 6 }}
   template:
     metadata:
       labels:
-        {{- include "webhook-platform.labels" $root | nindent 8 }}
+        {{- include "hookubit.labels" $root | nindent 8 }}
         app.kubernetes.io/component: {{ $role.name }}
       annotations:
         checksum/config: {{ include (print $root.Template.BasePath "/configmap.yaml") $root | sha256sum }}
@@ -49,7 +49,7 @@ spec:
         prometheus.io/path: /metrics
         {{- end }}
     spec:
-      serviceAccountName: {{ include "webhook-platform.serviceAccountName" $root }}
+      serviceAccountName: {{ include "hookubit.serviceAccountName" $root }}
       automountServiceAccountToken: false
       {{- with $root.Values.global.imagePullSecrets }}
       imagePullSecrets:
@@ -62,10 +62,10 @@ spec:
       terminationGracePeriodSeconds: {{ $role.grace }}
       securityContext:
         # distroless nonroot.
-        {{- include "webhook-platform.podSecurityContext" (dict "uid" 65532) | nindent 8 }}
+        {{- include "hookubit.podSecurityContext" (dict "uid" 65532) | nindent 8 }}
       containers:
         - name: webhookd
-          image: {{ include "webhook-platform.image" (dict "ctx" $root "image" $root.Values.dataPlane.image "defaultTag" $root.Chart.AppVersion) }}
+          image: {{ include "hookubit.image" (dict "ctx" $root "image" $root.Values.dataPlane.image "defaultTag" $root.Chart.AppVersion) }}
           imagePullPolicy: {{ $root.Values.dataPlane.image.pullPolicy }}
           args: [{{ $role.name | quote }}]
           ports:
@@ -84,7 +84,7 @@ spec:
           # HTTP to customer-controlled URLs and is the worst place in the
           # system to hold the session-forgery key.
           envFrom:
-            {{- include "webhook-platform.dataPlaneEnvFrom" $root | nindent 12 }}
+            {{- include "hookubit.dataPlaneEnvFrom" $root | nindent 12 }}
           {{- if $root.Values.dataPlane.startupProbe.enabled }}
           # ── STARTUP ────────────────────────────────────────────────────────
           # The third probe, and the one that was missing. While it is running,
@@ -136,7 +136,7 @@ spec:
           resources:
             {{- toYaml $role.cfg.resources | nindent 12 }}
           securityContext:
-            {{- include "webhook-platform.containerSecurityContext" $root | nindent 12 }}
+            {{- include "hookubit.containerSecurityContext" $root | nindent 12 }}
           volumeMounts:
             - name: tmp
               mountPath: /tmp
@@ -156,9 +156,9 @@ spec:
 apiVersion: v1
 kind: Service
 metadata:
-  name: {{ include "webhook-platform.fullname" $root }}-{{ $role.name }}
+  name: {{ include "hookubit.fullname" $root }}-{{ $role.name }}
   labels:
-    {{- include "webhook-platform.labels" $root | nindent 4 }}
+    {{- include "hookubit.labels" $root | nindent 4 }}
     app.kubernetes.io/component: {{ $role.name }}
 spec:
   type: ClusterIP
@@ -172,6 +172,6 @@ spec:
       targetPort: probes
       protocol: TCP
   selector:
-    {{- include "webhook-platform.selectorLabels" (dict "ctx" $root "component" $role.name) | nindent 4 }}
+    {{- include "hookubit.selectorLabels" (dict "ctx" $root "component" $role.name) | nindent 4 }}
 {{- end }}
 {{- end }}

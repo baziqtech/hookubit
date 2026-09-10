@@ -249,7 +249,7 @@ Use a monorepo.
 
 Recommended structure:
 
-webhook-platform/
+hookubit/
 │
 ├── apps/
 │   ├── dashboard/

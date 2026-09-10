@@ -565,7 +565,7 @@ instance). Run them with:
 
 ```
 cd services/data-plane
-DATABASE_URL=postgresql://webhook:webhook@localhost:5432/webhook_platform go test -race -count=1 ./internal/router/
+DATABASE_URL=postgresql://postgres:root@localhost:5432/hookubit go test -race -count=1 ./internal/router/
 ```
 
 They assert the properties that cannot be unit-tested: that a re-run inserts

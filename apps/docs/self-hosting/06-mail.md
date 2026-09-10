@@ -9,7 +9,7 @@ no mailer at all.
 | Variable | Value | Notes |
 |---|---|---|
 | `SMTP_URL` | `smtp://user:pass@mail.example.com:587` or `smtps://...` | **Set is the switch.** With it, SMTP is used in every environment, `development` included. Without it, `development` and `test` use a stub that logs and delivers nothing, and `staging` and `production` refuse to boot. |
-| `MAIL_FROM` | `Hookubit <no-reply@example.com>` or `no-reply@example.com` | Required whenever `SMTP_URL` is set; the control plane refuses to boot with one and not the other. The display name is the product name used in subjects and bodies. Quote it: the angle brackets are shell syntax. |
+| `MAIL_FROM` | `HookuBit <no-reply@example.com>` or `no-reply@example.com` | Required whenever `SMTP_URL` is set; the control plane refuses to boot with one and not the other. The display name is the product name used in subjects and bodies. Quote it: the angle brackets are shell syntax. |
 | `DASHBOARD_URL` | `https://webhooks.example.com` | The base of every link. The path is preserved, so `https://example.com/hooks` produces `https://example.com/hooks/verify-email?...`. Scheme required. |
 
 `SMTP_URL` carries a password, so it belongs in a Secret, not a ConfigMap. The
@@ -73,7 +73,7 @@ mailpit:
 
 ```
 SMTP_URL=smtp://mailpit:1025
-MAIL_FROM="Hookubit <no-reply@staging.example.com>"
+MAIL_FROM="HookuBit <no-reply@staging.example.com>"
 ```
 
 Every message lands in the inbox at port 8025 and nothing leaves the network.

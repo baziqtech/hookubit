@@ -1,6 +1,6 @@
 import { Tracer, trace } from '@opentelemetry/api';
 
-export const TRACER_NAME = '@webhook/control-api';
+export const TRACER_NAME = '@hookubit/control-api';
 export const TRACER_VERSION = '0.1.0';
 
 /**

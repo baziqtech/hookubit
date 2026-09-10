@@ -994,7 +994,7 @@ const ERRORS: Failure[] = [
     error_code: 'http_502',
     error_message: 'endpoint responded 502 Bad Gateway',
     body: null,
-    body_location: 's3://shaq-webhooks-responses/2026/09/502-nginx-debug-page.html',
+    body_location: 's3://hookubit-responses/2026/09/502-nginx-debug-page.html',
     size: 2_097_152,
   },
   {
@@ -1112,7 +1112,7 @@ function payloadEnvelope(
       source: 'object_storage',
       body: null,
       encoding: null,
-      location: `s3://shaq-webhooks-payloads/${PROD}/${index}.json`,
+      location: `s3://hookubit-payloads/${PROD}/${index}.json`,
       size_bytes: size,
       sha256,
       normalised_json: normalised,
@@ -1328,7 +1328,7 @@ function buildFixture(index: number): Fixture {
       payload_hash: sha256,
       payload_inline: index !== OFFLOADED_EVENT && index !== AGED_OUT_EVENT,
       payload_location:
-        index === OFFLOADED_EVENT ? `s3://shaq-webhooks-payloads/${PROD}/${index}.json` : null,
+        index === OFFLOADED_EVENT ? `s3://hookubit-payloads/${PROD}/${index}.json` : null,
       headers: {
         'content-type': 'application/json',
         'user-agent': 'shaq-payment-gateway/2.4.1',
@@ -1442,7 +1442,7 @@ function buildAttempts(
        */
       request_headers: {
         'content-type': 'application/json',
-        'user-agent': 'hookubit-worker/0.4.2',
+        'user-agent': 'HookuBit/1.0',
         'webhook-id': deliveryId,
         'webhook-timestamp': Math.floor(startedAt.getTime() / 1000).toString(),
         'webhook-signature': `v1=${digest().slice(0, 44)}`,

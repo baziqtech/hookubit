@@ -149,7 +149,7 @@ export const envSchema = z.object({
     z
       .string()
       .max(64, 'OTEL_SERVICE_NAMESPACE must be at most 64 characters')
-      .default('webhook-platform'),
+      .default('hookubit'),
   ),
   /**
    * `service.name` on every span. Overridable because a self-hosted install may
@@ -232,7 +232,7 @@ export const envSchema = z.object({
       .string()
       .refine(
         (v) => parseMailbox(v) !== null,
-        'MAIL_FROM must be a mailbox such as "Hookubit <no-reply@example.com>" or no-reply@example.com',
+        'MAIL_FROM must be a mailbox such as "HookuBit <no-reply@example.com>" or no-reply@example.com',
       )
       .optional(),
   ),

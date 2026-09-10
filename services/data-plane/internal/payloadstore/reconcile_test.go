@@ -13,7 +13,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/s3/types"
 	"github.com/oklog/ulid/v2"
 
-	"github.com/shaq/webhook-platform/services/data-plane/internal/ids"
+	"github.com/shaq/hookubit/services/data-plane/internal/ids"
 )
 
 // fakeS3 is an in-memory bucket. It is enough for the sweep, whose logic is all

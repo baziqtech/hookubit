@@ -71,8 +71,8 @@ which plane's configuration loader reads the key.
 |---|---|---|---|
 | `APP_ENV` | `development` | both | `development`, `test`, `staging` or `production`. Gates several refusals (see below). |
 | `LOG_LEVEL` | `debug` | both | `trace`..`fatal`. The data plane maps `trace` to debug. |
-| `DATABASE_URL` | `postgresql://webhook:webhook@localhost:5432/webhook_platform?schema=public` | both | PostgreSQL URL. Point at PgBouncer in production. **Required.** |
-| `DIRECT_DATABASE_URL` | `postgresql://webhook:webhook@localhost:5432/webhook_platform?schema=public` | control plane | Direct (non-pooled) URL for migrations. Must bypass PgBouncer. |
+| `DATABASE_URL` | `postgresql://hookubit:hookubit@localhost:5432/hookubit?schema=public` | both | PostgreSQL URL. Point at PgBouncer in production. **Required.** |
+| `DIRECT_DATABASE_URL` | `postgresql://hookubit:hookubit@localhost:5432/hookubit?schema=public` | control plane | Direct (non-pooled) URL for migrations. Must bypass PgBouncer. |
 | `DATABASE_MAX_CONNECTIONS` | `20` | data plane | Per-process pool size for the Go roles. |
 | `REDIS_URL` | `redis://localhost:6379/0` | both | Optional. Token buckets only; delivery never depends on it. Leave **unset** rather than empty. |
 | `S3_ENDPOINT` | `http://localhost:9000` | data plane | S3-compatible endpoint. Empty means no object storage. |
@@ -90,7 +90,7 @@ which plane's configuration loader reads the key.
 | `CONTROL_API_URL` | `http://localhost:3000` | neither (informational) | Public URL of the control API. |
 | `DASHBOARD_URL` | `http://localhost:5173` | control plane | Public origin of the dashboard; the base of every link in outbound mail. Scheme required. |
 | `SMTP_URL` | `smtp://localhost:1025` | control plane | `smtp://` or `smtps://` with credentials. Set means SMTP everywhere; unset refuses to boot under `staging`/`production`. `host:587` is refused. |
-| `MAIL_FROM` | `"Hookubit <no-reply@localhost>"` | control plane | From header, `Name <address>` or bare address. Required whenever `SMTP_URL` is set. |
+| `MAIL_FROM` | `"HookuBit <no-reply@localhost>"` | control plane | From header, `Name <address>` or bare address. Required whenever `SMTP_URL` is set. |
 | `CORS_ORIGINS` | `http://localhost:5173` | control plane | Comma-separated browser origins allowed to call the control API. |
 | `TRUST_PROXY_HOPS` | `0` | control plane | Exact number of reverse proxies in front of the control API (0..10). Wrong in either direction breaks per-IP rate limiting. |
 | `INGEST_PORT` | `8080` | data plane | Listen port of the ingest API. |
@@ -129,7 +129,7 @@ which plane's configuration loader reads the key.
 | `EGRESS_ALLOW_PRIVATE_NETWORKS` | `false` | data plane | Disable the SSRF private-range refusal. **Refused when `APP_ENV=production`.** |
 | `EGRESS_PRIVATE_ALLOWLIST` | unset | data plane | Comma-separated CIDRs deliverable despite being private. Works in production. |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | unset | both | Collector base URL; `/v1/traces` is appended. **Scheme required**: `host:4318` is refused by the control plane and logged-and-disabled by the data plane. Unset means tracing off. |
-| `OTEL_SERVICE_NAMESPACE` | `webhook-platform` | both | `service.namespace` on every span (max 64 chars). |
+| `OTEL_SERVICE_NAMESPACE` | `hookubit` | both | `service.namespace` on every span (max 64 chars). |
 | `OTEL_SERVICE_NAME` | `control-api` | control plane | `service.name` for the control API (max 64 chars). |
 | `OTEL_TRACES_SAMPLER_ARG` | `1` | control plane | Control-plane head sampling ratio 0..1. |
 | `DATA_PLANE_OTEL_SERVICE_NAME` | `data-plane` | data plane | `service.name` for the Go roles. No fallback to `OTEL_SERVICE_NAME`. |
@@ -189,4 +189,4 @@ but no process reads it today. Harmless; do not rely on it.
 
 ---
 
-**Where this comes from.** `.env.example` (key order and defaults), `services/data-plane/internal/config/{config,isolation}.go`, `services/data-plane/internal/retention/config.go`, `services/data-plane/internal/tracing/tracing.go`, `apps/control-api/src/config/env.schema.ts`, `deployments/helm/webhook-platform/templates/configmap.yaml`. The two tables are produced by a generator that parses those files; regenerate them when a key is added.
+**Where this comes from.** `.env.example` (key order and defaults), `services/data-plane/internal/config/{config,isolation}.go`, `services/data-plane/internal/retention/config.go`, `services/data-plane/internal/tracing/tracing.go`, `apps/control-api/src/config/env.schema.ts`, `deployments/helm/hookubit/templates/configmap.yaml`. The two tables are produced by a generator that parses those files; regenerate them when a key is added.

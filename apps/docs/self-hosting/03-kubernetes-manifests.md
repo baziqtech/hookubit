@@ -15,7 +15,7 @@ Secrets or run migrations; both are separate steps below.
 
 | File | Contents | In the kustomization? |
 |---|---|---|
-| `00-namespace.yaml` | Namespace `webhook-platform`, labelled for Pod Security Admission `restricted` | yes |
+| `00-namespace.yaml` | Namespace `HookuBit`, labelled for Pod Security Admission `restricted` | yes |
 | `01-configmap.yaml` | Every non-secret setting for both planes | yes |
 | `02-secret.template.yaml` | **Template only.** Placeholders for the three Secrets. Never commit a filled copy | no: create the Secrets out of band |
 | `10-migration-job.yaml` | The migration Job. Uses `generateName`, so `kubectl create`, not `apply` | no: run it explicitly |
@@ -32,11 +32,11 @@ Secrets or run migrations; both are separate steps below.
 The sequence for a first install:
 
 1. Create the three Secrets (below).
-2. `kubectl -n webhook-platform create -f deployments/kubernetes/10-migration-job.yaml`
-   and wait for it: `kubectl -n webhook-platform wait --for=condition=complete --timeout=10m job -l app.kubernetes.io/component=migrate`.
+2. `kubectl -n HookuBit create -f deployments/kubernetes/10-migration-job.yaml`
+   and wait for it: `kubectl -n HookuBit wait --for=condition=complete --timeout=10m job -l app.kubernetes.io/component=migrate`.
 3. `kubectl apply -k deployments/kubernetes`.
 4. Create the first owner with a bootstrap Job (the Helm page shows the shape;
-   substitute `webhook-platform-config` and `webhook-platform-app` for the
+   substitute `hookubit-config` and `hookubit-app` for the
    `envFrom` names).
 
 ## The Secrets
@@ -47,16 +47,16 @@ template's header carries the exact `kubectl create secret` lines.
 
 | Secret | Keys | Mounted by |
 |---|---|---|
-| `webhook-platform-database` | `DATABASE_URL` (pooled), `DIRECT_DATABASE_URL` (direct, for migrations), optionally `REDIS_URL` | Control API, migration Job |
-| `webhook-platform-app` | `JWT_SECRET`, `SESSION_SECRET`, `ENCRYPTION_KEY`, `SMTP_URL`, optionally `S3_*` | Control API |
-| `webhook-platform-data-plane` | `DATABASE_URL`, optionally `REDIS_URL`, `S3_ACCESS_KEY`, `S3_SECRET_KEY` | The four Go roles |
+| `hookubit-database` | `DATABASE_URL` (pooled), `DIRECT_DATABASE_URL` (direct, for migrations), optionally `REDIS_URL` | Control API, migration Job |
+| `hookubit-app` | `JWT_SECRET`, `SESSION_SECRET`, `ENCRYPTION_KEY`, `SMTP_URL`, optionally `S3_*` | Control API |
+| `hookubit-data-plane` | `DATABASE_URL`, optionally `REDIS_URL`, `S3_ACCESS_KEY`, `S3_SECRET_KEY` | The four Go roles |
 
 The split is least privilege: the worker dials customer-controlled URLs and is
 the worst process in the system to hold the key that forges a session cookie,
 so `JWT_SECRET` and `SESSION_SECRET` never reach it.
 
-> **`ENCRYPTION_KEY` must be the same value in both `webhook-platform-app` and
-> `webhook-platform-data-plane`.** The control plane encrypts endpoint signing
+> **`ENCRYPTION_KEY` must be the same value in both `hookubit-app` and
+> `hookubit-data-plane`.** The control plane encrypts endpoint signing
 > secrets with it; the worker decrypts them with it and exits at startup
 > without it (`build decryption keyring: ENCRYPTION_KEY is required`). The
 > template lists it in both. When you rotate, `ENCRYPTION_KEY_ID` and
@@ -138,7 +138,7 @@ images:
   - name: ghcr.io/shaq/webhook-dashboard
     newTag: 0.2.0
 patches:
-  - target: { kind: Ingress, name: webhook-platform }
+  - target: { kind: Ingress, name: HookuBit }
     patch: |-
       - op: replace
         path: /spec/rules/0/host

@@ -87,7 +87,7 @@ describe('NotificationsModule wiring (real DI graph)', () => {
       ...base,
       APP_ENV: 'development',
       SMTP_URL: 'smtp://127.0.0.1:1',
-      MAIL_FROM: 'Hookubit <no-reply@localhost>',
+      MAIL_FROM: 'HookuBit <no-reply@localhost>',
     });
 
     const moduleRef = await compile(AuthzModule, MembersModule);
@@ -137,7 +137,7 @@ describe('NotificationsModule wiring (real DI graph)', () => {
       ...base,
       APP_ENV: 'production',
       SMTP_URL: 'smtps://mailer:secret@mail.example.com:465',
-      MAIL_FROM: 'Hookubit <no-reply@example.com>',
+      MAIL_FROM: 'HookuBit <no-reply@example.com>',
     });
 
     const moduleRef = await compile(AuthModule);

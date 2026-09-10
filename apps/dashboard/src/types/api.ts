@@ -2,7 +2,7 @@
  * ─────────────────────────────────────────────────────────────────────────────
  * DOMAIN NAMES FOR THE GENERATED OPENAPI TYPES.
  *
- * `src/types/api.d.ts` is written by `pnpm --filter @webhook/dashboard
+ * `src/types/api.d.ts` is written by `pnpm --filter @hookubit/dashboard
  * generate:api` from the control API's live `/docs-json`. It is the contract.
  * NOTHING in this file re-states a field name or a field type by hand — every
  * alias below is `components['schemas'][…]`, so a rename on the wire is a

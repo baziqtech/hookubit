@@ -6,8 +6,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/shaq/webhook-platform/services/data-plane/internal/queue"
-	"github.com/shaq/webhook-platform/services/data-plane/internal/testsupport"
+	"github.com/shaq/hookubit/services/data-plane/internal/queue"
+	"github.com/shaq/hookubit/services/data-plane/internal/testsupport"
 )
 
 // TestScenario09_QueueUnavailable_ReportsTheOutageAndLosesNothing covers

@@ -8,7 +8,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"github.com/shaq/webhook-platform/services/data-plane/internal/queue"
+	"github.com/shaq/hookubit/services/data-plane/internal/queue"
 )
 
 // TestScenario17_TwoWorkersAttemptTheSameDelivery covers ARCHITECTURE.md 57

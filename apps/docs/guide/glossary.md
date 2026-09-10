@@ -1,6 +1,6 @@
 # Glossary
 
-Terms that carry weight in hookubit, with the page that explains each.
+Terms that carry weight in HookuBit, with the page that explains each.
 
 | Term | Meaning |
 |---|---|

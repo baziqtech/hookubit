@@ -6,7 +6,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/shaq/webhook-platform/services/data-plane/internal/metrics"
+	"github.com/shaq/hookubit/services/data-plane/internal/metrics"
 )
 
 // LeaseKeeper holds a worker's leases open while attempts are in flight, and -

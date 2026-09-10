@@ -50,8 +50,8 @@ env:
   # exactly one file to edit when pnpm moves.
 
   # CI-only values. Real secrets never live in a workflow file.
-  DATABASE_URL: postgresql://webhook:webhook@localhost:5432/webhook_platform_test?schema=public
-  DIRECT_DATABASE_URL: postgresql://webhook:webhook@localhost:5432/webhook_platform_test?schema=public
+  DATABASE_URL: postgresql://hookubit:hookubit@localhost:5432/hookubit_test?schema=public
+  DIRECT_DATABASE_URL: postgresql://hookubit:hookubit@localhost:5432/hookubit_test?schema=public
   REDIS_URL: redis://localhost:6379/0
   JWT_SECRET: ci-only-jwt-secret-value-at-least-32-chars
   SESSION_SECRET: ci-only-session-secret-value-at-least-32-chars
@@ -79,12 +79,12 @@ jobs:
       postgres:
         image: postgres:16-alpine
         env:
-          POSTGRES_USER: webhook
-          POSTGRES_PASSWORD: webhook
-          POSTGRES_DB: webhook_platform_test
+          POSTGRES_USER: hookubit
+          POSTGRES_PASSWORD: hookubit
+          POSTGRES_DB: hookubit_test
         ports: ['5432:5432']
         options: >-
-          --health-cmd "pg_isready -U webhook"
+          --health-cmd "pg_isready -U hookubit"
           --health-interval 5s --health-timeout 3s --health-retries 10
       # Redis is the rate limiter's token store and nothing else. It is here so
       # the live Lua tests run (REDIS_TEST_URL on the Test step); the delivery
@@ -104,7 +104,7 @@ jobs:
       # its own URL, and the migration step below restores Prisma's. The same
       # split already exists in the root package.json (`test:db:migrate` uses
       # ?schema=, `go:test:db` uses ?sslmode=).
-      DATABASE_URL: postgresql://webhook:webhook@localhost:5432/webhook_platform_test?sslmode=disable
+      DATABASE_URL: postgresql://hookubit:hookubit@localhost:5432/hookubit_test?sslmode=disable
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
@@ -122,9 +122,9 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - name: Apply migrations
         env:
-          DATABASE_URL: postgresql://webhook:webhook@localhost:5432/webhook_platform_test?schema=public
-          DIRECT_DATABASE_URL: postgresql://webhook:webhook@localhost:5432/webhook_platform_test?schema=public
-        run: pnpm --filter @webhook/control-api prisma:deploy
+          DATABASE_URL: postgresql://hookubit:hookubit@localhost:5432/hookubit_test?schema=public
+          DIRECT_DATABASE_URL: postgresql://hookubit:hookubit@localhost:5432/hookubit_test?schema=public
+        run: pnpm --filter @hookubit/control-api prisma:deploy
       - name: Verify modules are tidy
         working-directory: services/data-plane
         run: |
@@ -188,12 +188,12 @@ jobs:
       postgres:
         image: postgres:16-alpine
         env:
-          POSTGRES_USER: webhook
-          POSTGRES_PASSWORD: webhook
-          POSTGRES_DB: webhook_platform_test
+          POSTGRES_USER: hookubit
+          POSTGRES_PASSWORD: hookubit
+          POSTGRES_DB: hookubit_test
         ports: ['5432:5432']
         options: >-
-          --health-cmd "pg_isready -U webhook"
+          --health-cmd "pg_isready -U hookubit"
           --health-interval 5s --health-timeout 3s --health-retries 10
       redis:
         image: redis:7-alpine
@@ -211,9 +211,9 @@ jobs:
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       - name: Generate Prisma client
-        run: pnpm --filter @webhook/control-api prisma:generate
+        run: pnpm --filter @hookubit/control-api prisma:generate
       - name: Apply migrations
-        run: pnpm --filter @webhook/control-api prisma:deploy
+        run: pnpm --filter @hookubit/control-api prisma:deploy
       - name: Lint
         run: pnpm -r lint
       - name: Build
@@ -240,12 +240,12 @@ jobs:
       postgres:
         image: postgres:16-alpine
         env:
-          POSTGRES_USER: webhook
-          POSTGRES_PASSWORD: webhook
-          POSTGRES_DB: webhook_platform_test
+          POSTGRES_USER: hookubit
+          POSTGRES_PASSWORD: hookubit
+          POSTGRES_DB: hookubit_test
         ports: ['5432:5432']
         options: >-
-          --health-cmd "pg_isready -U webhook"
+          --health-cmd "pg_isready -U hookubit"
           --health-interval 5s --health-timeout 3s --health-retries 10
     steps:
       - uses: actions/checkout@v4
@@ -277,7 +277,7 @@ jobs:
         working-directory: apps/control-api
         env:
           # libpq rejects Prisma's ?schema= parameter, so psql gets its own URL.
-          PGURL: postgresql://webhook:webhook@localhost:5432/webhook_platform_test
+          PGURL: postgresql://hookubit:hookubit@localhost:5432/hookubit_test
         run: |
           set -euo pipefail
           # The shadow database must NOT be the job's own database. `migrate
@@ -288,11 +288,11 @@ jobs:
           # P3005 "The database schema is not empty". That failed this job on
           # every run from the day it was written. The service user owns the
           # container, so it may create a sibling database for the diff.
-          psql "$PGURL" -v ON_ERROR_STOP=1 -c 'CREATE DATABASE webhook_platform_shadow'
+          psql "$PGURL" -v ON_ERROR_STOP=1 -c 'CREATE DATABASE hookubit_shadow'
           npx prisma migrate diff \
             --from-migrations prisma/migrations \
             --to-schema-datamodel prisma/schema.prisma \
-            --shadow-database-url "postgresql://webhook:webhook@localhost:5432/webhook_platform_shadow?schema=public" \
+            --shadow-database-url "postgresql://hookubit:hookubit@localhost:5432/hookubit_shadow?schema=public" \
             --script > /tmp/drift.sql
 
           echo "--- raw drift script ---"
@@ -330,7 +330,7 @@ jobs:
         working-directory: apps/control-api
         env:
           # libpq rejects Prisma's ?schema= parameter, so psql gets its own URL.
-          PGURL: postgresql://webhook:webhook@localhost:5432/webhook_platform_test
+          PGURL: postgresql://hookubit:hookubit@localhost:5432/hookubit_test
         run: |
           set -euo pipefail
           npx prisma migrate deploy
@@ -567,8 +567,8 @@ jobs:
       K8S_VERSION: '1.29.0'
       # Lint values. Never real credentials - these only have to satisfy the
       # schema so the templates render.
-      CI_DB_URL: 'postgresql://ci:ci@postgres.invalid:6432/webhook_platform?schema=public'
-      CI_DIRECT_DB_URL: 'postgresql://ci:ci@postgres.invalid:5432/webhook_platform?schema=public'
+      CI_DB_URL: 'postgresql://ci:ci@postgres.invalid:6432/hookubit?schema=public'
+      CI_DIRECT_DB_URL: 'postgresql://ci:ci@postgres.invalid:5432/hookubit?schema=public'
     steps:
       - uses: actions/checkout@v4
       - uses: azure/setup-helm@v4
@@ -593,7 +593,7 @@ jobs:
       - name: Chart refuses to install without externalDatabase.url
         run: |
           set +e
-          out=$(helm lint deployments/helm/webhook-platform \
+          out=$(helm lint deployments/helm/hookubit \
             --set secrets.jwtSecret=ci \
             --set secrets.sessionSecret=ci \
             --set secrets.encryptionKey=ci \
@@ -613,7 +613,7 @@ jobs:
 
       - name: helm lint
         run: |
-          helm lint deployments/helm/webhook-platform \
+          helm lint deployments/helm/hookubit \
             --set externalDatabase.url="$CI_DB_URL" \
             --set externalDatabase.directUrl="$CI_DIRECT_DB_URL" \
             --set secrets.jwtSecret=ci \
@@ -625,8 +625,8 @@ jobs:
         run: |
           # Render with every optional feature ON, because /tmp/rendered.yaml is
           # also what the "no bundled database" guard greps.
-          helm template ci deployments/helm/webhook-platform \
-            --namespace webhook-platform \
+          helm template ci deployments/helm/hookubit \
+            --namespace HookuBit \
             --set externalDatabase.url="$CI_DB_URL" \
             --set externalDatabase.directUrl="$CI_DIRECT_DB_URL" \
             --set externalRedis.url="rediss://redis.invalid:6379/0" \
@@ -653,8 +653,8 @@ jobs:
       - name: Data-plane Secret carries the decryption key and nothing it must not
         run: |
           set -euo pipefail
-          helm template ci deployments/helm/webhook-platform \
-            --namespace webhook-platform \
+          helm template ci deployments/helm/hookubit \
+            --namespace HookuBit \
             --set externalDatabase.url="$CI_DB_URL" \
             --set secrets.jwtSecret=ci \
             --set secrets.sessionSecret=ci \
@@ -669,10 +669,10 @@ jobs:
             if echo "$dp" | grep -qE "^\s*$k:"; then echo "::error::The data-plane Secret carries $k. The worker must never hold it."; exit 1; fi
           done
           # Raw manifests: the data-plane Secret template must list the key too.
-          dpraw=$(awk '/name: webhook-platform-data-plane$/{f=1} /^---/{f=0} f' deployments/kubernetes/02-secret.template.yaml)
-          echo "$dpraw" | grep -qE "^\s*ENCRYPTION_KEY:" || { echo "::error::deployments/kubernetes/02-secret.template.yaml: webhook-platform-data-plane has no ENCRYPTION_KEY."; exit 1; }
+          dpraw=$(awk '/name: hookubit-data-plane$/{f=1} /^---/{f=0} f' deployments/kubernetes/02-secret.template.yaml)
+          echo "$dpraw" | grep -qE "^\s*ENCRYPTION_KEY:" || { echo "::error::deployments/kubernetes/02-secret.template.yaml: hookubit-data-plane has no ENCRYPTION_KEY."; exit 1; }
           for k in JWT_SECRET SESSION_SECRET SMTP_URL; do
-            if echo "$dpraw" | grep -qE "^\s*$k:"; then echo "::error::webhook-platform-data-plane carries $k."; exit 1; fi
+            if echo "$dpraw" | grep -qE "^\s*$k:"; then echo "::error::hookubit-data-plane carries $k."; exit 1; fi
           done
           echo "OK - data plane gets ENCRYPTION_KEY and none of JWT_SECRET, SESSION_SECRET, SMTP_URL"
 
@@ -696,12 +696,12 @@ jobs:
       # halves - refuses without, renders with.
       - name: Compose production file refuses without mail and renders with it
         env:
-          DATABASE_URL: postgresql://u:p@db.invalid:5432/webhook_platform
+          DATABASE_URL: postgresql://u:p@db.invalid:5432/hookubit
           ENCRYPTION_KEY: ci
           JWT_SECRET: ci
           SESSION_SECRET: ci
           DASHBOARD_URL: https://webhooks.invalid
-          MAIL_FROM: Hookubit <no-reply@invalid>
+          MAIL_FROM: HookuBit <no-reply@invalid>
         run: |
           set -euo pipefail
           f=deployments/compose/docker-compose.prod.yml
@@ -723,8 +723,8 @@ jobs:
       - name: Optional keys are omitted, not emptied
         run: |
           set -euo pipefail
-          helm template ci deployments/helm/webhook-platform \
-            --namespace webhook-platform \
+          helm template ci deployments/helm/hookubit \
+            --namespace HookuBit \
             --set externalDatabase.url="$CI_DB_URL" \
             --set externalDatabase.directUrl="$CI_DIRECT_DB_URL" \
             --set secrets.jwtSecret=ci \
@@ -777,7 +777,7 @@ jobs:
 
           # 4. Any chart dependency at all. A subchart is the fastest way to
           #    lose delivery history to a `helm uninstall`.
-          if grep -nE '^[[:space:]]*dependencies:' deployments/helm/webhook-platform/Chart.yaml; then
+          if grep -nE '^[[:space:]]*dependencies:' deployments/helm/hookubit/Chart.yaml; then
             echo "::error::Chart.yaml declares dependencies. This chart bundles nothing - least of all a database."
             fail=1
           fi
