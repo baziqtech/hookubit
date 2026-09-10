@@ -1,14 +1,38 @@
 import type { ReactNode, RefObject } from 'react';
 import { cn } from '../../lib/cn';
 import { ApiRequestError } from '../../lib/api';
+import { AlertGlyph } from './AuthField';
 
+/**
+ * The content of an auth page: a headline, a sentence, the form, and a way
+ * back out.
+ *
+ * There is deliberately no box any more. The old card — a 22rem bordered panel
+ * on an empty canvas — was doing the job of separating the form from nothing,
+ * and it made a sign-in read like a settings dialog. `AuthLayout` now owns the
+ * composition, and the column IS the card: the form sits on `panel`, the
+ * fields are `canvas`, and the elevation is the same in light and dark rather
+ * than inverting (`raised` is lighter than `panel` in one theme and darker in
+ * the other, which is exactly the trap a nested card falls into here).
+ *
+ * Every auth page shares this, including `AcceptInvitationPage`, so the type
+ * is unchanged and every existing caller keeps working.
+ */
 export function AuthCard({
+  icon,
   title,
   description,
   children,
   footer,
   titleRef,
 }: {
+  /**
+   * A status badge above the headline, for the transactional cards
+   * (verifying / verified / this link is dead) where the outcome is the
+   * headline's whole point. Purely decorative — the heading still carries the
+   * meaning, and pages that have no outcome to report pass nothing.
+   */
+  icon?: ReactNode;
   title: string;
   description?: ReactNode;
   children: ReactNode;
@@ -24,27 +48,35 @@ export function AuthCard({
   titleRef?: RefObject<HTMLHeadingElement>;
 }) {
   return (
-    <div className="rounded-lg border border-line bg-panel p-5 shadow-panel">
+    <div className="animate-fade-in">
+      {icon && <div className="mb-5">{icon}</div>}
       <h1
         ref={titleRef}
         tabIndex={titleRef ? -1 : undefined}
         className={cn(
-          'text-sm font-semibold tracking-tight',
+          'text-[1.625rem] font-semibold leading-tight tracking-tight text-ink',
           titleRef && 'focus:outline-none focus-visible:ring-0 focus-visible:ring-offset-0',
         )}
       >
         {title}
       </h1>
-      {description && <p className="mt-1 text-xs text-ink-muted">{description}</p>}
-      <div className="mt-5">{children}</div>
-      {footer && <div className="mt-5 border-t border-line pt-4 text-xs text-ink-muted">{footer}</div>}
+      {description && (
+        <p className="mt-2.5 text-base leading-relaxed text-ink-muted">{description}</p>
+      )}
+      <div className="mt-7">{children}</div>
+      {footer && (
+        <div className="mt-7 border-t border-line pt-5 text-sm text-ink-muted">{footer}</div>
+      )}
     </div>
   );
 }
 
 /**
- * Compact form-level failure. Always prints `request_id` when the server sent
- * one — it is the only handle support has on what actually happened.
+ * Form-level failure, rendered directly above the fields — where the eye
+ * already is after pressing submit, rather than at the bottom of the page.
+ *
+ * Always prints `request_id` when the server sent one: it is the only handle
+ * support has on what actually happened.
  */
 export function FormError({ error }: { error: unknown }) {
   if (!error) return null;
@@ -60,11 +92,19 @@ export function FormError({ error }: { error: unknown }) {
   return (
     <div
       role="alert"
-      className="mb-4 rounded-md border border-danger/25 bg-danger-soft px-3 py-2 text-xs text-danger"
+      className="mb-5 rounded-xl border border-danger/25 bg-danger-soft px-3.5 py-3 text-sm text-danger"
     >
-      <p>{message}</p>
+      <div className="flex gap-2.5">
+        <AlertGlyph className="mt-0.5 h-4 w-4 shrink-0" />
+        <p className="min-w-0">{message}</p>
+      </div>
+      {/* Full width, under the message rather than indented beside the icon:
+          a request id is 40-odd unbreakable characters and the indent is the
+          difference between one line and an orphaned letter on a second. */}
       {requestId && (
-        <p className="mt-1 font-mono text-2xs opacity-80">request_id: {requestId}</p>
+        <p className="mt-2 break-all border-t border-danger/20 pt-2 font-mono text-2xs opacity-80">
+          request_id: {requestId}
+        </p>
       )}
     </div>
   );

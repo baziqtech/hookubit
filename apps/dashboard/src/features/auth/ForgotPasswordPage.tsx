@@ -1,8 +1,8 @@
 import { useForm } from 'react-hook-form';
 import { Link } from 'react-router-dom';
-import { Button, Input } from '../../components';
 import type { ForgotPasswordBody } from '../../types/api';
 import { AuthCard, FormError } from './AuthCard';
+import { AuthInput, AuthSubmit } from './AuthField';
 import { useForgotPassword } from './api';
 
 export function ForgotPasswordPage() {
@@ -21,12 +21,15 @@ export function ForgotPasswordPage() {
         title="Check your email"
         description="If that address has an account, a reset link is on its way. The link expires in 1 hour."
         footer={
-          <Link to="/login" className="font-medium text-accent hover:underline">
+          <Link
+            to="/login"
+            className="rounded font-medium text-accent underline-offset-4 hover:underline"
+          >
             Back to sign in
           </Link>
         }
       >
-        <p className="text-xs text-ink-muted">
+        <p className="text-sm leading-relaxed text-ink-muted">
           Nothing arrived? Check spam, then try again — repeated requests invalidate earlier links.
         </p>
       </AuthCard>
@@ -38,7 +41,10 @@ export function ForgotPasswordPage() {
       title="Reset your password"
       description="We will email you a link to set a new one."
       footer={
-        <Link to="/login" className="font-medium text-accent hover:underline">
+        <Link
+          to="/login"
+          className="rounded font-medium text-accent underline-offset-4 hover:underline"
+        >
           Back to sign in
         </Link>
       }
@@ -47,23 +53,22 @@ export function ForgotPasswordPage() {
       <form
         onSubmit={handleSubmit((values) => forgot.mutate(values))}
         noValidate
-        className="flex flex-col gap-3.5"
+        className="flex flex-col gap-4"
       >
-        <Input
+        <AuthInput
           label="Email"
           type="email"
           autoComplete="email"
           autoFocus
           required
+          placeholder="you@company.com"
           error={errors.email?.message}
           {...register('email', {
             required: 'Email is required',
             pattern: { value: /.+@.+\..+/, message: 'Enter a valid email address' },
           })}
         />
-        <Button type="submit" variant="primary" loading={forgot.isPending} className="mt-1 w-full">
-          Send reset link
-        </Button>
+        <AuthSubmit loading={forgot.isPending}>Send reset link</AuthSubmit>
       </form>
     </AuthCard>
   );

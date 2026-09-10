@@ -1,8 +1,9 @@
-import { useEffect, useRef } from 'react';
+import { useEffect, useRef, type ReactNode } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
-import { Button } from '../../components';
+import { cn } from '../../lib/cn';
 import { ApiRequestError } from '../../lib/api';
 import { AuthCard, FormError } from './AuthCard';
+import { AuthSecondary } from './AuthField';
 import { useVerifyEmail } from './api';
 import { ResendVerificationForm } from './ResendVerification';
 
@@ -50,14 +51,85 @@ export function VerifyEmailPage() {
   return <VerifyEmailView outcome={outcome} />;
 }
 
+/**
+ * The badge above the headline. Decorative: every one of these states says the
+ * same thing in the heading text, which is what is announced.
+ */
+function StatusBadge({ tone, children }: { tone: 'ok' | 'warn' | 'accent'; children: ReactNode }) {
+  const TONES = {
+    ok: 'bg-ok-soft text-ok',
+    warn: 'bg-warn-soft text-warn',
+    accent: 'bg-accent-soft text-accent',
+  } as const;
+  return (
+    <span
+      aria-hidden="true"
+      className={cn(
+        'inline-flex h-12 w-12 items-center justify-center rounded-2xl',
+        TONES[tone],
+      )}
+    >
+      {children}
+    </span>
+  );
+}
+
+function CheckBadge() {
+  return (
+    <StatusBadge tone="ok">
+      <svg viewBox="0 0 24 24" fill="none" className="h-6 w-6">
+        <path
+          d="m6 12.4 3.9 3.9L18 8"
+          stroke="currentColor"
+          strokeWidth="2.2"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+        />
+      </svg>
+    </StatusBadge>
+  );
+}
+
+/**
+ * A dead link. Drawn as a broken chain rather than a generic warning: the two
+ * halves pulling apart say "this link" without a word of copy.
+ */
+function LinkBadge({ tone }: { tone: 'warn' }) {
+  return (
+    <StatusBadge tone={tone}>
+      <svg viewBox="0 0 24 24" fill="none" className="h-[1.6rem] w-[1.6rem]">
+        {/* Two halves of a chain link, pulled apart on the diagonal. */}
+        <path
+          d="M11 13 8.5 15.5a3.54 3.54 0 0 1-5-5L6 8"
+          stroke="currentColor"
+          strokeWidth="2"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+        />
+        <path
+          d="M13 11 15.5 8.5a3.54 3.54 0 0 1 5 5L18 16"
+          stroke="currentColor"
+          strokeWidth="2"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+        />
+      </svg>
+    </StatusBadge>
+  );
+}
+
 /** "Not a real link", not "the server refused it": the same treatment `ResetPasswordPage` gives. */
 function MissingToken() {
   return (
     <AuthCard
+      icon={<LinkBadge tone="warn" />}
       title="This link is not valid"
       description="The verification link is missing its token. Request a new one."
       footer={
-        <Link to="/login" className="font-medium text-accent hover:underline">
+        <Link
+          to="/login"
+          className="rounded font-medium text-accent underline-offset-4 hover:underline"
+        >
           Back to sign in
         </Link>
       }
@@ -100,11 +172,16 @@ export function VerifyEmailView({ outcome }: { outcome: VerifyEmailOutcome }) {
     case 'verifying':
       return (
         <AuthCard
+          icon={
+            <StatusBadge tone="accent">
+              <span className="inline-block h-6 w-6 animate-spin rounded-full border-2 border-accent/25 border-t-accent" />
+            </StatusBadge>
+          }
           title="Verifying your email"
           description="Checking the link. This takes a moment."
           titleRef={titleRef}
         >
-          <p role="status" className="flex items-center gap-2 text-xs text-ink-muted">
+          <p role="status" className="flex items-center gap-2 text-sm text-ink-muted">
             <span
               aria-hidden="true"
               className="inline-block h-3.5 w-3.5 animate-spin rounded-full border-2 border-line-strong border-t-accent"
@@ -117,6 +194,7 @@ export function VerifyEmailView({ outcome }: { outcome: VerifyEmailOutcome }) {
     case 'verified':
       return (
         <AuthCard
+          icon={<CheckBadge />}
           title="Email verified"
           description={
             <>
@@ -136,7 +214,11 @@ export function VerifyEmailView({ outcome }: { outcome: VerifyEmailOutcome }) {
             to="/login"
             state={{ email: outcome.email }}
             data-testid="verified-sign-in"
-            className="inline-flex h-8 w-full items-center justify-center rounded-md border border-transparent bg-accent px-3 text-sm font-medium text-accent-ink transition-colors hover:bg-accent/90"
+            className={cn(
+              'inline-flex h-11 w-full items-center justify-center rounded-lg border border-transparent',
+              'bg-accent px-3 text-sm font-semibold text-accent-ink shadow-panel',
+              'transition-colors hover:bg-accent/90',
+            )}
           >
             Sign in
           </Link>
@@ -147,21 +229,25 @@ export function VerifyEmailView({ outcome }: { outcome: VerifyEmailOutcome }) {
       const retryable = outcome.error instanceof ApiRequestError && outcome.error.retryable;
       return (
         <AuthCard
+          icon={<LinkBadge tone="warn" />}
           title={failureTitle(outcome.error)}
           description="Verification links are single-use and expire. Enter your email and we will send a fresh one."
           titleRef={titleRef}
           footer={
-            <Link to="/login" className="font-medium text-accent hover:underline">
+            <Link
+              to="/login"
+              className="rounded font-medium text-accent underline-offset-4 hover:underline"
+            >
               Back to sign in
             </Link>
           }
         >
           <FormError error={outcome.error} />
           {retryable && (
-            <div className="mb-4">
-              <Button type="button" variant="secondary" size="sm" onClick={outcome.retry}>
+            <div className="mb-5">
+              <AuthSecondary type="button" variant="secondary" onClick={outcome.retry}>
                 Try this link again
-              </Button>
+              </AuthSecondary>
             </div>
           )}
           <ResendVerificationForm />

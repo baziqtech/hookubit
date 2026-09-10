@@ -9,6 +9,7 @@ import { useTourStore } from '../features/onboarding/tour-store';
 import { useOrganizations } from '../features/organizations/api';
 import { useProject } from '../features/projects/api';
 import { cn } from '../lib/cn';
+import { HookGlyph } from '../features/auth/Wordmark';
 import { Menu, MenuLabel } from './Menu';
 import { currentSectionLabel, organizationNav, projectNav, type NavItem } from './navigation';
 import { OrganizationSwitcher, ProjectSwitcher } from './Switchers';
@@ -313,11 +314,11 @@ function Wordmark() {
     <span className="flex items-center gap-2">
       <span
         aria-hidden="true"
-        className="flex h-5 w-5 items-center justify-center rounded bg-accent text-2xs font-bold text-accent-ink"
+        className="flex h-5 w-5 items-center justify-center rounded bg-accent text-accent-ink"
       >
-        h
+        <HookGlyph className="h-3.5 w-3.5" />
       </span>
-      <span className="text-xs font-semibold tracking-tight">hookubit</span>
+      <span className="text-xs font-semibold tracking-tight">HookuBit</span>
     </span>
   );
 }

@@ -1,7 +1,7 @@
 import { useForm } from 'react-hook-form';
 import { Link, useNavigate, useSearchParams } from 'react-router-dom';
-import { Button, Input } from '../../components';
 import { AuthCard, FormError } from './AuthCard';
+import { AuthPasswordInput, AuthSubmit } from './AuthField';
 import { useResetPassword } from './api';
 
 interface ResetForm {
@@ -28,12 +28,15 @@ export function ResetPasswordPage() {
         title="This link is not valid"
         description="The reset link is missing its token. Request a new one."
         footer={
-          <Link to="/forgot-password" className="font-medium text-accent hover:underline">
+          <Link
+            to="/forgot-password"
+            className="rounded font-medium text-accent underline-offset-4 hover:underline"
+          >
             Request a new link
           </Link>
         }
       >
-        <p className="text-xs text-ink-muted">
+        <p className="text-sm leading-relaxed text-ink-muted">
           Links expire 1 hour after they are issued, and requesting a new link invalidates the
           previous one.
         </p>
@@ -49,10 +52,9 @@ export function ResetPasswordPage() {
   return (
     <AuthCard title="Set a new password" description="You will be signed out of other sessions.">
       <FormError error={reset.error} />
-      <form onSubmit={onSubmit} noValidate className="flex flex-col gap-3.5">
-        <Input
+      <form onSubmit={onSubmit} noValidate className="flex flex-col gap-4">
+        <AuthPasswordInput
           label="New password"
-          type="password"
           autoComplete="new-password"
           autoFocus
           required
@@ -63,9 +65,8 @@ export function ResetPasswordPage() {
             minLength: { value: 12, message: 'Use at least 12 characters' },
           })}
         />
-        <Input
+        <AuthPasswordInput
           label="Confirm password"
-          type="password"
           autoComplete="new-password"
           required
           error={errors.confirmation?.message}
@@ -74,9 +75,7 @@ export function ResetPasswordPage() {
             validate: (value) => value === watch('password') || 'Passwords do not match',
           })}
         />
-        <Button type="submit" variant="primary" loading={reset.isPending} className="mt-1 w-full">
-          Set password
-        </Button>
+        <AuthSubmit loading={reset.isPending}>Set password</AuthSubmit>
       </form>
     </AuthCard>
   );

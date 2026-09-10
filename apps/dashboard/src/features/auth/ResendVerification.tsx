@@ -1,8 +1,8 @@
 import { forwardRef, useEffect, useRef } from 'react';
 import { useForm } from 'react-hook-form';
-import { Button, Input } from '../../components';
 import type { ResendVerificationBody } from '../../types/api';
 import { FormError } from './AuthCard';
+import { AuthInput, AuthSecondary, AuthSubmit } from './AuthField';
 import { useResendVerification } from './api';
 
 /**
@@ -31,14 +31,14 @@ export const ResendAcknowledgement = forwardRef<HTMLDivElement>(function ResendA
       tabIndex={-1}
       role="status"
       data-testid="resend-acknowledged"
-      className="rounded-md border border-line bg-raised/60 px-3 py-2 text-xs text-ink-muted focus:outline-none"
+      className="rounded-xl border border-line bg-raised/70 px-3.5 py-3 text-sm leading-relaxed text-ink-muted focus:outline-none"
     >
       <p className="font-medium text-ink">Check your inbox</p>
-      <p className="mt-1">
+      <p className="mt-1.5">
         If that address has an account waiting to be verified, a fresh link is on its way. Only
         the newest link works; any earlier one has been cancelled.
       </p>
-      <p className="mt-1">Nothing arrived? Check spam, then try again in a few minutes.</p>
+      <p className="mt-1.5">Nothing arrived? Check spam, then try again in a few minutes.</p>
     </div>
   );
 });
@@ -82,15 +82,15 @@ export function ResendVerificationForm({ email = '', locked = false }: ResendVer
     return (
       <div data-testid="resend-verification">
         <FormError error={resend.error} />
-        <Button
+        <AuthSecondary
           type="button"
           variant="secondary"
-          size="sm"
           loading={resend.isPending}
           onClick={() => resend.mutate({ email })}
+          className="max-w-full"
         >
-          Send a new link to {email}
-        </Button>
+          <span className="truncate">Send a new link to {email}</span>
+        </AuthSecondary>
       </div>
     );
   }
@@ -100,23 +100,22 @@ export function ResendVerificationForm({ email = '', locked = false }: ResendVer
       data-testid="resend-verification"
       onSubmit={handleSubmit((values) => resend.mutate(values))}
       noValidate
-      className="flex flex-col gap-3.5"
+      className="flex flex-col gap-4"
     >
       <FormError error={resend.error} />
-      <Input
+      <AuthInput
         label="Email"
         type="email"
         autoComplete="email"
         required
+        placeholder="you@company.com"
         error={errors.email?.message}
         {...register('email', {
           required: 'Email is required',
           pattern: { value: /.+@.+\..+/, message: 'Enter a valid email address' },
         })}
       />
-      <Button type="submit" variant="primary" loading={resend.isPending} className="w-full">
-        Send a new link
-      </Button>
+      <AuthSubmit loading={resend.isPending}>Send a new link</AuthSubmit>
     </form>
   );
 }

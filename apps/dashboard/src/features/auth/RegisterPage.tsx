@@ -1,8 +1,8 @@
 import { useForm } from 'react-hook-form';
 import { Link } from 'react-router-dom';
-import { Button, Input } from '../../components';
 import type { RegisterBody } from '../../types/api';
 import { AuthCard, FormError } from './AuthCard';
+import { AuthInput, AuthPasswordInput, AuthSubmit } from './AuthField';
 import { useRegister } from './api';
 import { ResendVerificationForm } from './ResendVerification';
 
@@ -25,12 +25,15 @@ export function RegistrationAccepted({ email }: { email: string }) {
       title="Check your email"
       description="If we can create an account for that address, a verification link is on its way. Follow it to confirm your email, then sign in."
       footer={
-        <Link to="/login" className="font-medium text-accent hover:underline">
+        <Link
+          to="/login"
+          className="rounded font-medium text-accent underline-offset-4 hover:underline"
+        >
           Back to sign in
         </Link>
       }
     >
-      <p className="mb-3 text-xs text-ink-muted">
+      <p className="mb-4 text-sm leading-relaxed text-ink-muted">
         Nothing arrived? Check spam, then try again in a few minutes.
       </p>
       <ResendVerificationForm email={email} locked />
@@ -62,7 +65,10 @@ export function RegisterPage() {
       footer={
         <span>
           Already have an account?{' '}
-          <Link to="/login" className="font-medium text-accent hover:underline">
+          <Link
+            to="/login"
+            className="rounded font-medium text-accent underline-offset-4 hover:underline"
+          >
             Sign in
           </Link>
         </span>
@@ -72,9 +78,9 @@ export function RegisterPage() {
       <form
         onSubmit={handleSubmit((values) => registerUser.mutate(values))}
         noValidate
-        className="flex flex-col gap-3.5"
+        className="flex flex-col gap-4"
       >
-        <Input
+        <AuthInput
           label="Name"
           autoComplete="name"
           autoFocus
@@ -82,7 +88,7 @@ export function RegisterPage() {
           error={errors.name?.message}
           {...register('name', { required: 'Name is required' })}
         />
-        <Input
+        <AuthInput
           label="Work email"
           type="email"
           autoComplete="email"
@@ -93,7 +99,7 @@ export function RegisterPage() {
             pattern: { value: /.+@.+\..+/, message: 'Enter a valid email address' },
           })}
         />
-        <Input
+        <AuthInput
           label="Organization"
           autoComplete="organization"
           required
@@ -101,9 +107,8 @@ export function RegisterPage() {
           error={errors.organization_name?.message}
           {...register('organization_name', { required: 'Organization name is required' })}
         />
-        <Input
+        <AuthPasswordInput
           label="Password"
-          type="password"
           autoComplete="new-password"
           required
           hint="At least 12 characters."
@@ -113,14 +118,7 @@ export function RegisterPage() {
             minLength: { value: 12, message: 'Use at least 12 characters' },
           })}
         />
-        <Button
-          type="submit"
-          variant="primary"
-          loading={registerUser.isPending}
-          className="mt-1 w-full"
-        >
-          Create account
-        </Button>
+        <AuthSubmit loading={registerUser.isPending}>Create account</AuthSubmit>
       </form>
     </AuthCard>
   );
