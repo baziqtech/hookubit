@@ -67,6 +67,20 @@ services:
       <<: *common-env
       JWT_SECRET: ${JWT_SECRET:?JWT_SECRET is required}
       SESSION_SECRET: ${SESSION_SECRET:?SESSION_SECRET is required}
+      # APP_ENV is production above, and the control API refuses to boot in
+      # production without a mail transport - registration, password reset
+      # and invitations would all silently deliver nothing. Required here so
+      # `compose up` fails with a readable message instead of a crash loop.
+      SMTP_URL: ${SMTP_URL:?SMTP_URL is required in production (smtp://user:pass@mail.example.com:587) - the control API refuses to start without a mail transport}
+      MAIL_FROM: ${MAIL_FROM:?MAIL_FROM is required with SMTP_URL, e.g. "Hookubit <no-reply@example.com>"}
+      # Base of every link a mail carries (/verify-email, /reset-password,
+      # /accept-invitation). Wrong here means mail full of dead links.
+      DASHBOARD_URL: ${DASHBOARD_URL:?DASHBOARD_URL is required - the origin the dashboard is served from, e.g. https://webhooks.example.com}
+      # EXACT number of reverse proxies in front of :3000 - 1 for the usual
+      # nginx or Caddy terminating TLS in front of 127.0.0.1:3000. Passed
+      # through (absent means the process default of 0, "no proxy"), because at
+      # 0 behind a proxy every request shares one per-IP rate-limit bucket.
+      TRUST_PROXY_HOPS:
       CONTROL_API_PORT: 3000
       CORS_ORIGINS: ${CORS_ORIGINS:-}
     ports:
@@ -87,6 +101,9 @@ services:
     environment:
       <<: *common-env
       INGEST_PORT: 8080
+      # Same rule as TRUST_PROXY_HOPS on control-api: the exact number of
+      # proxies in front of :8080, passed through, 0 when unset.
+      INGEST_TRUSTED_PROXY_HOPS:
     ports:
       - '${INGEST_BIND:-0.0.0.0:8080}:8080'
     # Docker's default stop_grace_period is 10s. webhookd's in-process drain is
@@ -121,6 +138,13 @@ services:
     environment:
       <<: *common-env
       WORKER_CONCURRENCY: ${WORKER_CONCURRENCY:-64}
+      # This file runs 2 worker replicas by default. With no REDIS_URL, endpoint
+      # delivery rate limits are enforced per replica - a customer's limit of N
+      # becomes N x 2 - and a PRODUCTION worker refuses to start rather than
+      # quietly weaken a limit the control plane accepted. Either set REDIS_URL
+      # or export DELIVERY_RATE_LIMIT_ALLOW_PER_REPLICA=true to take that
+      # deliberately. Passed through, not defaulted, so the refusal stands.
+      DELIVERY_RATE_LIMIT_ALLOW_PER_REPLICA:
     deploy:
       replicas: ${WORKER_REPLICAS:-2}
     # Above the in-process drain budget AND above one full outbound attempt

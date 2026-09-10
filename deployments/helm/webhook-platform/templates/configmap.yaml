@@ -18,6 +18,9 @@ data:
   DASHBOARD_URL: {{ .Values.app.publicUrl | quote }}
   MAIL_FROM: {{ .Values.app.mailFrom | quote }}
   CORS_ORIGINS: {{ .Values.app.publicUrl | quote }}
+  # Exact proxy hop count, never inferred - see ingress.trustedProxyHops.
+  TRUST_PROXY_HOPS: {{ .Values.ingress.trustedProxyHops | int64 | quote }}
+  INGEST_TRUSTED_PROXY_HOPS: {{ .Values.ingress.trustedProxyHops | int64 | quote }}
 
   CONTROL_API_PORT: "3000"
   INGEST_PORT: "8080"

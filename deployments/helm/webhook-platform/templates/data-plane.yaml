@@ -77,11 +77,12 @@ spec:
             - name: probes
               containerPort: 9090
               protocol: TCP
-          # The data plane's own Secret: only DATABASE_URL, REDIS_URL and the
-          # S3 credentials, which is everything internal/config/config.go reads.
-          # JWT_SECRET and SESSION_SECRET are not projected here - the worker
-          # makes outbound HTTP to customer-controlled URLs and is the worst
-          # place in the system to hold the session-forgery key.
+          # The data plane's own Secret: DATABASE_URL, REDIS_URL, the S3
+          # credentials and ENCRYPTION_KEY (the worker decrypts endpoint signing
+          # secrets with it and refuses to start without it). JWT_SECRET and
+          # SESSION_SECRET are not projected here - the worker makes outbound
+          # HTTP to customer-controlled URLs and is the worst place in the
+          # system to hold the session-forgery key.
           envFrom:
             {{- include "webhook-platform.dataPlaneEnvFrom" $root | nindent 12 }}
           {{- if $root.Values.dataPlane.startupProbe.enabled }}

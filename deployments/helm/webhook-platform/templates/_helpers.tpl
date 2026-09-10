@@ -81,13 +81,16 @@ existingSecret always overrides what the chart rendered.
 {{/*
 Environment for the four Go roles. Same ConfigMap, but a Secret carrying only
 what services/data-plane/internal/config/config.go reads: DATABASE_URL,
-REDIS_URL and the S3 credentials. JWT_SECRET and SESSION_SECRET are never
-projected into a process whose whole job is making outbound HTTP requests to
-customer-controlled URLs.
+REDIS_URL, the S3 credentials and ENCRYPTION_KEY (the worker decrypts endpoint
+signing secrets). JWT_SECRET and SESSION_SECRET are never projected into a
+process whose whole job is making outbound HTTP requests to customer-controlled
+URLs.
 
 secrets.existingSecret is deliberately NOT in this chain - it is the control
 plane's credential bundle. Database and Redis existingSecrets are, because the
-data plane does read those.
+data plane does read those. If you keep ENCRYPTION_KEY in your own Secret
+rather than secrets.encryptionKey, put it in externalDatabase.existingSecret
+(which both planes read) or set dataPlane.separateSecret=false.
 */}}
 {{- define "webhook-platform.dataPlaneEnvFrom" -}}
 - configMapRef:

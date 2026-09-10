@@ -19,6 +19,16 @@ data:
   MAIL_FROM: 'Hookubit <no-reply@example.com>'
   LOG_LEVEL: 'info'
 
+  # EXACT number of reverse proxies in front of the pods, never inferred. 1 is
+  # the Ingress in 41-ingress.yaml; a CDN or a load balancer that rewrites
+  # X-Forwarded-For in front of it makes 2. At 0 every request behind the
+  # Ingress is attributed to the ingress controller, so per-IP rate limiting
+  # becomes ONE bucket for the whole internet and a trickle of anonymous
+  # requests locks everybody out of login. Too high and a client can forge
+  # X-Forwarded-For for a fresh bucket per request.
+  TRUST_PROXY_HOPS: '1'
+  INGEST_TRUSTED_PROXY_HOPS: '1'
+
   # Control plane
   CONTROL_API_PORT: '3000'
   ALLOW_OPEN_REGISTRATION: 'false'

@@ -218,6 +218,18 @@ jobs:
         run: pnpm -r lint
       - name: Build
         run: pnpm -r build
+      # apps/docs/api is GENERATED from the control plane's OpenAPI document by
+      # the docs build that just ran. If that regeneration changed a committed
+      # page, the reference on the site had drifted from the code - a DTO
+      # decorator changed and nobody rebuilt the docs. Fail rather than ship a
+      # reference that disagrees with the product.
+      - name: Generated API reference is committed and current
+        run: |
+          if ! git diff --exit-code --stat -- apps/docs/api; then
+            echo "::error::apps/docs/api is stale relative to apps/control-api/openapi.json. Run 'pnpm docs:build' and commit the result."
+            exit 1
+          fi
+          echo "OK - the committed API reference matches the code"
       - name: Test
         run: pnpm -r test
 
@@ -631,6 +643,77 @@ jobs:
         run: |
           kubeconform -strict -summary -ignore-missing-schemas \
             -kubernetes-version "$K8S_VERSION" deployments/kubernetes/*.yaml
+
+      # The worker decrypts endpoint signing secrets with ENCRYPTION_KEY and
+      # exits at startup without it. The data-plane Secret once omitted it on
+      # the strength of a comment, and every worker pod crash-looped under the
+      # chart's defaults. The least-privilege half of the same Secret must hold
+      # too: no session-forgery key next to the process that talks to customer
+      # URLs. The raw manifests get the same two checks.
+      - name: Data-plane Secret carries the decryption key and nothing it must not
+        run: |
+          set -euo pipefail
+          helm template ci deployments/helm/webhook-platform \
+            --namespace webhook-platform \
+            --set externalDatabase.url="$CI_DB_URL" \
+            --set secrets.jwtSecret=ci \
+            --set secrets.sessionSecret=ci \
+            --set secrets.encryptionKey=ci-enc \
+            --set secrets.smtpUrl=smtp://ci:ci@mail.invalid:587 \
+            --show-only templates/secret.yaml > /tmp/secrets.yaml
+          # The Secret whose name ends in -data-plane-secrets, as one block.
+          dp=$(awk '/-data-plane-secrets$/{f=1} /^---/{f=0} f' /tmp/secrets.yaml)
+          [ -n "$dp" ] || { echo "::error::No data-plane Secret rendered with dataPlane.separateSecret at its default."; exit 1; }
+          echo "$dp" | grep -qE '^\s*ENCRYPTION_KEY: "ci-enc"$' || { echo "::error::The data-plane Secret does not carry ENCRYPTION_KEY - every worker pod would exit with 'build decryption keyring: ENCRYPTION_KEY is required'."; exit 1; }
+          for k in JWT_SECRET SESSION_SECRET SMTP_URL; do
+            if echo "$dp" | grep -qE "^\s*$k:"; then echo "::error::The data-plane Secret carries $k. The worker must never hold it."; exit 1; fi
+          done
+          # Raw manifests: the data-plane Secret template must list the key too.
+          dpraw=$(awk '/name: webhook-platform-data-plane$/{f=1} /^---/{f=0} f' deployments/kubernetes/02-secret.template.yaml)
+          echo "$dpraw" | grep -qE "^\s*ENCRYPTION_KEY:" || { echo "::error::deployments/kubernetes/02-secret.template.yaml: webhook-platform-data-plane has no ENCRYPTION_KEY."; exit 1; }
+          for k in JWT_SECRET SESSION_SECRET SMTP_URL; do
+            if echo "$dpraw" | grep -qE "^\s*$k:"; then echo "::error::webhook-platform-data-plane carries $k."; exit 1; fi
+          done
+          echo "OK - data plane gets ENCRYPTION_KEY and none of JWT_SECRET, SESSION_SECRET, SMTP_URL"
+
+      # Both deployments sit behind a proxy (the chart's Ingress, 41-ingress.yaml)
+      # so both must tell the processes so. At the process default of 0, every
+      # request is attributed to the proxy's own address and per-IP rate
+      # limiting becomes one bucket for the whole internet.
+      - name: Proxy hop counts are set for both planes
+        run: |
+          set -euo pipefail
+          for k in TRUST_PROXY_HOPS INGEST_TRUSTED_PROXY_HOPS; do
+            grep -qE "^\s*$k: \"1\"$" /tmp/rendered.yaml || { echo "::error::Rendered chart does not set $k (ingress.trustedProxyHops)."; exit 1; }
+            grep -qE "^\s*$k: '1'$" deployments/kubernetes/01-configmap.yaml || { echo "::error::01-configmap.yaml does not set $k."; exit 1; }
+          done
+          echo "OK - both planes are told about the proxy in front of them"
+
+      # docker-compose.prod.yml hard-sets APP_ENV=production, and in production
+      # the control API refuses to boot without SMTP_URL. The file once did not
+      # pass SMTP_URL at all, so the documented install crash-looped. `:?` makes
+      # `compose up` fail with a readable message instead; this proves both
+      # halves - refuses without, renders with.
+      - name: Compose production file refuses without mail and renders with it
+        env:
+          DATABASE_URL: postgresql://u:p@db.invalid:5432/webhook_platform
+          ENCRYPTION_KEY: ci
+          JWT_SECRET: ci
+          SESSION_SECRET: ci
+          DASHBOARD_URL: https://webhooks.invalid
+          MAIL_FROM: Hookubit <no-reply@invalid>
+        run: |
+          set -euo pipefail
+          f=deployments/compose/docker-compose.prod.yml
+          if docker compose -f "$f" config > /dev/null 2>/tmp/compose-err.txt; then
+            echo "::error::$f rendered with SMTP_URL unset. APP_ENV=production there, and the control API refuses to boot without a mail transport - the file must refuse too."; exit 1
+          fi
+          grep -q "SMTP_URL is required" /tmp/compose-err.txt || { echo "::error::compose failed for a reason other than the SMTP_URL guard:"; cat /tmp/compose-err.txt; exit 1; }
+          SMTP_URL=smtp://ci:ci@mail.invalid:587 docker compose -f "$f" config > /tmp/compose.yaml
+          for k in SMTP_URL MAIL_FROM DASHBOARD_URL; do
+            grep -qE "^\s*$k:" /tmp/compose.yaml || { echo "::error::control-api is not given $k."; exit 1; }
+          done
+          echo "OK - compose production file guards SMTP_URL and passes mail configuration"
 
       # Optional configuration must be ABSENT, not empty. envFrom projects every
       # key in a Secret as a SET environment variable, and the control API's env
