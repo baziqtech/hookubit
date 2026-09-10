@@ -31,6 +31,7 @@ import { useEndpoint, useEndpoints } from '../endpoints/api';
 import { EndpointActions } from '../endpoints/EndpointActions';
 import { useEventDeliveries } from '../events/api';
 import { useDelivery, useDeliveryAttempts, useReplayDelivery } from './api';
+import { attemptHistoryState, attemptsWerePruned } from './pruned';
 
 /**
  * "What happened to this delivery?" — the whole reason the operator surface
@@ -110,9 +111,17 @@ export function DeliveryDetailPage() {
               }
             />
 
-            <Diagnosis delivery={data} outcome={outcomeOf(data, moreAttempts.data?.rows)} />
+            <Diagnosis
+              delivery={data}
+              outcome={outcomeOf(data, moreAttempts.data?.rows)}
+              pruned={attemptsWerePruned(data, moreAttempts.data?.rows ?? data.attempts)}
+            />
             <EndpointHealthCheck delivery={data} orgId={orgId} projectId={projectId} />
-            <RetrySchedule delivery={data} outcome={outcomeOf(data, moreAttempts.data?.rows)} />
+            <RetrySchedule
+              delivery={data}
+              outcome={outcomeOf(data, moreAttempts.data?.rows)}
+              pruned={attemptsWerePruned(data, moreAttempts.data?.rows ?? data.attempts)}
+            />
 
             <Tabs
               aria-label="Delivery detail"
@@ -131,6 +140,7 @@ export function DeliveryDetailPage() {
                     paged={moreAttempts.data?.rows}
                     truncated={data.attempts_truncated}
                     total={data.max_attempts}
+                    delivery={data}
                   />
                 )}
                 {tab === 'siblings' && (
@@ -199,11 +209,22 @@ function outcomeOf(delivery: DeliveryDetail, extra?: DeliveryAttempt[]): Deliver
 function Diagnosis({
   delivery,
   outcome,
+  pruned = false,
 }: {
   delivery: DeliveryDetail;
   outcome: DeliveryOutcome;
+  /** Retention reclaimed the attempts, so `outcome.last_status_code` is unknown, not null. */
+  pruned?: boolean;
 }) {
   const diagnosis = diagnoseDelivery(outcome);
+  /*
+   * With no attempts in hand `classifyFailure` reads a null code plus an error
+   * as a TRANSPORT failure — correct for a list row, wrong for a pruned one,
+   * where the code existed and was reclaimed. The explanation must not claim
+   * "the request never reached an HTTP server" about a delivery that may have
+   * been answered 503 five times.
+   */
+  const codeUnknown = pruned && diagnosis.kind === 'transport';
 
   const tone = {
     ok: 'border-ok/30 bg-ok-soft/50',
@@ -217,13 +238,19 @@ function Diagnosis({
     <section className={cn('rounded-lg border px-4 py-3.5', tone)} aria-label="Diagnosis">
       <div className="flex flex-wrap items-center gap-2">
         <h2 className="text-sm font-semibold text-ink">{diagnosis.headline}</h2>
-        {diagnosis.kind !== 'none' && (
-          <FailureBadge kind={diagnosis.kind} code={outcome.last_status_code} />
+        {codeUnknown ? (
+          <Badge tone="neutral">attempt detail reclaimed</Badge>
+        ) : (
+          diagnosis.kind !== 'none' && (
+            <FailureBadge kind={diagnosis.kind} code={outcome.last_status_code} />
+          )
         )}
       </div>
 
       <p className="mt-1.5 max-w-3xl text-xs leading-relaxed text-ink-muted">
-        {diagnosis.explanation}
+        {codeUnknown
+          ? `The per-attempt detail was reclaimed by retention on ${formatTimestamp(delivery.attempts_pruned_at)}, so whether this was an HTTP failure or a transport failure can no longer be read from the attempts. The last error the worker recorded is below; it is the only per-attempt fact that survives.`
+          : diagnosis.explanation}
       </p>
 
       {/*
@@ -354,9 +381,11 @@ function EndpointHealthCheck({
 function RetrySchedule({
   delivery,
   outcome,
+  pruned = false,
 }: {
   delivery: DeliveryDetail;
   outcome: DeliveryOutcome;
+  pruned?: boolean;
 }) {
   const remaining = attemptsRemaining(outcome);
   const nextAt = !delivery.terminal ? delivery.next_attempt_at : null;
@@ -384,9 +413,11 @@ function RetrySchedule({
         value={
           outcome.last_status_code
             ? `HTTP ${outcome.last_status_code}`
-            : delivery.last_error
-              ? 'No response'
-              : '—'
+            : pruned
+              ? 'Unknown — detail reclaimed'
+              : delivery.last_error
+                ? 'No response'
+                : '—'
         }
         hint={delivery.last_error ?? undefined}
       />
@@ -575,6 +606,13 @@ function AttemptCard({ attempt, total }: { attempt: DeliveryAttempt; total: numb
             request failed before the endpoint could answer.
           </p>
         )}
+        {attempt.trace_id && (
+          <p className="text-2xs text-ink-subtle">
+            <span className="mr-1.5 font-semibold">trace</span>
+            <code className="select-all font-mono">{attempt.trace_id}</code>
+            <span className="ml-1.5">— look it up in your tracing backend; only sampled attempts carry one.</span>
+          </p>
+        )}
         {attempt.response_headers && (
           <CodeBlock value={attempt.response_headers} label="response headers" maxHeight="8rem" />
         )}
@@ -616,20 +654,28 @@ function AttemptCard({ attempt, total }: { attempt: DeliveryAttempt; total: numb
  * before the extra page lands, so nobody reads a partial history as a whole one
  * in the seconds between.
  */
-function AttemptHistory({
+export function AttemptHistory({
   embedded,
   paged,
   truncated,
   total,
+  delivery,
 }: {
   embedded: DeliveryAttempt[];
   paged?: DeliveryAttempt[];
   truncated: boolean;
   total: number;
+  /** For `attempts_pruned_at` — read BEFORE the array, per the DTO. */
+  delivery: Pick<Delivery, 'attempts_pruned_at' | 'attempt_count'>;
 }) {
   const rows = paged ?? embedded;
+  const history = attemptHistoryState(delivery, rows);
 
-  if (rows.length === 0) {
+  if (history.kind === 'pruned') {
+    return <PrunedAttempts prunedAt={history.prunedAt} attemptCount={history.attemptCount} />;
+  }
+
+  if (history.kind === 'none') {
     return (
       <EmptyState
         title="No attempts yet"
@@ -640,6 +686,12 @@ function AttemptHistory({
 
   return (
     <div className="flex flex-col gap-2">
+      {history.prunedAt && (
+        <p className="rounded-md border border-line bg-raised px-3 py-1.5 text-2xs text-ink-muted">
+          Retention reclaimed part of this history on {formatTimestamp(history.prunedAt)}; what is
+          below is what survived.
+        </p>
+      )}
       {truncated && paged === undefined && (
         <p className="rounded-md border border-warn/40 bg-warn-soft px-3 py-1.5 text-2xs text-warn">
           This delivery has more attempts than the detail response carries. Loading the full
@@ -657,6 +709,50 @@ function AttemptHistory({
           ))}
       </ol>
     </div>
+  );
+}
+
+/**
+ * The reclaimed state, said out loud.
+ *
+ * "We tried five times and the detail was removed on this date" is a
+ * different sentence from "no attempts yet", and on the page whose whole job
+ * is "what happened to this delivery" the two must never share a rendering.
+ * The count and the outcome are still the record; only the bytes are gone.
+ */
+export function PrunedAttempts({
+  prunedAt,
+  attemptCount,
+}: {
+  prunedAt: string;
+  attemptCount: number;
+}) {
+  const made = attemptCount === 1 ? '1 attempt was made' : `${attemptCount} attempts were made`;
+  return (
+    <section
+      data-testid="attempts-pruned"
+      aria-label="Attempt history reclaimed"
+      className="rounded-lg border border-line bg-raised/60 px-4 py-3.5"
+    >
+      <h3 className="text-xs font-semibold text-ink">
+        {attemptCount === 0
+          ? 'The attempt detail was reclaimed by retention'
+          : `${made}; the detail was reclaimed by retention`}
+      </h3>
+      <p className="mt-1 max-w-3xl text-xs leading-relaxed text-ink-muted">
+        The per-attempt record — request and response headers, bodies, status codes and timings —
+        was removed on{' '}
+        <span className="font-medium text-ink" title={prunedAt}>
+          {formatTimestamp(prunedAt)}
+        </span>{' '}
+        ({formatRelativeTime(prunedAt)}). Attempts carry the bytes and are kept for a shorter
+        window than this summary row, which is why the count survives and the detail does not.
+      </p>
+      <p className="mt-1.5 text-2xs text-ink-subtle">
+        This is not a delivery that was never tried. The status, the attempt count and the last
+        error above are still the record of what happened.
+      </p>
+    </section>
   );
 }
 
@@ -699,7 +795,9 @@ function RequestTab({
         </>
       ) : (
         <p className="rounded-md border border-line bg-raised px-3 py-2 text-xs text-ink-muted">
-          No attempt has recorded its request headers yet.
+          {delivery.attempts_pruned_at
+            ? `The request headers were reclaimed with the attempt detail on ${formatTimestamp(delivery.attempts_pruned_at)}.`
+            : 'No attempt has recorded its request headers yet.'}
         </p>
       )}
 

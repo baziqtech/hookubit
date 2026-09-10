@@ -1,4 +1,4 @@
-import { useEffect, type ReactNode } from 'react';
+import type { ReactNode } from 'react';
 import { Link, NavLink, Outlet, useLocation, useParams } from 'react-router-dom';
 import { Badge } from '../components';
 import { useLogout, useSession } from '../features/auth/api';
@@ -22,16 +22,11 @@ import { OrganizationSwitcher, ProjectSwitcher } from './Switchers';
  * The tour is mounted HERE rather than on a route, so it survives navigation:
  * it is non-blocking by design, and someone reading step 2 can click into
  * Deliveries to look at what it just described without losing their place.
+ * Whether it opens on its own is the tour's decision, made against the
+ * session's `onboarding_completed_at` — see `ProductTour`.
  */
 export function AppLayout() {
   const { orgId = '', projectId } = useParams();
-  const maybeAutoOpen = useTourStore((state) => state.maybeAutoOpen);
-
-  // Considered exactly once per session, and only for someone with no stored
-  // record. A returning user is never interrupted.
-  useEffect(() => {
-    maybeAutoOpen();
-  }, [maybeAutoOpen]);
 
   return (
     <div className="flex min-h-screen bg-canvas">

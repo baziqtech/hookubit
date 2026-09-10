@@ -1,10 +1,12 @@
+import type { ReactNode } from 'react';
 import { useForm } from 'react-hook-form';
-import { Link, useNavigate } from 'react-router-dom';
+import { Link, useLocation, useNavigate } from 'react-router-dom';
 import { Button, Input } from '../../components';
 import { ApiRequestError } from '../../lib/api';
 import type { LoginBody } from '../../types/api';
 import { AuthCard, FormError } from './AuthCard';
 import { useLogin } from './api';
+import { ResendVerificationForm } from './ResendVerification';
 
 /**
  * Login-specific failure rendering.
@@ -15,9 +17,13 @@ import { useLogin } from './api';
  * the confirmation `RegisterPage` already ends on, so a user who registered,
  * missed the email and came here reads one consistent story.
  *
+ * `action` is the way out — the resend control — passed in rather than
+ * rendered here so this stays a pure function of the error: it needs no query
+ * client, and the test can render it bare.
+ *
  * Exported for the test, and because this is the piece worth asserting on.
  */
-export function LoginError({ error }: { error: unknown }) {
+export function LoginError({ error, action }: { error: unknown; action?: ReactNode }) {
   const unverified = error instanceof ApiRequestError && error.body.code === 'email_not_verified';
   if (!unverified) return <FormError error={error} />;
 
@@ -35,18 +41,34 @@ export function LoginError({ error }: { error: unknown }) {
       {error.body.request_id && (
         <p className="mt-1 font-mono text-2xs opacity-80">request_id: {error.body.request_id}</p>
       )}
+      {action && <div className="mt-2.5">{action}</div>}
     </div>
   );
 }
 
+/**
+ * `/verify-email` sends a just-verified user here with their address as router
+ * state, so they do not retype what the link already proved. Anything else in
+ * state (a `from` path, nothing at all) leaves the field empty.
+ */
+function emailFromState(state: unknown): string {
+  if (typeof state !== 'object' || state === null) return '';
+  const { email } = state as { email?: unknown };
+  return typeof email === 'string' ? email : '';
+}
+
 export function LoginPage() {
   const navigate = useNavigate();
+  const location = useLocation();
+  const { from } = (location.state ?? {}) as { from?: unknown };
   const login = useLogin();
   const {
     register,
     handleSubmit,
     formState: { errors },
-  } = useForm<LoginBody>({ defaultValues: { email: '', password: '' } });
+  } = useForm<LoginBody>({
+    defaultValues: { email: emailFromState(location.state), password: '' },
+  });
 
   const onSubmit = handleSubmit(async (values) => {
     await login.mutateAsync(values);
@@ -60,7 +82,10 @@ export function LoginPage() {
      * forward from there, which is one extra request on a page transition the
      * user is already waiting through.
      */
-    navigate('/orgs', { replace: true });
+    // …unless a gate sent them here with `state.from` (`RequireSession`, or the
+    // accept-invitation page keeping its token): an in-app path only.
+    const inApp = typeof from === 'string' && from.startsWith('/') && !from.startsWith('//');
+    navigate(inApp ? from : '/orgs', { replace: true });
   });
 
   return (
@@ -76,7 +101,16 @@ export function LoginPage() {
         </span>
       }
     >
-      <LoginError error={login.error} />
+      <LoginError
+        error={login.error}
+        // The address they just signed in with — `variables` is the body of
+        // the attempt that failed, not whatever is in the input now.
+        action={
+          login.variables?.email ? (
+            <ResendVerificationForm email={login.variables.email} locked />
+          ) : undefined
+        }
+      />
       <form onSubmit={onSubmit} noValidate className="flex flex-col gap-3.5">
         <Input
           label="Email"

@@ -34,7 +34,7 @@ export function ResetPasswordPage() {
         }
       >
         <p className="text-xs text-ink-muted">
-          Links expire 30 minutes after they are issued, and requesting a new link invalidates the
+          Links expire 1 hour after they are issued, and requesting a new link invalidates the
           previous one.
         </p>
       </AuthCard>

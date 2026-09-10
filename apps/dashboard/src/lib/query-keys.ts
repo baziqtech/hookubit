@@ -49,6 +49,7 @@ export const queryKeys = {
   retryPolicies: (projectId: string, offset = 0) =>
     ['project', projectId, 'retry-policies', { offset }] as const,
   analytics: (projectId: string) => ['project', projectId, 'analytics'] as const,
+  eventsRoot: (projectId: string) => ['project', projectId, 'events'] as const,
   events: (projectId: string, filters: Record<string, string>, offset = 0) =>
     ['project', projectId, 'events', filters, { offset }] as const,
   event: (projectId: string, eventId: string) => ['project', projectId, 'event', eventId] as const,
@@ -61,4 +62,10 @@ export const queryKeys = {
     ['project', projectId, 'delivery', deliveryId] as const,
   deliveryAttempts: (projectId: string, deliveryId: string) =>
     ['project', projectId, 'delivery', deliveryId, 'attempts'] as const,
+
+  outboxRoot: (projectId: string) => ['project', projectId, 'outbox'] as const,
+  outbox: (projectId: string, filters: Record<string, string>, offset = 0) =>
+    ['project', projectId, 'outbox', filters, { offset }] as const,
+  outboxEntry: (projectId: string, outboxId: string) =>
+    ['project', projectId, 'outbox-entry', outboxId] as const,
 };

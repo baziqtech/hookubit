@@ -350,13 +350,20 @@ in `vite.config.ts` — the existing tests keep working either way.
 
 ---
 
-# First-run experience, the product tour, and what the backend still owes them
+# First-run experience, the product tour, and what the backend owed them
+
+> **Delivered, both sides.** `users.onboarding_completed_at` exists, the API
+> exposes it on the session and accepts `POST /v1/auth/onboarding-completed`
+> (idempotent by conditional UPDATE, user id from the session only), and the
+> dashboard now decides from the server value first with `localStorage` as the
+> fallback for the window between the click and the response. The ask below is
+> kept as the record of why the field has the shape it has.
 
 This pass added a guided setup path, an orientation tour, a real Analytics
 page, and a rewritten delivery-detail screen. Everything below is either a
 decision worth not re-litigating or a concrete ask on the control API.
 
-## The single most important backend ask: `onboarding_completed_at`
+## The single most important backend ask: `onboarding_completed_at` (delivered)
 
 **The product tour's "has this person seen it?" flag is in `localStorage`, and
 that is a stand-in, not the design.**

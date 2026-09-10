@@ -162,6 +162,17 @@ export type Organization = S['OrganizationDto'];
  */
 export type Member = S['MemberDto'];
 
+/** `AcceptInvitationDto` — the single-use token from the invitation email, nothing else. */
+export type AcceptInvitationBody = S['AcceptInvitationDto'];
+
+/**
+ * `AcceptedInvitationDto` — `{ organization }`, the organization just joined
+ * with the CALLER's new role on it. Redeeming an invitation to an organization
+ * the caller already belongs to returns that membership unchanged, so a page
+ * cannot tell "joined" from "was already in" by the shape.
+ */
+export type AcceptedInvitation = S['AcceptedInvitationDto'];
+
 /* ── Projects ─────────────────────────────────────────────────────────────── */
 
 /** Two values, not three, and neither is "production". */
@@ -391,6 +402,49 @@ export type DeliveryDetail = S['DeliveryDetailDto'];
 
 export type ReplayResult = S['ReplayResultDto'];
 
+/* ── Outbox ───────────────────────────────────────────────────────────────── */
+
+/**
+ * `OutboxEntryDto.status`. `failed` is PARKED: the router gave up, the event
+ * was answered `202 Accepted` and will never be delivered until someone
+ * requeues it. Nothing else in this union is actionable.
+ */
+export type OutboxStatus = S['OutboxEntryDto']['status'];
+
+/**
+ * `OutboxEntryDto` — the router's record of what it still owes an accepted
+ * event, exactly as the data plane wrote it. Nothing here is derived.
+ *
+ * Two counters that look alike and are not: `attempts` is monotonic and
+ * informational (a requeue preserves it); `unaccounted_attempts` is the poison
+ * bound (a requeue resets it). `failing_since` is the time-based bound. A
+ * non-null `fan_out_cursor` on a parked row means the fan-out is PARTLY done.
+ */
+export type OutboxEntry = S['OutboxEntryDto'];
+
+/** `RequeueOutboxDto` — `reason` only, and optional on the wire. */
+export type RequeueOutboxBody = S['RequeueOutboxDto'];
+
+/** `RequeueParkedDto` — `reason` plus an optional `event_id` scope. */
+export type RequeueParkedBody = S['RequeueParkedDto'];
+
+/**
+ * `RequeueResultDto`. `has_more` is the load-bearing field: the bound is per
+ * request, not per incident, so a bulk requeue that ignores it recovers the
+ * first hundred rows and reports the incident closed.
+ */
+export type RequeueResult = S['RequeueResultDto'];
+
+/**
+ * `MAX_REQUEUE_BATCH` in control-api `src/outbox/outbox-limits.ts`, mirrored
+ * so the UI can say "up to 100, oldest first" rather than "some". A stale value
+ * here costs wrong copy, never a wrong request — the server decides.
+ */
+export const MAX_REQUEUE_BATCH = 100;
+
+/** `@MaxLength(500)` on `RequeueOutboxDto.reason` and `RequeueParkedDto.reason`. */
+export const MAX_REQUEUE_REASON_LENGTH = 500;
+
 /* ── Audit log ────────────────────────────────────────────────────────────── */
 
 /**
@@ -459,6 +513,19 @@ export type LoginBody = S['LoginDto'];
 export type RegisterBody = S['RegisterDto'];
 export type ForgotPasswordBody = S['ForgotPasswordDto'];
 export type ResetPasswordBody = S['ResetPasswordDto'];
+
+/** `VerifyEmailDto` — the single-use token from the emailed link, nothing else. */
+export type VerifyEmailBody = S['VerifyEmailDto'];
+
+/**
+ * `ResendVerificationDto`. The route answers 202 with an identical body for
+ * every address — registered, unknown, verified, disabled — so the response
+ * is `Acknowledged` and carries nothing a page could branch on.
+ */
+export type ResendVerificationBody = S['ResendVerificationDto'];
+
+/** `AcknowledgedDto` — `{ status }` with `status` typed `string`, not a literal. */
+export type Acknowledged = S['AcknowledgedDto'];
 
 /**
  * `POST /v1/auth/register` answers `{"status":"accepted"}` with no session

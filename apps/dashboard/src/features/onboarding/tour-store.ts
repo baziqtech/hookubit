@@ -6,6 +6,11 @@
  * components that are nowhere near each other in the tree — the sidebar's
  * "Product tour" button and the tour panel itself, which is mounted at the
  * shell. Lifting it would mean threading it through the whole layout.
+ *
+ * What IS server-owned — whether the person has finished the tour — stays out
+ * of here. The store is told the server's answer (`maybeAutoOpen`) and records
+ * the browser-local fallback on close; the POST that persists completion lives
+ * with the component, which has the query client. See `tour-storage.ts`.
  */
 import { create } from 'zustand';
 import { TOUR_STEPS } from './tour-content';
@@ -19,12 +24,16 @@ interface TourState {
 
   /** Opened deliberately — from the help affordance. Always starts at step 1. */
   openTour: () => void;
-  /** Considered once per session; opens only for someone with no stored record. */
-  maybeAutoOpen: () => void;
+  /**
+   * Considered once per session, given the user's `onboarding_completed_at`
+   * from the session. Opens only when the server has no completion and this
+   * browser has no record either.
+   */
+  maybeAutoOpen: (onboardingCompletedAt: string | null) => void;
   next: () => void;
   previous: () => void;
   goTo: (step: number) => void;
-  /** Dismissed early. Recorded so it does not reappear unbidden. */
+  /** Dismissed early. Recorded locally so it does not reappear unbidden. */
   skip: () => void;
   /** Reached the end. Recorded the same way, under a different reason. */
   complete: () => void;
@@ -37,9 +46,9 @@ export const useTourStore = create<TourState>((set, get) => ({
 
   openTour: () => set({ open: true, step: 0 }),
 
-  maybeAutoOpen: () => {
+  maybeAutoOpen: (onboardingCompletedAt) => {
     if (get().autoOpenChecked) return;
-    set({ autoOpenChecked: true, open: shouldAutoOpenTour(), step: 0 });
+    set({ autoOpenChecked: true, open: shouldAutoOpenTour(onboardingCompletedAt), step: 0 });
   },
 
   next: () =>

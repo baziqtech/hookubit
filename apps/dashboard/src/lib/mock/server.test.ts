@@ -1,5 +1,13 @@
 import { beforeEach, describe, expect, it } from 'vitest';
-import type { Delivery, EventDetail, OffsetPage, Session, WebhookEvent } from '../../types/api';
+import type {
+  AcceptedInvitation,
+  Delivery,
+  EventDetail,
+  OffsetPage,
+  Organization,
+  Session,
+  WebhookEvent,
+} from '../../types/api';
 import * as db from './data';
 import { MockHttpError, mockRequest, resetMockState } from './server';
 
@@ -22,6 +30,157 @@ describe('mock control API', () => {
     expect(session.user.email).toContain('@');
     expect(session.user.email_verified).toBe(true);
     expect(session).not.toHaveProperty('organizations');
+  });
+
+  it('refuses login for an unverified account with the code the page branches on', async () => {
+    await expect(
+      mockRequest('POST', '/v1/auth/login', { email: 'ada@example.com', password: 'unverified' }),
+    ).rejects.toMatchObject({ status: 403, body: { error: { code: 'email_not_verified' } } });
+  });
+
+  it('verify-email answers a SessionResponseDto for a live token and one 400 for every dead one', async () => {
+    const verified = await mockRequest<Session>('POST', '/v1/auth/verify-email', {
+      token: 'tok_live',
+    });
+    expect(verified.user.email_verified).toBe(true);
+    expect(verified).not.toHaveProperty('organizations');
+
+    for (const token of ['expired', 'invalid']) {
+      await expect(mockRequest('POST', '/v1/auth/verify-email', { token })).rejects.toMatchObject({
+        status: 400,
+        body: { error: { code: 'invalid_request' } },
+      });
+    }
+    await expect(mockRequest('POST', '/v1/auth/verify-email', {})).rejects.toBeInstanceOf(
+      MockHttpError,
+    );
+  });
+
+  it('resend-verification is the same 202 body for any address, then throttles like the server', async () => {
+    const bodies = await Promise.all(
+      ['registered@example.com', 'nobody@example.com'].map((email) =>
+        mockRequest<{ status: string }>('POST', '/v1/auth/resend-verification', { email }),
+      ),
+    );
+    expect(bodies[0]).toEqual(bodies[1]);
+    expect(bodies[0]).toEqual({ status: 'accepted' });
+
+    // Five per hour on the real route; the sixth is a 429 with a retry hint.
+    for (let i = 0; i < 3; i += 1) {
+      await mockRequest('POST', '/v1/auth/resend-verification', { email: 'a@example.com' });
+    }
+    await expect(
+      mockRequest('POST', '/v1/auth/resend-verification', { email: 'a@example.com' }),
+    ).rejects.toMatchObject({
+      status: 429,
+      body: { error: { code: 'rate_limited', details: { retry_after_seconds: 42 } } },
+    });
+  });
+
+  /*
+   * `POST /v1/invitations/accept`, as `MembersService.accept` behaves: consume
+   * first, then check the address, then the inviter. One 400 for every dead
+   * token, a 409 for an inviter who can no longer support it, and every
+   * refusal burns the token.
+   */
+  it('accepting a live invitation answers { organization } and adds it to the list', async () => {
+    const before = await mockRequest<OffsetPage<Organization>>('GET', '/v1/organizations');
+    expect(before.data.map((row) => row.id)).not.toContain('org_01JQNORTH');
+
+    const accepted = await mockRequest<AcceptedInvitation>('POST', '/v1/invitations/accept', {
+      token: 'inv_live_northline_developer_01',
+    });
+    expect(accepted.organization).toMatchObject({ id: 'org_01JQNORTH', role: 'developer' });
+    expect(accepted).not.toHaveProperty('status');
+
+    const after = await mockRequest<OffsetPage<Organization>>('GET', '/v1/organizations');
+    expect(after.data.map((row) => row.id)).toContain('org_01JQNORTH');
+
+    // Single-use: the same token a second time is the dead-token 400.
+    await expect(
+      mockRequest('POST', '/v1/invitations/accept', { token: 'inv_live_northline_developer_01' }),
+    ).rejects.toMatchObject({ status: 400, body: { error: { code: 'invalid_request' } } });
+  });
+
+  it('accepting again for an organization you are already in returns it unchanged', async () => {
+    const accepted = await mockRequest<AcceptedInvitation>('POST', '/v1/invitations/accept', {
+      token: 'inv_live_shaq_already_member_02',
+    });
+    // The membership as it stands — owner — not the viewer role on the token.
+    expect(accepted.organization).toMatchObject({ id: 'org_01JQSHAQ', role: 'owner' });
+    const list = await mockRequest<OffsetPage<Organization>>('GET', '/v1/organizations');
+    expect(list.data.filter((row) => row.id === 'org_01JQSHAQ')).toHaveLength(1);
+  });
+
+  it('expired, used and wrong-address tokens are ONE 400 with ONE sentence', async () => {
+    const messages = new Set<string>();
+    for (const token of [
+      'inv_expired_northline_000000_03',
+      'inv_used_northline_00000000_04',
+      'inv_live_northline_other_addr_05',
+      'inv_unknown_00000000000000_99',
+    ]) {
+      const failure = await mockRequest('POST', '/v1/invitations/accept', { token }).catch(
+        (error: MockHttpError) => error,
+      );
+      expect(failure).toMatchObject({ status: 400, body: { error: { code: 'invalid_request' } } });
+      messages.add((failure as MockHttpError).message);
+    }
+    expect(messages.size).toBe(1);
+    // The wrong-address token is burnt by the attempt, as it is on the server.
+    await expect(
+      mockRequest('POST', '/v1/invitations/accept', { token: 'inv_live_northline_other_addr_05' }),
+    ).rejects.toMatchObject({ status: 400 });
+  });
+
+  it('refuses with 409 conflict when the inviter can no longer support the invitation', async () => {
+    await expect(
+      mockRequest('POST', '/v1/invitations/accept', {
+        token: 'inv_live_northline_inviter_gone_06',
+      }),
+    ).rejects.toMatchObject({
+      status: 409,
+      body: { error: { code: 'conflict', message: expect.stringContaining('new invitation') } },
+    });
+  });
+
+  it('validates the token the way AcceptInvitationDto does, as a per-field 400', async () => {
+    await expect(mockRequest('POST', '/v1/invitations/accept', {})).rejects.toBeInstanceOf(
+      MockHttpError,
+    );
+    await expect(
+      mockRequest('POST', '/v1/invitations/accept', { token: 'short' }),
+    ).rejects.toMatchObject({
+      status: 400,
+      body: { error: { code: 'invalid_request', message: [expect.stringContaining('token')] } },
+    });
+  });
+
+  it('counts acceptances against the same 20-per-hour bucket as InvitationsController', async () => {
+    for (let i = 0; i < 20; i += 1) {
+      await expect(
+        mockRequest('POST', '/v1/invitations/accept', { token: 'inv_unknown_00000000000000_99' }),
+      ).rejects.toMatchObject({ status: 400 });
+    }
+    await expect(
+      mockRequest('POST', '/v1/invitations/accept', { token: 'inv_unknown_00000000000000_99' }),
+    ).rejects.toMatchObject({ status: 429, body: { error: { code: 'rate_limited' } } });
+  });
+
+  it('onboarding-completed is a bodiless 204 that sticks on the FIRST call and reads back on the session', async () => {
+    const before = await mockRequest<Session>('GET', '/v1/auth/session');
+    expect(before.user.onboarding_completed_at).toBeNull();
+
+    expect(await mockRequest('POST', '/v1/auth/onboarding-completed')).toBeUndefined();
+    const first = (await mockRequest<Session>('GET', '/v1/auth/session')).user
+      .onboarding_completed_at;
+    expect(first).toEqual(expect.any(String));
+
+    // A replay is a success that touches nothing.
+    await mockRequest('POST', '/v1/auth/onboarding-completed');
+    const second = (await mockRequest<Session>('GET', '/v1/auth/session')).user
+      .onboarding_completed_at;
+    expect(second).toBe(first);
   });
 
   it('paginates events by OFFSET — `next_cursor` does not exist anywhere', async () => {

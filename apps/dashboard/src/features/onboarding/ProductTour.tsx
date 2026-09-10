@@ -1,7 +1,8 @@
-import { useEffect, useRef } from 'react';
+import { useCallback, useEffect, useRef } from 'react';
 import { Link, useParams } from 'react-router-dom';
 import { Button } from '../../components';
 import { cn } from '../../lib/cn';
+import { useCompleteOnboarding, useSession } from '../auth/api';
 import { TOUR_STEPS } from './tour-content';
 import { useTourStore } from './tour-store';
 
@@ -34,10 +35,47 @@ import { useTourStore } from './tour-store';
  * It is sized and positioned to stay clear of the primary navigation, and it
  * uses `max-h`/overflow rather than a fixed height so it stays usable at 200%
  * zoom instead of clipping its own buttons off-screen.
+ *
+ * Whether to open at all, and remembering that it closed, are decided against
+ * the SESSION: `user.onboarding_completed_at` is the record, and closing the
+ * tour — finished or skipped, both count — posts to
+ * `/v1/auth/onboarding-completed`. The session is already in the cache by the
+ * time this mounts (`RequireSession` waited for it), so reading it costs no
+ * request. See `tour-storage.ts` for how the browser-local record backs this.
  */
 export function ProductTour() {
   const { orgId, projectId } = useParams();
-  const { open, step, next, previous, goTo, skip, complete } = useTourStore();
+  const { open, step, next, previous, goTo, skip, complete, maybeAutoOpen } = useTourStore();
+  const session = useSession();
+  const completeOnboarding = useCompleteOnboarding();
+
+  // Considered exactly once per session, and only once the session has
+  // answered — a `null` from a not-yet-loaded user must not read as "never".
+  const onboardingCompletedAt = session.data?.user.onboarding_completed_at;
+  useEffect(() => {
+    if (onboardingCompletedAt === undefined) return;
+    maybeAutoOpen(onboardingCompletedAt);
+  }, [onboardingCompletedAt, maybeAutoOpen]);
+
+  /*
+   * Close, record locally, and tell the server — unless the server already
+   * knows. Someone re-opening the tour from the sidebar after finishing it
+   * once should not spend a write (and a slot in the route's throttle) on a
+   * fact that is already recorded. `mutate` never throws: a failed POST is
+   * covered by the local record until the next successful one.
+   */
+  const alreadyRecorded = onboardingCompletedAt != null;
+  const { mutate: persistCompletion } = completeOnboarding;
+  const finish = useCallback(
+    (how: 'skipped' | 'completed') => {
+      if (how === 'skipped') skip();
+      else complete();
+      if (!alreadyRecorded) persistCompletion();
+    },
+    [skip, complete, alreadyRecorded, persistCompletion],
+  );
+  const onSkip = useCallback(() => finish('skipped'), [finish]);
+  const onComplete = useCallback(() => finish('completed'), [finish]);
 
   const panelRef = useRef<HTMLDivElement>(null);
   const headingRef = useRef<HTMLHeadingElement>(null);
@@ -70,11 +108,11 @@ export function ProductTour() {
   useEffect(() => {
     if (!open) return;
     const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') skip();
+      if (event.key === 'Escape') onSkip();
     };
     document.addEventListener('keydown', onKeyDown);
     return () => document.removeEventListener('keydown', onKeyDown);
-  }, [open, skip]);
+  }, [open, onSkip]);
 
   if (!open) return null;
 
@@ -103,7 +141,7 @@ export function ProductTour() {
         <Button
           size="sm"
           variant="ghost"
-          onClick={skip}
+          onClick={onSkip}
           // The escape hatch is a labelled word on every step, not a glyph.
           className="text-ink-muted hover:text-ink"
         >
@@ -159,7 +197,7 @@ export function ProductTour() {
         {isLast && getStartedHref && (
           <Link
             to={getStartedHref}
-            onClick={complete}
+            onClick={onComplete}
             className="mt-3 inline-flex items-center gap-1.5 rounded-md bg-accent px-3 py-1.5 text-xs font-medium text-accent-ink transition-colors hover:bg-accent/90"
           >
             Open Get started
@@ -176,7 +214,7 @@ export function ProductTour() {
             Back
           </Button>
           {isLast ? (
-            <Button size="sm" variant="primary" onClick={complete}>
+            <Button size="sm" variant="primary" onClick={onComplete}>
               Finish
             </Button>
           ) : (

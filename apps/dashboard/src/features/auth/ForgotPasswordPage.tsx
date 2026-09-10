@@ -19,7 +19,7 @@ export function ForgotPasswordPage() {
     return (
       <AuthCard
         title="Check your email"
-        description="If that address has an account, a reset link is on its way. The link expires in 30 minutes."
+        description="If that address has an account, a reset link is on its way. The link expires in 1 hour."
         footer={
           <Link to="/login" className="font-medium text-accent hover:underline">
             Back to sign in

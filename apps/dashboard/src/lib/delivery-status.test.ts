@@ -92,6 +92,7 @@ function attempt(overrides: Partial<DeliveryAttempt> = {}): DeliveryAttempt {
     error_code: null,
     error_message: null,
     worker_id: 'worker-a1',
+    trace_id: null,
     created_at: '2026-09-06T12:00:00.000Z',
     ...overrides,
   };

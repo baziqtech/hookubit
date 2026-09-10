@@ -24,7 +24,10 @@ import type {
   Member,
   OffsetPage,
   Organization,
+  OutboxEntry,
+  OutboxStatus,
   Project,
+  RequeueResult,
   RetryPolicy,
   RotatedSecret,
   Subscription,
@@ -33,6 +36,8 @@ import type {
 import {
   DEFAULT_PAGE_SIZE,
   MAX_PAGE_SIZE,
+  MAX_REQUEUE_BATCH,
+  MAX_REQUEUE_REASON_LENGTH,
   ORGANIZATION_NAME_MAX_LENGTH,
   ORGANIZATION_NAME_MIN_LENGTH,
   ORGANIZATION_SLUG_MAX_LENGTH,
@@ -66,6 +71,9 @@ class MockHttpError extends Error {
     super(Array.isArray(message) ? message.join(' ') : message);
   }
 }
+
+/** The one sentence `MembersService.accept` answers for every dead token. */
+const INVALID_INVITATION = 'This invitation is invalid or has expired.';
 
 let requestSeq = 0;
 const requestId = () => `req_01JQMOCK${(requestSeq += 1).toString().padStart(4, '0')}`;
@@ -166,7 +174,18 @@ const THROTTLE_LIMITS: Record<string, number> = {
   'organizations.create': 10,
   'organizations.update': 30,
   'members.invite': 20,
+  // Counted, not enforced per address, on the real route — the same posture
+  // `auth.verify` takes. The number matches `InvitationsController`.
+  'invitations.accept': 20,
   'endpoint-secrets.rotate': 30,
+  // Sends mail to an address the caller typed, so it is the one auth route
+  // the real API enforces per IP AND per address. Same number as the server.
+  'auth.resend': 5,
+  // As tight as event replay, and for the same reason: one call can put a
+  // hundred fan-outs into the queue, each of which becomes real HTTP to
+  // endpoints that were, very often, already failing. `OutboxController`
+  // declares 10 per five minutes on BOTH requeue routes, sharing one bucket.
+  'outbox.requeue': 10,
 };
 
 const throttleCounts = new Map<string, number>();
@@ -185,20 +204,34 @@ export function resetMockLimits(): void {
  * state across a test file, so there has to be a way back.
  */
 const pristine = {
+  user: { ...db.user },
   endpoints: db.endpoints.map((endpoint) => ({ ...endpoint })),
   projects: db.projects.map((project) => ({ ...project })),
   organizations: db.organizations.map((organization) => ({ ...organization })),
+  // A requeue rewrites the outbox row AND flips its event `failed → received`.
+  outbox: db.outbox.map((entry) => ({ ...entry })),
+  events: db.events.map((event) => ({ ...event })),
+  // Redemption consumes the token and can add an organization row.
+  invitations: db.invitations.map((invitation) => ({ ...invitation })),
 };
 
 /** Rewinds every write the mock has accepted, and the throttle counters. */
 export function resetMockState(): void {
   throttleCounts.clear();
+  Object.assign(db.user, pristine.user);
   db.endpoints.splice(0, db.endpoints.length, ...pristine.endpoints.map((row) => ({ ...row })));
   db.projects.splice(0, db.projects.length, ...pristine.projects.map((row) => ({ ...row })));
   db.organizations.splice(
     0,
     db.organizations.length,
     ...pristine.organizations.map((row) => ({ ...row })),
+  );
+  db.outbox.splice(0, db.outbox.length, ...pristine.outbox.map((row) => ({ ...row })));
+  db.events.splice(0, db.events.length, ...pristine.events.map((row) => ({ ...row })));
+  db.invitations.splice(
+    0,
+    db.invitations.length,
+    ...pristine.invitations.map((row) => ({ ...row })),
   );
 }
 
@@ -394,6 +427,96 @@ function assertRejections(rejections: string[]): void {
   fail(400, 'invalid_request', rejections);
 }
 
+/* ── Outbox ───────────────────────────────────────────────────────────────── */
+
+const OUTBOX_STATUSES: readonly OutboxStatus[] = ['pending', 'processing', 'processed', 'failed'];
+
+/**
+ * One message for "does not exist" and "belongs to another tenant" alike —
+ * `CROSS_TENANT_MESSAGE` in the control API. These routes take an outbox id in
+ * the path AND an event id in the query or body, so a 404 that said which KIND
+ * of resource an id names would confirm the id is live infrastructure
+ * belonging to somebody.
+ */
+const CROSS_TENANT_MESSAGE = 'Resource not found.';
+
+/**
+ * Outbox rows carry no project column; they are scoped through their event,
+ * exactly as `ScopedRepository` scopes `event_outbox` on the server.
+ */
+function outboxInProject(projectId: string): OutboxEntry[] {
+  const owned = new Set(
+    db.events.filter((event) => event.project_id === projectId).map((event) => event.id),
+  );
+  return db.outbox.filter((entry) => owned.has(entry.event_id));
+}
+
+/** `forbidNonWhitelisted`: a filter the DTO does not declare is a 400, not a wider listing. */
+function rejectUnknownQuery(query: URLSearchParams, allowed: readonly string[]): void {
+  const rejections = [...query.keys()]
+    .filter((key) => !allowed.includes(key))
+    .map((key) => `property ${key} should not exist`);
+  assertRejections(rejections);
+}
+
+function readRequeueBody(
+  body: unknown,
+  allowEventId: boolean,
+): { reason?: string; event_id?: string } {
+  const record = (typeof body === 'object' && body !== null ? body : {}) as Record<
+    string,
+    unknown
+  >;
+  const rejections: string[] = [];
+  const allowed = allowEventId ? ['reason', 'event_id'] : ['reason'];
+  for (const key of Object.keys(record)) {
+    if (!allowed.includes(key)) rejections.push(`property ${key} should not exist`);
+  }
+  if (record.reason !== undefined) {
+    if (typeof record.reason !== 'string') rejections.push('reason: must be a string');
+    else if (record.reason.length > MAX_REQUEUE_REASON_LENGTH) {
+      rejections.push(
+        `reason: must be shorter than or equal to ${MAX_REQUEUE_REASON_LENGTH} characters`,
+      );
+    }
+  }
+  if (record.event_id !== undefined) {
+    if (typeof record.event_id !== 'string') rejections.push('event_id: must be a string');
+    else if (record.event_id.length > 64) {
+      rejections.push('event_id: must be shorter than or equal to 64 characters');
+    }
+  }
+  assertRejections(rejections);
+  return record as { reason?: string; event_id?: string };
+}
+
+/**
+ * `OutboxService.returnToQueue`, mirrored write for write.
+ *
+ * The two BUDGETS reset — `unaccounted_attempts` and `failing_since` — because
+ * the operator has looked at the row. `attempts` is NOT reset: it is monotonic,
+ * and zeroing it would erase the number that separates "requeued four times
+ * and keeps dying" from "first time". `last_error` and `fan_out_cursor` are
+ * untouched — the evidence survives the recovery and a partial fan-out
+ * resumes. `processed_at` clears because the row is no longer finished. The
+ * event goes `failed → received`, guarded on `failed`.
+ */
+function returnToQueue(rows: OutboxEntry[]): OutboxEntry[] {
+  const now = new Date().toISOString();
+  for (const row of rows) {
+    row.status = 'pending';
+    row.available_at = now;
+    row.processed_at = null;
+    row.locked_by = null;
+    row.locked_until = null;
+    row.unaccounted_attempts = 0;
+    row.failing_since = null;
+    const event = db.events.find((candidate) => candidate.id === row.event_id);
+    if (event && event.status === 'failed') event.status = 'received';
+  }
+  return rows;
+}
+
 const handlers: Handler[] = [
   /* Auth */
   /*
@@ -420,7 +543,55 @@ const handlers: Handler[] = [
       if (credentials.password === 'wrong') {
         fail(401, 'unauthenticated', 'Email or password is incorrect');
       }
+      // And one unverified account, so the resend path on the login page is
+      // reachable too. 403 with the code, as `AuthService.login` answers it.
+      if (credentials.password === 'unverified') {
+        fail(
+          403,
+          'email_not_verified',
+          'Confirm your email address before signing in. Request a new link if the last one expired.',
+        );
+      }
       return { user: { ...db.user, email: credentials.email } };
+    },
+  },
+  {
+    method: 'POST',
+    pattern: '/v1/auth/verify-email',
+    handle: ({ body }) => {
+      const input = requireBody<{ token: string }>(body, ['token']);
+      // Unknown, already consumed and expired are ONE outcome on the real API
+      // — the same 400 and the same sentence — so the mock has one too. There
+      // is no session cookie in the mock to set, and the real route sets none
+      // either: the page it answers sends the user on to sign in.
+      if (input.token === 'expired' || input.token === 'invalid') {
+        fail(400, 'invalid_request', 'This verification link is invalid or has expired.');
+      }
+      db.user.email_verified = true;
+      return { user: db.user };
+    },
+  },
+  {
+    method: 'POST',
+    pattern: '/v1/auth/resend-verification',
+    handle: ({ body }) => {
+      // Throttle first, as the guard runs before validation on the server.
+      charge('auth.resend');
+      requireBody(body, ['email']);
+      // Always 202 with this exact body: registered, unknown, verified and
+      // disabled addresses are indistinguishable by design.
+      return { status: 'accepted' };
+    },
+  },
+  {
+    method: 'POST',
+    pattern: '/v1/auth/onboarding-completed',
+    handle: () => {
+      // 204, no body. The FIRST completion is the one that sticks; a replay
+      // is a success that touches nothing, and the client re-reads the
+      // session to learn the instant.
+      db.user.onboarding_completed_at ??= new Date().toISOString();
+      return undefined;
     },
   },
   {
@@ -545,6 +716,55 @@ const handlers: Handler[] = [
       // account, or is unknown. Anything else lets a member enumerate the
       // platform. No member row is created; the invitee redeems a token.
       return { status: 'accepted' };
+    },
+  },
+  /*
+   * Redemption lives at `/v1/invitations`, not under `:orgId` — the invitee is
+   * not a member yet, so a tenant-scoped route would 404. Mirrors
+   * `MembersService.accept` step for step: the token is CONSUMED first, then
+   * the address on it is checked against the session, then the inviter. So an
+   * expired, used, unknown or wrong-address token is ONE 400 with ONE sentence
+   * (the real service refuses to say which), and every refusal burns the token
+   * — a second POST of the same token is that same 400.
+   */
+  {
+    method: 'POST',
+    pattern: '/v1/invitations/accept',
+    handle: ({ body }) => {
+      charge('invitations.accept');
+      const input = requireBody<{ token: unknown }>(body, ['token']);
+      if (typeof input.token !== 'string' || input.token.length < 20 || input.token.length > 200) {
+        fail(400, 'invalid_request', [
+          'token: token must be longer than or equal to 20 and shorter than or equal to 200 characters',
+        ]);
+      }
+      const refuse: () => never = () => fail(400, 'invalid_request', INVALID_INVITATION);
+
+      const invitation = db.invitations.find((row) => row.token === input.token);
+      if (!invitation || invitation.consumed_at !== null) refuse();
+      if (invitation.expires_at < new Date().toISOString()) refuse();
+      invitation.consumed_at = new Date().toISOString();
+
+      if (invitation.email.toLowerCase() !== db.user.email.toLowerCase()) refuse();
+
+      // Already a member: the membership as it stands, role untouched.
+      const existing = db.organizations.find((row) => row.id === invitation.organization_id);
+      if (existing) return { organization: existing };
+
+      if (invitation.inviter_gone) {
+        fail(
+          409,
+          'conflict',
+          'The member who invited you is no longer part of that organization. Ask for a new invitation.',
+        );
+      }
+      const joined: Organization = {
+        ...db.invitableOrganization,
+        role: invitation.role,
+        updated_at: new Date().toISOString(),
+      };
+      db.organizations.push(joined);
+      return { organization: joined };
     },
   },
   /*
@@ -1168,6 +1388,101 @@ const handlers: Handler[] = [
       if (!delivery) fail(404, 'not_found', `Delivery ${params.deliveryId} was not found`);
       // A NEW delivery row, not a reset of this one. Both stay in the ledger.
       return replayOf(delivery);
+    },
+  },
+
+  /*
+   * The outbox — the router's record of what it still owes an accepted event,
+   * and the way back when it parks one. Nested under the project like events
+   * and deliveries. Bulk requeue is declared BEFORE `:outboxId/requeue`; the
+   * paths are different depths so the matcher cannot confuse them, but the
+   * order documents the intent.
+   */
+  {
+    method: 'GET',
+    pattern: '/v1/projects/:projectId/outbox',
+    handle: ({ params, query }) => {
+      rejectUnknownQuery(query, ['status', 'event_id', 'limit', 'offset']);
+      const status = query.get('status');
+      if (status !== null && !(OUTBOX_STATUSES as readonly string[]).includes(status)) {
+        fail(400, 'invalid_request', [
+          `status: must be one of the following values: ${OUTBOX_STATUSES.join(', ')}`,
+        ]);
+      }
+      const eventId = query.get('event_id');
+      const rows = outboxInProject(params.projectId)
+        .filter((entry) => (status ? entry.status === status : true))
+        .filter((entry) => (eventId ? entry.event_id === eventId : true))
+        // Newest first, as the controller orders it.
+        .sort((a, b) => b.created_at.localeCompare(a.created_at));
+      return offsetEnvelope<OutboxEntry>(rows, query);
+    },
+  },
+  {
+    method: 'POST',
+    pattern: '/v1/projects/:projectId/outbox/requeue',
+    handle: ({ params, body }): RequeueResult => {
+      // The guard runs before the pipe, so the throttle is charged first.
+      charge('outbox.requeue');
+      const dto = readRequeueBody(body, true);
+      const owned = outboxInProject(params.projectId);
+
+      // The event is resolved FIRST, so an id from another tenant is the
+      // shared 404 rather than an empty result that reads as "nothing parked".
+      if (
+        dto.event_id !== undefined &&
+        !owned.some((entry) => entry.event_id === dto.event_id)
+      ) {
+        fail(404, 'not_found', CROSS_TENANT_MESSAGE);
+      }
+
+      const parked = owned
+        .filter((entry) => entry.status === 'failed')
+        .filter((entry) => (dto.event_id ? entry.event_id === dto.event_id : true))
+        // OLDEST first: those consumers have been waiting longest.
+        .sort((a, b) => a.created_at.localeCompare(b.created_at));
+
+      const page = parked.slice(0, MAX_REQUEUE_BATCH);
+      const requeued = returnToQueue(page);
+      return {
+        requeued: requeued.length,
+        has_more: parked.length > page.length,
+        data: requeued.map((row) => ({ ...row })),
+      };
+    },
+  },
+  {
+    method: 'GET',
+    pattern: '/v1/projects/:projectId/outbox/:outboxId',
+    handle: ({ params }) =>
+      outboxInProject(params.projectId).find((entry) => entry.id === params.outboxId) ??
+      fail(404, 'not_found', CROSS_TENANT_MESSAGE),
+  },
+  {
+    method: 'POST',
+    pattern: '/v1/projects/:projectId/outbox/:outboxId/requeue',
+    handle: ({ params, body }): OutboxEntry => {
+      charge('outbox.requeue');
+      readRequeueBody(body, false);
+      const entry = outboxInProject(params.projectId).find(
+        (candidate) => candidate.id === params.outboxId,
+      );
+      if (!entry) fail(404, 'not_found', CROSS_TENANT_MESSAGE);
+      if (entry.status !== 'failed') {
+        // The CURRENT status in `details`, so the caller can tell "a router
+        // already has it" from "the fan-out already completed" without a
+        // second request.
+        fail(
+          409,
+          'conflict',
+          entry.status === 'processed'
+            ? 'This entry already fanned out. To send the event again, replay it.'
+            : 'This entry is not parked: a router is already working on it.',
+          { outbox_id: entry.id, outbox_status: entry.status },
+        );
+      }
+      const [requeued] = returnToQueue([entry]);
+      return { ...requeued };
     },
   },
 

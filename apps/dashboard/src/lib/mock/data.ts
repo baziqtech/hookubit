@@ -32,6 +32,8 @@ import type {
   EventStatus,
   Member,
   Organization,
+  Role,
+  OutboxEntry,
   Project,
   ProjectAnalytics,
   RetryPolicy,
@@ -55,6 +57,10 @@ function rng(seed: number): () => number {
 const random = rng(20260906);
 const pick = <T,>(items: T[]): T => items[Math.floor(random() * items.length)];
 const between = (min: number, max: number) => min + Math.floor(random() * (max - min + 1));
+/** A W3C trace id: 32 lowercase hex characters, never all zeros. */
+const traceId = () =>
+  Array.from({ length: 32 }, () => '0123456789abcdef'[Math.floor(random() * 16)]).join('') ||
+  '0';
 /** A plausible lowercase-hex digest. Seeded, so it is stable across reloads. */
 const digest = () =>
   Array.from({ length: 64 }, () => '0123456789abcdef'[Math.floor(random() * 16)]).join('');
@@ -76,6 +82,7 @@ const digest = () =>
  */
 export const NOW = new Date();
 const minutesAgo = (m: number) => new Date(NOW.getTime() - m * 60_000).toISOString();
+const minutesFromNow = (m: number) => new Date(NOW.getTime() + m * 60_000).toISOString();
 const minutesAhead = (m: number) => new Date(NOW.getTime() + m * 60_000).toISOString();
 
 let counter = 0;
@@ -199,6 +206,93 @@ export const members: Record<string, Member[]> = {
  * `environment` is `test | live` — there is no `production`, `staging` or
  * `development` on the wire. `status` carries the soft delete.
  */
+/**
+ * Invitation tokens, keyed by the raw token the emailed link carries as
+ * `?token=`. Not a DTO: the real API never returns an invitation, only the
+ * organization on redemption, so this is the server-side state the mock needs
+ * to answer `POST /v1/invitations/accept` the way `MembersService.accept` does.
+ *
+ * Tokens are 20–200 characters because `AcceptInvitationDto` validates that
+ * length. `org_01JQNORTH` is deliberately NOT in `organizations`: it is the one
+ * org the demo user can actually JOIN, so accepting `inv_live_...` visibly adds
+ * a row rather than returning one that was already there.
+ */
+export interface MockInvitation {
+  token: string;
+  email: string;
+  organization_id: string;
+  role: Role;
+  expires_at: string;
+  consumed_at: string | null;
+  /** The inviting membership no longer exists — the 409 branch. */
+  inviter_gone?: boolean;
+}
+
+export const invitableOrganization: Organization = {
+  id: 'org_01JQNORTH',
+  name: 'Northline Freight',
+  slug: 'northline-freight',
+  status: 'active',
+  role: 'developer',
+  created_at: minutesAgo(60 * 24 * 45),
+  updated_at: minutesAgo(60 * 24 * 2),
+};
+
+export const invitations: MockInvitation[] = [
+  {
+    token: 'inv_live_northline_developer_01',
+    email: user.email,
+    organization_id: invitableOrganization.id,
+    role: 'developer',
+    expires_at: minutesFromNow(60 * 24 * 6),
+    consumed_at: null,
+  },
+  // Already a member of this one: redemption returns it unchanged, at the
+  // role the membership already holds, NOT the role on the token.
+  {
+    token: 'inv_live_shaq_already_member_02',
+    email: user.email,
+    organization_id: 'org_01JQSHAQ',
+    role: 'viewer',
+    expires_at: minutesFromNow(60 * 24 * 6),
+    consumed_at: null,
+  },
+  {
+    token: 'inv_expired_northline_000000_03',
+    email: user.email,
+    organization_id: invitableOrganization.id,
+    role: 'developer',
+    expires_at: minutesAgo(60 * 24),
+    consumed_at: null,
+  },
+  {
+    token: 'inv_used_northline_00000000_04',
+    email: user.email,
+    organization_id: invitableOrganization.id,
+    role: 'developer',
+    expires_at: minutesFromNow(60 * 24 * 3),
+    consumed_at: minutesAgo(30),
+  },
+  // Issued to a different mailbox than the one signed in.
+  {
+    token: 'inv_live_northline_other_addr_05',
+    email: 'ama@shaqexpress.com',
+    organization_id: invitableOrganization.id,
+    role: 'admin',
+    expires_at: minutesFromNow(60 * 24 * 6),
+    consumed_at: null,
+  },
+  {
+    token: 'inv_live_northline_inviter_gone_06',
+    email: user.email,
+    organization_id: invitableOrganization.id,
+    role: 'developer',
+    expires_at: minutesFromNow(60 * 24 * 6),
+    consumed_at: null,
+    inviter_gone: true,
+  },
+];
+
 export const projects: Project[] = [
   {
     id: 'proj_01JQPAYPROD',
@@ -853,6 +947,17 @@ const JUST_RECEIVED_EVENT = 47;
 /** The fan-out itself failed. Also no deliveries — and NOT a delivery outcome. */
 const FANOUT_FAILED_EVENT = 53;
 
+/**
+ * THE INCIDENT. Indices from here up are events accepted during a database
+ * failover that outlasted the router's retry window, so every one of them is
+ * PARKED: answered 202, never fanned out, no delivery rows. There are more of
+ * them than one bulk requeue may return (`MAX_REQUEUE_BATCH`, 100), which is
+ * the only way the `has_more` loop on the outbox page is reachable in the
+ * mock — a loop that only ever runs once is a loop the UI never exercised.
+ */
+const INCIDENT_START = 64;
+const INCIDENT_SIZE = 101;
+
 function payloadFor(type: string, index: number): unknown {
   const base = {
     id: `evt_seq_${index}`,
@@ -979,6 +1084,7 @@ function ingestStateFor(index: number): {
 } {
   if (index === JUST_RECEIVED_EVENT) return { status: 'received', processed: false, fansOut: false };
   if (index === FANOUT_FAILED_EVENT) return { status: 'failed', processed: false, fansOut: false };
+  if (index >= INCIDENT_START) return { status: 'failed', processed: false, fansOut: false };
   // Fan-out in flight: some rows are written, `processed_at` is not set yet.
   if (index === 2) return { status: 'processing', processed: false, fansOut: true };
   return { status: 'processed', processed: true, fansOut: true };
@@ -1231,6 +1337,13 @@ function buildAttempts(
       completed_at: inFlight ? null : new Date(startedAt.getTime() + duration).toISOString(),
       duration_ms: inFlight ? null : duration,
       /*
+       * The data plane records a trace id only when the attempt's span was
+       * SAMPLED - NULL honestly means "no trace was kept". Head sampling is a
+       * few percent; retries are sampled in unconditionally because they exist
+       * because something went wrong. An in-flight attempt has no id yet.
+       */
+      trace_id: !inFlight && (n > 1 || random() < 0.05) ? traceId() : null,
+      /*
        * What we sent. Credential-shaped VALUES are redacted and the keys kept.
        * The signature is NOT redacted: it is an HMAC over the payload, not the
        * key, and it is the one thing a consumer can compare against when
@@ -1268,7 +1381,9 @@ function buildAttempts(
   return chain;
 }
 
-const fixtures: Fixture[] = Array.from({ length: 64 }, (_, index) => buildFixture(index));
+const fixtures: Fixture[] = Array.from({ length: INCIDENT_START + INCIDENT_SIZE }, (_, index) =>
+  buildFixture(index),
+);
 
 export const events: EventDetail[] = fixtures.map((fixture) => fixture.event);
 export const deliveries: Delivery[] = fixtures.flatMap((fixture) => fixture.deliveries);
@@ -1276,6 +1391,118 @@ export const attempts: Record<string, DeliveryAttempt[]> = Object.assign(
   {},
   ...fixtures.map((fixture) => fixture.attempts),
 );
+
+/* ── Outbox ───────────────────────────────────────────────────────────────── */
+
+/**
+ * ONE OUTBOX ROW PER EVENT, exactly as the platform writes it: the event and
+ * its outbox row commit together at ingest, and the row's status tracks what
+ * the router has done with it since. `OutboxEntryDto` field for field —
+ * nothing here is derived, which is what the controller promises too.
+ *
+ * The parked rows are the point, and they are built to be told apart:
+ *
+ *   - `FANOUT_FAILED_EVENT` parked HALFWAY through a fan-out — 11 of 14 claims
+ *     left nothing recorded and `fan_out_cursor` points at the subscription
+ *     the last committed batch stopped at.
+ *   - The first two incident rows are POISON: every claim ended with the router
+ *     writing nothing at all, which is what an event that kills the process
+ *     looks like. Requeueing one unchanged will park it again.
+ *   - The rest of the incident is `retry_duration_exceeded`: 0 unaccounted out
+ *     of dozens of claims, every failure recorded, failing for longer than the
+ *     hour. That is a database outage, not a bad event, and a requeue recovers
+ *     it.
+ *
+ * `last_error` is written the way the router writes it — `"<reason>: <detail>"`
+ * (`internal/router/router.go`, `park`) — because the outbox page reads the
+ * reason back off that prefix and the mock must not be kinder than the wire.
+ */
+const ROUTER_MAX_OUTBOX_ATTEMPTS = 10;
+
+function outboxRowFor(event: EventDetail, index: number): OutboxEntry {
+  const base: OutboxEntry = {
+    id: id('obx'),
+    event_id: event.id,
+    type: 'event.created',
+    status: 'processed',
+    attempts: 1,
+    unaccounted_attempts: 0,
+    last_error: null,
+    failing_since: null,
+    fan_out_cursor: null,
+    available_at: event.created_at,
+    locked_by: null,
+    locked_until: null,
+    processed_at: event.processed_at,
+    created_at: event.created_at,
+  };
+
+  const acceptedAt = new Date(event.created_at).getTime();
+  const after = (minutes: number) => new Date(acceptedAt + minutes * 60_000).toISOString();
+
+  if (index === JUST_RECEIVED_EVENT) {
+    return { ...base, status: 'pending', attempts: 0, processed_at: null };
+  }
+
+  if (index === 2) {
+    // Mid-fan-out, healthy: a router holds the lease and has committed one
+    // batch. `processing` with a cursor is NORMAL for a wide event.
+    return {
+      ...base,
+      status: 'processing',
+      attempts: 1,
+      unaccounted_attempts: 1,
+      fan_out_cursor: subscriptions[0].id,
+      locked_by: 'router-2',
+      locked_until: minutesAhead(1),
+      processed_at: null,
+    };
+  }
+
+  if (index === FANOUT_FAILED_EVENT) {
+    return {
+      ...base,
+      status: 'failed',
+      attempts: 14,
+      unaccounted_attempts: 11,
+      fan_out_cursor: subscriptions[1].id,
+      last_error: `attempts_exhausted: claimed 14 times (11 of them leaving no recorded outcome, bound ${ROUTER_MAX_OUTBOX_ATTEMPTS})`,
+      available_at: after(31),
+      processed_at: after(31),
+    };
+  }
+
+  if (index >= INCIDENT_START) {
+    const offset = index - INCIDENT_START;
+    if (offset < 2) {
+      return {
+        ...base,
+        status: 'failed',
+        attempts: 11,
+        unaccounted_attempts: 11,
+        last_error: `attempts_exhausted: claimed 11 times (11 of them leaving no recorded outcome, bound ${ROUTER_MAX_OUTBOX_ATTEMPTS})`,
+        available_at: after(18),
+        processed_at: after(18),
+      };
+    }
+    const failingSince = after(1);
+    const parkedAt = after(63);
+    return {
+      ...base,
+      status: 'failed',
+      attempts: 40 + (offset % 23),
+      unaccounted_attempts: 0,
+      failing_since: failingSince,
+      last_error: `retry_duration_exceeded: failing since ${failingSince.replace(/\.\d{3}Z$/, 'Z')} (1h2m0s, bound 1h0m0s)`,
+      available_at: parkedAt,
+      processed_at: parkedAt,
+    };
+  }
+
+  return base;
+}
+
+export const outbox: OutboxEntry[] = events.map((event, index) => outboxRowFor(event, index));
 
 /* ── Aggregates ───────────────────────────────────────────────────────────── */
 

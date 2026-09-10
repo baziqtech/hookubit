@@ -20,9 +20,11 @@ import {
   describeDelivery,
   summarizeDeliveries,
 } from '../../lib/delivery-status';
-import { formatBytes, formatRelativeTime, formatTimestamp, truncateId } from '../../lib/format';
+import { formatBytes, formatTimestamp, truncateId } from '../../lib/format';
 import type { Delivery, DeliveryCounts, EventPayload } from '../../types/api';
+import { nextAttemptLabel } from '../deliveries/next-attempt';
 import { useEndpoints } from '../endpoints/api';
+import { ParkedEventNotice } from '../outbox/ParkedEventNotice';
 import { useEvent, useEventDeliveries, useReplayEvent } from './api';
 
 export function EventDetailPage() {
@@ -72,6 +74,16 @@ export function EventDetailPage() {
                 </>
               }
             />
+
+            {/*
+              The 2am path. A `failed` event PARKED before it fanned out — the
+              publisher got 202, no delivery rows exist, replay has nothing to
+              work from — and the only way back is a requeue. That row, its
+              reason and the requeue live here rather than behind a menu.
+            */}
+            {data.status === 'failed' && (
+              <ParkedEventNotice orgId={orgId} projectId={projectId} eventId={data.id} />
+            )}
 
             <FanOutSummary counts={counts} pending={deliveries.isPending} />
 
@@ -358,9 +370,12 @@ function deliveryColumns(
       header: 'Next attempt',
       align: 'right',
       secondary: true,
+      // Gated on `terminal`, as the delivery page already is. `next_attempt_at`
+      // is becoming NOT NULL and a terminal row carries a meaningless one; a
+      // succeeded delivery must never read "2 minutes ago" here.
       render: (row) => (
-        <span className="text-xs text-ink-subtle">
-          {row.next_attempt_at ? formatRelativeTime(row.next_attempt_at) : '—'}
+        <span className="text-xs text-ink-subtle" data-testid="next-attempt">
+          {nextAttemptLabel(row)}
         </span>
       ),
     },

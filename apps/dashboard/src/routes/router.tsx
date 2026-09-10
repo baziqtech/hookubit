@@ -5,8 +5,10 @@ import { ForgotPasswordPage } from '../features/auth/ForgotPasswordPage';
 import { LoginPage } from '../features/auth/LoginPage';
 import { RegisterPage } from '../features/auth/RegisterPage';
 import { ResetPasswordPage } from '../features/auth/ResetPasswordPage';
+import { VerifyEmailPage } from '../features/auth/VerifyEmailPage';
 import { DeliveriesPage } from '../features/deliveries/DeliveriesPage';
 import { DeliveryDetailPage } from '../features/deliveries/DeliveryDetailPage';
+import { OutboxPage } from '../features/outbox/OutboxPage';
 import { EndpointsPage } from '../features/endpoints/EndpointsPage';
 import { EventDetailPage } from '../features/events/EventDetailPage';
 import { EventsPage } from '../features/events/EventsPage';
@@ -17,6 +19,7 @@ import { OrganizationSettingsPage } from '../features/settings/OrganizationSetti
 import { ProjectSettingsPage } from '../features/settings/ProjectSettingsPage';
 import { BillingPage } from '../features/settings/placeholders';
 import { SubscriptionsPage } from '../features/subscriptions/SubscriptionsPage';
+import { AcceptInvitationPage } from '../features/team/AcceptInvitationPage';
 import { TeamPage } from '../features/team/TeamPage';
 import { UsagePage } from '../features/usage/UsagePage';
 import { AppLayout } from '../layouts/AppLayout';
@@ -40,6 +43,13 @@ export const router = createBrowserRouter([
       { path: '/register', element: <RegisterPage /> },
       { path: '/forgot-password', element: <ForgotPasswordPage /> },
       { path: '/reset-password', element: <ResetPasswordPage /> },
+      // Where the verification email lands: `${DASHBOARD_URL}/verify-email?token=…`.
+      { path: '/verify-email', element: <VerifyEmailPage /> },
+      // Where the invitation email lands: `${DASHBOARD_URL}/accept-invitation?token=…`.
+      // Outside `RequireSession` on purpose: an invitee often has no session yet,
+      // and the page itself decides whether to redeem or to send them to sign in
+      // with the token kept.
+      { path: '/accept-invitation', element: <AcceptInvitationPage /> },
     ],
   },
   {
@@ -68,6 +78,7 @@ export const router = createBrowserRouter([
               { path: 'events/:eventId', element: <EventDetailPage /> },
               { path: 'deliveries', element: <DeliveriesPage /> },
               { path: 'deliveries/:deliveryId', element: <DeliveryDetailPage /> },
+              { path: 'outbox', element: <OutboxPage /> },
               { path: 'endpoints', element: <EndpointsPage /> },
               { path: 'subscriptions', element: <SubscriptionsPage /> },
               { path: 'api-keys', element: <ApiKeysPage /> },
