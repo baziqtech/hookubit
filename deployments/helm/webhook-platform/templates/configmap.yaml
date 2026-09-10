@@ -16,6 +16,7 @@ data:
   ALLOW_OPEN_REGISTRATION: {{ .Values.app.allowOpenRegistration | quote }}
   CONTROL_API_URL: {{ .Values.app.publicUrl | quote }}
   DASHBOARD_URL: {{ .Values.app.publicUrl | quote }}
+  MAIL_FROM: {{ .Values.app.mailFrom | quote }}
   CORS_ORIGINS: {{ .Values.app.publicUrl | quote }}
 
   CONTROL_API_PORT: "3000"

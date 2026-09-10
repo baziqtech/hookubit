@@ -146,6 +146,9 @@ failing at pod start with an unreadable config-validation stack trace.
 {{- if and (not .Values.secrets.existingSecret) (not .Values.secrets.encryptionKey) -}}
 {{- fail "secrets.encryptionKey is empty and secrets.existingSecret is unset. Generate one (openssl rand -base64 32, must decode to exactly 32 bytes)." -}}
 {{- end -}}
+{{- if and (not .Values.secrets.existingSecret) (not .Values.secrets.smtpUrl) -}}
+{{- fail "secrets.smtpUrl is empty and secrets.existingSecret is unset. Outbound mail (email verification, password reset, invitations) needs an SMTP URL, and the control API refuses to boot outside development without one - so this chart refuses to install without one, rather than deploying a service in which nobody can ever verify an address." -}}
+{{- end -}}
 {{/*
 egress.allowPrivateNetworks is refused outright by the data plane when
 APP_ENV=production (services/data-plane/internal/config/config.go), and app.env

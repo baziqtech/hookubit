@@ -10,6 +10,11 @@ const baseEnv = (): Record<string, unknown> => ({
   ENCRYPTION_KEY: KEY_32,
 });
 
+const smtpEnv = (): Record<string, unknown> => ({
+  SMTP_URL: 'smtp://mailer:secret@mail.example.com:587',
+  MAIL_FROM: 'Hookubit <no-reply@example.com>',
+});
+
 describe('validateEnv', () => {
   it('accepts a minimal environment with no optional values set', () => {
     const env = validateEnv(baseEnv());
@@ -108,8 +113,10 @@ describe('validateEnv', () => {
       },
     );
 
+    // staging/production need a mail transport (see the SMTP block below), so
+    // the accepted-environment check supplies one - it is checking APP_ENV.
     it.each(['development', 'test', 'staging', 'production'])('accepts APP_ENV %j', (value) => {
-      expect(validateEnv({ ...baseEnv(), APP_ENV: value }).APP_ENV).toBe(value);
+      expect(validateEnv({ ...baseEnv(), ...smtpEnv(), APP_ENV: value }).APP_ENV).toBe(value);
     });
 
     it('rejects an unknown LOG_LEVEL', () => {
@@ -186,6 +193,90 @@ describe('validateEnv', () => {
       );
       expect(() => validateEnv({ ...baseEnv(), OTEL_TRACES_SAMPLER_ARG: 'half' })).toThrow(
         /OTEL_TRACES_SAMPLER_ARG/,
+      );
+    });
+  });
+
+  describe('outbound mail (SMTP_URL, MAIL_FROM, DASHBOARD_URL)', () => {
+    it('leaves SMTP_URL unset by default in development - unset means the logging stub', () => {
+      const env = validateEnv(baseEnv());
+      expect(env.SMTP_URL).toBeUndefined();
+      expect(env.MAIL_FROM).toBeUndefined();
+    });
+
+    it.each(['', '  ', '\t'])('treats a blank SMTP_URL %j as unset', (blank) => {
+      expect(validateEnv({ ...baseEnv(), SMTP_URL: blank }).SMTP_URL).toBeUndefined();
+    });
+
+    it('keeps a real smtp:// and smtps:// URL, credentials and all', () => {
+      expect(validateEnv({ ...baseEnv(), ...smtpEnv() }).SMTP_URL).toBe(
+        'smtp://mailer:secret@mail.example.com:587',
+      );
+      expect(
+        validateEnv({ ...baseEnv(), ...smtpEnv(), SMTP_URL: 'smtps://mail.example.com:465' }).SMTP_URL,
+      ).toBe('smtps://mail.example.com:465');
+    });
+
+    // `z.string().url()` accepts `mail.example.com:587`, reading the host as
+    // the scheme - the same trap OTEL_EXPORTER_OTLP_ENDPOINT closes.
+    it.each(['mail.example.com:587', 'localhost:1025', 'http://mail.example.com', 'not a url'])(
+      'REFUSES SMTP_URL %j - no smtp/smtps scheme',
+      (value) => {
+        expect(() => validateEnv({ ...baseEnv(), ...smtpEnv(), SMTP_URL: value })).toThrow(
+          /SMTP_URL/,
+        );
+      },
+    );
+
+    it('REFUSES SMTP_URL without MAIL_FROM - a transport with no sender', () => {
+      expect(() =>
+        validateEnv({ ...baseEnv(), SMTP_URL: 'smtp://mail.example.com:587' }),
+      ).toThrow(/MAIL_FROM is required when SMTP_URL is set/);
+      expect(() =>
+        validateEnv({ ...baseEnv(), SMTP_URL: 'smtp://mail.example.com:587', MAIL_FROM: '  ' }),
+      ).toThrow(/MAIL_FROM/);
+    });
+
+    it.each(['Hookubit <no-reply@example.com>', 'no-reply@example.com', 'no-reply@localhost'])(
+      'accepts MAIL_FROM %j',
+      (value) => {
+        expect(validateEnv({ ...baseEnv(), ...smtpEnv(), MAIL_FROM: value }).MAIL_FROM).toBe(value);
+      },
+    );
+
+    it.each(['Hookubit', 'Hookubit <not-an-address>', 'a@b, c@d'])('REFUSES MAIL_FROM %j', (value) => {
+      expect(() => validateEnv({ ...baseEnv(), ...smtpEnv(), MAIL_FROM: value })).toThrow(/MAIL_FROM/);
+    });
+
+    it.each(['staging', 'production'])(
+      'REFUSES to boot under APP_ENV=%s with no SMTP_URL, naming the variable',
+      (appEnv) => {
+        expect(() => validateEnv({ ...baseEnv(), APP_ENV: appEnv })).toThrow(
+          new RegExp(`SMTP_URL: SMTP_URL is required when APP_ENV=${appEnv}`),
+        );
+      },
+    );
+
+    it.each(['development', 'test'])('boots under APP_ENV=%s with no SMTP_URL', (appEnv) => {
+      expect(validateEnv({ ...baseEnv(), APP_ENV: appEnv }).SMTP_URL).toBeUndefined();
+    });
+
+    it('defaults DASHBOARD_URL to the local dev server, blank included', () => {
+      expect(validateEnv(baseEnv()).DASHBOARD_URL).toBe('http://localhost:5173');
+      expect(validateEnv({ ...baseEnv(), DASHBOARD_URL: '' }).DASHBOARD_URL).toBe(
+        'http://localhost:5173',
+      );
+    });
+
+    it('keeps a real DASHBOARD_URL and REFUSES one with no http(s) scheme - it is the base of every link', () => {
+      expect(validateEnv({ ...baseEnv(), DASHBOARD_URL: 'https://app.example.com' }).DASHBOARD_URL).toBe(
+        'https://app.example.com',
+      );
+      expect(() => validateEnv({ ...baseEnv(), DASHBOARD_URL: 'app.example.com' })).toThrow(
+        /DASHBOARD_URL/,
+      );
+      expect(() => validateEnv({ ...baseEnv(), DASHBOARD_URL: 'app.example.com:5173' })).toThrow(
+        /DASHBOARD_URL/,
       );
     });
   });

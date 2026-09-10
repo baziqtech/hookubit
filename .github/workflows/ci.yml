@@ -581,7 +581,8 @@ jobs:
           out=$(helm lint deployments/helm/webhook-platform \
             --set secrets.jwtSecret=ci \
             --set secrets.sessionSecret=ci \
-            --set secrets.encryptionKey=ci 2>&1)
+            --set secrets.encryptionKey=ci \
+            --set secrets.smtpUrl=smtp://ci:ci@mail.invalid:587 2>&1)
           rc=$?
           set -e
           echo "$out"
@@ -602,7 +603,8 @@ jobs:
             --set externalDatabase.directUrl="$CI_DIRECT_DB_URL" \
             --set secrets.jwtSecret=ci \
             --set secrets.sessionSecret=ci \
-            --set secrets.encryptionKey=ci
+            --set secrets.encryptionKey=ci \
+            --set secrets.smtpUrl=smtp://ci:ci@mail.invalid:587
 
       - name: Render chart and validate against Kubernetes schemas
         run: |
@@ -616,6 +618,7 @@ jobs:
             --set secrets.jwtSecret=ci \
             --set secrets.sessionSecret=ci \
             --set secrets.encryptionKey=ci \
+            --set secrets.smtpUrl=smtp://ci:ci@mail.invalid:587 \
             --set ingress.enabled=true \
             --set migrations.enabled=true > /tmp/rendered.yaml
           kubeconform -strict -summary -ignore-missing-schemas \
@@ -640,7 +643,8 @@ jobs:
             --set externalDatabase.directUrl="$CI_DIRECT_DB_URL" \
             --set secrets.jwtSecret=ci \
             --set secrets.sessionSecret=ci \
-            --set secrets.encryptionKey=ci > /tmp/rendered-no-redis.yaml
+            --set secrets.encryptionKey=ci \
+            --set secrets.smtpUrl=smtp://ci:ci@mail.invalid:587 > /tmp/rendered-no-redis.yaml
           if grep -nE '^[[:space:]]*(REDIS_URL|S3_ACCESS_KEY|S3_SECRET_KEY):[[:space:]]*("")?[[:space:]]*$' /tmp/rendered-no-redis.yaml; then
             echo "::error::An optional key rendered with an empty value. Wrap it in an {{- if }} so unset means unset."
             exit 1

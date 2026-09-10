@@ -76,6 +76,11 @@ secrets:
   # AES-256-GCM key for endpoint signing secrets. Must decode to exactly 32
   # bytes. Changing it without re-encrypting makes every stored secret unreadable.
   encryptionKey: ''
+  # REQUIRED. smtp:// or smtps:// with credentials; it carries the password, so it
+  # lives here and not in the ConfigMap. Without it the control API refuses to boot
+  # outside development: a deploy that cannot send verification mail has signup
+  # silently broken, and refusing is the honest failure.
+  smtpUrl: ''
 
 # --- Optional: object storage for oversized payloads (ARCHITECTURE.md 32) ----
 objectStorage:
@@ -94,6 +99,9 @@ app:
   allowOpenRegistration: false
   # Public URLs. Used for CORS and for links in outbound email.
   publicUrl: 'https://webhooks.example.com'
+  # Sender for every outbound mail. Required whenever secrets.smtpUrl is set; the
+  # display name doubles as the product name in subjects and bodies.
+  mailFrom: 'Hookubit <no-reply@example.com>'
 
 # Outbound HTTP limits (ARCHITECTURE.md 31). Never unbounded.
 egress:

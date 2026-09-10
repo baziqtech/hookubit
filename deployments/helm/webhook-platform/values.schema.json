@@ -42,7 +42,8 @@
         "existingSecret": { "type": "string" },
         "jwtSecret": { "type": "string" },
         "sessionSecret": { "type": "string" },
-        "encryptionKey": { "type": "string" }
+        "encryptionKey": { "type": "string" },
+        "smtpUrl": { "type": "string" }
       }
     },
     "app": {

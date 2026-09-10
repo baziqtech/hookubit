@@ -141,7 +141,51 @@ require("http").createServer((req,res)=>{
 }).listen(8081,()=>console.log("sink on :8081"));'
 ```
 
-## 6. Drive the path
+## 6. Mail: verification links, password reset, invitations
+
+Self-serve signup, forgot-password and team invitations all end in an email
+carrying a single-use link, and login refuses an unverified address. With no
+transport configured the control plane logs a six-character token prefix and
+delivers nothing — deliberately (`apps/control-api/HANDOFF.md`, FIX 5) — so
+none of those flows can be finished from the console. Run a catcher:
+
+```bash
+docker compose -f deployments/compose/docker-compose.dev.yml up -d mailpit
+```
+
+Add to `.env` and restart `pnpm dev:api`:
+
+```
+SMTP_URL=smtp://localhost:1025
+MAIL_FROM="Hookubit <no-reply@localhost>"
+```
+
+Every message lands in the inbox at http://localhost:8025; nothing leaves your
+machine. Links are built from `DASHBOARD_URL`, so they open the dashboard from
+step 5 at `/verify-email?token=…`, `/reset-password?token=…` and
+`/accept-invitation?token=…`.
+
+Gotchas:
+
+- **Both variables or neither.** `SMTP_URL` without `MAIL_FROM` refuses to boot.
+  Quote `MAIL_FROM` — the angle brackets are shell syntax if you export it. The
+  display name is also the product name the messages use.
+- **`SMTP_URL` set means SMTP in every environment**, `APP_ENV=development`
+  included. `SMTP_URL` unset under staging or production refuses to boot, by
+  name — there is no "quiet" mode outside development/test.
+- **The stub is not a fallback for a server that is down.** With `SMTP_URL` set
+  and Mailpit stopped you get one warning at boot and an error line per message
+  (`Failed to send email_verification to <hash>@domain`), and signup still
+  answers 202 — that is deliberate (FIX 3), the response must not say whether
+  the address exists. Start Mailpit and use "resend verification" from the
+  login screen.
+- **The `bootstrap` owner needs none of this.** It is created verified.
+- **Only the control plane reads `.env`** (step 5). The Go services do not send
+  mail, so there is nothing to export in their shells.
+- The link in the message is the only copy of the token; the log carries a
+  prefix. Never paste a token out of Mailpit into a ticket.
+
+## 7. Drive the path
 
 Log in through the dashboard at http://localhost:5173, or use the API directly.
 **Confirm exact request shapes at http://localhost:3000/docs** — the OpenAPI
@@ -173,7 +217,7 @@ delivered. Within a poll interval the router materialises a delivery row and the
 worker signs and sends it — you should see it arrive at the sink with
 `Webhook-Signature: t=...,v1=...`.
 
-## 7. Verify the signature the way a consumer would
+## 8. Verify the signature the way a consumer would
 
 ```
 HMAC-SHA256(secret, "<t>.<exact raw body bytes>")
@@ -197,3 +241,8 @@ curl -s localhost:9090/metrics | grep -E 'events_ingested|deliveries_|outbox_pen
   and that `ENCRYPTION_KEY` is exported in its shell.
 - Attempts recorded with a signature the consumer rejects → the NestJS/Go crypto
   or signing contract. This is the least-tested seam in the system.
+- Registered (202) but no mail → `SMTP_URL` is unset (the stub logs
+  `[dev-mailer] … token abc123…` and sends nothing) or Mailpit is down (the
+  control-api log has `SMTP transport … could not be verified at boot` and a
+  `Failed to send …` line per message). `curl -s localhost:8025/api/v1/messages`
+  shows what the catcher actually received.

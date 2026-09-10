@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { parseMailbox } from '../notifications/mailbox';
 
 /**
  * Kubernetes `envFrom.secretRef` and Docker Compose `${VAR:-}` both inject an
@@ -180,6 +181,81 @@ export const envSchema = z.object({
       .default('false')
       .transform((v) => v === 'true'),
   ),
+
+  /**
+   * Outbound mail (notifications module).
+   *
+   * `DASHBOARD_URL` is the base of every link a message carries -
+   * `/verify-email?token=`, `/reset-password?token=`,
+   * `/accept-invitation?token=`. A wrong value here is a mail full of dead
+   * links, so the scheme is checked the way OTEL's is: `app.example.com`
+   * parses as a URL with scheme `app.example.com` and would boot cleanly.
+   */
+  DASHBOARD_URL: blankAsUnset(
+    z
+      .string()
+      .url()
+      .refine(
+        (v) => /^https?:\/\//i.test(v),
+        'DASHBOARD_URL must start with http:// or https:// (the dashboard origin, e.g. https://app.example.com)',
+      )
+      .default('http://localhost:5173'),
+  ),
+  /**
+   * SMTP connection URL, `smtp://user:pass@host:587` or `smtps://…`. SET IS
+   * THE SWITCH: with it, the SMTP transport is used in EVERY environment;
+   * without it, development and test fall back to a logging stub that delivers
+   * nothing, and staging/production refuse to boot (below) - a control plane
+   * that comes up healthy with signup, password reset and invitations silently
+   * dead is the failure this exists to prevent.
+   *
+   * The scheme check is not redundant: `z.string().url()` accepts `host:1025`
+   * as a URL with scheme `host`.
+   */
+  SMTP_URL: blankAsUnset(
+    z
+      .string()
+      .url()
+      .refine(
+        (v) => /^smtps?:\/\//i.test(v),
+        'SMTP_URL must start with smtp:// or smtps:// (e.g. smtp://user:pass@mail.example.com:587)',
+      )
+      .optional(),
+  ),
+  /**
+   * The From header: `Display Name <address>` (or a bare address). Required
+   * whenever SMTP_URL is set. The display name is also the product name the
+   * messages use in their subject and body.
+   */
+  MAIL_FROM: blankAsUnset(
+    z
+      .string()
+      .refine(
+        (v) => parseMailbox(v) !== null,
+        'MAIL_FROM must be a mailbox such as "Hookubit <no-reply@example.com>" or no-reply@example.com',
+      )
+      .optional(),
+  ),
+}).superRefine((env, ctx) => {
+  if (env.SMTP_URL && !env.MAIL_FROM) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['MAIL_FROM'],
+      message: 'MAIL_FROM is required when SMTP_URL is set - the transport needs a sender address',
+    });
+  }
+  // The same rule the development stubs enforce in their constructors, moved
+  // to where every other "refuses to boot" decision lives so the failure is
+  // one line naming the variable rather than a DI stack trace.
+  if (!env.SMTP_URL && (env.APP_ENV === 'staging' || env.APP_ENV === 'production')) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['SMTP_URL'],
+      message:
+        `SMTP_URL is required when APP_ENV=${env.APP_ENV}: without a mail transport, registration, ` +
+        'email verification, password reset and member invitations would silently deliver nothing',
+    });
+  }
 });
 
 export type Env = z.infer<typeof envSchema>;

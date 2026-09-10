@@ -14,6 +14,9 @@ metadata:
     app.kubernetes.io/part-of: webhook-platform
 data:
   APP_ENV: 'production'
+  # Sender for outbound mail. Required whenever SMTP_URL (a Secret) is set; the
+  # display name doubles as the product name in subjects and bodies.
+  MAIL_FROM: 'Hookubit <no-reply@example.com>'
   LOG_LEVEL: 'info'
 
   # Control plane

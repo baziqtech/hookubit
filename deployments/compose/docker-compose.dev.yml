@@ -52,6 +52,21 @@ services:
       timeout: 5s
       retries: 5
 
+  # Catches every message the control plane sends - verification links, password
+  # resets, invitations - so a signup can actually be finished locally. SMTP on
+  # 1025, inbox at http://localhost:8025. Point SMTP_URL at it (see
+  # docs/LOCAL_SETUP.md); nothing leaves the machine. Not part of any deployment.
+  mailpit:
+    image: axllent/mailpit:v1.21
+    ports:
+      - '1025:1025'
+      - '8025:8025'
+    healthcheck:
+      test: ['CMD', 'wget', '-q', '-O', '-', 'http://127.0.0.1:8025/livez']
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
   # A webhook sink to deliver to while developing. Not part of any deployment.
   sink:
     image: mendhak/http-https-echo:34

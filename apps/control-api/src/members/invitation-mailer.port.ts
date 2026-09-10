@@ -40,8 +40,10 @@ const STUB_MAILER_ENVIRONMENTS = new Set(['development', 'test']);
 const TOKEN_LOG_PREFIX = 6;
 
 /**
- * Placeholder transport, with the two rules `DevelopmentAuthMailer` learned the
- * hard way (HANDOFF, FIX 5) applied verbatim:
+ * The transport bound when `SMTP_URL` is unset; the real one is
+ * `notifications/SmtpMailer`, chosen by `selectMailer` in `MembersModule`.
+ * The two rules `DevelopmentAuthMailer` learned the hard way (HANDOFF, FIX 5)
+ * apply verbatim:
  *
  *  1. **Raw tokens are never printed, in any environment.** An invitation token
  *     grants membership of somebody else's organization; printed to stdout it
