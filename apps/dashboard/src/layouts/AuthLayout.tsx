@@ -1,5 +1,6 @@
 import { Outlet } from 'react-router-dom';
 import { AUTH_STYLES } from '../features/auth/auth-styles';
+import { ThemeToggle } from '../components';
 import { Wordmark } from '../features/auth/Wordmark';
 
 /**
@@ -49,8 +50,17 @@ export function AuthLayout() {
         <Outlet />
       </main>
 
-      <footer className="shrink-0 text-center text-2xs leading-relaxed text-ink-subtle">
-        Sessions are HTTP-only cookies. Nothing is stored in this browser.
+      <footer className="flex shrink-0 flex-col items-center gap-4">
+        <ThemeToggle />
+        {/*
+          This used to read "Nothing is stored in this browser", which the
+          theme preference directly above it would have made false. The claim
+          worth making is the one about credentials, and it is still true: the
+          session is an HTTP-only cookie no script can read.
+        */}
+        <p className="text-center text-2xs leading-relaxed text-ink-subtle">
+          Sessions are HTTP-only cookies — no token is readable by this page.
+        </p>
       </footer>
     </div>
   );

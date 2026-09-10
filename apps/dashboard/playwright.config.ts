@@ -18,8 +18,10 @@ import { defineConfig, devices } from '@playwright/test';
  * the default and would prove nothing), and the local webhook receiver the
  * delivery tests point an endpoint at.
  */
-const DASHBOARD_PORT = 5173;
-export const RECEIVER_PORT = 9797;
+// Overridable so a run does not have to take down the dev server someone is
+// using: `E2E_PORT=5273 E2E_RECEIVER_PORT=9897 pnpm test:e2e`.
+const DASHBOARD_PORT = Number(process.env.E2E_PORT ?? 5173);
+export const RECEIVER_PORT = Number(process.env.E2E_RECEIVER_PORT ?? 9797);
 
 export default defineConfig({
   testDir: './e2e',

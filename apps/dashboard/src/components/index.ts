@@ -40,6 +40,7 @@ export { StatusLegend } from './StatusLegend';
 export type { StatusLegendProps } from './StatusLegend';
 export { Table } from './Table';
 export type { Column, TableProps } from './Table';
+export { ThemeToggle } from './ThemeToggle';
 export { Tabs } from './Tabs';
 export type { TabItem, TabsProps } from './Tabs';
 export { WriteErrorNotice } from './WriteErrorNotice';

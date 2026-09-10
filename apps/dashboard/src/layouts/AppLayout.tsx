@@ -1,6 +1,6 @@
 import type { ReactNode } from 'react';
 import { Link, NavLink, Outlet, useLocation, useNavigate, useParams } from 'react-router-dom';
-import { Badge } from '../components';
+import { Badge, ThemeToggle } from '../components';
 import { useLogout, useSession } from '../features/auth/api';
 import { useSetupState } from '../features/onboarding/api';
 import { ProductTour } from '../features/onboarding/ProductTour';
@@ -285,6 +285,19 @@ function UserMenu() {
           <>
             <MenuLabel>Signed in as</MenuLabel>
             <p className="truncate px-2 pb-1.5 text-xs text-ink">{session?.user.email ?? '—'}</p>
+
+            {/*
+              A setting, not an action, so it is not a `menuitem` and clicking
+              it does not close the menu — you want to see the theme change
+              while you are still looking at the control that changed it.
+            */}
+            <div className="my-1 border-t border-line pt-2">
+              <MenuLabel>Theme</MenuLabel>
+              <div className="px-2 pb-1.5 pt-0.5">
+                <ThemeToggle className="w-full justify-between" />
+              </div>
+            </div>
+
             <button
               type="button"
               role="menuitem"

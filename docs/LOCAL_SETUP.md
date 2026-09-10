@@ -258,6 +258,13 @@ pnpm --filter @hookubit/dashboard test:e2e
 pnpm --filter @hookubit/dashboard exec playwright show-report   # traces and video for any failure
 ```
 
+The suite starts its own dev server on 5173 and a receiver on 9797. To run it
+without taking down a dev server you are using, override both:
+
+```bash
+E2E_PORT=5273 E2E_RECEIVER_PORT=9897 pnpm --filter @hookubit/dashboard test:e2e
+```
+
 Two things bite on repeated runs from one machine. Registration is throttled at
 5 per hour and sign-in at 10 per 15 minutes per address, and the buckets live in
 Redis when it is up; a dev-only reset is

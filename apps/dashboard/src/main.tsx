@@ -22,11 +22,8 @@ const queryClient = new QueryClient({
   },
 });
 
-// Follow the OS theme on first paint. A per-user preference belongs in the
-// account settings once that endpoint exists, not in localStorage guesswork.
-if (window.matchMedia('(prefers-color-scheme: dark)').matches) {
-  document.documentElement.dataset.theme = 'dark';
-}
+// The theme is applied before first paint by the inline script in index.html,
+// and owned from there by `src/lib/theme.ts`. See the note in that file.
 
 ReactDOM.createRoot(document.getElementById('root')!).render(
   <React.StrictMode>
