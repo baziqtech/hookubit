@@ -133,6 +133,17 @@ copy of the migrated `hookubit_test` database. Two runs at once against one
 `DATABASE_URL` refuse to start rather than corrupt each other; set
 `TEST_DB_RUN_ID` per run if you need that.
 
+The dashboard is also proved **against the real stack**, not its mock: a
+Playwright journey registers an account through the verification mail, creates
+a project, key, endpoint and subscription, publishes through the ingest API,
+verifies the HMAC on what a local receiver got, replays, fails and retries,
+pauses, rotates a secret, creates policies, invites, renames, revokes and
+deletes - every control the dashboard offers.
+
+```bash
+pnpm --filter @webhook/dashboard test:e2e     # needs the stack running; see docs/LOCAL_SETUP.md 9
+```
+
 ## Status
 
 Phases 1–6 of [the roadmap](docs/ROADMAP.md) are complete and every line of

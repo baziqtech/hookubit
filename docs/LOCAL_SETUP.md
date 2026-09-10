@@ -226,6 +226,30 @@ HMAC-SHA256(secret, "<t>.<exact raw body bytes>")
 compared in constant time against any `v1=` value. During a rotation window
 there will be two `v1=` components, one per active secret.
 
+## 9. Prove the dashboard against the real stack
+
+`apps/dashboard/e2e/` is a Playwright journey that exercises every dashboard
+control against the running control API, data plane and Mailpit - the mock
+transport proves nothing here, so the runner starts Vite with
+`VITE_API_TRANSPORT=http` and a local webhook receiver on `127.0.0.1:9797`.
+
+It expects, beyond section 5: the control API started with
+`ALLOW_OPEN_REGISTRATION=true` (it registers a fresh account per run and reads
+the verification link from Mailpit), and `EGRESS_ALLOW_PRIVATE_NETWORKS=true`
+on both planes (the receiver is a loopback address).
+
+```bash
+pnpm --filter @webhook/dashboard test:e2e
+pnpm --filter @webhook/dashboard exec playwright show-report   # traces and video for any failure
+```
+
+Two things bite on repeated runs from one machine. Registration is throttled at
+5 per hour and sign-in at 10 per 15 minutes per address, and the buckets live in
+Redis when it is up; a dev-only reset is
+`docker exec <redis> sh -c "redis-cli --scan --pattern 'throttle:auth.*' | xargs -r redis-cli DEL"`.
+And each run leaves its account and organization behind on purpose - they are
+what the audit log and retention are for.
+
 ## Where to look when it does not work
 
 ```bash

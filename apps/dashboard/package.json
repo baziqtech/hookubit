@@ -9,7 +9,8 @@
     "preview": "vite preview",
     "lint": "eslint src --ext ts,tsx",
     "test": "vitest run --passWithNoTests",
-    "generate:api": "pnpm --filter @webhook/control-api build && node ../control-api/dist/openapi.js ../control-api/openapi.json && openapi-typescript ../control-api/openapi.json --default-non-nullable false -o src/types/api.d.ts"
+    "generate:api": "pnpm --filter @webhook/control-api build && node ../control-api/dist/openapi.js ../control-api/openapi.json && openapi-typescript ../control-api/openapi.json --default-non-nullable false -o src/types/api.d.ts",
+    "test:e2e": "playwright test"
   },
   "dependencies": {
     "@tanstack/react-query": "^5.62.7",
@@ -20,6 +21,7 @@
     "zustand": "^5.0.2"
   },
   "devDependencies": {
+    "@playwright/test": "1.63.0",
     "@types/react": "^18.3.17",
     "@types/react-dom": "^18.3.5",
     "@typescript-eslint/eslint-plugin": "^8.18.1",
