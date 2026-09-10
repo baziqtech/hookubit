@@ -1,5 +1,5 @@
 import type { ReactNode } from 'react';
-import { Link, NavLink, Outlet, useLocation, useParams } from 'react-router-dom';
+import { Link, NavLink, Outlet, useLocation, useNavigate, useParams } from 'react-router-dom';
 import { Badge } from '../components';
 import { useLogout, useSession } from '../features/auth/api';
 import { useSetupState } from '../features/onboarding/api';
@@ -261,11 +261,13 @@ function TourButton() {
 function UserMenu() {
   const { data: session } = useSession();
   const logout = useLogout();
+  const navigate = useNavigate();
 
   return (
     <div className="border-t border-line p-2">
       <Menu
         label="Account menu"
+        placement="top"
         trigger={
           <span className="flex min-w-0 items-center gap-2">
             <span
@@ -287,7 +289,13 @@ function UserMenu() {
               role="menuitem"
               onClick={() => {
                 close();
-                logout.mutate();
+                // Leave explicitly. Clearing the query cache does not, by
+                // itself, re-run the session check the guard is waiting on,
+                // so without this the shell stayed on screen, signed out,
+                // with an empty page under it.
+                logout.mutate(undefined, {
+                  onSuccess: () => navigate('/login', { replace: true }),
+                });
               }}
               className="flex w-full items-center rounded px-2 py-1.5 text-xs text-ink-muted transition-colors hover:bg-raised hover:text-ink"
             >

@@ -1,5 +1,6 @@
-import { useEffect, useRef } from 'react';
+import { useEffect, useId, useRef } from 'react';
 import { useForm, type UseFormRegister } from 'react-hook-form';
+import { Link, useParams } from 'react-router-dom';
 import { Button, Dialog, Field, Input, Select, WriteErrorNotice } from '../../components';
 import { classifyWriteError } from '../../lib/api-errors';
 import { cn } from '../../lib/cn';
@@ -127,6 +128,12 @@ export function EndpointEditDialog({
   projectId: string;
   onClose: () => void;
 }) {
+  // A per-instance id, not a literal. A dialog can be mounted more than once
+  // on a page (the switcher and the empty state both own a create dialog), and
+  // a footer button's `form` attribute binds to the FIRST element with that
+  // id in the document - which was the other, closed dialog's form, whose
+  // validation failed on empty fields and never sent a request.
+  const formId = useId();
   const update = useUpdateEndpoint(projectId, endpoint.id);
   const policies = useRetryPolicies(projectId);
   const initial = toFormValues(endpoint);
@@ -200,7 +207,7 @@ export function EndpointEditDialog({
           <Button onClick={onClose}>Cancel</Button>
           <Button
             type="submit"
-            form="edit-endpoint-form"
+            form={formId}
             variant="primary"
             loading={update.isPending}
           >
@@ -209,7 +216,7 @@ export function EndpointEditDialog({
         </>
       }
     >
-      <form id="edit-endpoint-form" onSubmit={onSubmit} className="flex flex-col gap-3">
+      <form id={formId} onSubmit={onSubmit} className="flex flex-col gap-3">
         <div ref={errorRef} tabIndex={-1} className="outline-none">
           <WriteErrorNotice error={update.error} claimedFields={claimed} />
         </div>
@@ -472,6 +479,9 @@ function RetryPolicyField({
   register: UseFormRegister<FormValues>;
 }) {
   const rows = policies.data?.rows ?? [];
+  // For the link in the empty state; the dialog is only ever rendered inside
+  // the project route, so the organization is in the URL.
+  const { orgId = '' } = useParams();
 
   if (policies.isPending) {
     return (
@@ -509,10 +519,15 @@ function RetryPolicyField({
         hint={
           <>
             This project has no retry policies, so there is nothing to choose here — deliveries use
-            the platform default. There is no screen for creating one yet either; the route is{' '}
-            <code className="font-mono">POST /v1/projects/{projectId}/retry-policies</code>. Saying
-            so is the point: an empty dropdown is indistinguishable from one that failed to load,
-            and neither tells you what to do next.
+            the built-in default. Create one on{' '}
+            <Link
+              to={`/orgs/${orgId}/projects/${projectId}/policies`}
+              className="text-accent hover:underline"
+            >
+              Policies
+            </Link>
+            , then choose it here. Saying so is the point: an empty dropdown is indistinguishable
+            from one that failed to load, and neither tells you what to do next.
           </>
         }
       >

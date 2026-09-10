@@ -15,15 +15,31 @@
  * They are strict subsets. The real dial-time guard in the Go data plane is
  * what actually stops SSRF; this decides only what is decidable without DNS.
  */
+import type { Role } from '../../types/api';
 import {
   ENDPOINT_LIMITS,
   MAX_CUSTOM_HEADERS,
   MAX_ENDPOINT_DESCRIPTION_LENGTH,
   MAX_ENDPOINT_NAME_LENGTH,
   MAX_ENDPOINT_URL_LENGTH,
+  MAX_PAYLOAD_FILTER_BYTES,
+  MAX_SUBSCRIPTION_DISABLE_REASON_LENGTH,
+  MAX_SUBSCRIPTION_NAME_LENGTH,
+  PROJECT_NAME_MAX_LENGTH,
+  PROJECT_NAME_MIN_LENGTH,
+  PROJECT_SLUG_MAX_LENGTH,
   RESERVED_HEADER_NAMES,
   RESERVED_HEADER_PREFIX,
+  SLUG_MIN_LENGTH,
   SLUG_PATTERN,
+} from '../../types/api';
+import { rejectEventTypes } from '../../features/subscriptions/event-types';
+import {
+  MAX_RETRY_POLICY_NAME_LENGTH,
+  RATE_LIMIT_LIMITS,
+  RATE_LIMIT_SCOPES,
+  RETRY_POLICY_LIMITS,
+  RETRY_STRATEGIES,
 } from '../../types/api';
 
 /** `"<property>: <reason>"`, the exact shape class-validator's messages take. */
@@ -273,6 +289,402 @@ export function rejectIdentityPatch(
     } else if (!SLUG_PATTERN.test(slug)) {
       rejections.push('slug: must be lowercase letters, digits and single dashes');
     }
+  }
+
+  return rejections;
+}
+
+/* ── Subscriptions ────────────────────────────────────────────────────────── */
+
+/**
+ * `payload_filter`, as far as the SHAPE goes.
+ *
+ * The full predicate grammar in control-api `payload-filter.ts` is not
+ * mirrored here — see `features/subscriptions/payload-filter.ts` for why. What
+ * the mock reproduces is every refusal the form can reach: not an object, the
+ * empty object, over the byte ceiling, and a `$`-prefixed key that is not one
+ * of the three logical operators. Each is worded as the server words it and
+ * prefixed `payload_filter: ` the way `PayloadFilterConstraint.defaultMessage`
+ * prefixes it.
+ */
+export function rejectPayloadFilter(value: unknown): string | null {
+  if (value === null || value === undefined) return null;
+  if (typeof value !== 'object' || Array.isArray(value)) {
+    return 'payload_filter must be a JSON object, or null for no filter';
+  }
+  const entries = Object.entries(value as Record<string, unknown>);
+  if (entries.length === 0) {
+    return 'payload_filter: is an empty object, which would match every payload. Omit payload_filter (or send null) if you do not want to filter on the body';
+  }
+  const bytes = new TextEncoder().encode(JSON.stringify(value)).length;
+  if (bytes > MAX_PAYLOAD_FILTER_BYTES) {
+    return `payload_filter is ${bytes} bytes; the maximum is ${MAX_PAYLOAD_FILTER_BYTES}`;
+  }
+  for (const [key] of entries) {
+    if (key.startsWith('$') && !['$and', '$or', '$not'].includes(key)) {
+      return `payload_filter.${key}: is not a supported operator. Logical: $and, $or, $not. Anything else here is read as a field path, and a field path may not begin with "$"`;
+    }
+  }
+  return null;
+}
+
+const SUBSCRIPTION_CREATE_FIELDS = ['name', 'endpoint_id', 'event_types', 'payload_filter', 'enabled'];
+const SUBSCRIPTION_UPDATE_FIELDS = ['name', 'endpoint_id', 'event_types', 'payload_filter'];
+
+function rejectSubscriptionName(name: unknown): string | null {
+  if (name === null) return null;
+  if (typeof name !== 'string') return 'name: must be a string';
+  if (name.length > MAX_SUBSCRIPTION_NAME_LENGTH) {
+    return `name: must be shorter than or equal to ${MAX_SUBSCRIPTION_NAME_LENGTH} characters`;
+  }
+  return null;
+}
+
+/**
+ * `CreateSubscriptionDto`.
+ *
+ * The event-type rejection is `rejectEventTypes` from the dashboard's own
+ * mirror — ONE copy of the server's words, shared by the form and the mock —
+ * and it is emitted WITHOUT a `property:` prefix, because that is what
+ * `EventTypesConstraint.defaultMessage` does: its message is the reason, and
+ * the reason begins with `event_types`. The form routes it by that prefix, and
+ * a mock that added a prefix would let that routing rot.
+ */
+export function rejectSubscriptionCreate(body: Record<string, unknown>): Rejections {
+  const rejections: Rejections = [];
+  for (const key of Object.keys(body)) {
+    if (!SUBSCRIPTION_CREATE_FIELDS.includes(key)) {
+      rejections.push(`${key}: property ${key} should not exist`);
+    }
+  }
+  if ('name' in body) {
+    const reason = rejectSubscriptionName(body.name);
+    if (reason) rejections.push(reason);
+  }
+  if (typeof body.endpoint_id !== 'string' || body.endpoint_id.length === 0) {
+    rejections.push('endpoint_id: must be a string');
+  } else if (body.endpoint_id.length > 64) {
+    rejections.push('endpoint_id: must be shorter than or equal to 64 characters');
+  }
+  const eventTypes = rejectEventTypes(body.event_types);
+  if (eventTypes) rejections.push(eventTypes);
+  const filter = rejectPayloadFilter(body.payload_filter);
+  if (filter) rejections.push(filter);
+  if ('enabled' in body && typeof body.enabled !== 'boolean') {
+    rejections.push('enabled: must be a boolean value');
+  }
+  return rejections;
+}
+
+/**
+ * `UpdateSubscriptionDto` — the same fields minus `enabled`, which has its own
+ * routes and gets its own sentence rather than the generic whitelist one.
+ * `event_types: null` reaches the validator (the real `@IsOptional()` skips
+ * null, and the service asserts it again) and is refused as "must be an
+ * array"; `name: null` and `payload_filter: null` CLEAR those fields.
+ */
+export function rejectSubscriptionPatch(body: Record<string, unknown>): Rejections {
+  const rejections: Rejections = [];
+  for (const key of Object.keys(body)) {
+    if (SUBSCRIPTION_UPDATE_FIELDS.includes(key)) continue;
+    rejections.push(
+      key === 'enabled'
+        ? 'enabled: property enabled should not exist. Enabling and disabling have their own routes so that pausing a route is a separately audited act.'
+        : `${key}: property ${key} should not exist`,
+    );
+  }
+  if ('name' in body) {
+    const reason = rejectSubscriptionName(body.name);
+    if (reason) rejections.push(reason);
+  }
+  if ('endpoint_id' in body) {
+    if (typeof body.endpoint_id !== 'string' || body.endpoint_id.length === 0) {
+      rejections.push('endpoint_id: must be a string');
+    }
+  }
+  if ('event_types' in body) {
+    const reason = rejectEventTypes(body.event_types);
+    if (reason) rejections.push(reason);
+  }
+  if ('payload_filter' in body) {
+    const reason = rejectPayloadFilter(body.payload_filter);
+    if (reason) rejections.push(reason);
+  }
+  return rejections;
+}
+
+/** `DisableSubscriptionDto.reason` — optional, `@MaxLength(200)`. */
+export function rejectDisableReason(body: unknown): Rejections {
+  const reason = (body as { reason?: unknown } | null)?.reason;
+  if (reason === undefined) return [];
+  if (typeof reason !== 'string' || reason.length > MAX_SUBSCRIPTION_DISABLE_REASON_LENGTH) {
+    return [`reason: must be a string of at most ${MAX_SUBSCRIPTION_DISABLE_REASON_LENGTH} characters`];
+  }
+  return [];
+}
+
+/* ── Projects ─────────────────────────────────────────────────────────────── */
+
+/**
+ * `slugFromName` from control-api `src/projects/slug.ts`, verbatim. A DERIVED
+ * slug is normalised (there is nothing for the caller to disagree with yet);
+ * a SUPPLIED one is validated and never rewritten.
+ */
+export function slugFromName(name: string): string | null {
+  const slug = name
+    .normalize('NFKD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, PROJECT_SLUG_MAX_LENGTH)
+    .replace(/-+$/g, '');
+  if (slug.length < SLUG_MIN_LENGTH || !SLUG_PATTERN.test(slug)) return null;
+  return slug;
+}
+
+/** `CreateProjectDto` — name required, slug optional, environment `test | live`. */
+export function rejectProjectCreate(body: Record<string, unknown>): Rejections {
+  const rejections: Rejections = [];
+  for (const key of Object.keys(body)) {
+    if (key === 'name' || key === 'slug' || key === 'environment') continue;
+    rejections.push(`${key}: property ${key} should not exist`);
+  }
+  const name = body.name;
+  if (
+    typeof name !== 'string' ||
+    name.length < PROJECT_NAME_MIN_LENGTH ||
+    name.length > PROJECT_NAME_MAX_LENGTH
+  ) {
+    rejections.push(
+      `name: must be between ${PROJECT_NAME_MIN_LENGTH} and ${PROJECT_NAME_MAX_LENGTH} characters`,
+    );
+  }
+  if (body.slug !== undefined) {
+    const slug = body.slug;
+    if (typeof slug !== 'string' || slug.length < SLUG_MIN_LENGTH || slug.length > PROJECT_SLUG_MAX_LENGTH) {
+      rejections.push(`slug: must be between ${SLUG_MIN_LENGTH} and ${PROJECT_SLUG_MAX_LENGTH} characters`);
+    } else if (!SLUG_PATTERN.test(slug)) {
+      rejections.push('slug: slug must be lowercase alphanumeric segments separated by single hyphens');
+    }
+  }
+  if (body.environment !== undefined && body.environment !== 'test' && body.environment !== 'live') {
+    rejections.push('environment: must be one of the following values: test, live');
+  }
+  return rejections;
+}
+
+/* ── Members — the role lattice ───────────────────────────────────────────── */
+
+/** `ROLE_RANK` in control-api `src/authz/permissions.ts`. */
+const ROLE_RANK: Record<Role, number> = { owner: 40, admin: 30, developer: 20, viewer: 10, billing: 10 };
+const MEMBER_ROLES: readonly Role[] = ['owner', 'admin', 'developer', 'viewer', 'billing'];
+
+export function isMemberRole(value: unknown): value is Role {
+  return typeof value === 'string' && (MEMBER_ROLES as readonly string[]).includes(value);
+}
+
+const holdsMembersWrite = (role: Role) => role === 'owner' || role === 'admin';
+const mayAssignRole = (actor: Role, target: Role) =>
+  holdsMembersWrite(actor) && ROLE_RANK[target] <= ROLE_RANK[actor];
+
+export interface MemberRefusal {
+  status: 403 | 409;
+  code: 'forbidden' | 'conflict';
+  message: string;
+}
+
+/**
+ * `assertRoleChangeAllowed` / `assertMemberRemovalAllowed` /
+ * `assertOwnerSurvives`, sentence for sentence. `nextRole: null` is a removal.
+ *
+ * Note that the last-owner 409 is a RACE guard on the real server: an actor
+ * with `members.write` is an owner or an admin, an admin cannot touch an owner,
+ * and an owner demoting another owner always counts at least two. It is
+ * reachable through a single request only when the owner count the
+ * transaction reads disagrees with the caller's own role — which is exactly
+ * what SERIALIZABLE exists to catch. It is mirrored here so the sentence and
+ * the status are pinned, not because the mock can be driven into it.
+ */
+export function rejectMemberChange(change: {
+  actorRole: Role;
+  actorMembershipId: string;
+  targetMembershipId: string;
+  currentRole: Role;
+  nextRole: Role | null;
+  ownerCount: number;
+}): MemberRefusal | null {
+  const removal = change.nextRole === null;
+  if (!holdsMembersWrite(change.actorRole)) {
+    return {
+      status: 403,
+      code: 'forbidden',
+      message: removal ? 'You may not remove members.' : 'You may not change member roles.',
+    };
+  }
+  if (change.actorMembershipId === change.targetMembershipId) {
+    return {
+      status: 403,
+      code: 'forbidden',
+      message: removal
+        ? 'You cannot remove your own membership. Ask another owner or admin to do it.'
+        : 'You cannot change your own role. Ask another owner or admin to do it.',
+    };
+  }
+  if (change.nextRole !== null && !mayAssignRole(change.actorRole, change.nextRole)) {
+    return {
+      status: 403,
+      code: 'forbidden',
+      message: `You may not assign the role "${change.nextRole}".`,
+    };
+  }
+  if (!mayAssignRole(change.actorRole, change.currentRole)) {
+    return {
+      status: 403,
+      code: 'forbidden',
+      message: removal
+        ? `You may not remove an ${change.currentRole}.`
+        : `You may not change the role of an ${change.currentRole}.`,
+    };
+  }
+  if (change.currentRole === 'owner' && change.nextRole !== 'owner' && change.ownerCount <= 1) {
+    return {
+      status: 409,
+      code: 'conflict',
+      message: 'An organization must always have at least one owner. Promote another member first.',
+    };
+  }
+  return null;
+}
+
+/* ── Retry policies and rate limits ───────────────────────────────────────── */
+
+/**
+ * The per-field edge of `CreateRetryPolicyDto` / `UpdateRetryPolicyDto`, in
+ * class-validator's words. The CROSS-field rules are not here: the server
+ * raises those from the service as one sentence with `details.field`, and the
+ * mock does the same in `server.ts` using the dashboard's own mirror
+ * (`features/retry-policies/retry-policy-rules.ts`), so there is exactly one
+ * copy of those sentences on the client side.
+ */
+const RETRY_POLICY_WRITABLE = [
+  'name',
+  'is_default',
+  'strategy',
+  'max_attempts',
+  'initial_delay_ms',
+  'max_delay_ms',
+  'multiplier',
+  'jitter_ratio',
+  'max_retry_duration_ms',
+];
+
+function rejectFloat(
+  value: unknown,
+  property: string,
+  bounds: { min: number; max: number },
+): string | null {
+  if (typeof value !== 'number' || !Number.isFinite(value)) {
+    return `${property}: must be a number conforming to the specified constraints`;
+  }
+  if (value < bounds.min) return `${property}: must not be less than ${bounds.min}`;
+  if (value > bounds.max) return `${property}: must not be greater than ${bounds.max}`;
+  return null;
+}
+
+export function rejectRetryPolicyBody(
+  body: Record<string, unknown>,
+  mode: 'create' | 'update',
+): Rejections {
+  const rejections: Rejections = [];
+
+  for (const key of Object.keys(body)) {
+    if (key === 'is_default' && mode === 'update') {
+      // `UpdateRetryPolicyDto` omits it: the default is moved with
+      // POST …/default so the clear and the set share one transaction.
+      rejections.push(
+        'is_default: property is_default should not exist. The project default is moved with POST …/default, so the clear of the old one and the set of the new one happen in a single transaction.',
+      );
+      continue;
+    }
+    if (RETRY_POLICY_WRITABLE.includes(key)) continue;
+    rejections.push(`${key}: property ${key} should not exist`);
+  }
+
+  if (mode === 'create' || 'name' in body) {
+    const name = body.name;
+    if (typeof name !== 'string' || name.length < 1 || name.length > MAX_RETRY_POLICY_NAME_LENGTH) {
+      rejections.push(`name: must be between 1 and ${MAX_RETRY_POLICY_NAME_LENGTH} characters`);
+    }
+  }
+  if ('is_default' in body && mode === 'create' && typeof body.is_default !== 'boolean') {
+    rejections.push('is_default: must be a boolean value');
+  }
+  if ('strategy' in body && !(RETRY_STRATEGIES as readonly unknown[]).includes(body.strategy)) {
+    rejections.push(
+      `strategy: must be one of the following values: ${RETRY_STRATEGIES.join(', ')}`,
+    );
+  }
+  for (const field of [
+    'max_attempts',
+    'initial_delay_ms',
+    'max_delay_ms',
+    'max_retry_duration_ms',
+  ] as const) {
+    if (!(field in body)) continue;
+    const reason = rejectInteger(body[field], field, RETRY_POLICY_LIMITS[field]);
+    if (reason) rejections.push(reason);
+  }
+  for (const field of ['multiplier', 'jitter_ratio'] as const) {
+    if (!(field in body)) continue;
+    const reason = rejectFloat(body[field], field, RETRY_POLICY_LIMITS[field]);
+    if (reason) rejections.push(reason);
+  }
+
+  return rejections;
+}
+
+/**
+ * `CreateRateLimitDto` / `UpdateRateLimitDto`. `resource_id: null` and
+ * `burst: null` are MEANINGFUL ("every resource in this scope", "the same as
+ * limit") and pass validation; they are not the same request as omitting the
+ * key. `burst >= limit` is cross-field and lives in `server.ts`.
+ */
+const RATE_LIMIT_WRITABLE = ['scope', 'resource_id', 'limit', 'window_seconds', 'burst'];
+
+export function rejectRateLimitBody(
+  body: Record<string, unknown>,
+  mode: 'create' | 'update',
+): Rejections {
+  const rejections: Rejections = [];
+
+  for (const key of Object.keys(body)) {
+    if (RATE_LIMIT_WRITABLE.includes(key)) continue;
+    rejections.push(`${key}: property ${key} should not exist`);
+  }
+
+  if (mode === 'create' || 'scope' in body) {
+    if (!(RATE_LIMIT_SCOPES as readonly unknown[]).includes(body.scope)) {
+      rejections.push(`scope: must be one of the following values: ${RATE_LIMIT_SCOPES.join(', ')}`);
+    }
+  }
+  if ('resource_id' in body && body.resource_id !== null) {
+    const id = body.resource_id;
+    if (typeof id !== 'string' || id.length > 64) {
+      rejections.push('resource_id: must be shorter than or equal to 64 characters');
+    }
+  }
+  if (mode === 'create' || 'limit' in body) {
+    const reason = rejectInteger(body.limit, 'limit', RATE_LIMIT_LIMITS.limit);
+    if (reason) rejections.push(reason);
+  }
+  if ('window_seconds' in body) {
+    const reason = rejectInteger(body.window_seconds, 'window_seconds', RATE_LIMIT_LIMITS.window_seconds);
+    if (reason) rejections.push(reason);
+  }
+  if ('burst' in body && body.burst !== null) {
+    const reason = rejectInteger(body.burst, 'burst', RATE_LIMIT_LIMITS.burst);
+    if (reason) rejections.push(reason);
   }
 
   return rejections;

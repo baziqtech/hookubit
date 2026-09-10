@@ -6,7 +6,6 @@ import type {
   CreateProjectBody,
   OffsetPage,
   Project,
-  ProjectAnalytics,
   UpdateProjectBody,
 } from '../../types/api';
 
@@ -74,6 +73,17 @@ export function useUpdateProject(orgId: string, projectId: string) {
   });
 }
 
+/**
+ * `POST /v1/organizations/:orgId/projects` — `projects.write` (owner or admin).
+ *
+ * `environment` is chosen HERE and never again: the DTO defaults it to `test`
+ * so nothing is created live by omission, and `UpdateProjectDto` refuses it.
+ * A supplied `slug` is validated, never rewritten; an omitted one is derived
+ * from the name and comes back in the response. Two 409s, told apart by
+ * `error.code`: `limit_exceeded` with `{ limit, current, resource }` at the
+ * per-organization ceiling, and `conflict` for a slug already taken in this
+ * organization — deleted projects keep theirs.
+ */
 export function useCreateProject(orgId: string) {
   const queryClient = useQueryClient();
   return useMutation({
@@ -85,15 +95,32 @@ export function useCreateProject(orgId: string) {
 }
 
 /**
- * MOCK-ONLY. `GET /v1/projects/:id/analytics` IS NOT IN THE OPENAPI DOCUMENT —
- * there is no analytics module at all, not one whose shape drifted. Against the
- * real transport this 404s, so `AnalyticsPage` refuses to run it and says so
- * instead of rendering an error or, worse, fabricated numbers.
+ * `DELETE /v1/organizations/:orgId/projects/:projectId` — a SOFT delete.
+ *
+ * Sets `status = deleted` and returns the row in that state. Nothing is
+ * erased: endpoints, API keys and the whole delivery ledger survive. The
+ * project stops being visible to this API, the ingest path refuses its keys
+ * (they are deliberately NOT revoked — the "project is not active" rule
+ * already covers them and needs no undoing if this was a mistake), and the
+ * slug stays taken. Audited as `project.deleted`. There is no undelete.
+ *
+ * Both the row and the LIST are dropped: the switcher and the breadcrumb read
+ * the list, and a deleted project still in the menu reads as "the delete did
+ * not happen".
  */
-export function useAnalytics(projectId: string) {
-  return useQuery({
-    queryKey: queryKeys.analytics(projectId),
-    queryFn: () => api.get<ProjectAnalytics>(`/v1/projects/${projectId}/analytics`),
-    enabled: Boolean(projectId),
+export function useDeleteProject(orgId: string, projectId: string) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: () =>
+      api.delete<Project>(`/v1/organizations/${orgId}/projects/${projectId}`),
+    onSuccess: () => {
+      // REMOVED, not invalidated. The caller navigates to the organization
+      // landing, which redirects to the first project in the list it reads -
+      // and an invalidated list still serves its cached rows while it refetches,
+      // so the landing page sent the operator straight back into the project
+      // they had just deleted. Dropping the entries makes it wait for the truth.
+      queryClient.removeQueries({ queryKey: queryKeys.project(projectId) });
+      queryClient.removeQueries({ queryKey: queryKeys.projectsRoot(orgId) });
+    },
   });
 }

@@ -20,6 +20,8 @@ export { ErrorState } from './ErrorState';
 export type { ErrorStateProps } from './ErrorState';
 export { Field } from './Field';
 export type { FieldProps } from './Field';
+export { GatedButton } from './GatedButton';
+export type { GatedButtonProps } from './GatedButton';
 export { Input } from './Input';
 export type { InputProps } from './Input';
 export { NoBackendRoute } from './NoBackendRoute';

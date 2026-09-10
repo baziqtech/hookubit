@@ -1,4 +1,5 @@
-import { Link, useParams } from 'react-router-dom';
+import { useState } from 'react';
+import { Link, useNavigate, useParams } from 'react-router-dom';
 import { Async, Badge, PageHeader, Panel } from '../../components';
 import { formatTimestamp } from '../../lib/format';
 import {
@@ -6,7 +7,10 @@ import {
   PROJECT_NAME_MIN_LENGTH,
   PROJECT_SLUG_MAX_LENGTH,
 } from '../../types/api';
-import { useProject, useUpdateProject } from '../projects/api';
+import { useOrganizations } from '../organizations/api';
+import { useDeleteProject, useProject, useUpdateProject } from '../projects/api';
+import { projectWriteGate } from '../projects/permissions';
+import { DangerZonePanel, TypeToConfirmDialog } from './DangerZone';
 import { IdentityForm } from './IdentityForm';
 import { ReadOnly } from './ReadOnly';
 
@@ -32,6 +36,13 @@ export function ProjectSettingsPage() {
   const { orgId = '', projectId = '' } = useParams();
   const project = useProject(orgId, projectId);
   const update = useUpdateProject(orgId, projectId);
+  const remove = useDeleteProject(orgId, projectId);
+  const navigate = useNavigate();
+  const organizations = useOrganizations();
+  const gate = projectWriteGate(
+    organizations.data?.rows.find((organization) => organization.id === orgId),
+  );
+  const [confirmingDelete, setConfirmingDelete] = useState(false);
 
   return (
     <div className="flex flex-col gap-4">
@@ -88,24 +99,45 @@ export function ProjectSettingsPage() {
                 <strong className="font-semibold text-ink">Deleting is a separate route.</strong>{' '}
                 It is a soft delete — the project and its delivery ledger survive — and it is
                 audited as a deletion rather than as an edit, which is why it is not a status you
-                can save from this form. There is no button for it in the dashboard yet.
+                can save from this form. The button is in the Danger zone at the foot of this page.
               </p>
             </Panel>
           </>
         )}
       </Async>
 
-      <Panel title="Not built yet" description="No screen here yet, whether or not a route exists.">
-        <ul className="flex flex-col gap-1.5 text-xs text-ink-muted">
+      <Panel
+        title="Policies"
+        description="Retry policies and rate limits are project configuration with their own page."
+      >
+        <p className="text-xs leading-relaxed text-ink-muted">
+          How this project’s deliveries are retried — backoff strategy, attempts, delays, jitter, the
+          wall-clock budget, and which policy is the default — and the ceilings on how fast its
+          events are accepted, are on{' '}
+          <Link
+            to={`/orgs/${orgId}/projects/${projectId}/policies`}
+            className="text-accent hover:underline"
+          >
+            Policies
+          </Link>
+          . Per-endpoint timeout, rate limit, concurrency and custom headers stay on{' '}
+          <Link
+            to={`/orgs/${orgId}/projects/${projectId}/endpoints`}
+            className="text-accent hover:underline"
+          >
+            Endpoints
+          </Link>
+          .
+        </p>
+        <p className="mt-3 text-2xs font-medium uppercase tracking-wider text-ink-subtle">
+          Not built yet
+        </p>
+        <ul className="mt-1.5 flex flex-col gap-1.5 text-xs text-ink-muted">
           {[
-            // The route EXISTS — projects/:projectId/retry-policies — and the
-            // endpoint edit form already reads it to offer a picker. What is
-            // missing is the create/edit screen, which is why an endpoint can
-            // choose a policy but nobody can make one from the dashboard.
-            'Retry policy — max attempts, backoff strategy, jitter (route exists; no editor)',
-            'Project-wide rate limit and per-endpoint overrides (route exists; no editor)',
+            // No route exists for either of these; they are listed so the
+            // absence is stated rather than discovered.
             'Payload retention window',
-            'Transfer to another organization, and delete',
+            'Transfer to another organization',
           ].map((item) => (
             <li key={item} className="flex gap-2">
               <span
@@ -116,18 +148,66 @@ export function ProjectSettingsPage() {
             </li>
           ))}
         </ul>
-        <p className="mt-3 text-2xs text-ink-subtle">
-          Per-endpoint timeout, rate limit, concurrency and custom headers ARE configurable today —
-          on{' '}
-          <Link
-            to={`/orgs/${orgId}/projects/${projectId}/endpoints`}
-            className="text-accent hover:underline"
-          >
-            Endpoints
-          </Link>
-          .
-        </p>
       </Panel>
+
+      <Async query={project}>
+        {(data) => (
+          <>
+            <DangerZonePanel
+              title="Delete this project"
+              description={
+                <>
+                  A soft delete, audited as <code className="font-mono">project.deleted</code>. The
+                  project disappears from the dashboard and the API, its keys stop working at
+                  ingest, and its delivery ledger is kept forever. There is no undelete.
+                </>
+              }
+              gate={gate}
+              action="Deleting a project"
+              buttonLabel="Delete project"
+              onClick={() => setConfirmingDelete(true)}
+            />
+            {confirmingDelete && (
+              <TypeToConfirmDialog
+                title="Delete this project?"
+                subject={`${data.name} · ${data.environment}`}
+                slug={data.slug}
+                confirmLabel="Delete project"
+                mutation={remove}
+                onSuccess={() => {
+                  setConfirmingDelete(false);
+                  navigate(`/orgs/${orgId}`);
+                }}
+                onClose={() => setConfirmingDelete(false)}
+              >
+                <p>
+                  <strong className="text-ink">Nothing is erased.</strong> The project’s status
+                  becomes <code className="font-mono">deleted</code>; endpoints, API keys and every
+                  delivery and attempt stay exactly where they are, so “did finance ever receive
+                  this?” can still be answered months from now.
+                </p>
+                <ul className="list-disc pl-4">
+                  <li>
+                    <strong className="text-ink">API keys are refused</strong>, not revoked. The
+                    ingest path rejects every key whose project is not active, so publishing stops
+                    immediately — and nothing has to be undone by hand if this was a mistake.
+                  </li>
+                  <li>No new events are accepted, so no new deliveries are created.</li>
+                  <li>
+                    The project vanishes from every list and route here; the API still lists it with{' '}
+                    <code className="font-mono">?status=deleted</code>.
+                  </li>
+                  <li>
+                    The slug <code className="font-mono">{data.slug}</code> stays taken in this
+                    organization.
+                  </li>
+                  <li>There is no undelete, in the dashboard or the API.</li>
+                </ul>
+              </TypeToConfirmDialog>
+            )}
+          </>
+        )}
+      </Async>
     </div>
   );
 }

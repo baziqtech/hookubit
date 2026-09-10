@@ -18,12 +18,17 @@ import {
 } from '../../components';
 import { formatDuration, formatRelativeTime } from '../../lib/format';
 import { DEFAULT_PAGE_SIZE, type CreatedEndpoint, type Endpoint } from '../../types/api';
+import { useOrganization } from '../organizations/api';
 import { useCreateEndpoint, useEndpoints } from './api';
 import { EndpointActions } from './EndpointActions';
 import { EndpointEditDialog } from './EndpointEditDialog';
+import { EndpointSecretsDialog } from './EndpointSecretsDialog';
+
+/** What the Secrets dialog needs of an endpoint — a created one qualifies too. */
+type SecretsTarget = Pick<Endpoint, 'id' | 'name' | 'status' | 'has_live_secret'>;
 
 export function EndpointsPage() {
-  const { projectId = '' } = useParams();
+  const { orgId = '', projectId = '' } = useParams();
   const [offset, setOffset] = useState(0);
   const [includeDeleted, setIncludeDeleted] = useState(false);
   const [creating, setCreating] = useState(false);
@@ -31,9 +36,13 @@ export function EndpointsPage() {
   // per row would put sixty `<dialog>` elements — and sixty copies of the same
   // element id — in the document.
   const [editing, setEditing] = useState<Endpoint | null>(null);
+  const [secretsFor, setSecretsFor] = useState<SecretsTarget | null>(null);
 
   const endpoints = useEndpoints(projectId, { offset, includeDeleted });
-  const columns = buildColumns(projectId, setEditing);
+  // The caller's own role, for the Secrets dialog's denial copy: signing
+  // secrets are owner/admin only, and "you cannot" should name the role.
+  const role = useOrganization(orgId).data?.role;
+  const columns = buildColumns(projectId, setEditing, setSecretsFor);
 
   return (
     <div className="flex flex-col gap-4">
@@ -104,6 +113,10 @@ export function EndpointsPage() {
         projectId={projectId}
         open={creating}
         onClose={() => setCreating(false)}
+        onOpenSecrets={(endpoint) => {
+          setCreating(false);
+          setSecretsFor(endpoint);
+        }}
       />
 
       {editing && (
@@ -111,6 +124,14 @@ export function EndpointsPage() {
           endpoint={editing}
           projectId={projectId}
           onClose={() => setEditing(null)}
+        />
+      )}
+
+      {secretsFor && (
+        <EndpointSecretsDialog
+          endpoint={secretsFor}
+          currentRole={role}
+          onClose={() => setSecretsFor(null)}
         />
       )}
     </div>
@@ -129,10 +150,13 @@ function CreateEndpointDialog({
   projectId,
   open,
   onClose,
+  onOpenSecrets,
 }: {
   projectId: string;
   open: boolean;
   onClose: () => void;
+  /** The cure for `secret_pending`: hands the created endpoint to the Secrets dialog. */
+  onOpenSecrets: (endpoint: SecretsTarget) => void;
 }) {
   const [name, setName] = useState('');
   const [url, setUrl] = useState('');
@@ -177,7 +201,7 @@ function CreateEndpointDialog({
       }
     >
       {created ? (
-        <EndpointCreatedNotice endpoint={created} />
+        <EndpointCreatedNotice endpoint={created} onOpenSecrets={() => onOpenSecrets(created)} />
       ) : (
         <div className="flex flex-col gap-3">
           {create.isError && <WriteErrorNotice error={create.error} />}
@@ -220,7 +244,14 @@ function CreateEndpointDialog({
  * exists to prevent — the user would wire up a consumer and wait for
  * deliveries that are never going to arrive.
  */
-export function EndpointCreatedNotice({ endpoint }: { endpoint: CreatedEndpoint }) {
+export function EndpointCreatedNotice({
+  endpoint,
+  onOpenSecrets,
+}: {
+  endpoint: CreatedEndpoint;
+  /** Opens the Secrets dialog for this endpoint — where the rotation happens. */
+  onOpenSecrets?: () => void;
+}) {
   if (endpoint.secret_pending || endpoint.secret === null) {
     return (
       <div
@@ -245,6 +276,16 @@ export function EndpointCreatedNotice({ endpoint }: { endpoint: CreatedEndpoint 
           Status: <Badge tone="neutral">{endpoint.status}</Badge> · secret version{' '}
           {endpoint.secret_version} pending
         </p>
+        {onOpenSecrets && (
+          <p>
+            <Button size="sm" variant="secondary" onClick={onOpenSecrets}>
+              Open secrets for this endpoint
+            </Button>
+            <span className="ml-2 text-2xs text-ink-subtle">
+              Rotation happens there. It names the role required if yours is not enough.
+            </span>
+          </p>
+        )}
       </div>
     );
   }
@@ -273,6 +314,7 @@ export function EndpointCreatedNotice({ endpoint }: { endpoint: CreatedEndpoint 
 function buildColumns(
   projectId: string,
   onEdit: (endpoint: Endpoint) => void,
+  onSecrets: (endpoint: Endpoint) => void,
 ): Column<Endpoint>[] {
   return [
     {
@@ -303,6 +345,13 @@ function buildColumns(
            */}
           {row.enabled && row.status === 'disabled' && <Badge tone="danger">auto-disabled</Badge>}
           {!row.enabled && row.status !== 'deleted' && <Badge tone="neutral">operator paused</Badge>}
+          {/*
+           * The state "Resume" cannot fix. `POST …/enable` answers 409 until a
+           * secret signs, and the Secrets button on this row is the cure.
+           */}
+          {!row.has_live_secret && row.status !== 'deleted' && (
+            <Badge tone="warn">no live secret</Badge>
+          )}
         </span>
       ),
     },
@@ -340,9 +389,20 @@ function buildColumns(
           <span className="text-2xs text-ink-subtle">kept for the ledger</span>
         ) : (
           <span className="flex flex-wrap items-center justify-end gap-2">
-            <EndpointActions endpoint={row} projectId={projectId} />
+            <EndpointActions
+              endpoint={row}
+              projectId={projectId}
+              onOpenSecrets={() => onSecrets(row)}
+            />
             <Button size="sm" onClick={() => onEdit(row)}>
               Edit
+            </Button>
+            <Button
+              size="sm"
+              variant={row.has_live_secret ? 'secondary' : 'primary'}
+              onClick={() => onSecrets(row)}
+            >
+              Secrets
             </Button>
           </span>
         ),

@@ -10,22 +10,19 @@ import {
   Table,
   type Column,
 } from '../../components';
-import {
-  formatCount,
-  formatDuration,
-  formatPercent,
-  formatRelativeTime,
-  truncateId,
-} from '../../lib/format';
+import { formatCount, formatDuration, formatPercent, formatRelativeTime, truncateId } from '../../lib/format';
 import { deliveryOutcome, describeDelivery } from '../../lib/delivery-status';
-import type { Delivery, Endpoint } from '../../types/api';
+import type { Delivery, Endpoint, FailingEndpoint } from '../../types/api';
+import { DEFAULT_WINDOW_HOURS } from '../../types/api';
+import { useAttemptLatency, useDeliveryOutcomes, useFailingEndpoints } from '../analytics/api';
+import { formatNullableDuration, formatRate, formatRateDelta, rateTone } from '../analytics/derive';
+import { ErrorTile, TileSkeletons } from '../analytics/tiles';
 import { useDeliveries } from '../deliveries/api';
 import { useEndpoints } from '../endpoints/api';
 import { useSetupState } from '../onboarding/api';
 import { isSetupComplete, setupHeadline } from '../onboarding/setup';
 import { SetupChecklist } from '../onboarding/SetupChecklist';
 import type { SetupStep } from '../onboarding/setup';
-import { useAnalytics } from '../projects/api';
 
 /**
  * The 2am page — once there is something to be at 2am about.
@@ -118,42 +115,92 @@ function FirstRun({
   );
 }
 
+/**
+ * The health tiles read TWO of the four analytics routes, each as its own
+ * request: `analytics/deliveries` for the outcome tiles and
+ * `analytics/latency` for p95. They render as they land — the controller
+ * split them precisely so the cheapest tile never waits for the dearest query
+ * — and each fails alone, with its own request id, rather than blanking the
+ * row. The window is the API default (24h); the Analytics page is where the
+ * window is a choice.
+ */
 function Health({ orgId, projectId }: { orgId: string; projectId: string }) {
-  const analytics = useAnalytics(projectId);
+  const outcomes = useDeliveryOutcomes(projectId, DEFAULT_WINDOW_HOURS);
+  const latency = useAttemptLatency(projectId, DEFAULT_WINDOW_HOURS);
+  const ranking = useFailingEndpoints(projectId, DEFAULT_WINDOW_HOURS, 5);
   const endpoints = useEndpoints(projectId);
   const failing = useDeliveries(projectId, { status: 'exhausted' });
+  const base = `/orgs/${orgId}/projects/${projectId}`;
 
   return (
     <>
-      <Async query={analytics}>
-        {(data) => (
-          <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+      <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-5">
+        {outcomes.isPending ? (
+          <TileSkeletons
+            labels={['Success rate (24h)', 'Failing (24h)', 'Exhausted (24h)', 'In flight']}
+          />
+        ) : outcomes.isError ? (
+          <ErrorTile
+            label="Delivery outcomes (24h)"
+            error={outcomes.error}
+            onRetry={() => void outcomes.refetch()}
+            className="sm:col-span-2 xl:col-span-4"
+          />
+        ) : (
+          <>
+            {/*
+              `success_rate` is NULL when nothing settled — not 0%, which would
+              read as "everything failed" on a project that simply had no
+              traffic. The delta is null when either window had nothing
+              settled, because a change from "unknown" is not a change.
+            */}
             <Stat
               label="Success rate (24h)"
-              value={formatPercent(data.success_rate, 2)}
-              tone={data.success_rate < 0.99 ? 'warn' : 'ok'}
-              hint={`${formatCount(data.totals.total)} deliveries attempted`}
+              value={formatRate(outcomes.data.current.success_rate)}
+              tone={rateTone(outcomes.data.current.success_rate)}
+              hint={
+                outcomes.data.current.success_rate === null
+                  ? 'No delivery settled in the last 24 hours'
+                  : `${formatRateDelta(outcomes.data.success_rate_delta)} vs the 24 hours before · ${formatCount(outcomes.data.current.total)} deliveries created`
+              }
             />
             <Stat
-              label="Failed (24h)"
-              value={formatCount(data.totals.failed)}
-              tone={data.totals.failed > 0 ? 'danger' : 'default'}
-              hint={`${formatCount(data.totals.exhausted)} exhausted their retries`}
+              label="Failing (24h)"
+              value={formatCount(outcomes.data.current.failing)}
+              tone={outcomes.data.current.failing > 0 ? 'danger' : 'default'}
+              hint={`${formatCount(outcomes.data.current.by_status.failed)} failed with retries left · ${formatCount(outcomes.data.current.exhausted)} exhausted`}
             />
             <Stat
-              label="In retry"
-              value={formatCount(data.totals.pending)}
-              tone={data.totals.pending > 0 ? 'warn' : 'default'}
-              hint="Scheduled for another attempt"
+              label="Exhausted (24h)"
+              value={formatCount(outcomes.data.current.exhausted)}
+              tone={outcomes.data.current.exhausted > 0 ? 'danger' : 'default'}
+              hint="Gave up; will not retry without a replay"
             />
             <Stat
-              label="p95 latency"
-              value={formatDuration(data.p95_latency_ms)}
-              hint="Endpoint response time"
+              label="In flight"
+              value={formatCount(outcomes.data.current.in_flight)}
+              tone={outcomes.data.current.in_flight > 0 ? 'warn' : 'default'}
+              hint={`${formatCount(outcomes.data.current.by_status.retrying)} retrying · not yet an outcome`}
             />
-          </div>
+          </>
         )}
-      </Async>
+
+        {latency.isPending ? (
+          <TileSkeletons labels={['p95 latency (24h)']} />
+        ) : latency.isError ? (
+          <ErrorTile
+            label="p95 latency (24h)"
+            error={latency.error}
+            onRetry={() => void latency.refetch()}
+          />
+        ) : (
+          <Stat
+            label="p95 latency (24h)"
+            value={formatNullableDuration(latency.data.p95_ms, formatDuration)}
+            hint={latencyCaveat(latency.data)}
+          />
+        )}
+      </div>
 
       <div className="grid gap-4 xl:grid-cols-2">
         <Async
@@ -165,7 +212,7 @@ function Health({ orgId, projectId }: { orgId: string; projectId: string }) {
                 title="No endpoints"
                 description="An endpoint is the URL we POST to. Nothing is delivered until one exists."
                 action={
-                  <Link to={`/orgs/${orgId}/projects/${projectId}/endpoints`}>
+                  <Link to={`${base}/endpoints`}>
                     <Button size="sm" variant="primary">
                       Add an endpoint
                     </Button>
@@ -189,10 +236,7 @@ function Health({ orgId, projectId }: { orgId: string; projectId: string }) {
                 }
                 flush
                 actions={
-                  <Link
-                    to={`/orgs/${orgId}/projects/${projectId}/endpoints`}
-                    className="text-xs text-ink-muted hover:text-ink"
-                  >
+                  <Link to={`${base}/endpoints`} className="text-xs text-ink-muted hover:text-ink">
                     All endpoints
                   </Link>
                 }
@@ -221,13 +265,60 @@ function Health({ orgId, projectId }: { orgId: string; projectId: string }) {
           }}
         </Async>
 
+        {/*
+          The panel above is about STATE — what the breaker or an operator has
+          stopped. This one is about OUTCOMES — which endpoints the deliveries
+          of the last 24 hours actually failed against, from the ranking route
+          that exists for exactly this question. An endpoint can be on both
+          (auto-disabled because it was failing) or on either alone.
+        */}
+        <Panel
+          title="Failing endpoints (24h)"
+          description="Worst first by failed + exhausted. Read the rate beside the count."
+          flush
+          actions={
+            <Link to={`${base}/analytics`} className="text-xs text-ink-muted hover:text-ink">
+              Analytics
+            </Link>
+          }
+        >
+          <Async
+            query={ranking}
+            isEmpty={(data) => data.data.length === 0}
+            empty={
+              <EmptyState
+                title="No failed or exhausted deliveries"
+                description="No endpoint had a delivery end badly in the last 24 hours."
+              />
+            }
+          >
+            {(data) => (
+              <>
+                <Table
+                  caption="Endpoints ranked by failing deliveries in the last 24 hours"
+                  columns={rankingColumns(base)}
+                  rows={data.data}
+                  rowKey={(row) => row.endpoint_id}
+                />
+                {data.has_more && (
+                  <p className="border-t border-line px-3 py-2 text-2xs text-ink-subtle">
+                    More endpoints had failures than the {data.data.length} shown; these are the
+                    worst.
+                  </p>
+                )}
+              </>
+            )}
+          </Async>
+        </Panel>
+
         <Panel
           title="Needs attention"
           description="Deliveries that exhausted every retry"
           flush
+          className="xl:col-span-2"
           actions={
             <Link
-              to={`/orgs/${orgId}/projects/${projectId}/deliveries?status=exhausted`}
+              to={`${base}/deliveries?status=exhausted`}
               className="text-xs text-ink-muted hover:text-ink"
             >
               All failures
@@ -257,6 +348,63 @@ function Health({ orgId, projectId }: { orgId: string; projectId: string }) {
       </div>
     </>
   );
+}
+
+/**
+ * The p95 is a nearest-rank percentile over a BOUNDED sample, and the tile
+ * says which: `exact` means the sample was every measured attempt in the
+ * window; otherwise it is the most recent `sample_size`, and the number
+ * describes recent traffic rather than the whole day.
+ */
+function latencyCaveat(data: {
+  exact: boolean;
+  sample_size: number;
+  sampled_deliveries: number;
+}): string {
+  if (data.sample_size === 0) return 'No measured attempts in the last 24 hours';
+  const scope = `${formatCount(data.sample_size)} attempts across ${formatCount(data.sampled_deliveries)} deliveries`;
+  return data.exact ? `Exact over ${scope}` : `Most recent ${scope} — a sample, not the whole day`;
+}
+
+function rankingColumns(base: string): Column<FailingEndpoint>[] {
+  return [
+    {
+      key: 'endpoint',
+      header: 'Endpoint',
+      render: (row) => (
+        <Link
+          to={`${base}/deliveries?endpoint_id=${encodeURIComponent(row.endpoint_id)}&failing_now=true`}
+          className="flex flex-col hover:underline"
+        >
+          <span className="text-xs font-medium text-ink">
+            {row.name ?? <span className="text-ink-subtle">endpoint row missing</span>}
+          </span>
+          <span className="truncate font-mono text-2xs text-ink-subtle">
+            {row.url ?? truncateId(row.endpoint_id)}
+          </span>
+        </Link>
+      ),
+    },
+    {
+      key: 'failing',
+      header: 'Failing',
+      align: 'right',
+      render: (row) => (
+        <span className="text-xs tabular text-danger">{formatCount(row.failing)}</span>
+      ),
+    },
+    {
+      key: 'rate',
+      header: 'Rate',
+      align: 'right',
+      render: (row) => (
+        <span className="flex flex-col items-end">
+          <span className="text-xs tabular text-ink">{formatPercent(row.failure_rate, 1)}</span>
+          <span className="text-2xs tabular text-ink-subtle">of {formatCount(row.total)}</span>
+        </span>
+      ),
+    },
+  ];
 }
 
 function endpointColumns(orgId: string, projectId: string): Column<Endpoint>[] {

@@ -28,7 +28,7 @@ export interface SetupState {
  * An endpoint counts as deliverable only when the operator has enabled it AND
  * the circuit breaker has not taken it away. Both halves are load-bearing:
  * `enabled` is operator intent and `status` is the breaker's verdict, and an
- * endpoint auto-disabled after twenty consecutive failures still reads
+ * endpoint auto-disabled after five consecutive failures still reads
  * `enabled: true`.
  */
 function isDeliverable(endpoint: { status: string; enabled: boolean }): boolean {

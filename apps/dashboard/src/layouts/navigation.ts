@@ -17,6 +17,7 @@ export function projectNav(orgId: string, projectId: string): NavItem[] {
     { to: `${base}/outbox`, label: 'Outbox' },
     { to: `${base}/endpoints`, label: 'Endpoints' },
     { to: `${base}/subscriptions`, label: 'Subscriptions' },
+    { to: `${base}/policies`, label: 'Policies' },
     { to: `${base}/api-keys`, label: 'API keys' },
     { to: `${base}/analytics`, label: 'Analytics' },
     { to: `${base}/settings`, label: 'Settings' },

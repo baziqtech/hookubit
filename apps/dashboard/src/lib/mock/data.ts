@@ -35,12 +35,11 @@ import type {
   Role,
   OutboxEntry,
   Project,
-  ProjectAnalytics,
   RetryPolicy,
   Subscription,
-  UsageSummary,
   User,
 } from '../../types/api';
+import type { RateLimit } from '../../types/api';
 
 /** mulberry32 — small, fast, and stable across runs. */
 function rng(seed: number): () => number {
@@ -198,6 +197,18 @@ export const members: Record<string, Member[]> = {
       role: 'admin',
       disabled: false,
       created_at: minutesAgo(60 * 24 * 30),
+    },
+    // The demo user is an ADMIN here, and this is the owner they cannot touch:
+    // the "you may not change the role of an owner" refusal has to be visible
+    // somewhere, and it cannot be in the organization they own.
+    {
+      id: 'mem_07',
+      user_id: 'usr_07',
+      email: 'yaw@kwiklogistics.example',
+      name: 'Yaw Darko',
+      role: 'owner',
+      disabled: false,
+      created_at: minutesAgo(60 * 24 * 200),
     },
   ],
 };
@@ -398,6 +409,77 @@ export const retryPolicies: RetryPolicy[] = [
   },
 ];
 
+/* ── Rate-limit policies ──────────────────────────────────────────────────── */
+
+/**
+ * `RateLimitDto`. One row per shape the Policies page has to render honestly:
+ * the every-key ingest budget, one key with its own ceiling, the project row,
+ * the organization row, and an `endpoint`-scope row — which the data plane
+ * does not read (the delivery workers charge only `endpoints.rate_limit`), so
+ * the "Not enforced" badge is reachable rather than theoretical.
+ *
+ * `resource_id`s point at fixture rows that exist, because the mock resolves
+ * them through the same lookups the API does and a dangling id would 404 on
+ * every edit.
+ */
+export const rateLimitPolicies: RateLimit[] = [
+  {
+    id: 'rl_01JQINGESTALL',
+    project_id: PROD,
+    scope: 'ingest',
+    resource_id: null,
+    limit: 500,
+    window_seconds: 1,
+    burst: 1_000,
+    created_at: minutesAgo(60 * 24 * 90),
+    updated_at: minutesAgo(60 * 24 * 90),
+  },
+  {
+    id: 'rl_01JQBACKFILLKEY',
+    project_id: PROD,
+    scope: 'ingest',
+    resource_id: 'key_01JQBACKFILL',
+    limit: 50,
+    window_seconds: 1,
+    burst: null,
+    created_at: minutesAgo(60 * 24 * 12),
+    updated_at: minutesAgo(60 * 24 * 2),
+  },
+  {
+    id: 'rl_01JQPROJECT',
+    project_id: PROD,
+    scope: 'project',
+    resource_id: null,
+    limit: 2_000,
+    window_seconds: 1,
+    burst: null,
+    created_at: minutesAgo(60 * 24 * 90),
+    updated_at: minutesAgo(60 * 24 * 90),
+  },
+  {
+    id: 'rl_01JQORG',
+    project_id: PROD,
+    scope: 'organization',
+    resource_id: null,
+    limit: 10_000,
+    window_seconds: 60,
+    burst: 20_000,
+    created_at: minutesAgo(60 * 24 * 90),
+    updated_at: minutesAgo(60 * 24 * 30),
+  },
+  {
+    id: 'rl_01JQPARTNERCAP',
+    project_id: PROD,
+    scope: 'endpoint',
+    resource_id: 'ep_01JQPARTNER',
+    limit: 20,
+    window_seconds: 1,
+    burst: 40,
+    created_at: minutesAgo(60 * 24 * 5),
+    updated_at: minutesAgo(60 * 24 * 5),
+  },
+];
+
 /* ── Endpoints ────────────────────────────────────────────────────────────── */
 
 /**
@@ -469,8 +551,17 @@ const namedEndpoints: Endpoint[] = [
     description: 'Partner bank reconciliation feed.',
     status: 'disabled',
     enabled: true,
+    // The real sentence `autoDisableReason()` writes (control-api
+    // `maintenance/auto-disable-policy.ts`): the breaker opens at 5 consecutive
+    // failures and the endpoint is switched off only after it has stayed open
+    // for days. A fixture that named a threshold the platform does not have was
+    // teaching operators the wrong number.
     disabled_reason:
-      'Circuit breaker opened after 20 consecutive failures (connect timeout).',
+      'auto-disabled: the circuit breaker had been open for 3d 2h (430 consecutive failures, ' +
+      'last successful delivery: ' +
+      minutesAgo(60 * 74 + 158) +
+      '). New events are no longer queued for this endpoint. Re-enable it once the endpoint is ' +
+      'answering.',
     disabled_at: minutesAgo(158),
     timeout_ms: 30_000,
     max_concurrency: 4,
@@ -1503,76 +1594,6 @@ function outboxRowFor(event: EventDetail, index: number): OutboxEntry {
 }
 
 export const outbox: OutboxEntry[] = events.map((event, index) => outboxRowFor(event, index));
-
-/* ── Aggregates ───────────────────────────────────────────────────────────── */
-
-export const analytics: ProjectAnalytics = (() => {
-  const points = Array.from({ length: 24 }, (_, hour) => {
-    const succeeded = between(1_800, 3_400);
-    return {
-      bucket: minutesAgo((23 - hour) * 60),
-      succeeded,
-      failed: between(20, 240),
-      retrying: between(0, 90),
-      p95_latency_ms: between(120, 780),
-    };
-  });
-  const totals = points.reduce(
-    (accumulator, point) => ({
-      total: accumulator.total + point.succeeded + point.failed,
-      succeeded: accumulator.succeeded + point.succeeded,
-      failed: accumulator.failed + point.failed,
-      pending: accumulator.pending + point.retrying,
-      exhausted: accumulator.exhausted + Math.round(point.failed * 0.18),
-    }),
-    { total: 0, succeeded: 0, failed: 0, pending: 0, exhausted: 0 },
-  );
-  return {
-    window: '24h' as const,
-    points,
-    totals,
-    p95_latency_ms: 412,
-    success_rate: totals.succeeded / totals.total,
-  };
-})();
-
-const periodStart = new Date(Date.UTC(NOW.getUTCFullYear(), NOW.getUTCMonth(), 1));
-const periodEnd = new Date(Date.UTC(NOW.getUTCFullYear(), NOW.getUTCMonth() + 1, 0, 23, 59, 59));
-
-/**
- * Analytics for one project.
- *
- * A project with no deliveries reports zeroes rather than borrowing the busy
- * project's numbers. That matters more than it sounds: the overview for a
- * brand-new project is the screen the first-run experience has to render, and
- * a fabricated 95% success rate on a project that has never received an event
- * hides the very state the guided setup exists to resolve.
- */
-export function analyticsFor(projectId: string): ProjectAnalytics {
-  if (projectId === PROD) return analytics;
-  return {
-    window: '24h',
-    points: Array.from({ length: 24 }, (_, hour) => ({
-      bucket: minutesAgo((23 - hour) * 60),
-      succeeded: 0,
-      failed: 0,
-      retrying: 0,
-      p95_latency_ms: 0,
-    })),
-    totals: { total: 0, succeeded: 0, failed: 0, pending: 0, exhausted: 0 },
-    p95_latency_ms: 0,
-    success_rate: 0,
-  };
-}
-
-export const usage: UsageSummary = {
-  period_start: periodStart.toISOString(),
-  period_end: periodEnd.toISOString(),
-  events_ingested: 1_284_930,
-  deliveries_attempted: 3_402_118,
-  included_events: 1_000_000,
-  overage_events: 284_930,
-};
 
 /**
  * `AuditLogDto`.

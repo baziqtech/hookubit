@@ -293,7 +293,7 @@ function FailureBadge({ kind, code }: { kind: FailureKind; code: number | null }
  * and one that is.
  *
  * `enabled` is operator intent; `status` is the circuit breaker's verdict. An
- * endpoint that has failed twenty times consecutively reads `enabled: true,
+ * endpoint that has failed five times consecutively (the breaker's open threshold) reads `enabled: true,
  * status: 'disabled'` — nobody chose that, the platform did — and every
  * delivery queued against it will sit at "retrying" without a single further
  * request being made. Without this panel the operator waits for a retry that is

@@ -1,7 +1,12 @@
+import { useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { Badge } from '../components';
 import { useOrganizations } from '../features/organizations/api';
+import { CreateOrganizationDialog } from '../features/organizations/CreateOrganizationDialog';
 import { useProjects } from '../features/projects/api';
+import { CreateProjectDialog } from '../features/projects/CreateProjectDialog';
+import { projectWriteGate } from '../features/projects/permissions';
+import { deniedReason, mayAct } from '../lib/role-gate';
 import { cn } from '../lib/cn';
 import type { Paged } from '../lib/pagination';
 import { Menu, MenuLabel } from './Menu';
@@ -16,10 +21,12 @@ function itemClass(active: boolean): string {
 
 export function OrganizationSwitcher({ orgId }: { orgId: string }) {
   const { data: page, isPending } = useOrganizations();
+  const [creating, setCreating] = useState(false);
   const organizations = page?.rows;
   const current = organizations?.find((organization) => organization.id === orgId);
 
   return (
+    <>
     <Menu
       label="Switch organization"
       className="min-w-0 flex-1"
@@ -58,9 +65,27 @@ export function OrganizationSwitcher({ orgId }: { orgId: string }) {
             </Link>
           ))}
           <TruncationNote page={page} noun="organizations" />
+          {/*
+            Any account may own more organizations (the API caps it per user),
+            so this is not role-gated: there is no organization to hold a role
+            in yet. The ceiling comes back as `limit_exceeded` in the dialog.
+          */}
+          <button
+            type="button"
+            role="menuitem"
+            onClick={() => {
+              close();
+              setCreating(true);
+            }}
+            className={cn(itemClass(false), 'mt-1 border-t border-line pt-2 text-accent hover:text-accent')}
+          >
+            New organization…
+          </button>
         </>
       )}
     </Menu>
+    <CreateOrganizationDialog open={creating} onClose={() => setCreating(false)} />
+    </>
   );
 }
 
@@ -69,8 +94,17 @@ export function ProjectSwitcher({ orgId, projectId }: { orgId: string; projectId
   const projects = page?.rows;
   const navigate = useNavigate();
   const current = projects?.find((project) => project.id === projectId);
+  // The "New project…" item is behind `projects.write` (owner or admin). The
+  // organizations list is already loaded for the switcher above, so this is
+  // served from cache. Unknown role → enabled; the server is the authority.
+  const organizations = useOrganizations();
+  const gate = projectWriteGate(
+    organizations.data?.rows.find((organization) => organization.id === orgId),
+  );
+  const [creating, setCreating] = useState(false);
 
   return (
+    <>
     <Menu
       label="Switch project"
       className="min-w-0 flex-1"
@@ -117,9 +151,29 @@ export function ProjectSwitcher({ orgId, projectId }: { orgId: string; projectId
             </button>
           ))}
           <TruncationNote page={page} noun="projects" />
+          <button
+            type="button"
+            role="menuitem"
+            disabled={!mayAct(gate)}
+            aria-disabled={!mayAct(gate) || undefined}
+            title={deniedReason(gate, 'Creating a project')}
+            onClick={() => {
+              close();
+              setCreating(true);
+            }}
+            className={cn(
+              itemClass(false),
+              'mt-1 border-t border-line pt-2 text-accent hover:text-accent',
+              'disabled:cursor-not-allowed disabled:opacity-50',
+            )}
+          >
+            New project…
+          </button>
         </>
       )}
     </Menu>
+    <CreateProjectDialog orgId={orgId} open={creating} onClose={() => setCreating(false)} />
+    </>
   );
 }
 

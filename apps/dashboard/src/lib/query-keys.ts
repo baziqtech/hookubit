@@ -21,7 +21,6 @@ export const queryKeys = {
   auditLogsRoot: (orgId: string) => ['organization', orgId, 'audit-logs'] as const,
   auditLogs: (orgId: string, filters: Record<string, string>, offset = 0) =>
     ['organization', orgId, 'audit-logs', filters, { offset }] as const,
-  usage: (orgId: string) => ['organization', orgId, 'usage'] as const,
 
   projectsRoot: (orgId: string) => ['projects', orgId] as const,
   projects: (orgId: string, offset = 0) => ['projects', orgId, { offset }] as const,
@@ -48,7 +47,26 @@ export const queryKeys = {
   retryPoliciesRoot: (projectId: string) => ['project', projectId, 'retry-policies'] as const,
   retryPolicies: (projectId: string, offset = 0) =>
     ['project', projectId, 'retry-policies', { offset }] as const,
-  analytics: (projectId: string) => ['project', projectId, 'analytics'] as const,
+  retryPolicy: (projectId: string, policyId: string) =>
+    ['project', projectId, 'retry-policy', policyId] as const,
+
+  rateLimitsRoot: (projectId: string) => ['project', projectId, 'rate-limits'] as const,
+  rateLimits: (projectId: string, offset = 0) =>
+    ['project', projectId, 'rate-limits', { offset }] as const,
+  /*
+   * Analytics: four routes, one key each, with the window (and limit) in the
+   * key so 24h and 7d are separate cache entries rather than one overwriting
+   * the other. `analyticsRoot` is the prefix a replay or requeue can drop.
+   */
+  analyticsRoot: (projectId: string) => ['project', projectId, 'analytics'] as const,
+  analyticsDeliveries: (projectId: string, windowHours: number) =>
+    ['project', projectId, 'analytics', 'deliveries', { windowHours }] as const,
+  analyticsEndpoints: (projectId: string, windowHours: number, limit: number) =>
+    ['project', projectId, 'analytics', 'endpoints', { windowHours, limit }] as const,
+  analyticsLatency: (projectId: string, windowHours: number) =>
+    ['project', projectId, 'analytics', 'latency', { windowHours }] as const,
+  analyticsEvents: (projectId: string, windowHours: number, limit: number) =>
+    ['project', projectId, 'analytics', 'events', { windowHours, limit }] as const,
   eventsRoot: (projectId: string) => ['project', projectId, 'events'] as const,
   events: (projectId: string, filters: Record<string, string>, offset = 0) =>
     ['project', projectId, 'events', filters, { offset }] as const,

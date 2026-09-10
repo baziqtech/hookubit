@@ -14,6 +14,7 @@ import { EventDetailPage } from '../features/events/EventDetailPage';
 import { EventsPage } from '../features/events/EventsPage';
 import { GetStartedPage } from '../features/onboarding/GetStartedPage';
 import { OverviewPage } from '../features/overview/OverviewPage';
+import { PoliciesPage } from '../features/policies/PoliciesPage';
 import { AnalyticsPage } from '../features/analytics/AnalyticsPage';
 import { OrganizationSettingsPage } from '../features/settings/OrganizationSettingsPage';
 import { ProjectSettingsPage } from '../features/settings/ProjectSettingsPage';
@@ -81,6 +82,7 @@ export const router = createBrowserRouter([
               { path: 'outbox', element: <OutboxPage /> },
               { path: 'endpoints', element: <EndpointsPage /> },
               { path: 'subscriptions', element: <SubscriptionsPage /> },
+              { path: 'policies', element: <PoliciesPage /> },
               { path: 'api-keys', element: <ApiKeysPage /> },
               { path: 'analytics', element: <AnalyticsPage /> },
               { path: 'settings', element: <ProjectSettingsPage /> },

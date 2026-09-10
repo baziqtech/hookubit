@@ -9,8 +9,8 @@ import type {
   Endpoint,
   EndpointSecret,
   OffsetPage,
+  RotateSecretBody,
   RotatedSecret,
-  Subscription,
   UpdateEndpointBody,
 } from '../../types/api';
 
@@ -153,8 +153,35 @@ export function useDisableEndpoint(projectId: string, endpointId: string) {
   });
 }
 
-/** Secret METADATA. No read path can return a plaintext secret. */
-export function useEndpointSecrets(endpointId: string, offset = 0) {
+/**
+ * `DELETE /v1/projects/:projectId/endpoints/:endpointId` — a SOFT delete.
+ *
+ * `deliveries.endpoint_id` is ON DELETE RESTRICT, so the row is kept forever:
+ * `status` becomes `deleted`, `enabled` false, the endpoint drops out of the
+ * default listing, and every later write against it answers 409. There is no
+ * undelete. Idempotent — deleting an already-deleted endpoint is a 204.
+ *
+ * The endpoint's own row is invalidated too, not only the list: a delivery
+ * detail page holding it in cache would otherwise keep offering controls
+ * that are guaranteed to be refused.
+ */
+export function useDeleteEndpoint(projectId: string, endpointId: string) {
+  const invalidate = useEndpointInvalidation(projectId, endpointId);
+  return useMutation({
+    mutationFn: () => api.delete<void>(`/v1/projects/${projectId}/endpoints/${endpointId}`),
+    onSuccess: invalidate,
+  });
+}
+
+/**
+ * Secret METADATA. No read path can return a plaintext secret.
+ *
+ * `endpoint-secrets.read` is owner/admin ONLY and is not implied by
+ * `endpoints.read`, so a developer who can see the endpoint gets a 403 here.
+ * `retry: false` makes that state appear promptly instead of after three
+ * identical refusals — the caller renders it as `PermissionDenied`.
+ */
+export function useEndpointSecrets(endpointId: string, offset = 0, enabled = true) {
   return useQuery({
     queryKey: queryKeys.endpointSecrets(endpointId, offset),
     queryFn: async () =>
@@ -163,44 +190,69 @@ export function useEndpointSecrets(endpointId: string, offset = 0) {
           `/v1/endpoints/${endpointId}/secrets${queryString(pageParams(offset))}`,
         ),
       ),
-    enabled: Boolean(endpointId),
+    enabled: Boolean(endpointId) && enabled,
+    retry: false,
   });
 }
 
 /**
- * Rotation returns the plaintext once. Like the API key create, it is never put
- * in the query cache — only the metadata list is invalidated.
+ * Everything a secret write has to drop: every page of the endpoint's secret
+ * list, and the endpoint itself wherever it is cached — `has_live_secret` on
+ * the row and in the project's endpoint list is derived from exactly the rows
+ * this mutation changed. Missing that is how "Resume" stays disabled after the
+ * operator has just rotated the secret that makes it resumable.
+ */
+function useSecretInvalidation(endpointId: string) {
+  const queryClient = useQueryClient();
+  return () => {
+    void queryClient.invalidateQueries({ queryKey: queryKeys.endpointSecretsRoot(endpointId) });
+    void queryClient.invalidateQueries({ queryKey: queryKeys.endpoint(endpointId) });
+    void queryClient.invalidateQueries({ queryKey: ['project'] });
+  };
+}
+
+/**
+ * `POST /v1/endpoints/:endpointId/secrets/rotate`.
+ *
+ * Rotation returns the plaintext ONCE. Like the API key create, it is never
+ * put in the query cache — only the metadata list is invalidated, and the
+ * caller holds the response in component state while its dialog is open.
+ *
+ * The new secret signs immediately; the current ones keep signing for
+ * `overlap_seconds` (default 24h, 0..30 days). `0` retires them now — the
+ * leak button, not the routine one. Refused with 409 on a deleted endpoint.
  */
 export function useRotateSecret(endpointId: string) {
-  const queryClient = useQueryClient();
+  const invalidate = useSecretInvalidation(endpointId);
   return useMutation({
-    mutationFn: (body: { overlap_seconds?: number } = {}) =>
+    mutationFn: (body: RotateSecretBody = {}) =>
       api.post<RotatedSecret>(`/v1/endpoints/${endpointId}/secrets/rotate`, body),
-    onSuccess: () => {
-      void queryClient.invalidateQueries({ queryKey: queryKeys.endpointSecretsRoot(endpointId) });
-      void queryClient.invalidateQueries({ queryKey: ['project'] });
-    },
+    onSuccess: invalidate,
   });
 }
 
 /**
- * `GET /v1/projects/:projectId/subscriptions` — a real module, offset paged
- * like everything else. It used to be read as a bare `{ data }` array, which
- * would have silently truncated at the page size.
+ * `DELETE /v1/endpoints/:endpointId/secrets/:secretId` — stop ONE secret
+ * signing.
  *
- * A row carries `endpoint_id` and NOT `endpoint_name`, and its filter field is
- * `payload_filter`, not `filter`. Callers wanting a name join against
- * `useEndpoints`.
+ * Refused with a 409 when it is the only secret still signing for a live
+ * endpoint: the data plane fails closed rather than deliver unsigned, so
+ * removing it would make every delivery fail. The remedy the server names is
+ * to rotate with `overlap_seconds: 0` instead, which reaches the same end
+ * state without the outage. Surface the conflict; do not swallow it.
  */
-export function useSubscriptions(projectId: string, offset = 0) {
-  return useQuery({
-    queryKey: queryKeys.subscriptions(projectId, offset),
-    queryFn: async () =>
-      offsetPage(
-        await api.get<OffsetPage<Subscription>>(
-          `/v1/projects/${projectId}/subscriptions${queryString(pageParams(offset))}`,
-        ),
-      ),
-    enabled: Boolean(projectId),
+export function useRevokeSecret(endpointId: string) {
+  const invalidate = useSecretInvalidation(endpointId);
+  return useMutation({
+    mutationFn: (secretId: string) =>
+      api.delete<EndpointSecret>(`/v1/endpoints/${endpointId}/secrets/${secretId}`),
+    onSuccess: invalidate,
   });
 }
+
+/**
+ * The subscription list lives with the subscription writes in
+ * `features/subscriptions/api.ts` now. Re-exported here so the callers that
+ * imported it from this file keep working; there is ONE implementation.
+ */
+export { useSubscriptions } from '../subscriptions/api';

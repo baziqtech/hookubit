@@ -1,4 +1,5 @@
-import { Link, useParams } from 'react-router-dom';
+import { useState } from 'react';
+import { Link, useNavigate, useParams } from 'react-router-dom';
 import { Async, Badge, PageHeader, Panel } from '../../components';
 import { formatTimestamp } from '../../lib/format';
 import {
@@ -6,7 +7,9 @@ import {
   ORGANIZATION_NAME_MIN_LENGTH,
   ORGANIZATION_SLUG_MAX_LENGTH,
 } from '../../types/api';
-import { useOrganization, useUpdateOrganization } from '../organizations/api';
+import { useDeleteOrganization, useOrganization, useUpdateOrganization } from '../organizations/api';
+import { organizationDeleteGate } from '../projects/permissions';
+import { DangerZonePanel, TypeToConfirmDialog } from './DangerZone';
 import { IdentityForm } from './IdentityForm';
 import { ReadOnly } from './ReadOnly';
 
@@ -16,8 +19,9 @@ import { ReadOnly } from './ReadOnly';
  * `UpdateOrganizationDto` is name and slug. `status` is absent deliberately —
  * suspension is a platform and billing decision, and a writable status would
  * let a customer un-suspend their own unpaid organization — and deletion has
- * its own owner-gated, audited route. Both are shown as facts with the reason,
- * not as controls that would fail.
+ * its own owner-gated, audited route — the Danger zone at the foot of the
+ * page, which requires the slug to be typed. Status is shown as a fact with
+ * the reason, not as a control that would fail.
  *
  * A rename has to reach the sidebar. `useUpdateOrganization` invalidates the
  * organizations LIST and the session as well as the row, because the switcher
@@ -28,6 +32,9 @@ export function OrganizationSettingsPage() {
   const { orgId = '' } = useParams();
   const organization = useOrganization(orgId);
   const update = useUpdateOrganization(orgId);
+  const remove = useDeleteOrganization(orgId);
+  const navigate = useNavigate();
+  const [confirmingDelete, setConfirmingDelete] = useState(false);
 
   return (
     <div className="flex flex-col gap-4">
@@ -80,8 +87,9 @@ export function OrganizationSettingsPage() {
               <p className="mt-3 rounded-md border border-line bg-raised/50 px-3 py-2 text-2xs leading-relaxed text-ink-muted">
                 <strong className="font-semibold text-ink">Status is not self-service.</strong>{' '}
                 Suspension is a platform and billing decision; a writable status would let an
-                organization lift its own suspension. Deleting has its own owner-gated route and is
-                audited as a deletion rather than as an edit — there is no button for it here yet.
+                organization lift its own suspension. Deleting is owner-only and is audited as a
+                deletion rather than as an edit, which is why it is not a status you can save here —
+                the button is in the Danger zone at the foot of this page.
               </p>
             </Panel>
           </>
@@ -93,7 +101,6 @@ export function OrganizationSettingsPage() {
           {[
             'Default settings applied to new projects',
             'SSO configuration (OIDC / SAML)',
-            'Delete the organization',
           ].map((item) => (
             <li key={item} className="flex gap-2">
               <span
@@ -112,6 +119,69 @@ export function OrganizationSettingsPage() {
           .
         </p>
       </Panel>
+
+      <Async query={organization}>
+        {(data) => (
+          <>
+            <DangerZonePanel
+              title="Delete this organization"
+              description={
+                <>
+                  Owner only. A soft delete that takes every project down with it: their keys stop
+                  working at ingest, and every route under the organization answers 404 for every
+                  member afterwards. The delivery ledger and the member rows are kept. There is no
+                  undelete.
+                </>
+              }
+              gate={organizationDeleteGate(data)}
+              action="Deleting this organization"
+              buttonLabel="Delete organization"
+              onClick={() => setConfirmingDelete(true)}
+            />
+            {confirmingDelete && (
+              <TypeToConfirmDialog
+                title="Delete this organization?"
+                subject={data.name}
+                slug={data.slug}
+                confirmLabel="Delete organization"
+                mutation={remove}
+                onSuccess={() => {
+                  setConfirmingDelete(false);
+                  navigate('/');
+                }}
+                onClose={() => setConfirmingDelete(false)}
+              >
+                <p>
+                  <strong className="text-ink">Every project goes with it</strong>, in one
+                  transaction: each active project is soft-deleted first, then the organization.
+                  If anything fails, nothing changes and the organization is still administrable.
+                </p>
+                <ul className="list-disc pl-4">
+                  <li>
+                    The ingest path refuses every project’s API keys at once, so publishing stops
+                    immediately. Keys are refused, not revoked.
+                  </li>
+                  <li>
+                    Nothing is erased. Endpoints, deliveries, attempts and the member list are kept
+                    — the delivery ledger hangs off this chain and its foreign keys forbid a
+                    cascade.
+                  </li>
+                  <li>
+                    Afterwards every route under this organization answers 404 for every member,
+                    you included. It disappears from the switcher and you land on your next
+                    organization, or on an empty account.
+                  </li>
+                  <li>
+                    Audited as <code className="font-mono">organization.deleted</code> with the
+                    number of projects taken down.
+                  </li>
+                  <li>There is no undelete, in the dashboard or the API.</li>
+                </ul>
+              </TypeToConfirmDialog>
+            )}
+          </>
+        )}
+      </Async>
     </div>
   );
 }

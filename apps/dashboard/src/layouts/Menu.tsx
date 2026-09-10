@@ -5,6 +5,14 @@ export interface MenuProps {
   /** The trigger's visible content. */
   trigger: ReactNode;
   label: string;
+  /**
+   * Which way the popover opens. The account menu sits at the FOOT of a
+   * sidebar that is exactly one viewport tall, so opening downward put "Sign
+   * out" below the fold on a 720px-high window, where nothing could scroll to
+   * it: the sidebar is sticky and its own height. Menus at the top of the
+   * sidebar keep the default.
+   */
+  placement?: 'bottom' | 'top';
   children: (close: () => void) => ReactNode;
   align?: 'left' | 'right';
   className?: string;
@@ -20,6 +28,7 @@ export interface MenuProps {
 export function Menu({
   trigger,
   label,
+  placement = 'bottom',
   children,
   align = 'left',
   className,
@@ -82,7 +91,8 @@ export function Menu({
           role="menu"
           aria-label={label}
           className={cn(
-            'absolute z-40 mt-1 min-w-[15rem] animate-pop-in rounded-lg border border-line',
+            'absolute z-40 min-w-[15rem] animate-pop-in rounded-lg border border-line',
+            placement === 'top' ? 'bottom-full mb-1' : 'mt-1',
             'bg-panel p-1 shadow-pop',
             align === 'right' ? 'right-0' : 'left-0',
           )}

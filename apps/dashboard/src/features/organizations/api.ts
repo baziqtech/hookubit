@@ -3,12 +3,13 @@ import { api, queryString } from '../../lib/api';
 import { offsetPage, pageParams } from '../../lib/pagination';
 import { queryKeys } from '../../lib/query-keys';
 import type {
+  CreateOrganizationBody,
   Member,
   OffsetPage,
   Organization,
   Role,
+  UpdateMemberRoleBody,
   UpdateOrganizationBody,
-  UsageSummary,
 } from '../../types/api';
 
 /**
@@ -26,6 +27,28 @@ export function useOrganizations(offset = 0) {
           `/v1/organizations${queryString(pageParams(offset))}`,
         ),
       ),
+  });
+}
+
+/**
+ * `POST /v1/organizations` — a second (third, …) organization for the same
+ * account, with the caller as its owner. Capped per USER (the ceiling answers
+ * `limit_exceeded`), and the slug namespace is global: a derived slug that
+ * collides is suffixed server-side, an explicit one that collides is a 409.
+ *
+ * The list and the session are invalidated because the switcher, the
+ * breadcrumb and `RootRedirect` read the list, and the new organization must
+ * be on it before the caller navigates into it.
+ */
+export function useCreateOrganization() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (body: CreateOrganizationBody) =>
+      api.post<Organization>('/v1/organizations', body),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: queryKeys.organizationsRoot() });
+      void queryClient.invalidateQueries({ queryKey: queryKeys.session() });
+    },
   });
 }
 
@@ -62,6 +85,37 @@ export function useUpdateOrganization(orgId: string) {
   });
 }
 
+/**
+ * `DELETE /v1/organizations/:orgId` — owner ONLY, and a SOFT delete.
+ *
+ * The route is declared `projects.write` and the service then refuses anyone
+ * whose role is not `owner` with a 403 — an admin holds the permission and is
+ * still turned away. In one transaction it soft-deletes every project that is
+ * not already deleted, then the organization; so the ingest path stops
+ * accepting every project's keys at once, the delivery ledger and the member
+ * rows are KEPT (its foreign keys are ON DELETE RESTRICT), and afterwards
+ * every route under the organization answers 404 for every member. Audited
+ * as `organization.deleted` with the count of projects taken down. There is
+ * no undelete.
+ *
+ * Answers 204. The organizations list and the session are dropped so the
+ * switcher and `RootRedirect` stop offering the organization that is gone.
+ */
+export function useDeleteOrganization(orgId: string) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: () => api.delete<void>(`/v1/organizations/${orgId}`),
+    onSuccess: () => {
+      // Removed, not invalidated: `RootRedirect` sends the operator to the
+      // first organization in the list it reads, and a cached list would
+      // still name the one just deleted. See useDeleteProject.
+      queryClient.removeQueries({ queryKey: queryKeys.organizationsRoot() });
+      queryClient.removeQueries({ queryKey: queryKeys.organization(orgId) });
+      void queryClient.invalidateQueries({ queryKey: queryKeys.session() });
+    },
+  });
+}
+
 export function useMembers(orgId: string, offset = 0) {
   return useQuery({
     queryKey: queryKeys.members(orgId, offset),
@@ -91,14 +145,41 @@ export function useInviteMember(orgId: string) {
 }
 
 /**
- * MOCK-ONLY. `GET /v1/organizations/:orgId/usage` IS NOT IN THE OPENAPI
- * DOCUMENT — there is no usage or billing module. Against the real transport
- * this 404s, so `UsagePage` refuses to run it and says so.
+ * `PATCH /v1/organizations/:orgId/members/:memberId` with `{ role }`.
+ *
+ * The lattice is enforced server-side inside the writing transaction: never
+ * your own membership, never a role above your own rank, never someone who
+ * outranks you (all 403 `forbidden`), and never the last owner (409
+ * `conflict`, counted in the same transaction so two concurrent demotions
+ * cannot leave zero). The client mirrors those rules in `team/lattice.ts` to
+ * explain a greyed-out control; the server's sentence is what is shown when
+ * it refuses anyway.
+ *
+ * Every page of the member list is invalidated. The caller's own role cannot
+ * move here (changing it is refused), so `OrganizationDto.role` is left alone.
  */
-export function useUsage(orgId: string) {
-  return useQuery({
-    queryKey: queryKeys.usage(orgId),
-    queryFn: () => api.get<UsageSummary>(`/v1/organizations/${orgId}/usage`),
-    enabled: Boolean(orgId),
+export function useUpdateMemberRole(orgId: string) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({ memberId, role }: { memberId: string; role: Role }) =>
+      api.patch<Member>(`/v1/organizations/${orgId}/members/${memberId}`, {
+        role,
+      } satisfies UpdateMemberRoleBody),
+    onSuccess: () => void queryClient.invalidateQueries({ queryKey: queryKeys.membersRoot(orgId) }),
+  });
+}
+
+/**
+ * `DELETE /v1/organizations/:orgId/members/:memberId` — a HARD delete of the
+ * membership row (nothing in the delivery ledger hangs off it; the audit row
+ * naming the removed user survives). Same lattice as a role change, last-owner
+ * rule included: 403 from the lattice, 409 if it would leave no owner.
+ */
+export function useRemoveMember(orgId: string) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (memberId: string) =>
+      api.delete<void>(`/v1/organizations/${orgId}/members/${memberId}`),
+    onSuccess: () => void queryClient.invalidateQueries({ queryKey: queryKeys.membersRoot(orgId) }),
   });
 }

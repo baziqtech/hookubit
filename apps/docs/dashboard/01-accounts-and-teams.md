@@ -83,15 +83,35 @@ and the created and updated times. **Status is not self-service.** Suspension
 is a platform and billing decision, and a writable status would let an
 organization lift its own suspension.
 
-::: info Not in the dashboard yet
-- **Creating a second organization.** The API (`POST /v1/organizations`)
-  does this and caps each account at 10 organizations it owns; there is no
-  button for it in the dashboard.
-- **Deleting an organization.** The API route exists and is owner-only. It is
-  a soft delete that also soft-deletes every project in the organization, so
-  the ingest path stops accepting their keys; the delivery ledger and the
-  members are kept. There is no button for it yet.
-:::
+### Deleting an organization
+
+The **Danger zone** at the foot of Organization settings has **Delete
+organization**. It is **owner-only** - an admin holds `projects.write`, which
+the route is declared with, and is still refused by the service - and the
+dashboard shows the button disabled with that reason for any other role. The
+confirmation requires you to type the organization's slug, and states what
+happens:
+
+| | Effect |
+|---|---|
+| Projects | Every active project is soft-deleted first, then the organization, in one transaction - if anything fails, nothing changes. |
+| API keys | Refused at ingest for every project at once (they are not revoked). |
+| Delivery ledger, endpoints, members | Kept. The ledger's foreign keys forbid a cascade. |
+| Every route under the organization | Answers 404 for every member afterwards, you included. It leaves the switcher and you land on your next organization, or an empty account. |
+| Audit | `organization.deleted`, with the number of projects taken down. |
+
+There is no undelete. Behind the button is `DELETE /v1/organizations/:orgId`.
+
+### Creating another organization
+
+The organization switcher at the top of the sidebar ends in **New
+organization…**. The dialog takes a name and an optional slug; you become the
+owner, and you land on the new organization's empty landing page, which offers
+the first project. Each account may own up to 10 organizations - the dialog
+reports `limit_exceeded` when you are at the ceiling - and slugs are unique
+across the whole platform: a derived slug that collides is suffixed for you, a
+slug you typed that collides is refused and stays as you typed it. Behind the
+button is `POST /v1/organizations`.
 
 ### What suspension means
 
@@ -104,19 +124,26 @@ for a suspended organization's projects.
 
 ## Team
 
-`/orgs/:orgId/team` lists the members: name and email, role, whether the
-account is active or disabled, and how long they have been a member. A
-membership whose user record is missing is shown as a data-integrity problem
-("no user record") rather than hidden.
+`/orgs/:orgId/team` lists the members:
+
+| Column | Meaning |
+|---|---|
+| Member | Name and email, with "(you)" on your own row. A membership whose user record is missing is shown as a data-integrity problem ("no user record") rather than hidden. |
+| Role | A **select** when you may change this member's role, or the role as a badge with the sentence explaining why you may not (see [Changing roles and removing members](#changing-roles-and-removing-members)). |
+| Account | Whether the account is active or disabled platform-wide. |
+| Member since | How long they have been a member. |
+| (actions) | **Remove**. Disabled, with the reason as its tooltip, on rows the rules below forbid. |
 
 Every member of the organization can see this list. Inviting, changing roles
-and removing members needs `members.write` (owner and admin).
+and removing members needs `members.write` (owner and admin); for every other
+role the Role column is read-only and Remove is disabled.
 
 ### Inviting someone
 
-**Invite member** asks for an email and a role. The roles offered are Admin,
-Developer, Viewer and Billing; **Owner is not offered**. You cannot assign a
-role above your own, so an admin cannot mint an owner.
+**Invite member** asks for an email and a role. Every role is listed, and the
+ones above your own rank are greyed out: an owner may invite an owner (it is
+the only way a second owner comes to exist); an admin may invite an admin but
+not an owner.
 
 The confirmation reads "If *address* can receive mail, an invitation is on
 its way. They will appear in this list once they accept it." That wording is
@@ -239,21 +266,36 @@ Removing a member deletes the membership row. The audit trail naming them
 survives. API keys they created keep authenticating for ingest but lose all
 control-plane authority - see [API keys](./03-api-keys.md#scopes-and-effective-scopes).
 
-::: info Not in the dashboard yet
-The Team page lists members and invites. **Changing a role and removing a
-member are API operations today** (`PATCH` and `DELETE` on
-`/v1/organizations/:orgId/members/:memberId`); the list has no controls for
-them.
-:::
+#### On the Team page
+
+The dashboard mirrors these rules so a control explains itself before it is
+touched, and shows the platform's own sentence when it refuses anyway:
+
+| You try to | What you see |
+|---|---|
+| Change a role | Pick the new role in the row's select. Nothing changes until you confirm: the dialog names the member, the change, and its consequences (promoting to owner puts them beyond an admin's reach; demoting an owner is subject to the last-owner rule). |
+| Change your own role, or the role of someone who outranks you | The Role column is a badge, with the reason beneath it: "You cannot change your own role. Ask another owner or admin to do it." / "You may not change the role of an owner." |
+| Pick a role above your own rank | The option is greyed out in the select. |
+| Remove a member | **Remove** opens a confirmation stating that the membership is deleted immediately, that the audit entries naming them survive, and what happens to the API keys they created. |
+| Remove yourself, or someone who outranks you | Remove is disabled; the reason is its tooltip. |
+| Demote or remove the last owner | The confirmation says the platform counts owners in the same transaction and refuses if this would leave none. The refusal, "An organization must always have at least one owner. Promote another member first.", is shown in the dialog. |
+
+The same operations through the API are `PATCH` (with `{ role }`) and
+`DELETE` on `/v1/organizations/:orgId/members/:memberId`.
 
 ---
 
 **Where this comes from** (for maintainers):
 `apps/dashboard/src/features/auth/*` (RegisterPage, LoginPage, VerifyEmailPage,
 ResendVerification, ForgotPasswordPage, ResetPasswordPage),
-`apps/dashboard/src/features/team/TeamPage.tsx`,
+`apps/dashboard/src/features/team/TeamPage.tsx` and `lattice.ts` (the client-side
+mirror of the role lattice), `apps/dashboard/src/features/organizations/api.ts`
+(`useUpdateMemberRole`, `useRemoveMember`),
 `apps/dashboard/src/features/team/AcceptInvitationPage.tsx`,
 `apps/dashboard/src/features/settings/OrganizationSettingsPage.tsx`,
+`apps/dashboard/src/features/settings/DangerZone.tsx`,
+`apps/dashboard/src/features/projects/permissions.ts` (`ORGANIZATION_DELETE_ROLES`),
+`apps/dashboard/src/features/organizations/api.ts` (`useDeleteOrganization`),
 `apps/control-api/src/auth/auth.service.ts` and `auth.controller.ts`,
 `apps/control-api/src/auth/token.service.ts` (`TOKEN_TTL_MS`),
 `apps/control-api/src/auth/session.service.ts` (`SESSION_TTL_SECONDS`),

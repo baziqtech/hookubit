@@ -13,12 +13,41 @@ name (or "Unnamed"), the endpoint it routes to, its event-type patterns as
 badges (`*` is highlighted, because it means everything), its payload filter
 as JSON if it has one, and whether it is enabled or disabled.
 
-::: info Not in the dashboard yet
-The **New subscription** button does not open a form, and there are no edit,
-enable/disable or delete controls on the rows. Manage subscriptions through
-the API (`/v1/projects/:projectId/subscriptions`); the list reflects the
-result. The rules below are the rules the API enforces.
-:::
+Every row carries its controls:
+
+| Control | What it does |
+|---|---|
+| **New subscription** (page header, and the empty state) | Opens the form below. |
+| **Enable** / **Disable** | Its own confirmation each; disable asks for an optional reason for the audit log. |
+| **Edit** | The same form as create, minus the enabled flag. |
+| **Delete** | A confirmation that says, in so many words, that this is a hard delete. |
+
+All of them need `subscriptions.write` (owner, admin or developer). For a
+viewer or a billing member the controls are shown **disabled with the
+reason** in a tooltip - "needs the developer, admin or owner role; you are a
+viewer in this organization" - rather than hidden, so the page does not read as
+broken. The server checks again on every request; the dashboard's gate is an
+affordance, not the authority.
+
+## The form
+
+The same dialog creates and edits. Client-side checks mirror the API's rules
+in the API's own words, so a bad pattern is refused under the field before the
+request is sent - and the server's answer, if the two ever disagree, lands
+under the same field.
+
+| Field | In the form |
+|---|---|
+| Name | Optional text, up to 200 characters. Blank saves as an unnamed subscription; blanking it on edit clears the stored name. |
+| Endpoint | A picker over this project's endpoints, **deleted endpoints excluded** (the API refuses them with a conflict). A paused or auto-disabled endpoint is offered with its status in brackets. On edit, an endpoint that is off the first page is kept as an explicit option so saving cannot silently re-point the subscription. |
+| Event types | A textarea, one pattern per line or comma-separated. Validated against the three forms below as you type; the whole list is replaced on save. |
+| Payload filter | An optional JSON textarea. Must parse, must be an object, must not be `{}`, must fit in 4096 bytes. The form carries a warning that the filter is **not evaluated yet** (see below). Blank means no filter; blanking it on edit clears the stored one. |
+| Enabled | A checkbox on **create only**, ticked by default. Untick to create the subscription paused. It is not on the edit form: enable and disable are their own operations. |
+
+A rejection the form could not place under a field - the per-project ceiling,
+a rate limit - appears in the panel at the top of the dialog, with the remedy
+that fits it: a ceiling says "delete one of your subscriptions", never "try
+again".
 
 ## Fields
 
@@ -119,6 +148,12 @@ distinct, separately audited act; disable takes an optional reason (up to 200
 characters) for the audit log. Both are idempotent. Deliveries already queued
 when you disable are not discarded.
 
+In the dashboard each is a button on the row with its own confirmation. The
+disable dialog asks for the reason; the enable dialog notes that events
+accepted while the subscription was disabled were not routed to it and will
+not be routed retroactively, because fan-out is pinned to the subscriptions
+that existed when each event arrived.
+
 Nothing automatic disables a subscription; it has one flag and you are its
 only writer.
 
@@ -132,7 +167,8 @@ same project.
 
 ## Deleting
 
-Deleting a subscription really deletes the row (unlike endpoints and
+The **Delete** button on a row opens a confirmation that says exactly this:
+deleting a subscription really deletes the row (unlike endpoints and
 projects). Nothing in the delivery ledger depends on it: a delivery keeps its
 own `endpoint_id` and `event_id`, so "did finance ever receive this?" is
 unaffected - only "which routing rule matched" is lost, and the whole rule
@@ -177,7 +213,10 @@ the operations reached for under pressure.
 
 **Where this comes from** (for maintainers):
 `apps/dashboard/src/features/subscriptions/SubscriptionsPage.tsx`,
-`apps/dashboard/src/features/endpoints/api.ts` (`useSubscriptions`),
+`SubscriptionFormDialog.tsx`, `SubscriptionActions.tsx`, `api.ts`,
+`event-types.ts` (the client-side mirror of the pattern rules),
+`payload-filter.ts`, `permissions.ts` (`SUBSCRIPTION_WRITE_ROLES`),
+`apps/dashboard/src/lib/role-gate.ts`,
 `apps/control-api/src/webhook-subscriptions/dto/create-subscription.dto.ts`,
 `dto/update-subscription.dto.ts`, `event-type-pattern.ts`, `payload-filter.ts`,
 `subscription-limits.ts`, `webhook-subscriptions.service.ts`,

@@ -22,7 +22,7 @@ project switcher and Project settings.
 
 ## Project settings
 
-`/orgs/:orgId/projects/:projectId/settings` has three panels.
+`/orgs/:orgId/projects/:projectId/settings` has these panels.
 
 **Project** - the editable pair:
 
@@ -38,33 +38,49 @@ itself.
 inputs: the project id, the environment (badged `immutable`), the status,
 created and last-updated times. The panel says in so many words that the
 environment cannot be changed and that deleting is a separate, audited route
-with no button yet.
+whose button is in the Danger zone at the foot of the page.
+
+**Danger zone** - the last panel, with a red border: **Delete project**. See
+[Deleting and suspending](#deleting-and-suspending).
 
 **Not built yet** - a list of what has no screen: a retry policy editor (the
 endpoint form can already *choose* a policy; see
 [Retry and rate-limit policies](./06-retry-and-rate-limit-policies.md)), a
-rate-limit editor, a payload retention setting, transfer to another
-organization, and delete.
+rate-limit editor, a payload retention setting, and transfer to another
+organization.
 
 ## Creating a project
 
-The API creates projects: `POST /v1/organizations/:orgId/projects` with a
-name, an optional slug (derived from the name when omitted) and an optional
-environment (default `test`). It needs `projects.write` (owner or admin), is
-rate limited to 20 creates a minute per address, and is subject to a ceiling
-of **100 live projects per organization** by default (your installation's
-operator can raise it). Deleted projects do not count towards the ceiling.
+Two places open the **New project** dialog: the **Create project** button on
+an organization that has no projects yet, and **New project…** at the bottom
+of the project switcher in the sidebar. Both need `projects.write` (owner or
+admin); for a developer, viewer or billing member the control is shown
+disabled with the reason rather than hidden.
 
-::: info Not in the dashboard yet
-The empty organization landing shows a "Create project" button, but it does
-not open a form. Create projects through the API for now.
-:::
+| Field | Rules |
+|---|---|
+| Name | Required, 1 to 200 characters. |
+| Slug | Optional. Derived from the name when blank (`Rider Café Ops` becomes `rider-cafe-ops`) and returned in the response; a slug you type is validated - 2 to 64 characters, lowercase letters and digits joined by single hyphens - and never rewritten. Unique within the organization; **deleted projects keep their slug**, so a collision with one is refused under the field with the same message as a live one. |
+| Environment | `test` (the default) or `live`. The dialog carries a warning that this **cannot be changed after creation** - it decides which keys (`wk_test_`/`wk_live_`) and which ingest traffic belong to the project. |
+
+On success you land on the new project's Overview, which is where the
+first-run checklist lives. Behind the dialog is
+`POST /v1/organizations/:orgId/projects`, rate limited to 20 creates a minute
+per address and subject to a ceiling of **100 live projects per
+organization** by default (your installation's operator can raise it).
+Deleted projects do not count towards the ceiling; hitting it is reported as a
+limit with the numbers, never as "try again".
 
 ## Deleting and suspending
 
-**Deleting is a soft delete**, and there is no hard delete. `DELETE
-/v1/organizations/:orgId/projects/:projectId` (owner or admin) sets the
-project's status to `deleted`. What that does:
+**Deleting is a soft delete**, and there is no hard delete. **Delete project**
+in the Danger zone at the foot of Project settings (owner or admin; disabled
+with the reason for anyone else) opens a confirmation that lists everything
+below and requires you to **type the project's slug** before the button
+enables. Behind it is `DELETE /v1/organizations/:orgId/projects/:projectId`,
+which sets the project's status to `deleted` and returns it in that state.
+Afterwards you land on the organization, which forwards to your next project.
+What the deletion does:
 
 | | Effect |
 |---|---|
@@ -87,7 +103,10 @@ installation's operator as a metric.
 **Where this comes from** (for maintainers):
 `apps/dashboard/src/features/settings/ProjectSettingsPage.tsx`,
 `apps/dashboard/src/features/settings/IdentityForm.tsx`,
-`apps/dashboard/src/features/projects/api.ts`, `apps/dashboard/src/routes/LandingRoutes.tsx`,
+`apps/dashboard/src/features/settings/DangerZone.tsx`,
+`apps/dashboard/src/features/projects/api.ts`, `CreateProjectDialog.tsx`,
+`permissions.ts` (`PROJECT_WRITE_ROLES`), `apps/dashboard/src/routes/LandingRoutes.tsx`,
+`apps/dashboard/src/layouts/Switchers.tsx`,
 `apps/control-api/src/projects/projects.service.ts`, `projects.controller.ts`,
 `dto/create-project.dto.ts`, `dto/update-project.dto.ts`, `slug.ts`,
 `project-limits.ts` (`PROJECTS_PER_ORGANIZATION`, `PROJECT_CREATE_THROTTLE`),

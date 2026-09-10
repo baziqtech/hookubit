@@ -20,7 +20,7 @@ hookubit has a three-level hierarchy, and it is in the URL:
 /orgs/:orgId/settings                          organization name and slug
 /orgs/:orgId/team                              members and invitations
 /orgs/:orgId/billing                           not built yet
-/orgs/:orgId/usage                             not built yet
+/orgs/:orgId/usage                             30-day events and deliveries per project
 /orgs/:orgId/audit                             audit log
 
 /orgs/:orgId/projects/:projectId/get-started   setup checklist and first request
@@ -32,8 +32,9 @@ hookubit has a three-level hierarchy, and it is in the URL:
 /orgs/:orgId/projects/:projectId/outbox        what the router still owes, and what it gave up on
 /orgs/:orgId/projects/:projectId/endpoints     the URLs you deliver to
 /orgs/:orgId/projects/:projectId/subscriptions the routing rules
+/orgs/:orgId/projects/:projectId/policies      retry policies and rate limits
 /orgs/:orgId/projects/:projectId/api-keys      publishing credentials
-/orgs/:orgId/projects/:projectId/analytics     not built against the API yet
+/orgs/:orgId/projects/:projectId/analytics     outcomes, failing endpoints, latency, volume
 /orgs/:orgId/projects/:projectId/settings      project name and slug
 ```
 
@@ -52,8 +53,8 @@ else.
 
 - **Sidebar.** The organization and project switchers are at the top. Below
   them, the project navigation (Get started, Overview, Events, Deliveries,
-  Outbox, Endpoints, Subscriptions, API keys, Analytics, Settings) and the
-  organization navigation (Settings, Team, Billing, Usage, Audit log). The
+  Outbox, Endpoints, Subscriptions, Policies, API keys, Analytics, Settings)
+  and the organization navigation (Settings, Team, Billing, Usage, Audit log). The
   Product tour button and your account menu (with Sign out) are at the bottom.
 - **Breadcrumb.** `Organization / Project / Section` across the top. The
   project crumb carries a `test` or `live` badge so you always know which

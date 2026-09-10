@@ -11,9 +11,12 @@ signing secrets.
 URL, its status (with `auto-disabled` or `operator paused` alongside when that
 is the case, and the platform's reason in red when it disabled the endpoint
 itself), its limits (`rate/window`, timeout, concurrency), when it was created,
-and its actions. **Show deleted endpoints** adds the soft-deleted ones; they
-are kept forever so the delivery ledger stays readable, and they have no
-actions.
+and its actions: the pause/resume control for its state, **Delete**, **Edit**
+and **Secrets**. An endpoint with nothing signing for it also carries a
+`no live secret` badge, and its Secrets button is highlighted, because that
+is the only control that can make it deliver. **Show deleted endpoints** adds
+the soft-deleted ones; they are kept forever so the delivery ledger stays
+readable, and they have no actions.
 
 ## Creating an endpoint
 
@@ -49,7 +52,7 @@ happens next depends on your role:
 | You are | Result |
 |---|---|
 | Owner or admin | The endpoint is **active** and the dialog shows the secret once, with a copy button. Hand it to whoever runs the consumer; it is not retrievable afterwards. |
-| Developer | The endpoint is created **paused** and the dialog says so: "This endpoint is paused and will not receive deliveries yet." You may create endpoints but may not read signing secrets, so there is no key you can hand over. **An owner or admin must rotate the secret** (which returns the new plaintext to them), give it to the consumer, and then enable the endpoint. |
+| Developer | The endpoint is created **paused** and the dialog says so: "This endpoint is paused and will not receive deliveries yet." You may create endpoints but may not read signing secrets, so there is no key you can hand over. **An owner or admin must rotate the secret** (which returns the new plaintext to them), give it to the consumer, and then enable the endpoint. The dialog offers **Open secrets for this endpoint**, which is where that rotation happens - and which names the role required if yours is not enough. |
 
 Going live without a handover would sign every delivery with a key nobody
 holds - the consumer would reject all of them, and the rotation that fixed it
@@ -181,9 +184,9 @@ The buttons on a row depend on how it stopped, and the wording is deliberate:
 
 | Row state | Buttons |
 |---|---|
-| Delivering | **Pause deliveries** |
-| Paused by a person (or awaiting a secret) | **Resume deliveries** |
-| Auto-disabled | **Resume deliveries anyway** and **Pause it instead** |
+| Delivering | **Pause deliveries**, Delete |
+| Paused by a person (or awaiting a secret) | **Resume deliveries**, Delete |
+| Auto-disabled | **Resume deliveries anyway**, **Pause it instead**, Delete |
 | Deleted | none ("kept for the ledger") |
 
 **Pause deliveries** asks for an optional reason (up to 200 characters) that
@@ -192,22 +195,31 @@ explainable next week. Pausing sets `status: paused`, and leaves the
 platform's own `disabled_reason` untouched, so "the platform stopped this" and
 "a person stopped this" stay separable afterwards.
 
-::: warning What happens to queued deliveries when you pause
-The pause dialog says queued deliveries "are not discarded - they wait". The
-platform's own description of the pause operation says something stronger:
-new events stop producing delivery rows for a paused endpoint, and **a
-delivery already queued for it is finished `cancelled`** rather than held and
-retried later. Treat a pause as stopping the queue, not parking it, and use
-[replay](./07-events-and-deliveries.md#replay) for anything that must still
-arrive once the endpoint is back. Cancelled deliveries can be replayed.
-:::
+### What pausing does to the queue
+
+The pause dialog states it before the button: **queued deliveries are
+cancelled, not held.** This is what the delivery workers actually do, not a
+policy the dashboard chose:
+
+| Delivery | On pause |
+|---|---|
+| Already queued, scheduled or retrying for this endpoint | Finished as `cancelled` ("we stopped on purpose") the moment a worker claims it - not retried, not failed. A retry that is not due yet is cancelled when it comes due. |
+| Published while the endpoint is paused | **No delivery row is created for this endpoint at all.** The router skips a non-active endpoint at fan-out rather than buffering rows that every worker poll would claim and put back. |
+| Already recorded in the ledger | Untouched. Nothing is erased. |
+
+So resuming an endpoint does not send anything from the gap. The resume
+dialog says so too: events published during the pause produced no deliveries
+for this endpoint, and deliveries that were queued when it was paused were
+cancelled. Use [replay](./07-events-and-deliveries.md#replay) for anything
+that must still arrive once the endpoint is back; cancelled deliveries can be
+replayed.
 
 **Resume deliveries** (`enable`) is refused with a conflict when the endpoint
 has **no live signing secret**: the platform fails closed rather than deliver
-unsigned, so enabling would only queue failures. Rotate a secret first. The
-dashboard knows this in advance through `has_live_secret` and will tell you
-why rather than let you find out by clicking. Resuming also clears the
-platform's `disabled_reason`.
+unsigned, so enabling would only queue failures. The dashboard knows this in
+advance through `has_live_secret`: on such an endpoint the resume dialog says
+why it cannot be resumed and offers **Open secrets** instead of the refusal.
+Resuming also clears the platform's `disabled_reason`.
 
 **Resume deliveries anyway** is the same operation with different words,
 because the situation is different. Re-enabling an auto-disabled endpoint
@@ -233,27 +245,61 @@ and a consumer verifying with either one succeeds - which is what lets
 consumers roll without dropping a delivery.
 
 Reading and rotating secrets needs `endpoint-secrets.*` - **owner and admin
-only** - and a viewer or developer gets "you cannot" on those operations even
-though they can see the endpoint.
+only** - and a viewer or developer gets "You cannot read or rotate this
+endpoint's signing secrets", naming their role, even though they can see the
+endpoint.
 
-::: info Not in the dashboard yet
-There is no secrets tab on an endpoint. Rotation and revocation are API
-operations:
+**Secrets** on a row opens the endpoint's secrets dialog:
 
-- `POST /v1/endpoints/:endpointId/secrets/rotate` mints a new secret (shown
-  once) and gives the current ones an expiry `overlap_seconds` from now -
-  **24 hours by default**, anywhere from 0 to 30 days. The response carries
-  `previous_secrets_expire_at` (the last moment any old secret still signs)
-  and `overlapping_versions`; consumers must accept both until that passes.
-  `overlap_seconds: 0` is the "this secret has leaked" button.
-- `DELETE /v1/endpoints/:endpointId/secrets/:secretId` stops one secret
-  signing, and is **refused when it is the last live secret** of a live
-  endpoint. Rotate with an overlap of 0 instead.
-- `GET /v1/endpoints/:endpointId/secrets` lists metadata only. No read path
-  can return a plaintext.
+| Column | Meaning |
+|---|---|
+| Version | Monotonic per endpoint; the highest is the newest. |
+| State | `signing` (no end scheduled), `signing until` a time (inside a rotation's overlap window, with the moment it stops), or `retired` (rotated out and expired, or revoked). This is the server's own `active` flag, which already folds in the expiry. |
+| Superseded | When a rotation put a clock on it. |
+| Created | When it was minted. |
+| (actions) | **Revoke**, on versions that still sign. |
 
-The full rotation procedure is in [Secrets and rotation](/guide/06-secrets-and-rotation).
-:::
+No row carries a plaintext. A secret is shown exactly once, in the response
+that mints it, and cannot be recovered afterwards by anyone - rotate if it is
+lost.
+
+### Rotating
+
+**Rotate secret** asks for one thing, the **overlap** in seconds:
+
+| Overlap | What happens |
+|---|---|
+| 86 400 (the default, 24 hours) up to 2 592 000 (30 days) | The new secret signs immediately and the current ones keep signing for that long, then stop. During the window every delivery carries one signature per active secret, and a consumer verifying with either one succeeds - so the consumer can be switched without dropping a delivery. |
+| 0 | The current secrets stop signing **immediately**. A consumer still verifying with the old one rejects every delivery until it is switched. The dialog turns red and says "use this for a leaked secret, not for a routine rotation". |
+
+A rotation never shortens a window a consumer was already promised: a
+version whose existing expiry is earlier than the new deadline keeps it.
+
+The next screen shows the new plaintext once, with a copy button and the
+one-time warning, and beneath it which prior versions still sign and until
+when (`overlapping_versions` and `previous_secrets_expire_at` on the wire).
+Switch the consumer before that moment and nothing is dropped.
+
+On an endpoint with nothing signing (`secret_pending`, or after every version
+was retired) the same button reads **Issue secret**: there is no window to
+overlap, and once the consumer holds the plaintext the endpoint can be
+resumed.
+
+### Revoking one version
+
+**Revoke** stops one version signing immediately. It is **refused when that
+version is the only one still signing** for a live endpoint, because that
+state makes every delivery fail closed. The dialog knows this in advance when
+the list fits on one page and says so; when the server refuses anyway, its
+sentence is shown whole. Either way the remedy is a button: **Rotate with
+zero overlap instead**, which reaches the same end state - that secret stops
+signing - with a new one taking over at the same moment.
+
+The same operations through the API:
+`GET /v1/endpoints/:endpointId/secrets` (metadata only),
+`POST /v1/endpoints/:endpointId/secrets/rotate` with `{ overlap_seconds }`,
+and `DELETE /v1/endpoints/:endpointId/secrets/:secretId`. The full rotation
+procedure is in [Secrets and rotation](/guide/06-secrets-and-rotation).
 
 ## Test delivery
 
@@ -275,10 +321,13 @@ pointed at it. Deleting is idempotent.
 The delivery ledger makes a hard delete impossible by construction, and there
 is no undelete.
 
-::: info Not in the dashboard yet
-There is no Delete button on a row. Delete through the API: `DELETE
-/v1/projects/:projectId/endpoints/:endpointId`.
-:::
+**Delete** on a row opens a confirmation that says exactly that: the endpoint
+stops receiving deliveries, its status becomes `deleted`, every later change
+is refused, its signing secrets go with it, and the row is kept forever so
+every delivery and attempt that pointed at its URL keeps pointing at it.
+Subscriptions bound to it stop matching (a non-active endpoint is skipped at
+fan-out); delete or re-point them separately. The same operation through the
+API is `DELETE /v1/projects/:projectId/endpoints/:endpointId`.
 
 ## Limits
 
@@ -291,8 +340,10 @@ exists.
 ---
 
 **Where this comes from** (for maintainers):
-`apps/dashboard/src/features/endpoints/EndpointsPage.tsx`, `EndpointActions.tsx`,
-`EndpointEditDialog.tsx`, `breaker.ts`, `custom-headers.ts`, `api.ts`,
+`apps/dashboard/src/features/endpoints/EndpointsPage.tsx`, `EndpointActions.tsx`
+(pause, resume, delete), `EndpointSecretsDialog.tsx` and `secrets.ts` (the
+overlap copy and the last-active rule), `EndpointEditDialog.tsx`, `breaker.ts`,
+`custom-headers.ts`, `api.ts`,
 `apps/control-api/src/endpoints/endpoints.controller.ts`, `endpoints.service.ts`,
 `endpoint-url.ts`, `endpoint-headers.ts`, `endpoint-limits.ts`,
 `dto/create-endpoint.dto.ts`, `dto/endpoint-response.dto.ts`,
@@ -303,7 +354,10 @@ exists.
 `apps/control-api/src/config/env.schema.ts` (`ENDPOINT_AUTO_DISABLE_*`),
 `apps/control-api/src/deliveries/delivery-limits.ts` (redacted request headers),
 `services/data-plane/internal/worker/breaker.go` (`DefaultBreakerConfig`),
-`services/data-plane/internal/egress/ssrf.go`, `services/data-plane/internal/router/plan.go`.
-The pause callout records a disagreement between `EndpointActions.tsx`
-("they wait") and the `disable` route description in `endpoints.controller.ts`
-("finished `cancelled`").
+`services/data-plane/internal/egress/ssrf.go`, `services/data-plane/internal/router/plan.go`
+(`gate()`: a non-active endpoint is skipped at fan-out),
+`services/data-plane/internal/worker/store.go` (`Endpoint.Deliverable()`) and
+`worker/deliver.go` (a claimed delivery for a paused endpoint is finished
+`cancelled`). "What pausing does to the queue" was verified against those
+three files; the pause dialog used to say "they wait", and the `disable`
+route description in `endpoints.controller.ts` was the accurate one.

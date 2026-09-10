@@ -162,6 +162,14 @@ export type Organization = S['OrganizationDto'];
  */
 export type Member = S['MemberDto'];
 
+/**
+ * `UpdateMemberRoleDto` — `{ role }` and nothing else, the only column the
+ * members module ever writes on an existing membership. The lattice is
+ * enforced server-side: never your own, never above your rank, never someone
+ * who outranks you, never the last owner. Mirrored in `team/lattice.ts`.
+ */
+export type UpdateMemberRoleBody = S['UpdateMemberRoleDto'];
+
 /** `AcceptInvitationDto` — the single-use token from the invitation email, nothing else. */
 export type AcceptInvitationBody = S['AcceptInvitationDto'];
 
@@ -190,6 +198,7 @@ export type Project = S['ProjectDto'];
 export type UpdateProjectBody = S['UpdateProjectDto'];
 export type CreateProjectBody = S['CreateProjectDto'];
 export type UpdateOrganizationBody = S['UpdateOrganizationDto'];
+export type CreateOrganizationBody = S['CreateOrganizationDto'];
 
 /**
  * Slug rules. The pattern and the floor are shared; THE CEILINGS ARE NOT —
@@ -332,10 +341,128 @@ export const DEFAULT_OVERLAP_SECONDS = 86_400;
  */
 export type Subscription = S['SubscriptionDto'];
 
+/**
+ * `CreateSubscriptionDto`. `event_types` is REQUIRED and is stored exactly as
+ * sent — a pattern the router cannot honour is a 400, never a silent widening
+ * to `*`. `payload_filter` is optional and NOT YET EVALUATED by the data plane.
+ * `enabled` defaults to true on the server.
+ */
+export type CreateSubscriptionBody = S['CreateSubscriptionDto'];
+
+/**
+ * `UpdateSubscriptionDto` — `enabled` is DELIBERATELY not here. Enabling and
+ * disabling have their own routes so pausing a route is a distinct, separately
+ * audited act; a body carrying `enabled` is refused by `forbidNonWhitelisted`.
+ * `event_types` and `payload_filter` are replaced wholesale, never merged;
+ * `name: null` and `payload_filter: null` clear them.
+ */
+export type UpdateSubscriptionBody = S['UpdateSubscriptionDto'];
+
+/** `DisableSubscriptionDto` — an optional `reason`, written to the audit log. */
+export type DisableSubscriptionBody = S['DisableSubscriptionDto'];
+
+/**
+ * Mirrored from control-api `src/webhook-subscriptions/event-type-pattern.ts`
+ * and `subscription-limits.ts`, so the form can refuse a filter before
+ * spending a round trip. The server stays the authority; a stale value here
+ * costs a 400, never a stored pattern the router reads differently.
+ */
+export const MAX_EVENT_TYPES_PER_SUBSCRIPTION = 100;
+export const MAX_EVENT_TYPE_LENGTH = 255;
+export const MAX_EVENT_TYPE_SEGMENTS = 8;
+export const MAX_SUBSCRIPTION_NAME_LENGTH = 200;
+/** `@MaxLength(200)` on `DisableSubscriptionDto.reason`. */
+export const MAX_SUBSCRIPTION_DISABLE_REASON_LENGTH = 200;
+/** `PAYLOAD_FILTER_LIMITS.maxBytes` in `payload-filter.ts` — the serialised predicate. */
+export const MAX_PAYLOAD_FILTER_BYTES = 4_096;
+
 /* ── Retry policies ───────────────────────────────────────────────────────── */
 
 export type RetryPolicy = S['RetryPolicyDto'];
 export type RetryStrategy = S['RetryPolicyDto']['strategy'];
+
+/**
+ * `CreateRetryPolicyDto`. Only `name` is required; every setting carries a
+ * server default. `is_default` is accepted HERE and nowhere else — see below.
+ */
+export type CreateRetryPolicyBody = S['CreateRetryPolicyDto'];
+
+/**
+ * `UpdateRetryPolicyDto` — every setting optional, and `is_default` is
+ * DELIBERATELY absent. "Exactly one default per project" is a property of a
+ * set of rows, held by a SERIALIZABLE clear-then-set in `setDefault`; a
+ * patchable flag would be a second writer of that column, and the shape of a
+ * PATCH is precisely the shape that skips the clear. `POST …/default` is the
+ * only way to move it.
+ */
+export type UpdateRetryPolicyBody = S['UpdateRetryPolicyDto'];
+
+/**
+ * `RETRY_POLICY_LIMITS` in control-api `src/retry-policies/retry-policy-limits.ts`,
+ * mirrored so the form can refuse an out-of-range value before spending a
+ * round trip. Every bound is "the delivery workers can compute a positive,
+ * finite delay from this": `max_delay_ms = 0` once overflowed the exponential
+ * term to a large NEGATIVE duration and scheduled retries permanently in the
+ * past, which is why nothing here is allowed to be zero.
+ */
+export const RETRY_POLICY_LIMITS = {
+  max_attempts: { min: 1, max: 50, default: 8 },
+  initial_delay_ms: { min: 1, max: 86_400_000, default: 5_000 },
+  max_delay_ms: { min: 1, max: 86_400_000, default: 3_600_000 },
+  multiplier: { min: 1, max: 100, default: 2 },
+  jitter_ratio: { min: 0, max: 1, default: 0.2 },
+  /** 1s .. 7 days — the column is a PostgreSQL integer, so 30 days would wrap. */
+  max_retry_duration_ms: { min: 1_000, max: 604_800_000, default: 86_400_000 },
+} as const;
+
+/** `RETRY_STRATEGIES` — the three switches `retry.Policy.Delay` has. */
+export const RETRY_STRATEGIES: readonly RetryStrategy[] = ['exponential', 'linear', 'constant'];
+export const MAX_RETRY_POLICY_NAME_LENGTH = 200;
+/** `MAX_RETRY_POLICIES_PER_PROJECT` — the create route answers `limit_exceeded` past it. */
+export const MAX_RETRY_POLICIES_PER_PROJECT = 50;
+
+/* ── Rate-limit policies ──────────────────────────────────────────────────── */
+
+/**
+ * `RateLimitDto`. `resource_id` is a POLYMORPHIC reference: what it names
+ * depends on `scope` (an endpoint, an API key for `ingest`, this project, this
+ * organization), and null means every resource in that scope.
+ */
+export type RateLimit = S['RateLimitDto'];
+export type RateLimitScope = S['RateLimitDto']['scope'];
+export type CreateRateLimitBody = S['CreateRateLimitDto'];
+
+/**
+ * `UpdateRateLimitDto`. `scope` and `resource_id` ARE patchable — they are the
+ * row's identity, and changing them re-runs the same resolution and
+ * uniqueness path a create does. A scope change that leaves a non-null
+ * `resource_id` unstated is refused, because an endpoint id means nothing at
+ * organization scope.
+ */
+export type UpdateRateLimitBody = S['UpdateRateLimitDto'];
+
+/**
+ * `RATE_LIMIT_LIMITS` in control-api `src/rate-limits/rate-limit-limits.ts`,
+ * mirrored for the form. `limit` is floored at 1 because 0 is not "a very
+ * small limit" — it switches delivery or ingestion off for whatever the policy
+ * covers; `window_seconds` is floored at 1 because the refill rate is
+ * `limit / window`.
+ */
+export const RATE_LIMIT_LIMITS = {
+  limit: { min: 1, max: 10_000_000 },
+  window_seconds: { min: 1, max: 86_400, default: 1 },
+  burst: { min: 1, max: 10_000_000 },
+} as const;
+
+/** `RATE_LIMIT_SCOPES`, in the order the Prisma enum declares them. */
+export const RATE_LIMIT_SCOPES: readonly RateLimitScope[] = [
+  'organization',
+  'project',
+  'endpoint',
+  'ingest',
+];
+/** `MAX_RATE_LIMIT_POLICIES_PER_PROJECT`. */
+export const MAX_RATE_LIMIT_POLICIES_PER_PROJECT = 300;
 
 /* ── Events ───────────────────────────────────────────────────────────────── */
 
@@ -458,47 +585,74 @@ export const MAX_REQUEUE_REASON_LENGTH = 500;
  */
 export type AuditLogEntry = S['AuditLogDto'];
 
-/* ═══════════════════════════════════════════════════════════════════════════
- * MOCK-ONLY. No route and no schema in the OpenAPI document.
- *
- * These are NOT contracts and must not be treated as any. They are the shapes
- * `src/lib/mock/server.ts` invented for two screens the control API has no
- * module for at all — not "a module whose types drifted", a module that does
- * not exist. Both screens now say so when the real transport is on, rather than
- * rendering a 404 as an error or, worse, rendering fabricated numbers.
- * ═══════════════════════════════════════════════════════════════════════════ */
+/* ── Analytics ────────────────────────────────────────────────────────────── */
 
+/**
+ * `GET /v1/projects/:projectId/analytics/{deliveries,endpoints,latency,events}`.
+ *
+ * FOUR routes, not one dashboard payload — the controller says why: the four
+ * questions cost different amounts and fail differently, and one combined
+ * route would make the cheapest tile wait for the dearest query. Every route
+ * takes `window_hours` (1..720, default 24; refused above 720, never clamped)
+ * and echoes the exact window it used in `window`, so a screenshot taken at
+ * 03:00 is still interpretable at 09:00. There is NO hourly time series: the
+ * comparison is `current` beside `previous` (the immediately preceding window
+ * of equal length), with the delta.
+ */
+export type AnalyticsWindow = S['AnalyticsWindowDto'];
+
+/** All nine `DeliveryStatus` keys, always present — `0`, never an absent key. */
+export type DeliveryStatusCounts = S['DeliveryStatusCountsDto'];
+
+/**
+ * `success_rate` is `null`, NEVER 0, when nothing settled: 0 means "everything
+ * we tried failed", which is the loudest thing this response can say. Render
+ * the null as "no settled deliveries", not as 0%.
+ */
+export type DeliveryOutcomeSummary = S['DeliveryOutcomeSummaryDto'];
+export type DeliveryOutcomes = S['DeliveryOutcomesDto'];
+
+/**
+ * One endpoint in the failure ranking. `name`/`url`/`status`/`enabled` are
+ * nullable — the ranking is the truth about what failed even when the endpoint
+ * row is gone. Read `failure_rate` beside `failing` and `total`.
+ */
+export type FailingEndpoint = S['FailingEndpointDto'];
+export type FailingEndpoints = S['FailingEndpointsDto'];
+
+/**
+ * A BOUNDED SAMPLE. `exact` says whether the sample was every measured attempt
+ * in the window; when false the percentiles describe the MOST RECENT traffic,
+ * and `sample_size` / `sampled_deliveries` say how much was measured. Every
+ * percentile is nullable (nothing measured), and nearest-rank, so each value is
+ * a duration something actually took.
+ */
+export type AttemptLatency = S['AttemptLatencyDto'];
+
+export type EventTypeCount = S['EventTypeCountDto'];
+export type EventVolume = S['EventVolumeDto'];
+
+/** `@Max(720)` on `window_hours` — 30 days, and the longest window the UI offers. */
+export const MAX_WINDOW_HOURS = 720;
+export const DEFAULT_WINDOW_HOURS = 24;
+/** `@Max(50)` on `limit` for the endpoint ranking and the event-type list. */
+export const MAX_ANALYTICS_LIMIT = 50;
+export const DEFAULT_ANALYTICS_LIMIT = 10;
+
+/* ── Client-side roll-ups ─────────────────────────────────────────────────── */
+
+/**
+ * NOT a wire type. `summarizeDeliveries` in `src/lib/delivery-status.ts` folds
+ * a page of `DeliveryDto` rows into this for the event detail's fan-out
+ * summary. It lives here only because the roll-up is shared; nothing on the
+ * API returns it, and it must never be read as though something did.
+ */
 export interface DeliveryCounts {
   total: number;
   succeeded: number;
   failed: number;
   pending: number;
   exhausted: number;
-}
-
-export interface AnalyticsPoint {
-  bucket: string;
-  succeeded: number;
-  failed: number;
-  retrying: number;
-  p95_latency_ms: number;
-}
-
-export interface ProjectAnalytics {
-  window: '24h' | '7d' | '30d';
-  points: AnalyticsPoint[];
-  totals: DeliveryCounts;
-  p95_latency_ms: number;
-  success_rate: number;
-}
-
-export interface UsageSummary {
-  period_start: string;
-  period_end: string;
-  events_ingested: number;
-  deliveries_attempted: number;
-  included_events: number;
-  overage_events: number;
 }
 
 /* ── Auth request bodies ──────────────────────────────────────────────────── */

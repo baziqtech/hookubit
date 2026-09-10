@@ -15,6 +15,7 @@ ever had, revoked and expired ones included:
 | Status | `active`, `expired` or `revoked`, derived from the key's timestamps at the moment you look, exactly as the ingest path derives it. Revoked outranks expired. Beside it, the environment badge. |
 | Last used | Best-effort, written by the data plane. Never a basis for a security decision. |
 | Created | When it was issued. |
+| (actions) | **Revoke**, on every key that has not been revoked - active and expired alike. A revoked key shows when it was revoked instead. |
 
 Read the pager before concluding you have seen every key. The reason to read
 this list is usually "what can currently authenticate as us?", and a page that
@@ -100,10 +101,22 @@ ceiling, and it is the tool for "this credential must die". It is rate
 limited loosely (60 a minute) on purpose, because it is the operation an
 operator reaches for under pressure, often from a script.
 
-::: info Not in the dashboard yet
-There is no Revoke button in the list. Revoke through the API:
+**Revoke** on a row opens a confirmation that states exactly that before the
+button:
+
+| Key is | The dialog says |
+|---|---|
+| Active | "This takes effect immediately and cannot be undone." The publisher holding the key is refused on its next request; only a hash was stored, so the key cannot be reinstated - issue a new one if that publisher should keep sending. If the key was used recently, it says so: a live integration is about to start failing. |
+| Expired | The key already stopped authenticating when it expired; revoking it frees the slot it still holds against the project's ceiling, which counts every un-revoked key. |
+
+In both cases the row stays in the list as `revoked`, so the events it
+published remain attributable. A revoked row has no Revoke button: the route
+is idempotent, and offering a no-op reads as "did it work?". A 429 (the
+throttle) or any other refusal is shown in the dialog with the server's own
+message.
+
+The same operation through the API is
 `POST /v1/projects/:projectId/api-keys/:apiKeyId/revoke`.
-:::
 
 There is no update route and there will not be one: widening a key's scopes,
 extending its expiry or renaming it would change what a credential already in
@@ -135,8 +148,8 @@ fact about the key row alone.
 ---
 
 **Where this comes from** (for maintainers):
-`apps/dashboard/src/features/api-keys/ApiKeysPage.tsx`, `api.ts`,
-`apps/dashboard/src/components/SecretReveal.tsx`,
+`apps/dashboard/src/features/api-keys/ApiKeysPage.tsx` (`RevokeApiKeyDialog`), `api.ts`
+(`useRevokeApiKey`), `apps/dashboard/src/components/SecretReveal.tsx`,
 `apps/control-api/src/api-keys/api-keys.controller.ts`, `api-keys.service.ts`,
 `api-key-state.ts`, `api-key-limits.ts` (`API_KEYS_PER_PROJECT`, throttles),
 `effective-scopes.ts`, `dto/create-api-key.dto.ts`, `dto/api-key-response.dto.ts`,

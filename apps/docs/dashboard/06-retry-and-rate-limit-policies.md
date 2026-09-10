@@ -5,15 +5,17 @@ curve the delivery workers run for an endpoint; a **rate-limit policy** is a
 ceiling on how fast deliveries go out, or events come in.
 
 ::: info What the dashboard has today
-- The endpoint form has a **Retry policy** picker over the policies this
-  project owns, with each option described in words ("8 attempts, exponential
-  ×2 from 5s up to 1h"). There is no screen for creating or editing a policy;
-  the picker says so and names the API route when the project has none.
-- There is no rate-limit screen at all. Project settings lists both editors
-  under "Not built yet".
+Both kinds of policy have a screen: **Policies** in the project navigation,
+at `/orgs/:orgId/projects/:projectId/policies`, with a tab for each.
 
-Everything below is therefore the API's behaviour, as reflected in what the
-dashboard shows.
+| Tab | What you can do |
+|---|---|
+| Retry policies | See every policy described in words, create and edit one with every field, make one the default, delete one (with the successor picker the API requires). |
+| Rate limits | See every policy with what it applies to and **whether the data plane enforces it today**, create and edit one, delete one. |
+
+The endpoint form's **Retry policy** picker is unchanged and links to
+Policies when the project has none. See [In the dashboard](#in-the-dashboard)
+for the page itself; the sections after it are the rules the page enforces.
 :::
 
 ## Retry policies
@@ -170,21 +172,98 @@ A project may hold 300 rate-limit policies. Rate-limit policies are
 hard-deleted; removing the last policy covering a resource means it falls
 back to the next scope up.
 
+## In the dashboard
+
+`/orgs/:orgId/projects/:projectId/policies`, in the project navigation
+between Subscriptions and API keys. Two tabs; the active one is in the URL
+(`?tab=rate-limits`), so a link lands on the right table.
+
+Reading needs `policies.read` (every role except billing). The create, edit,
+make-default and delete controls need `policies.write` (owner, admin,
+developer); for a viewer they are disabled with the reason in the tooltip,
+and a refusal from the API is shown naming the roles that can.
+
+### Retry policies tab
+
+| Column | Meaning |
+|---|---|
+| Policy | Name, a **default** badge on the one in force for endpoints without their own, and the id. |
+| Backoff | The curve in words ("8 attempts, exponential ×2 from 30s up to 60m"), then the strategy and jitter. The same sentence the endpoint form's picker shows. |
+| Attempts | `max_attempts`, including the first delivery. |
+| Budget | `max_retry_duration_ms` in the largest whole unit ("1d", "5m"). |
+| Actions | **Edit**, **Make default** (absent on the default), **Delete**. |
+
+**Create policy** and **Edit** open the same dialog, with every field from
+the table in [Fields](#fields) and a hint on each saying why its bound
+exists. Below the numbers, a live preview shows the wait before each retry as
+the workers compute it, and warns when the budget runs out before the last
+attempt. The three cross-field rules are checked as you type, under the
+field the API would name; anything the API still refuses lands under the same
+field.
+
+- **Make this the project default** is a checkbox on create only. On edit it
+  is not a field, because the API does not accept it there; use **Make
+  default** in the table, which confirms what changes: endpoints without a
+  policy of their own, for deliveries created from now on.
+- **Delete** explains the two refusals before the button. If the policy is
+  the default and others exist, the dialog requires choosing the successor
+  and sends it as `replacement_id`. If endpoints on the first page of
+  Endpoints still use the policy, they are named; the API's own count is the
+  authority and its refusal is shown as a conflict.
+
+### Rate limits tab
+
+| Column | Meaning |
+|---|---|
+| Scope | `endpoint`, `project`, `organization` or `ingest`, and the id. |
+| Applies to | The endpoint or API key by name, "Every endpoint in this project", "Every API key in this project (one shared budget)", "This project" or "This organization". An id not on the first page of its list is shown as the id, flagged. |
+| Limit | `limit / window`, e.g. `500 / 1s`. |
+| Burst | The bucket capacity, or "= limit". |
+| Enforced today | See the table below. |
+| Actions | **Edit**, **Delete**. |
+
+The **Enforced today** badge is read from the data plane's code, not from the
+API's description of intent, and the panel under the table says where:
+
+| Scope | Badge | Why |
+|---|---|---|
+| `ingest` | Enforced on ingest | The ingest service charges it for every accepted event. |
+| `project` | Ingest only | Charged when events are accepted. The delivery workers do not read it. |
+| `organization` | Ingest only | As `project`. Rows made under a sibling project apply here but are listed there. |
+| `endpoint` | Not enforced | Stored and validated; the delivery workers read only the endpoint's own **Rate limit** setting. |
+
+**Create policy** and **Edit** open a dialog whose resource control follows
+the scope: a select over this project's endpoints (`endpoint`), a select
+over its API keys (`ingest`), or nothing (`project`, `organization`), since a
+row can only name its own. Blank means every resource in the scope. The
+enforcement verdict for the chosen scope is shown before the numbers.
+`burst` below `limit` is refused under the burst field; a second row for the
+same scope and resource is refused as a conflict naming the existing one.
+
+**Delete** is a hard delete with no preconditions; the dialog says what the
+resource falls back to.
+
 ## Attaching a policy to an endpoint
 
 - **Retry policy**: choose it in the endpoint's **Edit** dialog. The picker
   lists only this project's policies, marks the default, and keeps a saved
   policy visible even if it is not on the first page, so saving cannot
-  silently unset it. Choosing "Project default" clears the attachment.
+  silently unset it. Choosing "Project default" clears the attachment. When
+  the project has no policies, the picker links to Policies.
 - **Rate limit**: the endpoint's own **Rate limit** and **Rate limit window**
-  fields are the per-endpoint ceiling that is enforced today. A
-  rate-limit *policy* at `endpoint` scope is attached by naming the endpoint
-  as its `resource_id` through the API.
+  fields are the per-endpoint ceiling that is enforced today. A rate-limit
+  *policy* at `endpoint` scope is created on Policies by choosing the
+  endpoint; it is stored but not yet read by the delivery workers, and the
+  page says so.
 
 ---
 
 **Where this comes from** (for maintainers):
-`apps/dashboard/src/features/retry-policies/api.ts` (`describeRetryPolicy`),
+`apps/dashboard/src/features/policies/PoliciesPage.tsx`, `permissions.ts`, `write-errors.ts`,
+`apps/dashboard/src/features/retry-policies/api.ts` (`describeRetryPolicy`, the write hooks),
+`RetryPoliciesTab.tsx`, `RetryPolicyDialog.tsx`, `retry-policy-rules.ts` (the coherence mirror),
+`apps/dashboard/src/features/rate-limits/api.ts`, `RateLimitsTab.tsx`, `RateLimitDialog.tsx`,
+`rate-limit-rules.ts` (`RATE_LIMIT_ENFORCEMENT`, with the Go citations),
 `apps/dashboard/src/features/endpoints/EndpointEditDialog.tsx` (`RetryPolicyField`),
 `apps/dashboard/src/features/settings/ProjectSettingsPage.tsx`,
 `apps/control-api/src/retry-policies/*` (`retry-policy-limits.ts`, `retry-policy-rules.ts`,

@@ -1,5 +1,25 @@
 # Dashboard — handoff
 
+> **Status, 2026-09-10.** Every section below this note is history: the notes
+> of the sessions that built the dashboard against a mock while the control
+> API was being written. They are kept for the reasoning. The current facts:
+>
+> - Every page reads the real control API. The last mock-only routes
+>   (`/analytics`, `/usage`) are gone; `src/lib/mock/` mirrors the API for
+>   `vitest` and for `VITE_API_TRANSPORT` unset, and its contract tests pin it
+>   to the OpenAPI document.
+> - Every control the dashboard offers is exercised against the running stack
+>   by `e2e/` (Playwright): `pnpm test:e2e`, prerequisites in
+>   `docs/LOCAL_SETUP.md` section 9. Twenty-eight steps from registration to
+>   deleting the project, with the HMAC on each delivery verified at a local
+>   receiver.
+> - Things the e2e run found and fixed in the product, for the record: a
+>   dialog's submit button bound to the wrong form when the same dialog was
+>   mounted twice (`Dialog` now unmounts when closed and forms use `useId`);
+>   the account menu opened below the fold; sign-out left the shell on screen;
+>   deleting a project sent you back into it (cached list); the pause dialog
+>   said queued deliveries wait when the data plane cancels them.
+
 ## The build serves mock data by default, and now says so
 
 `resolveTransport()` in `src/lib/api.ts` uses the in-memory mock in

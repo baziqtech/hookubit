@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it } from 'vitest';
-import type { Endpoint, Organization, Project } from '../../types/api';
+import type { Endpoint, Organization, Project, Subscription } from '../../types/api';
 import * as db from './data';
 import { MockHttpError, mockRequest, resetMockState } from './server';
 
@@ -304,5 +304,173 @@ describe('project and organization settings', () => {
   it('refuses a name shorter than an organization name may be', async () => {
     const error = await failure(mockRequest('PATCH', `/v1/organizations/${ORG}`, { name: 'A' }));
     expect(error.status).toBe(400);
+  });
+});
+
+describe('subscription writes — the failures the form has to render', () => {
+  const create = (body: Record<string, unknown>) =>
+    mockRequest<Subscription>('POST', `/v1/projects/${PROJECT}/subscriptions`, body);
+  const messagesOf = (error: MockHttpError) => error.body.error.message as string[];
+
+  it('refuses an empty event_types list, naming both alternatives', async () => {
+    const error = await failure(create({ endpoint_id: 'ep_01JQFINANCE', event_types: [] }));
+    expect(error.status).toBe(400);
+    expect(messagesOf(error)[0]).toMatch(/must not be empty/);
+    expect(messagesOf(error)[0]).toMatch(/enabled=false/);
+  });
+
+  it('refuses duplicates rather than de-duplicating', async () => {
+    const error = await failure(
+      create({ endpoint_id: 'ep_01JQFINANCE', event_types: ['a.b', 'a.b'] }),
+    );
+    expect(messagesOf(error)[0]).toBe('event_types[1] repeats "a.b"');
+  });
+
+  it('refuses whitespace rather than trimming it', async () => {
+    const error = await failure(
+      create({ endpoint_id: 'ep_01JQFINANCE', event_types: ['payment.settled '] }),
+    );
+    expect(messagesOf(error)[0]).toMatch(/byte for byte/);
+  });
+
+  it('refuses ".*"', async () => {
+    const error = await failure(create({ endpoint_id: 'ep_01JQFINANCE', event_types: ['.*'] }));
+    expect(messagesOf(error)[0]).toMatch(/write "\*" if you mean everything/);
+  });
+
+  it('refuses an empty payload_filter object, prefixed with the property', async () => {
+    const error = await failure(
+      create({ endpoint_id: 'ep_01JQFINANCE', event_types: ['*'], payload_filter: {} }),
+    );
+    expect(messagesOf(error)[0]).toMatch(/^payload_filter: is an empty object/);
+  });
+
+  it('refuses a payload_filter that is not an object', async () => {
+    const error = await failure(
+      create({ endpoint_id: 'ep_01JQFINANCE', event_types: ['*'], payload_filter: [1] }),
+    );
+    expect(messagesOf(error)[0]).toMatch(/^payload_filter must be a JSON object/);
+  });
+
+  it('refuses an unknown top-level $operator in a payload_filter', async () => {
+    const error = await failure(
+      create({
+        endpoint_id: 'ep_01JQFINANCE',
+        event_types: ['*'],
+        payload_filter: { $contains: 'x' },
+      }),
+    );
+    expect(messagesOf(error)[0]).toMatch(/^payload_filter\.\$contains: is not a supported operator/);
+  });
+
+  it('accepts a null payload_filter and a null name — both mean "none"', async () => {
+    const created = await create({
+      endpoint_id: 'ep_01JQFINANCE',
+      event_types: ['*'],
+      payload_filter: null,
+      name: null,
+    });
+    expect(created.payload_filter).toBeNull();
+    expect(created.name).toBeNull();
+  });
+
+  it('refuses a name over 200 characters under its own property', async () => {
+    const error = await failure(
+      create({ endpoint_id: 'ep_01JQFINANCE', event_types: ['*'], name: 'x'.repeat(201) }),
+    );
+    expect(messagesOf(error)[0]).toMatch(/^name: /);
+  });
+
+  it('refuses a PATCH with event_types: null as "must be an array"', async () => {
+    const error = await failure(
+      mockRequest('PATCH', `/v1/projects/${PROJECT}/subscriptions/sub_01JQFIN`, {
+        event_types: null,
+      }),
+    );
+    expect(messagesOf(error)[0]).toBe('event_types must be an array of strings');
+  });
+
+  it('refuses re-pointing a PATCH at a deleted endpoint with a 409 conflict', async () => {
+    const error = await failure(
+      mockRequest('PATCH', `/v1/projects/${PROJECT}/subscriptions/sub_01JQFIN`, {
+        endpoint_id: DELETED,
+      }),
+    );
+    expect(error.status).toBe(409);
+    expect(error.body.error.code).toBe('conflict');
+  });
+
+  it('refuses a disable reason over 200 characters', async () => {
+    const error = await failure(
+      mockRequest('POST', `/v1/projects/${PROJECT}/subscriptions/sub_01JQFIN/disable`, {
+        reason: 'x'.repeat(201),
+      }),
+    );
+    expect(error.status).toBe(400);
+    expect(messagesOf(error)[0]).toMatch(/^reason: /);
+  });
+
+  it('answers 404 for a subscription in another project, and 429 past the mutate bucket', async () => {
+    const other = db.projects.find((project) => project.id !== PROJECT);
+    const notFound = await failure(
+      mockRequest('POST', `/v1/projects/${other!.id}/subscriptions/sub_01JQFIN/enable`),
+    );
+    expect(notFound.status).toBe(404);
+
+    let throttled: MockHttpError | null = null;
+    for (let index = 0; index < 25; index += 1) {
+      try {
+        await mockRequest('POST', `/v1/projects/${PROJECT}/subscriptions/sub_01JQFIN/enable`);
+      } catch (error) {
+        throttled = error as MockHttpError;
+        break;
+      }
+    }
+    expect(throttled?.status).toBe(429);
+    expect(throttled?.body.error.details).toEqual({ retry_after_seconds: 42 });
+  });
+});
+
+describe('project create — the failures the dialog has to render', () => {
+  it('refuses a name that derives to no slug and asks for one explicitly', async () => {
+    const error = await failure(
+      mockRequest('POST', `/v1/organizations/${ORG}/projects`, { name: '!!!' }),
+    );
+    expect(error.status).toBe(400);
+    expect(error.body.error.message).toMatch(/Supply "slug" explicitly/);
+  });
+
+  it('refuses a supplied slug that breaks the pattern, under the slug property', async () => {
+    const error = await failure(
+      mockRequest('POST', `/v1/organizations/${ORG}/projects`, {
+        name: 'Ops',
+        slug: 'Ops Live',
+      }),
+    );
+    expect(error.status).toBe(400);
+    expect((error.body.error.message as string[])[0]).toMatch(/^slug: /);
+  });
+
+  it('refuses an environment outside test | live', async () => {
+    const error = await failure(
+      mockRequest('POST', `/v1/organizations/${ORG}/projects`, {
+        name: 'Ops',
+        environment: 'production',
+      }),
+    );
+    expect((error.body.error.message as string[])[0]).toMatch(/^environment: /);
+  });
+
+  it('refuses the missing name under its property', async () => {
+    const error = await failure(mockRequest('POST', `/v1/organizations/${ORG}/projects`, {}));
+    expect((error.body.error.message as string[])[0]).toMatch(/^name: /);
+  });
+
+  it('answers 404 for a project delete in an organization that does not own it', async () => {
+    const other = db.organizations.find((organization) => organization.id !== ORG);
+    const error = await failure(
+      mockRequest('DELETE', `/v1/organizations/${other!.id}/projects/${PROJECT}`),
+    );
+    expect(error.status).toBe(404);
   });
 });

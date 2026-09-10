@@ -1,7 +1,11 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 import type {
   ApiKey,
+  AttemptLatency,
   AuditLogEntry,
+  DeliveryOutcomes,
+  EventVolume,
+  FailingEndpoints,
   CreatedApiKey,
   CreatedEndpoint,
   Delivery,
@@ -424,5 +428,502 @@ describe('modules that were speculative and are now real', () => {
     await expect(
       mockRequest('GET', `/v1/organizations/${ORG}/audit-logs?as=viewer`),
     ).rejects.toMatchObject({ status: 403 });
+  });
+});
+
+/**
+ * The four analytics routes, computed from the ledger the list routes serve.
+ * Shapes mirror `apps/control-api/src/analytics/dto/analytics-response.dto.ts`
+ * and the arithmetic mirrors `AnalyticsService`; the one-route
+ * `GET /v1/projects/:id/analytics` and `GET /v1/organizations/:id/usage` the
+ * mock used to invent are gone, and the last test pins that they stay gone.
+ */
+describe('analytics — four routes, not one dashboard payload', () => {
+  const EMPTY_PROJECT = 'proj_01JQPAYSTG';
+  const STATUSES = [
+    'pending',
+    'scheduled',
+    'queued',
+    'processing',
+    'succeeded',
+    'failed',
+    'retrying',
+    'exhausted',
+    'cancelled',
+  ] as const;
+
+  it('deliveries: echoes the window, carries all nine by_status keys, and counts the ledger', async () => {
+    const body = await mockRequest<DeliveryOutcomes>(
+      'GET',
+      `/v1/projects/${PROJECT}/analytics/deliveries`,
+    );
+
+    // Default window is 24h, echoed as `[from, to)` beside the previous window.
+    expect(body.window.hours).toBe(24);
+    expect(new Date(body.window.to).getTime() - new Date(body.window.from).getTime()).toBe(
+      24 * 3_600_000,
+    );
+    expect(body.window.previous_to).toBe(body.window.from);
+
+    for (const summary of [body.current, body.previous]) {
+      for (const status of STATUSES) {
+        expect(typeof summary.by_status[status]).toBe('number');
+      }
+      expect(Object.keys(summary.by_status).sort()).toEqual([...STATUSES].sort());
+      expect(summary.total).toBe(STATUSES.reduce((sum, s) => sum + summary.by_status[s], 0));
+      expect(summary.failing).toBe(summary.by_status.failed + summary.by_status.exhausted);
+      expect(summary.in_flight).toBe(
+        summary.by_status.pending +
+          summary.by_status.scheduled +
+          summary.by_status.queued +
+          summary.by_status.processing +
+          summary.by_status.retrying,
+      );
+    }
+
+    // Every fixture delivery in the busy project was created inside the last
+    // 24h, so the analytics total IS the deliveries list — the property the
+    // real service promises.
+    const ledger = db.deliveries.filter((delivery) => delivery.project_id === PROJECT);
+    expect(body.current.total).toBe(ledger.length);
+    expect(typeof body.current.success_rate).toBe('number');
+    expect(body.total_delta).toBe(body.current.total - body.previous.total);
+  });
+
+  it('deliveries: success_rate is NULL, never 0, when nothing settled', async () => {
+    const body = await mockRequest<DeliveryOutcomes>(
+      'GET',
+      `/v1/projects/${EMPTY_PROJECT}/analytics/deliveries?window_hours=720`,
+    );
+    expect(body.window.hours).toBe(720);
+    expect(body.current.total).toBe(0);
+    expect(body.current.success_rate).toBeNull();
+    expect(body.previous.success_rate).toBeNull();
+    expect(body.success_rate_delta).toBeNull();
+  });
+
+  it('refuses window_hours above 720 with a per-property 400, never a clamp', async () => {
+    for (const route of ['deliveries', 'endpoints', 'latency', 'events']) {
+      await expect(
+        mockRequest('GET', `/v1/projects/${PROJECT}/analytics/${route}?window_hours=721`),
+      ).rejects.toMatchObject({
+        status: 400,
+        body: {
+          error: { code: 'invalid_request', message: [expect.stringMatching(/^window_hours: /)] },
+        },
+      });
+    }
+    await expect(
+      mockRequest('GET', `/v1/projects/${PROJECT}/analytics/deliveries?window_hours=0`),
+    ).rejects.toMatchObject({ status: 400 });
+  });
+
+  it('endpoints: ranked worst first, nullable endpoint columns, a rate beside the count', async () => {
+    const body = await mockRequest<FailingEndpoints>(
+      'GET',
+      `/v1/projects/${PROJECT}/analytics/endpoints`,
+    );
+    expect(body.window.hours).toBe(24);
+    expect(body.data.length).toBeGreaterThan(0);
+    expect(typeof body.has_more).toBe('boolean');
+
+    for (const row of body.data) {
+      expect(row).toMatchObject({
+        endpoint_id: expect.any(String),
+        failing: expect.any(Number),
+        failed: expect.any(Number),
+        exhausted: expect.any(Number),
+        retrying: expect.any(Number),
+        total: expect.any(Number),
+        failure_rate: expect.any(Number),
+      });
+      expect(row.failing).toBe(row.failed + row.exhausted);
+      expect(row.failure_rate).toBeGreaterThanOrEqual(0);
+      expect(row.failure_rate).toBeLessThanOrEqual(1);
+      expect(row.failure_rate).toBeCloseTo(row.total === 0 ? 0 : row.failing / row.total, 4);
+      // Present-or-null, never absent.
+      for (const key of ['name', 'url', 'status', 'enabled'] as const) {
+        expect(row).toHaveProperty(key);
+      }
+    }
+    for (let index = 1; index < body.data.length; index += 1) {
+      expect(body.data[index - 1].failing).toBeGreaterThanOrEqual(body.data[index].failing);
+    }
+    // The partner endpoint is the fixture that is genuinely broken.
+    expect(body.data[0].endpoint_id).toBe('ep_01JQPARTNER');
+  });
+
+  it('endpoints: limit bounds the ranking and has_more says the list is not the set', async () => {
+    const one = await mockRequest<FailingEndpoints>(
+      'GET',
+      `/v1/projects/${PROJECT}/analytics/endpoints?limit=1`,
+    );
+    expect(one.data).toHaveLength(1);
+    expect(one.has_more).toBe(true);
+
+    await expect(
+      mockRequest('GET', `/v1/projects/${PROJECT}/analytics/endpoints?limit=51`),
+    ).rejects.toMatchObject({ status: 400, body: { error: { code: 'invalid_request' } } });
+  });
+
+  it('latency: nullable nearest-rank percentiles with the sample honestly described', async () => {
+    const body = await mockRequest<AttemptLatency>(
+      'GET',
+      `/v1/projects/${PROJECT}/analytics/latency`,
+    );
+    expect(body.window.hours).toBe(24);
+    expect(typeof body.exact).toBe('boolean');
+    expect(typeof body.sample_size).toBe('number');
+    expect(typeof body.sampled_deliveries).toBe('number');
+    expect(body.sample_size).toBeGreaterThan(0);
+
+    const { p50_ms, p95_ms, p99_ms, min_ms, max_ms } = body;
+    if (p50_ms === null || p95_ms === null || p99_ms === null || min_ms === null || max_ms === null) {
+      throw new Error('percentiles must be numbers when sample_size > 0');
+    }
+    expect(min_ms).toBeLessThanOrEqual(p50_ms);
+    expect(p50_ms).toBeLessThanOrEqual(p95_ms);
+    expect(p95_ms).toBeLessThanOrEqual(p99_ms);
+    expect(p99_ms).toBeLessThanOrEqual(max_ms);
+    // `exact` only when NEITHER bound was hit: 200 deliveries, 200 measured
+    // attempts. The fixtures' exhausted chains carry eight attempts each, so
+    // the attempt cap is the one that bites — and the response says so
+    // rather than presenting a sample as the whole day.
+    const inWindow = db.deliveries.filter((delivery) => delivery.project_id === PROJECT);
+    const measuredAttempts = inWindow
+      .flatMap((delivery) => db.attempts[delivery.id] ?? [])
+      .filter((attempt) => attempt.duration_ms !== null).length;
+    expect(body.sampled_deliveries).toBe(Math.min(inWindow.length, 200));
+    expect(body.sample_size).toBe(Math.min(measuredAttempts, 200));
+    expect(body.exact).toBe(inWindow.length <= 200 && measuredAttempts <= 200);
+
+    // Nearest rank: every value is a duration some attempt actually took.
+    const observed = new Set(
+      Object.values(db.attempts)
+        .flat()
+        .map((attempt) => attempt.duration_ms)
+        .filter((value): value is number => typeof value === 'number'),
+    );
+    expect(observed.has(p95_ms)).toBe(true);
+  });
+
+  it('latency: an idle project answers nulls with sample_size 0, and exact', async () => {
+    const body = await mockRequest<AttemptLatency>(
+      'GET',
+      `/v1/projects/${EMPTY_PROJECT}/analytics/latency`,
+    );
+    expect(body.p50_ms).toBeNull();
+    expect(body.p95_ms).toBeNull();
+    expect(body.p99_ms).toBeNull();
+    expect(body.min_ms).toBeNull();
+    expect(body.max_ms).toBeNull();
+    expect(body.sample_size).toBe(0);
+    expect(body.sampled_deliveries).toBe(0);
+    expect(body.exact).toBe(true);
+  });
+
+  it('events: counts what was PUBLISHED, beside the previous window, busiest types first', async () => {
+    const body = await mockRequest<EventVolume>(
+      'GET',
+      `/v1/projects/${PROJECT}/analytics/events`,
+    );
+    expect(body.window.hours).toBe(24);
+    expect(body.total).toBe(db.events.filter((event) => event.project_id === PROJECT).length);
+    expect(body.total_delta).toBe(body.total - body.previous_total);
+    expect(typeof body.has_more).toBe('boolean');
+    expect(body.by_type.length).toBeGreaterThan(0);
+    expect(body.by_type.length).toBeLessThanOrEqual(10);
+    for (const row of body.by_type) {
+      expect(row).toEqual({ event_type: expect.any(String), count: expect.any(Number) });
+    }
+    for (let index = 1; index < body.by_type.length; index += 1) {
+      expect(body.by_type[index - 1].count).toBeGreaterThanOrEqual(body.by_type[index].count);
+    }
+
+    const one = await mockRequest<EventVolume>(
+      'GET',
+      `/v1/projects/${PROJECT}/analytics/events?limit=1`,
+    );
+    expect(one.by_type).toHaveLength(1);
+    expect(one.has_more).toBe(true);
+    // Unchanged by `limit`: the total is the window, not the list.
+    expect(one.total).toBe(body.total);
+  });
+
+  it('the invented one-route analytics and the usage route are gone', async () => {
+    await expect(mockRequest('GET', `/v1/projects/${PROJECT}/analytics`)).rejects.toMatchObject({
+      status: 404,
+    });
+    await expect(mockRequest('GET', `/v1/organizations/${ORG}/usage`)).rejects.toMatchObject({
+      status: 404,
+    });
+  });
+});
+
+/**
+ * The write routes on `WebhookSubscriptionsController`, `ProjectsController`
+ * and `OrganizationsController` that the dashboard now calls. Shape first:
+ * what comes back is a `SubscriptionDto` / `ProjectDto`, a 204 is a 204, and
+ * the two 409s are told apart by `error.code`, never by the sentence.
+ */
+describe('subscription writes — WebhookSubscriptionsController', () => {
+  const create = (body: Record<string, unknown>) =>
+    mockRequest<Subscription>('POST', `/v1/projects/${PROJECT}/subscriptions`, body);
+
+  it('creates a subscription and stores event_types EXACTLY as sent', async () => {
+    const created = await create({
+      endpoint_id: 'ep_01JQFINANCE',
+      event_types: ['payout.*', 'payment.settled'],
+      name: 'Payouts',
+    });
+    expect(created.id).toMatch(/^sub_/);
+    expect(created.project_id).toBe(PROJECT);
+    expect(created.endpoint_id).toBe('ep_01JQFINANCE');
+    // Order and content untouched — not sorted, not de-duplicated, not widened.
+    expect(created.event_types).toEqual(['payout.*', 'payment.settled']);
+    expect(created.payload_filter).toBeNull();
+    expect(created.enabled).toBe(true);
+    expect(created).toHaveProperty('updated_at');
+    expect(created).not.toHaveProperty('endpoint_name');
+
+    const page = await mockRequest<OffsetPage<Subscription>>(
+      'GET',
+      `/v1/projects/${PROJECT}/subscriptions`,
+    );
+    expect(page.data[0].id).toBe(created.id);
+  });
+
+  it('defaults enabled to true, and honours enabled: false', async () => {
+    const paused = await create({
+      endpoint_id: 'ep_01JQFINANCE',
+      event_types: ['*'],
+      enabled: false,
+    });
+    expect(paused.enabled).toBe(false);
+    expect(paused.name).toBeNull();
+  });
+
+  it('refuses an event-type pattern with a 400 whose message is the server sentence, un-prefixed', async () => {
+    try {
+      await create({ endpoint_id: 'ep_01JQFINANCE', event_types: ['pay*'] });
+      throw new Error('expected a 400');
+    } catch (error) {
+      expect(error).toBeInstanceOf(MockHttpError);
+      const failure = error as MockHttpError;
+      expect(failure.status).toBe(400);
+      const messages = failure.body.error.message as string[];
+      // `EventTypesConstraint.defaultMessage` returns the reason itself, which
+      // begins with `event_types[…]` and carries no `property: ` prefix.
+      expect(messages[0]).toMatch(/^event_types\[0\] contains "\*"/);
+      expect(messages[0]).toMatch(/would never fire/);
+    }
+  });
+
+  it('refuses "*" alongside other patterns rather than widening', async () => {
+    try {
+      await create({ endpoint_id: 'ep_01JQFINANCE', event_types: ['*', 'payment.settled'] });
+      throw new Error('expected a 400');
+    } catch (error) {
+      const failure = error as MockHttpError;
+      expect(failure.status).toBe(400);
+      expect((failure.body.error.message as string[])[0]).toMatch(/alongside other patterns/);
+    }
+  });
+
+  it('answers limit_exceeded with { limit, current, resource } at the ceiling', async () => {
+    // Fill the project up to the mock ceiling, then one more.
+    let last: MockHttpError | null = null;
+    for (let index = 0; index < 10; index += 1) {
+      try {
+        await create({ endpoint_id: 'ep_01JQFINANCE', event_types: [`type.${index}`] });
+      } catch (error) {
+        last = error as MockHttpError;
+        break;
+      }
+    }
+    expect(last?.status).toBe(409);
+    expect(last?.body.error.code).toBe('limit_exceeded');
+    expect(last?.body.error.details).toEqual({ limit: 8, current: 8, resource: 'subscriptions' });
+  });
+
+  it('refuses a deleted endpoint with a plain conflict, distinguishable by code', async () => {
+    const deleted = db.endpoints.find((endpoint) => endpoint.status === 'deleted');
+    try {
+      await create({ endpoint_id: deleted!.id, event_types: ['*'] });
+      throw new Error('expected a 409');
+    } catch (error) {
+      const failure = error as MockHttpError;
+      expect(failure.status).toBe(409);
+      expect(failure.body.error.code).toBe('conflict');
+      expect(failure.body.error.details).toEqual({ endpoint_id: deleted!.id });
+    }
+  });
+
+  it('answers 404 — not 403 — for an endpoint that belongs to another project', async () => {
+    // One answer for "does not exist" and "belongs to someone else": the id is
+    // real, the project in the path is not the one that owns it.
+    const other = db.projects.find((project) => project.id !== PROJECT);
+    try {
+      await mockRequest('POST', `/v1/projects/${other!.id}/subscriptions`, {
+        endpoint_id: 'ep_01JQFINANCE',
+        event_types: ['*'],
+      });
+      throw new Error('expected a 404');
+    } catch (error) {
+      expect(error).toBeInstanceOf(MockHttpError);
+      expect((error as MockHttpError).status).toBe(404);
+      expect((error as MockHttpError).body.error.code).toBe('not_found');
+    }
+  });
+
+  it('PATCH replaces event_types wholesale and clears the name with null', async () => {
+    const updated = await mockRequest<Subscription>(
+      'PATCH',
+      `/v1/projects/${PROJECT}/subscriptions/sub_01JQFIN`,
+      { event_types: ['payment.settled'], name: null },
+    );
+    expect(updated.event_types).toEqual(['payment.settled']);
+    expect(updated.name).toBeNull();
+    // Untouched fields survive.
+    expect(updated.endpoint_id).toBe('ep_01JQFINANCE');
+  });
+
+  it('PATCH refuses `enabled` and names the right route', async () => {
+    try {
+      await mockRequest('PATCH', `/v1/projects/${PROJECT}/subscriptions/sub_01JQFIN`, {
+        enabled: false,
+      });
+      throw new Error('expected a 400');
+    } catch (error) {
+      const failure = error as MockHttpError;
+      expect(failure.status).toBe(400);
+      expect((failure.body.error.message as string[])[0]).toMatch(/^enabled: .*own routes/);
+    }
+  });
+
+  it('enable and disable flip the flag and are idempotent', async () => {
+    const disabled = await mockRequest<Subscription>(
+      'POST',
+      `/v1/projects/${PROJECT}/subscriptions/sub_01JQFIN/disable`,
+      { reason: 'ledger migration' },
+    );
+    expect(disabled.enabled).toBe(false);
+    const again = await mockRequest<Subscription>(
+      'POST',
+      `/v1/projects/${PROJECT}/subscriptions/sub_01JQFIN/disable`,
+      {},
+    );
+    expect(again.enabled).toBe(false);
+    const enabled = await mockRequest<Subscription>(
+      'POST',
+      `/v1/projects/${PROJECT}/subscriptions/sub_01JQFIN/enable`,
+    );
+    expect(enabled.enabled).toBe(true);
+  });
+
+  it('DELETE is a hard delete, answers 204, and 204 again for a row already gone', async () => {
+    const first = await mockRequest<undefined>(
+      'DELETE',
+      `/v1/projects/${PROJECT}/subscriptions/sub_01JQANL`,
+    );
+    expect(first).toBeUndefined();
+    const page = await mockRequest<OffsetPage<Subscription>>(
+      'GET',
+      `/v1/projects/${PROJECT}/subscriptions`,
+    );
+    expect(page.data.some((row) => row.id === 'sub_01JQANL')).toBe(false);
+    const second = await mockRequest<undefined>(
+      'DELETE',
+      `/v1/projects/${PROJECT}/subscriptions/sub_01JQANL`,
+    );
+    expect(second).toBeUndefined();
+  });
+});
+
+describe('project create and delete — ProjectsController', () => {
+  it('creates a project, derives the slug from the name and defaults environment to test', async () => {
+    const created = await mockRequest<Project>('POST', `/v1/organizations/${ORG}/projects`, {
+      name: 'Rider Café Ops',
+    });
+    expect(created.id).toMatch(/^proj_/);
+    expect(created.organization_id).toBe(ORG);
+    expect(created.slug).toBe('rider-cafe-ops');
+    expect(created.environment).toBe('test');
+    expect(created.status).toBe('active');
+  });
+
+  it('keeps a supplied slug verbatim and honours environment: live', async () => {
+    const created = await mockRequest<Project>('POST', `/v1/organizations/${ORG}/projects`, {
+      name: 'Fulfilment',
+      slug: 'fulfil-2',
+      environment: 'live',
+    });
+    expect(created.slug).toBe('fulfil-2');
+    expect(created.environment).toBe('live');
+  });
+
+  it('refuses a taken slug as a plain conflict — deleted projects keep theirs', async () => {
+    try {
+      await mockRequest('POST', `/v1/organizations/${ORG}/projects`, {
+        name: 'Payments again',
+        slug: 'payments',
+      });
+      throw new Error('expected a 409');
+    } catch (error) {
+      const failure = error as MockHttpError;
+      expect(failure.status).toBe(409);
+      expect(failure.body.error.code).toBe('conflict');
+      expect(failure.body.error.message).toMatch(/Deleted projects keep their slug/);
+    }
+  });
+
+  it('soft-deletes: returns the row with status deleted and drops it from the default list', async () => {
+    const deleted = await mockRequest<Project>(
+      'DELETE',
+      `/v1/organizations/${ORG}/projects/proj_01JQRIDER`,
+    );
+    expect(deleted.status).toBe('deleted');
+    expect(deleted.slug).toBe('rider-dispatch');
+
+    const page = await mockRequest<OffsetPage<Project>>('GET', `/v1/organizations/${ORG}/projects`);
+    expect(page.data.some((project) => project.id === 'proj_01JQRIDER')).toBe(false);
+    const gone = await mockRequest<OffsetPage<Project>>(
+      'GET',
+      `/v1/organizations/${ORG}/projects?status=deleted`,
+    );
+    expect(gone.data.some((project) => project.id === 'proj_01JQRIDER')).toBe(true);
+  });
+});
+
+describe('organization delete — OrganizationsController', () => {
+  it('is owner-only: an admin holds projects.write and is still refused with 403', async () => {
+    const admin = db.organizations.find((organization) => organization.role === 'admin');
+    try {
+      await mockRequest('DELETE', `/v1/organizations/${admin!.id}`);
+      throw new Error('expected a 403');
+    } catch (error) {
+      const failure = error as MockHttpError;
+      expect(failure.status).toBe(403);
+      expect(failure.body.error.code).toBe('forbidden');
+      expect(failure.body.error.message).toMatch(/Only an owner/);
+    }
+  });
+
+  it('soft-deletes the organization AND every active project, answers 204, and leaves the list', async () => {
+    const result = await mockRequest<undefined>('DELETE', `/v1/organizations/${ORG}`);
+    expect(result).toBeUndefined();
+    expect(
+      db.projects
+        .filter((project) => project.organization_id === ORG)
+        .every((project) => project.status === 'deleted'),
+    ).toBe(true);
+    const page = await mockRequest<OffsetPage<Organization>>('GET', '/v1/organizations');
+    expect(page.data.some((organization) => organization.id === ORG)).toBe(false);
+    try {
+      await mockRequest('GET', `/v1/organizations/${ORG}`);
+      throw new Error('expected a 404');
+    } catch (error) {
+      expect((error as MockHttpError).status).toBe(404);
+    }
   });
 });
