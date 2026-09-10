@@ -627,7 +627,13 @@ model Delivery {
   status         DeliveryStatus @default(pending)
   attemptCount   Int            @default(0) @map("attempt_count")
   maxAttempts    Int            @map("max_attempts")
-  nextAttemptAt  DateTime?      @map("next_attempt_at")
+  /// NOT NULL since 20260911000000_next_attempt_at_not_null, defaulted to the
+  /// insert time. The claim orders by it, and while it was nullable NULL sorted
+  /// FIRST - ahead of every retry that was actually due - so one stray NULL
+  /// silently jumped the queue. A terminal row keeps a value too (the worker
+  /// writes now() on every terminal transition); it has no scheduling meaning
+  /// there, because status alone keeps a terminal row out of the ready set.
+  nextAttemptAt  DateTime       @default(now()) @map("next_attempt_at")
   lastAttemptAt  DateTime?      @map("last_attempt_at")
   completedAt    DateTime?      @map("completed_at")
   /// Opt-in serialisation key. Stored from day one; enforcement is deferred
@@ -705,29 +711,21 @@ model Delivery {
   /// excluding it would put an abandoned delivery outside the index and make a
   /// dead worker's rows recoverable only by a sequential scan.
   ///
-  /// `next_attempt_at` stays NULLABLE, but NOT for the reason recorded here
-  /// until 2026-09-09. This said internal/worker's `advanceSQL` writes NULL on
-  /// every TERMINAL transition, so NOT NULL would fail every succeed/exhaust/
-  /// cancel write. It does not: `services/data-plane/internal/worker/store.go`
-  /// writes `now()` on the terminal branch, and has done since that ELSE branch
-  /// was changed precisely to clear the way for NOT NULL. Someone weighing the
-  /// constraint would have read this and concluded the Go change was still
-  /// outstanding when it had already landed.
+  /// `next_attempt_at` is NOT NULL, and it was made so by APPENDING a migration
+  /// (20260911000000_next_attempt_at_not_null) rather than by editing the two
+  /// earlier files that discuss it. 20260907000000 still says on disk that
+  /// "NOT NULL would fail every succeed" - that was true when it was written and
+  /// stopped being true when internal/worker's advanceSQL began writing now()
+  /// on its terminal branch; Prisma checksums applied migrations, so the stale
+  /// sentence stays and the correction lives here and in the new file.
   ///
-  /// What actually stands in the way now is the EXISTING ROWS. The column is
-  /// nullable today, so any row written before that change - and any row written
-  /// by an older data-plane build - may still hold NULL, and `SET NOT NULL`
-  /// validates the whole table. Making it NOT NULL therefore needs a backfill
-  /// (`UPDATE deliveries SET next_attempt_at = COALESCE(next_attempt_at,
-  /// completed_at, created_at) WHERE next_attempt_at IS NULL`) followed by
-  /// `ADD CONSTRAINT ... NOT VALID` + `VALIDATE CONSTRAINT`, so the largest
-  /// table in the system is not locked for a full scan. That is the migration to
-  /// write; the Go side is ready. See apps/control-api/HANDOFF.md.
-  ///
-  /// Why it is worth doing at all: the claim query orders by
-  /// `next_attempt_at NULLS FIRST`, so NULL is not a neutral value - it is the
-  /// FRONT of the queue. One stray NULL silently promotes that row ahead of
-  /// retries that are actually due.
+  /// The same migration REBUILT `deliveries_ready_idx` and
+  /// `deliveries_ready_fifo_idx` without `NULLS FIRST` and with `id` appended
+  /// as the claim's tiebreaker, because the claim's ORDER BY dropped NULLS FIRST
+  /// at the same time and the planner does not treat a NULLS FIRST index as
+  /// delivering a NULLS LAST ordering, NOT NULL or not. Both indexes keep their
+  /// names, their predicate and their entry in
+  /// deployments/ci/expected-schema-drift.txt.
   ///
   /// NOTE: `deliveries_retention_idx` and `deliveries_attempt_pruning_idx` -
   /// partial indexes over the TERMINAL set, ordered by created_at - are created

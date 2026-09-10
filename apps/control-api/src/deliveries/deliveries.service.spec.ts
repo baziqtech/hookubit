@@ -1,8 +1,12 @@
+import { SpanContext } from '@opentelemetry/api';
 import { Delivery } from '@prisma/client';
 import { CROSS_TENANT_MESSAGE, MAX_PAGE_SIZE } from '../authz';
 import { IDS } from '../authz/testing/fixtures';
 import { AppError } from '../common/errors';
+import { setTracingEnabled, withSpan } from '../tracing';
+import { InMemoryTracing, startInMemoryTracing } from '../tracing/testing/in-memory-tracing';
 import { DeliveriesService } from './deliveries.service';
+import { TRACEPARENT_LENGTH } from './trace-context';
 import { MAX_INLINE_ATTEMPTS } from './delivery-limits';
 import { DeliveryDetailDto, toDeliveryDto } from './dto';
 import {
@@ -206,6 +210,21 @@ describe('fetching one delivery', () => {
    * stamps `attempts_pruned_at`, and this field is what turns that silence into
    * an answer. It must survive to the wire, on both shapes.
    */
+  it('names the trace the worker kept for an attempt, and says null when it kept none', async () => {
+    const { deliveries, context } = await ledgerHarness();
+
+    const detail = await deliveries.get(context, LEDGER.deliveryOrderA1);
+
+    const [sampled, unsampled] = detail.attempts;
+    // Attempt 1's span was sampled: the row carries the id and so does the DTO.
+    expect(sampled.trace_id).toBe(LEDGER.attemptA1TraceId);
+    // Attempt 2's was not. The contract is `string | null`, not absent: a
+    // client renders "no trace kept" from null, and would render nothing at
+    // all from a missing key.
+    expect(unsampled.trace_id).toBeNull();
+    expect('trace_id' in unsampled).toBe(true);
+  });
+
   it('says when the per-attempt detail was reclaimed by retention', async () => {
     const { deliveries, context, db } = await ledgerHarness();
     const prunedAt = new Date('2026-06-01T00:00:00.000Z');
@@ -445,6 +464,75 @@ describe('replaying one delivery', () => {
     expect(second.replay_of_delivery_id).toBe(first.id);
     expect(rawDelivery(harness.db, first.id)).toEqual(firstRow);
     expect(rawDelivery(harness.db, LEDGER.deliveryOrderA1).replayOfDeliveryId).toBeNull();
+  });
+
+  /**
+   * `deliveries.trace_context` is what the worker links each attempt's trace
+   * to. On a fan-out row the router writes its own span; on a replay the cause
+   * is the operator's request, and nothing else - not the original's context
+   * (a request from weeks ago), and not a trace invented for the occasion.
+   */
+  describe("carries the operator's trace context", () => {
+    let tracing: InMemoryTracing | undefined;
+    afterEach(async () => {
+      await tracing?.stop();
+      tracing = undefined;
+      setTracingEnabled(false);
+    });
+
+    it("stamps the current request span's traceparent on the new row", async () => {
+      tracing = startInMemoryTracing();
+      const harness = await ledgerHarness();
+
+      let request: SpanContext | undefined;
+      const result = await withSpan('POST /deliveries/:id/replay', {}, async (span) => {
+        request = span?.spanContext();
+        return harness.deliveries.replay(harness.context, LEDGER.deliveryOrderA1, {});
+      });
+
+      if (!request) throw new Error('the harness span never started');
+      const row = rawDelivery(harness.db, result.deliveries[0].id);
+      // A valid W3C traceparent: version 00, THIS trace, THIS span, sampled.
+      expect(row.traceContext).toBe(`00-${request.traceId}-${request.spanId}-01`);
+      expect(String(row.traceContext)).toHaveLength(TRACEPARENT_LENGTH);
+      expect(row.traceContext).toMatch(/^00-[0-9a-f]{32}-[0-9a-f]{16}-[0-9a-f]{2}$/);
+      // The original is what it was; it never inherits the replay's context.
+      expect(historyWrites(harness.db)).toEqual([]);
+    });
+
+    it('writes null with tracing off - it never invents a trace', async () => {
+      setTracingEnabled(false);
+      const harness = await ledgerHarness();
+
+      const result = await harness.deliveries.replay(harness.context, LEDGER.deliveryOrderA1, {});
+
+      expect(rawDelivery(harness.db, result.deliveries[0].id).traceContext).toBeNull();
+    });
+
+    it('writes null with tracing on but no span active', async () => {
+      tracing = startInMemoryTracing();
+      const harness = await ledgerHarness();
+
+      const result = await harness.deliveries.replay(harness.context, LEDGER.deliveryOrderA1, {});
+
+      expect(rawDelivery(harness.db, result.deliveries[0].id).traceContext).toBeNull();
+    });
+
+    it('one fan-out, one cause: every row of a replay-to-all carries the same context', async () => {
+      tracing = startInMemoryTracing();
+      const harness = await ledgerHarness();
+
+      const result = await withSpan('POST /events/:id/replay', {}, () =>
+        harness.events.replay(harness.context, LEDGER.eventOrder, {}),
+      );
+
+      const contexts = new Set(
+        result.deliveries.map((delivery) => rawDelivery(harness.db, delivery.id).traceContext),
+      );
+      expect(result.deliveries.length).toBeGreaterThan(1);
+      expect(contexts.size).toBe(1);
+      expect([...contexts][0]).toMatch(/^00-[0-9a-f]{32}-[0-9a-f]{16}-01$/);
+    });
   });
 
   it('records the replay in the audit log with both sides of the mapping', async () => {

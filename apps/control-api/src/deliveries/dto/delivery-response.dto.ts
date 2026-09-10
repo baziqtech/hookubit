@@ -118,6 +118,18 @@ export class DeliveryAttemptDto {
   })
   worker_id!: string | null;
 
+  @ApiProperty({
+    type: String,
+    nullable: true,
+    description:
+      'The 32-hex trace id of the span for THIS attempt - the seam between this ledger and the ' +
+      'trace backend. The worker writes it only when that span was actually sampled, so null ' +
+      'honestly means "no trace was kept for this attempt": not that tracing is broken, and not ' +
+      'a link worth rendering. Each attempt has its own trace; the retry chain is reassembled ' +
+      'by querying the backend for `webhook.delivery.id`, not by walking a span tree.',
+  })
+  trace_id!: string | null;
+
   @ApiProperty() created_at!: string;
 }
 
@@ -139,6 +151,7 @@ export function toAttemptDto(attempt: DeliveryAttempt): DeliveryAttemptDto {
     error_code: attempt.errorCode ?? null,
     error_message: attempt.errorMessage ?? null,
     worker_id: attempt.workerId ?? null,
+    trace_id: attempt.traceId ?? null,
     created_at: new Date(attempt.createdAt).toISOString(),
   };
 }
@@ -190,7 +203,11 @@ export class DeliveryDto {
   @ApiProperty({
     type: String,
     nullable: true,
-    description: 'When the next attempt is due. Null means "as soon as a worker is free".',
+    description:
+      'When the next attempt is due. Always set - the column is NOT NULL and defaults to the ' +
+      'insert time, so a fresh delivery is due immediately. Read it together with `terminal`: ' +
+      'a terminal delivery still carries the time of its last transition here and nothing will ' +
+      'ever act on it. Nullable in the contract only so a client never has to change shape.',
   })
   next_attempt_at!: string | null;
 

@@ -230,7 +230,11 @@ describe('the outbox can resume a fan-out, and a parked row can be recovered', (
     // The stale claim, still on disk and deliberately not edited.
     expect(handoff).toContain('NOT NULL would fail every succeed');
     expect(flatOutboxRecovery).toContain('CORRECTION to a comment in 20260907000000');
-    expect(schema).toContain('but NOT for the reason recorded here');
+    // Superseded in turn by 20260911000000_next_attempt_at_not_null, which
+    // ALSO appended rather than editing: the constraint landed, and the schema
+    // says where the stale sentence is and why it is still there.
+    expect(schema).toContain('NOT NULL, and it was made so by APPENDING a migration');
+    expect(schema).toContain('nextAttemptAt  DateTime       @default(now()) @map("next_attempt_at")');
   });
 });
 

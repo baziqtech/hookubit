@@ -6,6 +6,7 @@ import { newId } from '../common/ids';
 import { TenantTransactionRunner } from '../organizations/tenant-transaction';
 import { MAX_REPLAY_FAN_OUT } from './delivery-limits';
 import { crossTenantNotFound } from './not-found';
+import { currentTraceparent } from './trace-context';
 
 /**
  * What one replay request is going to do, decided inside the transaction.
@@ -92,6 +93,15 @@ export class DeliveryReplayService {
     plan: (scope: TenantScope) => Promise<ReplayPlan>,
     reason?: string | null,
   ): Promise<Delivery[]> {
+    // The operator's request is the CAUSE of every row this creates, so its
+    // trace context is what the worker should link each replay attempt to.
+    // Captured here, before the transaction opens, so that what is stamped is
+    // the request span - not whatever inner span a transaction runner or a
+    // database hook may make active later - and captured once, because a
+    // fan-out of fifty replays has one cause, not fifty. Null when tracing is
+    // off or nothing is active; see currentTraceparent.
+    const traceContext = currentTraceparent();
+
     return this.transactions.run(context, async (scope, audit) => {
       const { originals, action, resourceType, resourceId, metadata } = await plan(scope);
 
@@ -108,7 +118,7 @@ export class DeliveryReplayService {
       const now = new Date();
       const created: Delivery[] = [];
       for (const original of originals) {
-        created.push(await this.insertReplay(scope, context, original, now));
+        created.push(await this.insertReplay(scope, context, original, now, traceContext));
       }
 
       await audit.record({
@@ -148,12 +158,20 @@ export class DeliveryReplayService {
    * about a resource the operator never mentioned. The provenance that matters
    * is `replay_of_delivery_id`, which points at a row that can never be deleted
    * (`deliveries.event_id`/`endpoint_id` are ON DELETE RESTRICT).
+   *
+   * `traceContext` is the OPERATOR'S, never the original's. The original's
+   * `trace_context` names the router span that fanned it out, weeks ago on a
+   * request that has nothing to do with this one; copying it would attribute
+   * this replay to that request. A replay is new work with a new cause
+   * (migration 20260910000000 makes the same argument for why `events` carries
+   * no trace context at all), and the cause is the request being handled now.
    */
   private async insertReplay(
     scope: TenantScope,
     context: RequestContext,
     original: Delivery,
     now: Date,
+    traceContext: string | null,
   ): Promise<Delivery> {
     const subscriptionId =
       original.subscriptionId && (await scope.subscriptions.findById(original.subscriptionId))
@@ -184,6 +202,7 @@ export class DeliveryReplayService {
       replayOfDeliveryId: original.id,
       replayedBy: context.user.userId,
       lastError: null,
+      traceContext,
       createdAt: now,
       updatedAt: now,
     });

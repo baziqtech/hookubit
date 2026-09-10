@@ -48,6 +48,9 @@ import { installRichTables } from './rich-fake';
  * A2's and B's were sitting in the same table and did not come back.
  */
 export const LEDGER = {
+  /** The trace the worker kept for attempt 1 of `deliveryOrderA1`. 32 hex. */
+  attemptA1TraceId: '4bf92f3577b34da6a3ce929d0e0e4736',
+
   // --- endpoints (project A1) ---------------------------------------------
   endpointA1: IDS.endpointA1,
   endpointFinance: 'ep_a_finance',
@@ -158,7 +161,9 @@ function delivery(db: FakeTenantPrisma, id: string, extra: Row): void {
     status: 'pending',
     attemptCount: 0,
     maxAttempts: 8,
-    nextAttemptAt: null,
+    // NOT NULL in the schema (20260911000000) and defaulted to the insert
+    // time; a seed that left it null would model a row PostgreSQL rejects.
+    nextAttemptAt: T.order,
     lastAttemptAt: null,
     completedAt: null,
     orderingKey: null,
@@ -191,6 +196,9 @@ function attempt(db: FakeTenantPrisma, id: string, deliveryId: string, number: n
     errorMessage: 'upstream said no',
     durationMs: 400,
     workerId: 'worker-1',
+    // The worker writes this only for a SAMPLED span; the common attempt has
+    // none, and the DTO must say null rather than invent one.
+    traceId: null,
     createdAt: new Date(T.order.getTime() + number * 1000 + 400),
     ...extra,
   });
@@ -236,7 +244,7 @@ function backfill(db: FakeTenantPrisma): void {
       subscriptionId: null,
       attemptCount: 0,
       maxAttempts: 8,
-      nextAttemptAt: null,
+      nextAttemptAt: T.order,
       lastAttemptAt: null,
       completedAt: null,
       orderingKey: null,
@@ -411,6 +419,8 @@ export function seedLedger(db: FakeTenantPrisma = seedWorld()): FakeTenantPrisma
     errorCode: 'http_503',
     errorMessage: 'service unavailable',
     durationMs: 1_204,
+    // This attempt's span was sampled, so the worker kept its trace id.
+    traceId: LEDGER.attemptA1TraceId,
   });
   attempt(db, 'att_a1_2', LEDGER.deliveryOrderA1, 2, {
     status: 'success',

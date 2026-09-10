@@ -409,11 +409,16 @@ LIMIT $4`
 // because replay legitimately creates a second row for the same
 // (event_id, endpoint_id) pair, carrying replay_of_delivery_id.
 //
-// next_attempt_at is set to now() rather than left NULL. The delivery queue
-// orders by `next_attempt_at NULLS FIRST`, so a NULL here would sort every
-// brand-new delivery ahead of every due retry: under sustained ingest a retry
-// starves until it hits max_retry_duration and is reported to the customer as
-// their endpoint failing when the platform never re-attempted it.
+// next_attempt_at is written explicitly as now(). The column is NOT NULL with
+// that same default (20260911000000), and the queue orders by it, so a brand-new
+// delivery is due the moment it exists. It is spelled out rather than left to
+// the default so the value's meaning is in this statement, next to the claim
+// predicate it is compared against - and because, while the column was nullable
+// and the claim ordered NULLS FIRST, a NULL here sorted every brand-new delivery
+// ahead of every due retry: under sustained ingest a retry starved until it hit
+// max_retry_duration and was reported to the customer as their endpoint failing
+// when the platform never re-attempted it. The constraint rejects that write
+// now; this comment is why it exists.
 //
 // organization_id and project_id are copied from the EVENT, which is the tenant
 // the event was accepted under. They are what the control plane's listing

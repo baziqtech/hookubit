@@ -440,17 +440,16 @@ func (s *PostgresStore) LoadBudget(ctx context.Context, deliveryID string) (Budg
 // considers status IN ('pending','scheduled','queued','retrying','processing'),
 // so for a terminal row the column carries no scheduling meaning at all.
 //
-// It is written as now() rather than left NULL because the column is on its way
-// to NOT NULL (see HANDOFF.md). The claim query orders by
-// `next_attempt_at NULLS FIRST`, so NULL is not a neutral value - it is the
-// FRONT of the queue. A nullable column means any single write of NULL silently
-// promotes that row ahead of retries that are actually due; making it NOT NULL
-// turns that latent ordering hazard into a constraint violation at the moment
-// the mistake is made, and this ELSE branch is the one write that stood in the
-// way. now() is the harmless representation: it sorts the completed row among
-// the other work finishing at the same instant, in an ordering nothing consults
-// for it, and it needs no prior value - so a legacy row that is still NULL is
-// repaired the moment it goes terminal.
+// It is written as now() rather than left NULL because the column is NOT NULL
+// (20260911000000_next_attempt_at_not_null): a NULL here is a constraint
+// violation that fails the transition. The constraint exists because, while the
+// column was nullable and the claim ordered NULLS FIRST, NULL was not a neutral
+// value - it was the FRONT of the queue, and any single write of NULL silently
+// promoted that row ahead of retries that were actually due. This ELSE branch
+// was the one write that stood in the constraint's way. now() is the harmless
+// representation: it sorts the completed row among the other work finishing at
+// the same instant, in an ordering nothing consults for it, and it needs no
+// prior value.
 const advanceSQL = `
 UPDATE deliveries
 SET status          = $3::text::"DeliveryStatus",

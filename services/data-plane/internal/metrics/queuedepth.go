@@ -49,25 +49,24 @@ const (
 // disagrees with the claim query is a graph that says "no work" while workers
 // idle next to a full table.
 //
-// The status list, the next_attempt_at NULL handling and the locked_until
+// The status list, the next_attempt_at comparison and the locked_until
 // comparison are all mirrored from internal/queue/postgres.go (claimStatuses,
-// readyPredicate). `processing` is in the list on purpose: a row whose lease
+// readyPredicate). next_attempt_at is NOT NULL, so there is no NULL case to
+// mirror. `processing` is in the list on purpose: a row whose lease
 // has expired is claimable again, and it must be counted as ready, not as
 // in-flight, or a fleet of dead workers looks like a busy one.
 //
 // COST. This is one aggregate over the non-terminal rows. It is affordable at
 // the default interval and it is not free: at tens of millions of live rows it
-// wants a partial index -
-//
-//	CREATE INDEX CONCURRENTLY deliveries_ready_idx ON deliveries (next_attempt_at, created_at)
-//	  WHERE status IN ('pending','scheduled','queued','retrying','processing');
-//
-// which the claim path wants anyway (ADR-0007). The DDL belongs to the control
-// plane, which owns every migration (ADR-0002); this file must never create it.
+// wants a partial index over the same status list, and it has one -
+// deliveries_ready_fifo_idx, (next_attempt_at, created_at, id) WHERE status IN
+// the five states above (20260907000000, rebuilt by 20260911000000). The DDL
+// belongs to the control plane, which owns every migration (ADR-0002); this
+// file must never create it.
 const queueDepthSQL = `
 SELECT CASE
          WHEN locked_until IS NOT NULL AND locked_until >= now() THEN 'in_flight'
-         WHEN next_attempt_at IS NULL OR next_attempt_at <= now() THEN 'ready'
+         WHEN next_attempt_at <= now() THEN 'ready'
          ELSE 'delayed'
        END AS state,
        count(*)::bigint

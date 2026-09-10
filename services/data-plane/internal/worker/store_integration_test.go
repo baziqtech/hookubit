@@ -428,14 +428,15 @@ func TestStoreCompleteMarksTerminalStates(t *testing.T) {
 			t.Fatalf("%s is terminal and must stamp completed_at", state)
 		}
 		// A terminal delivery still carries a next_attempt_at, and that is
-		// deliberate - see advanceSQL. The column is on its way to NOT NULL,
-		// and NULL is not a neutral value in a claim ordered by
-		// `next_attempt_at NULLS FIRST`: it is the front of the queue. Nothing
-		// re-attempts this row (its status is outside the ready set, which
+		// deliberate - see advanceSQL. The column is NOT NULL, and NULL was
+		// never a neutral value here: while it was allowed, the claim's NULLS
+		// FIRST ordering put it at the front of the queue. Nothing re-attempts
+		// this row (its status is outside the ready set, which
 		// TestTerminalDeliveriesAreNeverClaimed in internal/queue proves), so
-		// the value is inert; what it must never be is absent.
+		// the value is inert; what it must never be is absent - and the
+		// database now says so, not just this test.
 		if nextAttempt == nil {
-			t.Fatalf("%s left next_attempt_at NULL; the pending NOT NULL constraint would reject this transition", state)
+			t.Fatalf("%s left next_attempt_at NULL; the NOT NULL constraint would have rejected this transition", state)
 		}
 		if nextAttempt.After(time.Now().Add(time.Second)) {
 			t.Fatalf("%s wrote a FUTURE next_attempt_at (%v); a terminal row must not look scheduled to an operator", state, nextAttempt)
@@ -443,8 +444,11 @@ func TestStoreCompleteMarksTerminalStates(t *testing.T) {
 	}
 
 	// The constraint is table-wide, not per-transition: assert it over every
-	// row this fixture touched, so a future write site that reintroduces a NULL
-	// fails here rather than during the migration.
+	// row this fixture touched. With NOT NULL applied a NULL cannot be written
+	// at all, so a non-zero count here means the database under test is
+	// missing 20260911000000 - which is worth failing loudly on, because every
+	// other assertion in this package would then be running against the wrong
+	// schema.
 	var nulls int
 	if err := pool.QueryRow(ctx,
 		`SELECT count(*) FROM deliveries WHERE organization_id = $1 AND next_attempt_at IS NULL`, f.orgID).
@@ -452,7 +456,7 @@ func TestStoreCompleteMarksTerminalStates(t *testing.T) {
 		t.Fatalf("count null next_attempt_at: %v", err)
 	}
 	if nulls != 0 {
-		t.Fatalf("%d deliveries have a NULL next_attempt_at; ALTER COLUMN ... SET NOT NULL would fail", nulls)
+		t.Fatalf("%d deliveries have a NULL next_attempt_at; the column is NOT NULL, so this database is missing 20260911000000_next_attempt_at_not_null", nulls)
 	}
 }
 

@@ -2286,7 +2286,7 @@ column goes NOT NULL.
 
 ### Deliberately NOT done
 
-1. **`deliveries.next_attempt_at` NOT NULL** (ADR-0007, data-plane item 7).
+1. **`deliveries.next_attempt_at` NOT NULL** (ADR-0007, data-plane item 7). **Since done** — `20260911000000_next_attempt_at_not_null`, with both ready-set indexes rebuilt without `NULLS FIRST`. The reasoning below is kept as the record of why it had to wait for the data-plane fix.
    **It would break the data plane on the first terminal delivery.**
    `internal/worker/store.go` `advanceSQL` writes
    `next_attempt_at = CASE WHEN $5::bool THEN now() + $6::interval ELSE NULL END`

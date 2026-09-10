@@ -18,8 +18,8 @@ import (
 func assertRetryScheduledByPolicy(t *testing.T, state deliveryState, serverNow time.Time) {
 	t.Helper()
 	if state.NextAttemptAt == nil {
-		t.Fatal("next_attempt_at is null on a retrying delivery: the claim orders by it NULLS FIRST, " +
-			"so a null here promotes this row ahead of every retry that is genuinely due")
+		t.Fatal("next_attempt_at is null on a retrying delivery: the column is NOT NULL (20260911000000), " +
+			"so either this database is missing that migration or the retry was never scheduled")
 	}
 	delay := state.NextAttemptAt.Sub(serverNow)
 	if delay < retryDelay-10*time.Second || delay > retryDelay+10*time.Second {

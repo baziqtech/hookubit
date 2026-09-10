@@ -341,10 +341,11 @@ func TestPostgresRouteMaterialisesFanOut(t *testing.T) {
 		t.Fatalf("max_attempts = %d with no policy, want the built-in default %d",
 			b.MaxAttempts, retry.DefaultPolicy().MaxAttempts)
 	}
-	// next_attempt_at MUST be set. The claim query orders by
-	// `next_attempt_at NULLS FIRST`, so a NULL here sorts every brand-new
-	// delivery ahead of every due retry and starves retries under sustained
-	// ingest.
+	// next_attempt_at MUST be set. The column is NOT NULL and the claim orders
+	// by it; while it was nullable, a NULL here sorted every brand-new delivery
+	// ahead of every due retry and starved retries under sustained ingest. The
+	// database rejects that write now, so a nil here means the scan is wrong or
+	// the database under test is missing 20260911000000.
 	for _, d := range deliveries {
 		if d.NextAttemptAt == nil {
 			t.Fatalf("delivery %s has a NULL next_attempt_at; it would sort ahead of every due retry", d.ID)

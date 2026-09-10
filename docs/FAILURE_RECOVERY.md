@@ -1732,9 +1732,10 @@ reading once because each one would have sent an operator the wrong way:
   (`internal/worker/store.go:361`). What blocks the migration is the **existing
   rows**, and the note now names the backfill and the `NOT VALID` +
   `VALIDATE CONSTRAINT` sequence that avoids locking the largest table in the
-  system for a full scan. Why it matters at all: the claim orders by
-  `next_attempt_at NULLS FIRST`, so NULL is not a neutral value — it is the front
-  of the queue.
+  system for a full scan. Why it mattered at all: the claim used to order by
+  `next_attempt_at NULLS FIRST`, so NULL was not a neutral value — it was the
+  front of the queue. The column is NOT NULL since `20260911000000` and the
+  `NULLS FIRST` is gone.
 - `OUTBOX_BATCH_SIZE` is gone. It was loaded and read by nothing;
   `runRouter` uses `ROUTER_BATCH_SIZE` (`cmd/webhookd/roles.go:85`). The Helm
   values file records the removal at

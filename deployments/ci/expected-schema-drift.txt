@@ -66,11 +66,19 @@ retry_policies_one_default_per_project
 # the claim reclaims expired leases. Narrow the predicate and a dead worker's
 # deliveries fall outside the index - stuck in 'processing' forever, never
 # retried, never exhausted, findable only by sequential scan.
+#
+# REBUILT by 20260911000000_next_attempt_at_not_null under the SAME NAME as
+# (organization_id, project_id, next_attempt_at, created_at, id): no NULLS
+# FIRST, because the claim's ORDER BY dropped it once the column became NOT
+# NULL and the planner will not use a NULLS FIRST index for a NULLS LAST order;
+# and `id` appended so the claim's tiebreaker is served by the index rather
+# than by an Incremental Sort over each fan-out's tie group. Same predicate.
 deliveries_ready_idx
 
-# Same ready set, leading with (next_attempt_at, created_at) instead of the
+# Same ready set, leading with (next_attempt_at, created_at, id) instead of the
 # tenant pair, because CLAIM_STRATEGY=fifo - the SHIPPING DEFAULT - orders
 # globally and cannot use an index that leads with organization_id/project_id.
+# Rebuilt by 20260911000000 exactly as the one above, for the same reasons.
 deliveries_ready_fifo_idx
 
 # Partial index over the outbox ready set (WHERE status IN ('pending',

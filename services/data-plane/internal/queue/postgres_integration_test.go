@@ -3,6 +3,8 @@ package queue
 import (
 	"context"
 	"errors"
+	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -334,10 +336,10 @@ func TestTenantFairClaimIsNotSelfThrottlingWithOneTenant(t *testing.T) {
 }
 
 // TestTerminalDeliveriesAreNeverClaimed is the safety proof behind the choice
-// internal/worker's advanceSQL makes: a terminal delivery now keeps a non-NULL
-// next_attempt_at (now()) instead of writing NULL, so that the column can
-// become NOT NULL and a stray NULL can no longer jump the `NULLS FIRST`
-// ordering.
+// internal/worker's advanceSQL makes: a terminal delivery keeps a non-NULL
+// next_attempt_at (now()) instead of writing NULL, which is what let the column
+// become NOT NULL (20260911000000) so a stray NULL can no longer jump the
+// queue.
 //
 // The obvious worry about that choice is "does a succeeded delivery with a
 // next_attempt_at in the past get delivered a second time?". It cannot: status
@@ -379,4 +381,142 @@ func TestTerminalDeliveriesAreNeverClaimed(t *testing.T) {
 			t.Fatalf("reset due delivery: %v", err)
 		}
 	}
+}
+
+// The three claim-path statements MUST be able to use the partial ready-set
+// indexes, and the two claims must use them WITHOUT a sort node.
+//
+// 20260911000000_next_attempt_at_not_null rebuilt deliveries_ready_idx and
+// deliveries_ready_fifo_idx as (... next_attempt_at, created_at, id) with no
+// NULLS FIRST, to match the ORDER BY in claimFIFOSQL / claimTenantFairSQL
+// column for column. The planner matches an index to an ORDER BY on the nulls
+// direction as well as the columns and does NOT reason from the column being
+// NOT NULL, so if either side drifts - NULLS FIRST creeps back into an ORDER
+// BY, the id tiebreaker is dropped from an index, the status list in the
+// predicate stops matching claimStatuses - the claim silently degrades to a
+// Sort over the whole ready set on every poll of every worker, or to a
+// sequential scan of the largest table in the system, and no functional test
+// notices because the rows still come back.
+//
+// The question is asked under REAL statistics, not on a two-row table. With
+// nothing analysed every access path costs the same and the planner breaks the
+// tie arbitrarily - measured: a Bitmap scan (which loses the index order, so a
+// Sort follows) for the FIFO claim, and Prisma's (project_id, created_at) index
+// plus a Sort for the tenant-fair one - which would make this test assert on a
+// coin toss. So the fixture inserts a few hundred ready rows and ANALYZEs
+// inside the same transaction as the EXPLAIN; ANALYZE is transactional, so the
+// rollback takes the rows and the statistics with it and no other test in this
+// package sees either. enable_seqscan is off for the plan only, as
+// internal/retention does for its own indexes. Plain EXPLAIN, never EXPLAIN
+// ANALYZE: two of these are UPDATEs.
+func TestClaimStatementsCanUseTheReadySetIndexes(t *testing.T) {
+	pool := requirePool(t)
+	f := seed(t, pool, 2)
+
+	for _, tc := range []struct {
+		name   string
+		sql    string
+		args   []any
+		index  string
+		noSort bool
+	}{
+		{
+			name:   "fifo claim",
+			sql:    claimFIFOSQL,
+			args:   []any{"wrk_explain", intervalOf(time.Minute), 10},
+			index:  "deliveries_ready_fifo_idx",
+			noSort: true,
+		},
+		{
+			name: "tenant-fair claim",
+			sql:  claimTenantFairSQL,
+			args: []any{"wrk_explain", intervalOf(time.Minute),
+				[]string{f.orgID, f.orgID}, f.projects, 5, 10},
+			index:  "deliveries_ready_idx",
+			noSort: true,
+		},
+		{
+			// The loose index scan descends deliveries_ready_idx once per
+			// tenant. Its ORDER BY is the index's leading pair, so it does not
+			// sort either, but the assertion that matters is the descent.
+			name:  "tenant snapshot",
+			sql:   tenantSnapshotSQL,
+			args:  []any{"", "", 40},
+			index: "deliveries_ready_idx",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			plan := f.explainOverReadyBacklog(t, tc.sql, tc.args...)
+			if !strings.Contains(plan, tc.index) {
+				t.Fatalf("the planner did not reach for %s. Plan:\n%s", tc.index, plan)
+			}
+			if tc.noSort && strings.Contains(plan, "Sort") {
+				t.Fatalf("the plan sorts, so %s does not deliver the claim's ORDER BY and every poll "+
+					"re-sorts the whole ready set. Plan:\n%s", tc.index, plan)
+			}
+		})
+	}
+}
+
+// explainOverReadyBacklog plans sql against a backlog of 200 ready deliveries
+// per project, with fresh statistics and sequential scans disabled, and
+// returns the plan text. Everything happens in one transaction that is rolled
+// back: the rows, the ANALYZE, and the SET LOCAL - which outside a transaction
+// is a WARNING pgx does not surface, so the setting would silently not apply.
+func (f *fixture) explainOverReadyBacklog(t *testing.T, sql string, args ...any) string {
+	t.Helper()
+	ctx := context.Background()
+	tx, err := f.pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	const perProject = 200
+	for _, project := range f.projects {
+		// One event per delivery, as newEvent explains: the partial unique index
+		// on (event_id, endpoint_id) is the router's ON CONFLICT arbiter.
+		prefix := ids.New(ids.Event)
+		if _, err := tx.Exec(ctx,
+			`INSERT INTO events (id, organization_id, project_id, event_type, payload_size, payload_hash, status, created_at)
+			 SELECT $1 || g, $2, $3, 'queue.test', 2, repeat('0', 64), 'received', now()
+			   FROM generate_series(1, $4::int) AS g`,
+			prefix+"_", f.orgID, project, perProject); err != nil {
+			t.Fatalf("seed events: %v", err)
+		}
+		if _, err := tx.Exec(ctx,
+			`INSERT INTO deliveries
+			   (id, event_id, endpoint_id, organization_id, project_id, status,
+			    attempt_count, max_attempts, next_attempt_at, created_at, updated_at)
+			 SELECT $1 || g, $2 || g, $3, $4, $5, 'pending', 0, 5,
+			        now() - interval '1 minute', now(), now()
+			   FROM generate_series(1, $6::int) AS g`,
+			ids.New(ids.Delivery)+"_", prefix+"_", f.endpoint, f.orgID, project, perProject); err != nil {
+			t.Fatalf("seed deliveries: %v", err)
+		}
+	}
+	if _, err := tx.Exec(ctx, `ANALYZE deliveries`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tx.Exec(ctx, `SET LOCAL enable_seqscan = off`); err != nil {
+		t.Fatal(err)
+	}
+
+	rows, err := tx.Query(ctx, "EXPLAIN "+sql, args...)
+	if err != nil {
+		t.Fatalf("explain: %v", err)
+	}
+	defer rows.Close()
+	var plan strings.Builder
+	for rows.Next() {
+		var line string
+		if err := rows.Scan(&line); err != nil {
+			t.Fatal(err)
+		}
+		fmt.Fprintln(&plan, line)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	return plan.String()
 }

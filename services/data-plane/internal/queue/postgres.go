@@ -35,13 +35,15 @@ const claimStatuses = `('pending', 'scheduled', 'queued', 'retrying', 'processin
 
 // readyPredicate is the shared definition of "this row wants a worker".
 //
-// The `next_attempt_at IS NULL` half is a workaround for a nullable column
-// whose null means "due immediately"; ADR-0007 asks the control plane to make
-// it NOT NULL, after which this collapses to a plain range predicate. See
-// HANDOFF.md.
+// next_attempt_at is NOT NULL (20260911000000_next_attempt_at_not_null), so
+// this is a plain range predicate. It used to carry `next_attempt_at IS NULL
+// OR`, a workaround for a nullable column whose NULL meant "due immediately"
+// and - under the NULLS FIRST ordering the claim then used - sorted ahead of
+// every retry that was actually due. The constraint rejects that write at the
+// source now, so nothing here has to tolerate it.
 const readyPredicate = `
       status IN ` + claimStatuses + `
-      AND (next_attempt_at IS NULL OR next_attempt_at <= now())
+      AND next_attempt_at <= now()
       AND (locked_until IS NULL OR locked_until < now())`
 
 // claimedColumns is the RETURNING list shared by both claim strategies.
@@ -52,9 +54,9 @@ const readyPredicate = `
 // not happened yet.
 const claimedColumns = `
           d.id, d.event_id, d.endpoint_id, d.organization_id, d.project_id,
-          d.attempt_count, COALESCE(d.next_attempt_at, d.created_at),
+          d.attempt_count, d.next_attempt_at,
           COALESCE(d.ordering_key, ''), d.locked_until,
-          GREATEST(EXTRACT(EPOCH FROM (now() - COALESCE(d.next_attempt_at, d.created_at))), 0)::double precision,
+          GREATEST(EXTRACT(EPOCH FROM (now() - d.next_attempt_at)), 0)::double precision,
           COALESCE(d.trace_context, '')`
 
 // claimFIFOSQL leases the globally oldest ready deliveries.
@@ -87,12 +89,19 @@ const claimedColumns = `
 // UPDATE joins to it, so the batch is bounded by construction, whatever plan
 // the join takes. The id tiebreaker makes the order deterministic among rows
 // that tie, which a fan-out batch always does.
+//
+// The ORDER BY is, column for column, the key of deliveries_ready_fifo_idx
+// (next_attempt_at, created_at, id; no NULLS FIRST since 20260911000000), so
+// the index delivers the claim's order and the plan carries no sort node.
+// TestClaimStatementsCanUseTheReadySetIndexes pins that; change one side
+// without the other and the planner silently sorts the whole ready set on
+// every poll.
 const claimFIFOSQL = `
 WITH picked AS MATERIALIZED (
     SELECT id AS picked_id
     FROM deliveries
     WHERE ` + readyPredicate + `
-    ORDER BY next_attempt_at NULLS FIRST, created_at, id
+    ORDER BY next_attempt_at, created_at, id
     FOR UPDATE SKIP LOCKED
     LIMIT $3
 )
@@ -126,9 +135,9 @@ WITH picked AS MATERIALIZED (
         WHERE dd.organization_id = t.organization_id
           AND dd.project_id      = t.project_id
           AND dd.status IN ` + claimStatuses + `
-          AND (dd.next_attempt_at IS NULL OR dd.next_attempt_at <= now())
+          AND dd.next_attempt_at <= now()
           AND (dd.locked_until IS NULL OR dd.locked_until < now())
-        ORDER BY dd.next_attempt_at NULLS FIRST, dd.created_at, dd.id
+        ORDER BY dd.next_attempt_at, dd.created_at, dd.id
         LIMIT $5
         FOR UPDATE SKIP LOCKED
     ) c
@@ -228,9 +237,10 @@ type tenant struct {
 // NewPostgresQueue builds a queue using the given claim strategy.
 //
 // The default is StrategyFIFO, deliberately inverting the default stated in
-// ADR-0007. Nothing has been measured yet, the prerequisite index and NOT NULL
-// migration have not been applied, and ARCHITECTURE.md's own rule is to prefer
-// the simplest production-grade option. StrategyTenantFair is fully implemented
+// ADR-0007. Nothing has been measured yet, and ARCHITECTURE.md's own rule is to
+// prefer the simplest production-grade option. (The prerequisite index and the
+// NOT NULL migration ADR-0007 asked for are both applied now, so neither is a
+// reason to hold the default any more; the missing measurement is.) StrategyTenantFair is fully implemented
 // and opt-in via CLAIM_STRATEGY; it becomes the default when
 // queue_head_of_line_delay_seconds actually shows starvation. See HANDOFF.md.
 func NewPostgresQueue(pool *pgxpool.Pool, strategy Strategy) *PostgresQueue {

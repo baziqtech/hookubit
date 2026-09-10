@@ -70,7 +70,7 @@ how much they will hurt if they are missing.
      delivery read this column and nothing else.
    - `payload` - the jsonb projection, for filtering, search and the operator
      UI. Never sign it, never deliver it.
-   - `payload_hash` - SHA-256 of `payload_raw`, so the invariant is checkable:
+      - `payload_hash` - SHA-256 of `payload_raw`, so the invariant is checkable:
      `HashPayload(payload_raw) == payload_hash`. That is asserted against a
      real database in `TestPostgresCreateEventPreservesRawPayloadBytes`
      (`internal/ingest/store_postgres_test.go`, skipped without
@@ -110,109 +110,89 @@ how much they will hurt if they are missing.
    ready set rather than a redundant one - which is why its doc comment no
    longer calls it cosmetic.
 
-7. **`deliveries.next_attempt_at` NOT NULL** (ADR-0007). **THE GO SIDE IS NOW
-   READY. This is unblocked - please apply it.**
+   *Landed* as `deliveries_ready_idx` in `20260907000000` with exactly that
+   predicate, and *rebuilt* under the same name by `20260911000000` (item 7)
+   as `(organization_id, project_id, next_attempt_at, created_at, id)` - no
+   `NULLS FIRST`, `id` appended - once the column became NOT NULL.
 
-   *Why it matters, restated, because "make a column NOT NULL" reads like
-   tidying and is not.* The claim orders by `next_attempt_at NULLS FIRST`, so
-   NULL is not a neutral value: it sorts **ahead of every due retry**. While the
-   column is nullable, one code path writing a NULL silently promotes that row
-   to the front of the queue, ahead of work that is actually due, and nothing
-   fails - the symptom is a retry starving until it hits `max_retry_duration`
-   and is reported to the customer as their endpoint failing when the platform
-   never re-attempted it. NOT NULL converts that latent ordering hazard into a
-   constraint violation at the moment the mistake is made.
+7. **`deliveries.next_attempt_at` NOT NULL** (ADR-0007) — **RESOLVED** by
+   `20260911000000_next_attempt_at_not_null`, applied to `hookubit` (10 legacy
+   NULL rows backfilled to `created_at`, 0 remain) and `hookubit_test`.
 
-   *What blocked it and what changed.* The consolidated migration deliberately
-   skipped this because `advanceSQL` in `internal/worker/store.go` wrote
-   `next_attempt_at = CASE WHEN $5 THEN now() + $6 ELSE NULL END` - a NULL on
-   **every terminal transition**, so the constraint would have rejected every
-   successful delivery. That `ELSE` branch now writes `now()`.
+   *Why it mattered, kept for the record because "make a column NOT NULL"
+   reads like tidying and was not.* The claim used to order by
+   `next_attempt_at NULLS FIRST`, so NULL was not a neutral value: it sorted
+   **ahead of every due retry**. One code path writing a NULL silently promoted
+   that row to the front of the queue and nothing failed - the symptom was a
+   retry starving until `max_retry_duration` and being reported to the
+   customer as their endpoint failing when the platform never re-attempted it.
+   NOT NULL turns that into a constraint violation at the moment the mistake is
+   made.
 
-   A terminal delivery therefore carries a `next_attempt_at`, and somebody will
-   ask why. It has no scheduling meaning: `claimStatuses` in
-   `internal/queue/postgres.go` is
-   `('pending','scheduled','queued','retrying','processing')`, so status alone
-   keeps a terminal row out of the ready set whatever its timestamp says.
-   `now()` was chosen over carrying the previous value forward because it needs
-   no prior value - a legacy NULL row repairs itself the moment it goes
-   terminal - and it sorts the completed row harmlessly among other work
-   finishing at the same instant, in an ordering nothing consults for it.
+   *What the migration does.* Backfill `next_attempt_at = created_at` for
+   legacy NULLs; `ADD CONSTRAINT ... CHECK (next_attempt_at IS NOT NULL) NOT
+   VALID`, `VALIDATE`, `SET NOT NULL`, drop the check; `SET DEFAULT
+   CURRENT_TIMESTAMP` (now() under the spelling Prisma emits for
+   `@default(now())`, so the default is not drift). Every step is idempotent
+   and the NOT NULL block is skipped when the column already is, so the
+   header's hand-run recipe for a large installation (separate transactions,
+   `CONCURRENTLY` index builds) leaves the migration a no-op. Prisma side:
+   `nextAttemptAt DateTime @default(now())`.
 
-   Every write site in the data plane has been checked: `advanceSQL` (fixed),
-   `insertDeliveriesSQL` in `internal/router/store.go` (already `now()`), and
-   `releaseSQL`/`reclaimSQL`/`renewSQL` in `internal/queue/postgres.go` (do not
-   touch the column at all). `advanceSQL` is the only path to a terminal state -
-   `Defer` is always `scheduled`.
+   *It also rebuilt both ready-set indexes* (same names, same predicate) as
+   `(organization_id, project_id, next_attempt_at, created_at, id)` and
+   `(next_attempt_at, created_at, id)`: no `NULLS FIRST`, because the claim's
+   ORDER BY dropped it and the planner matches an index to an ORDER BY on the
+   nulls direction - measured before the rebuild, a plain `ORDER BY
+   next_attempt_at, created_at, id` against the NULLS FIRST index planned as
+   Index Scan -> **Sort** -> LockRows -> Limit; and `id` appended so the
+   tiebreaker the claim statements gained the same day is served by the index
+   instead of an Incremental Sort that has to read a whole fan-out's tie group
+   before emitting the first row. `TestClaimStatementsCanUseTheReadySetIndexes`
+   in `internal/queue` pins all three claim-path statements to their index with
+   no sort node, under real statistics (400 ready rows, ANALYZEd inside the
+   rolled-back EXPLAIN transaction - on a two-row table the costs tie and the
+   planner picks a Bitmap scan or Prisma's `(project_id, created_at)` index by
+   coin toss). `deployments/ci/expected-schema-drift.txt` still holds.
 
-   Covered by two integration tests, both gated on `DATABASE_URL` and both run
-   green against PostgreSQL 16.2:
-   `TestStoreCompleteMarksTerminalStates` (`internal/worker`) asserts
-   `next_attempt_at IS NOT NULL` after each of `succeeded`, `failed`,
-   `exhausted`, `cancelled`, that it is not in the future, and that the fixture
-   leaves no NULL row behind; `TestTerminalDeliveriesAreNeverClaimed`
-   (`internal/queue`) seeds terminal rows an hour overdue and proves neither
-   claim strategy picks them up.
+   *The Go side collapsed with it.* `readyPredicate` is a plain range
+   predicate, `claimedColumns` reads `next_attempt_at` directly, every ORDER BY
+   lost `NULLS FIRST`, and `queueDepthSQL` in `internal/metrics` matches. The
+   terminal-transition write in `advanceSQL` still writes `now()` - a terminal
+   row carries a `next_attempt_at` with no scheduling meaning, because
+   `claimStatuses` keeps it out of the ready set whatever the timestamp says -
+   and `TestStoreCompleteMarksTerminalStates` / `TestTerminalDeliveriesAreNeverClaimed`
+   still prove both halves.
 
-   **The migration wanted:**
-
-   ```sql
-   -- 1. Backfill rows written before this deploy. Bounded by history, not by
-   --    backlog; no new NULLs can appear once the binary below is live.
-   UPDATE deliveries SET next_attempt_at = created_at WHERE next_attempt_at IS NULL;
-
-   -- 2/3. Prove it, then promote it, without an ACCESS EXCLUSIVE full scan:
-   --      PostgreSQL 12+ uses a VALIDATED check to skip the scan that
-   --      SET NOT NULL would otherwise do while holding that lock.
-   ALTER TABLE deliveries
-       ADD CONSTRAINT deliveries_next_attempt_at_not_null
-       CHECK (next_attempt_at IS NOT NULL) NOT VALID;
-   ALTER TABLE deliveries VALIDATE CONSTRAINT deliveries_next_attempt_at_not_null;
-   ALTER TABLE deliveries ALTER COLUMN next_attempt_at SET NOT NULL;
-   ALTER TABLE deliveries DROP CONSTRAINT deliveries_next_attempt_at_not_null;
-
-   -- 4. So a future INSERT cannot omit it. ADR-0007 says "defaulted to
-   --    created_at"; a column default cannot reference another column, and
-   --    now() is that value for any row being inserted.
-   ALTER TABLE deliveries ALTER COLUMN next_attempt_at SET DEFAULT now();
-   ```
-
-   Prisma side: `nextAttemptAt DateTime @map("next_attempt_at")` - drop the `?`.
-
-   **DEPLOY ORDERING - this one is not interchangeable.** The data-plane binary
-   containing the `advanceSQL` fix **must be live everywhere before the
+   **DEPLOY ORDERING - carried forward because it is not interchangeable and
+   nothing is deployed anywhere yet.** The data-plane binary whose `advanceSQL`
+   writes `now()` on the terminal branch **must be live everywhere before the
    constraint is applied**. Apply the constraint first and every terminal
    transition still in flight from an older worker - including successful
    deliveries - fails its UPDATE, the transaction rolls back, the
    `delivery_attempts` row goes with it, and the delivery stays `processing`
    until its lease expires and it is retried against an endpoint that has
-   already received it. So:
+   already received it. So, in the first environment where the planes roll
+   separately:
 
    1. Deploy the data plane (workers, scheduler, router) at this revision.
    2. Confirm no older worker is still running.
-   3. Run the backfill (step 1 above) - it is idempotent, run it as many times
-      as you like.
-   4. Apply steps 2-4.
+   3. Run the backfill - idempotent, run it as often as you like.
+   4. Apply the rest of the migration.
 
-   Rolling back the binary after the constraint is applied has the same failure
-   mode, so the constraint must be dropped before any rollback past this
-   revision.
+   Rolling the binary back after the constraint is applied has the same
+   failure mode, so `ALTER COLUMN next_attempt_at DROP NOT NULL` must precede
+   any rollback past this revision. The migration's header says all of this
+   too.
 
-   **Two follow-ups this unblocks, neither required for the migration:**
-
-   - `readyPredicate` in `internal/queue/postgres.go` still carries
-     `(next_attempt_at IS NULL OR next_attempt_at <= now())`, `claimedColumns`
-     still carries `COALESCE(next_attempt_at, created_at)`, and every ORDER BY
-     still carries `NULLS FIRST`. All of that is dead weight once the column is
-     NOT NULL and can be collapsed in a follow-up - it is left in place now
-     because it is what makes the deploy ordering above survive legacy rows.
-   - **Operator surface, for whoever owns the dashboard.** The "Next attempt"
-     cell in `DeliveryDetailPage.tsx` and `EventDetailPage.tsx` renders
-     `next_attempt_at ? formatRelativeTime(...) : '—'` and is **not gated on
-     status**, so a succeeded delivery will now read "2 minutes ago" where it
-     used to read "—". That is misleading in exactly the way ARCHITECTURE.md
-     cares about. Gate the field on a non-terminal status. Nothing in the API
-     contract changes: `next_attempt_at` is already typed `string | null`.
+   **Done on the dashboard side** (was: still open): the "Next attempt" cell in
+   `DeliveryDetailPage.tsx` and `EventDetailPage.tsx` used to render
+   `next_attempt_at ? formatRelativeTime(...) : '—'` ungated on status, so a
+   succeeded delivery would have read "2 minutes ago" once the column became
+   NOT NULL. Both now gate on a non-terminal status
+   (`features/deliveries/next-attempt.ts`); a terminal delivery reads "None". The API contract is unchanged
+   (`next_attempt_at` stays `string | null` on the wire; its description now
+   says it is always set and to read it with `terminal`).
 
 ## Object storage reconciliation: orphaned payloads — RESOLVED
 
