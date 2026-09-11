@@ -3,208 +3,154 @@ package testsupport
 import (
 	"context"
 	"os"
-
-	"github.com/jackc/pgx/v5"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/jackc/pgx/v5"
+
+	"github.com/shaq/hookubit/services/data-plane/internal/db"
 )
 
-// The database name is derived, not supplied, and it is interpolated into DDL
-// that cannot take parameters - so the derivation is the safety property, not a
-// convenience.
-func TestPackageSuffixNamesThePackageUnderTest(t *testing.T) {
-	cases := map[string]string{
-		"github.com/shaq/hookubit/services/data-plane/internal/router": "internal_router",
-		"github.com/shaq/hookubit/services/data-plane/internal/queue":  "internal_queue",
-		// The compiler names an external test package `<pkg>_test`; it must share
-		// the database of the package it tests rather than take a second copy.
-		"github.com/shaq/hookubit/services/data-plane/internal/db_test": "internal_db",
-		// Two packages with the same base name in different directories stay
-		// apart, because the path below the module root is kept.
-		"github.com/shaq/hookubit/services/data-plane/internal/egress/store": "internal_egress_store",
-		"example.com/mod/toplevel": "toplevel",
+// The guard that makes emptying the database safe. Every test package
+// TRUNCATEs this database before it runs, so the only thing standing between a
+// mistyped DATABASE_URL and someone's development data is this check.
+func TestRefusesAnyDatabaseNotNamedAsATest(t *testing.T) {
+	refused := []string{
+		"hookubit",            // the development database - the one that matters
+		"postgres",            //
+		"hookubit_production", //
+		"test",                // "test" is not the same as "_test"
+		"hookubit_test_old",   // a leftover from the old per-package scheme
 	}
-	for in, want := range cases {
-		if got := packageSuffix(in); got != want {
-			t.Errorf("packageSuffix(%q) = %q, want %q", in, got, want)
+	for _, name := range refused {
+		t.Run(name, func(t *testing.T) {
+			err := assertTestDatabase(name)
+			if err == nil {
+				t.Fatalf("assertTestDatabase(%q) allowed a database that is not a test database", name)
+			}
+			// The message has to say what to do, not just what went wrong.
+			if !strings.Contains(err.Error(), "hookubit_test") {
+				t.Fatalf("refusal does not name the database to use: %v", err)
+			}
+		})
+	}
+
+	for _, name := range []string{"hookubit_test", "webhook_platform_test", "anything_test"} {
+		if err := assertTestDatabase(name); err != nil {
+			t.Fatalf("assertTestDatabase(%q) refused a legitimate test database: %v", name, err)
 		}
 	}
 }
 
-func TestImportPathOfStripsFunctionAndReceiver(t *testing.T) {
-	cases := map[string]string{
-		"github.com/o/r/internal/router.requirePool":      "github.com/o/r/internal/router",
-		"github.com/o/r/internal/queue.(*fixture).status": "github.com/o/r/internal/queue",
-		"github.com/o/r/internal/db_test.TestOpen":        "github.com/o/r/internal/db_test",
+func TestLockKeyIsStablePerDatabaseAndDiffersBetweenThem(t *testing.T) {
+	if lockKey("hookubit_test") != lockKey("hookubit_test") {
+		t.Fatal("lock key is not stable for one database, so two runs would not queue")
 	}
-	for in, want := range cases {
-		if got := importPathOf(in); got != want {
-			t.Errorf("importPathOf(%q) = %q, want %q", in, got, want)
-		}
+	if lockKey("hookubit_test") == lockKey("other_test") {
+		t.Fatal("two databases share a lock key, so unrelated suites would queue behind each other")
 	}
 }
 
-// Nothing that reaches quoteIdentifier may carry anything but [a-z0-9_], so a
-// derivation bug fails loudly here rather than becoming DDL.
-func TestValidIdentifierRejectsAnythingUnquotable(t *testing.T) {
-	for _, bad := range []string{"", `foo"; DROP DATABASE x --`, "Mixed_Case", "with-dash", strings.Repeat("a", 64)} {
-		if err := validIdentifier(bad); err == nil {
-			t.Errorf("validIdentifier(%q) = nil, want an error", bad)
-		}
-	}
-	if err := validIdentifier("hookubit_test_internal_router"); err != nil {
-		t.Errorf("validIdentifier rejected a name it produces itself: %v", err)
-	}
-}
-
-// NAMEDATALEN is 63. A long path must hash rather than truncate, or two
-// packages silently share one database - the exact failure this package exists
-// to remove.
-func TestDerivedNameStaysWithinNamedatalenWithoutColliding(t *testing.T) {
-	template := "hookubit_test"
-	long := strings.Repeat("verylongsegment_", 6)
-	a := derivedName(template, long+"one")
-	b := derivedName(template, long+"two")
-	for _, n := range []string{a, b} {
-		if len(n) > maxIdentifier {
-			t.Fatalf("derived name %q is %d bytes, over NAMEDATALEN-1", n, len(n))
-		}
-		if err := validIdentifier(n); err != nil {
-			t.Fatalf("derived name is not a usable identifier: %v", err)
-		}
-	}
-	if a == b {
-		t.Fatalf("two different packages collapsed onto database %q", a)
-	}
-	if got, want := derivedName(template, "internal_router"), "hookubit_test_internal_router"; got != want {
-		t.Errorf("derivedName = %q, want %q", got, want)
-	}
-}
-
-// The Prisma-only parameters are handled in exactly one place (db.NormaliseDSN);
-// retargeting must not lose the operator's own parameters on the way through.
-func TestWithDatabaseRetargetsAndKeepsOperatorParameters(t *testing.T) {
-	got, err := withDatabase("postgresql://postgres:root@localhost:5432/hookubit_test?sslmode=disable&schema=public", "hookubit_test_internal_queue")
+func TestDatabaseNameReadsTheDatabaseOutOfTheURL(t *testing.T) {
+	dsn, err := db.NormaliseDSN("postgresql://u:p@localhost:5432/hookubit_test?schema=public&sslmode=disable")
 	if err != nil {
-		t.Fatalf("withDatabase: %v", err)
+		t.Fatalf("normalise: %v", err)
 	}
-	if !strings.Contains(got, "/hookubit_test_internal_queue?") {
-		t.Errorf("database was not retargeted: %s", got)
-	}
-	if !strings.Contains(got, "sslmode=disable") {
-		t.Errorf("operator parameter lost: %s", got)
-	}
-	if strings.Contains(got, "schema=") || !strings.Contains(got, "search_path=public") {
-		t.Errorf("NormaliseDSN was not applied: %s", got)
-	}
-}
-
-func TestDatabaseNameReadsTheTemplateOutOfTheURL(t *testing.T) {
-	got, err := databaseName("postgresql://postgres:root@localhost:5432/hookubit_test?sslmode=disable")
+	name, err := databaseName(dsn)
 	if err != nil {
 		t.Fatalf("databaseName: %v", err)
 	}
-	if got != "hookubit_test" {
-		t.Errorf("databaseName = %q, want hookubit_test", got)
+	if name != "hookubit_test" {
+		t.Fatalf("databaseName = %q, want hookubit_test", name)
 	}
-	if _, err := databaseName("postgresql://postgres:root@localhost:5432/"); err == nil {
-		t.Error("a URL naming no database was accepted; there is no template to copy")
-	}
-}
 
-// Two concurrent test runs against one DATABASE_URL derive the same database
-// names, so the second drops the first's database out from under it. A run ID
-// separates them.
-func TestRunIDSeparatesConcurrentRuns(t *testing.T) {
-	const template = "hookubit_test"
-	const suffix = "internal_failure"
-
-	t.Setenv("TEST_DB_RUN_ID", "")
-	shared := derivedName(template, suffixWithRunID(suffix))
-
-	t.Setenv("TEST_DB_RUN_ID", "agent-a")
-	a := derivedName(template, suffixWithRunID(suffix))
-
-	t.Setenv("TEST_DB_RUN_ID", "agent-b")
-	b := derivedName(template, suffixWithRunID(suffix))
-
-	if a == b {
-		t.Fatalf("two run IDs derived the same name %q; concurrent runs would still collide", a)
-	}
-	if a == shared || b == shared {
-		t.Fatalf("a run ID did not change the name (%q, %q, unset=%q)", a, b, shared)
-	}
-	for _, name := range []string{shared, a, b} {
-		if err := validIdentifier(name); err != nil {
-			t.Fatalf("derived name %q is not a usable identifier: %v", name, err)
-		}
+	if _, err := databaseName("postgresql://u:p@localhost:5432/"); err == nil {
+		t.Fatal("a URL naming no database was accepted")
 	}
 }
 
-// A run ID is arbitrary text from an environment variable; it must not be able
-// to produce an unusable or overlong identifier.
-func TestRunIDIsSanitisedAndBounded(t *testing.T) {
-	t.Setenv("TEST_DB_RUN_ID", `weird/id-"with' spaces;`)
-	name := derivedName("hookubit_test", suffixWithRunID("internal_failure"))
-	if err := validIdentifier(name); err != nil {
-		t.Fatalf("hostile run ID produced %q: %v", name, err)
-	}
-
-	t.Setenv("TEST_DB_RUN_ID", strings.Repeat("x", 200))
-	long := derivedName("hookubit_test", suffixWithRunID("internal_failure"))
-	if len(long) > maxIdentifier {
-		t.Fatalf("run ID overran NAMEDATALEN: %d chars", len(long))
-	}
-	if err := validIdentifier(long); err != nil {
-		t.Fatalf("long run ID produced %q: %v", long, err)
-	}
-}
-
-// Creating a per-package database must not evict a run that is already using
-// one by that name.
-//
-// Two runs against one DATABASE_URL derive the same names, and DROP DATABASE
-// ... WITH (FORCE) makes stealing one silent. The victim sees 3D000 plus
-// "terminating connection due to administrator command"; the thief inherits the
-// victim's rows, which is worse, because Claim and ClaimOutbox are deliberately
-// GLOBAL queries with no tenant predicate - a scheduler test that asks for one
-// delivery gets five, and reads as a broken LIMIT. Both symptoms have been
-// misdiagnosed as flaky tests here.
-func TestRefusesToDropADatabaseAnotherRunIsUsing(t *testing.T) {
+// The lock is what replaces the per-package databases, so it is worth proving
+// that it actually excludes a second holder rather than trusting the SQL.
+func TestAdvisoryLockExcludesASecondHolder(t *testing.T) {
 	raw := os.Getenv("DATABASE_URL")
 	if raw == "" {
 		t.Skip("DATABASE_URL is not set; skipping PostgreSQL integration test")
 	}
-
-	template, err := databaseName(raw)
+	dsn, err := db.NormaliseDSN(raw)
 	if err != nil {
-		t.Fatalf("derive template name: %v", err)
+		t.Fatalf("normalise: %v", err)
 	}
-	name := derivedName(template, "testsupport_guard_probe")
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
 
-	dsn, err := createFromTemplate(raw, template, name)
+	// A key of this test's own, so it cannot collide with the lock the suite
+	// itself is holding on the real database.
+	key := lockKey("testsupport_lock_probe_test")
+
+	first, err := pgx.Connect(ctx, dsn)
 	if err != nil {
-		t.Fatalf("first create: %v", err)
+		t.Fatalf("connect: %v", err)
+	}
+	defer first.Close(context.Background())
+
+	var got bool
+	if err := first.QueryRow(ctx, `SELECT pg_try_advisory_lock($1)`, key).Scan(&got); err != nil {
+		t.Fatalf("first lock: %v", err)
+	}
+	if !got {
+		t.Fatal("could not take a lock nobody else should hold")
 	}
 
-	// Stand in for the other run: one connection, idle, exactly as a pgxpool
-	// holds them between queries.
-	ctx := context.Background()
-	conn, err := pgx.Connect(ctx, dsn)
+	second, err := pgx.Connect(ctx, dsn)
 	if err != nil {
-		t.Fatalf("hold a connection on %s: %v", name, err)
+		t.Fatalf("connect second: %v", err)
 	}
-	defer func() { _ = conn.Close(context.Background()) }()
+	defer second.Close(context.Background())
 
-	_, err = createFromTemplate(raw, template, name)
-	if err == nil {
-		t.Fatal("a second run recreated the database while a connection was open on it; " +
-			"the first run would have lost its database mid-test")
+	if err := second.QueryRow(ctx, `SELECT pg_try_advisory_lock($1)`, key).Scan(&got); err != nil {
+		t.Fatalf("second lock: %v", err)
 	}
-	if !strings.Contains(err.Error(), "live connection") {
-		t.Fatalf("error does not name the cause: %v", err)
+	if got {
+		t.Fatal("two sessions hold the same advisory lock, so test packages would not be isolated")
 	}
-	if !strings.Contains(err.Error(), "TEST_DB_RUN_ID") {
-		t.Fatalf("error does not name the remedy: %v", err)
+
+	// Releasing by closing the session is what the real code relies on: it
+	// never calls pg_advisory_unlock, it lets the process exit.
+	if err := first.Close(context.Background()); err != nil {
+		t.Fatalf("close first: %v", err)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if err := second.QueryRow(ctx, `SELECT pg_try_advisory_lock($1)`, key).Scan(&got); err != nil {
+			t.Fatalf("retry lock: %v", err)
+		}
+		if got {
+			return // the lock followed the closed session, as designed
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the advisory lock outlived the session that held it")
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+}
+
+// The whole point of the change: running the suite must not leave databases
+// behind. This asserts the process it is running in created none.
+func TestLeavesNoDatabasesBehind(t *testing.T) {
+	raw := os.Getenv("DATABASE_URL")
+	if raw == "" {
+		t.Skip("DATABASE_URL is not set; skipping PostgreSQL integration test")
+	}
+	pool := Pool(t) // takes the lock and truncates, exactly as a real package does
+
+	var strays int
+	err := pool.QueryRow(context.Background(), `
+		SELECT count(*) FROM pg_database WHERE datname LIKE 'hookubit\_test\_%'`).Scan(&strays)
+	if err != nil {
+		t.Fatalf("count databases: %v", err)
+	}
+	if strays != 0 {
+		t.Fatalf("%d per-package test databases exist; testsupport must use only the DATABASE_URL one", strays)
 	}
 }

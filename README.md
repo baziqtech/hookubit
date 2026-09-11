@@ -141,10 +141,13 @@ pnpm go:test:race                                 # data plane, against hookubit
 pnpm load:all                                     # k6; two scenarios are red by design
 ```
 
-The Go integration and failure-injection suites give every package its own
-copy of the migrated `hookubit_test` database. Two runs at once against one
-`DATABASE_URL` refuse to start rather than corrupt each other; set
-`TEST_DB_RUN_ID` per run if you need that.
+The Go integration and failure-injection suites all share the one migrated
+`hookubit_test` database. Each test binary takes a PostgreSQL advisory lock on
+it, empties it, and holds the lock until it exits, so DB-backed packages queue
+rather than interleave — `go test ./...` costs the sum of those suites rather
+than the longest. Two runs at once queue the same way. **A database whose name
+does not end in `_test` is refused outright**, because the first thing a run
+does is truncate every table in it.
 
 The dashboard is also proved **against the real stack**, not its mock: a
 Playwright journey registers an account through the verification mail, creates

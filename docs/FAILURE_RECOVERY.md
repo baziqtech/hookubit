@@ -84,9 +84,11 @@ pointed at a closed port; a pool of one connection already checked out) and
 never by stopping a real service, because other packages share those services.
 
 **Running them.** Both packages *skip* rather than fail when `DATABASE_URL` is
-unset, which is `internal/testsupport`'s contract. Set `TEST_DB_RUN_ID` to
-something distinctive before running: concurrent runs against one `DATABASE_URL`
-now refuse to start rather than corrupt each other.
+unset, which is `internal/testsupport`'s contract. They share `hookubit_test`
+with every other DB-backed package and take an advisory lock on it for the
+duration of the binary, so a concurrent run queues instead of corrupting
+anything. Point `DATABASE_URL` at a database whose name ends in `_test`; any
+other name is refused, because the run truncates every table before it starts.
 
 Test names in the sections below are **verified references** — each was checked
 to exist at the file and line given. Where a scenario has no test, the section

@@ -40,10 +40,28 @@ created.
 psql -h localhost -U postgres <<'SQL'
 CREATE ROLE hookubit WITH LOGIN PASSWORD 'hookubit';
 CREATE DATABASE hookubit OWNER hookubit;
+CREATE DATABASE hookubit_test OWNER hookubit;
 SQL
 ```
 
 Adjust the superuser name if yours differs.
+
+**Two databases, and only two.** `hookubit` is yours to develop against;
+`hookubit_test` is the one every automated suite uses. Migrate the test one
+with `pnpm test:db:migrate`.
+
+Nothing creates any other database. The Go suites used to copy `hookubit_test`
+once per package — `hookubit_test_internal_worker`, and so on — which was fast
+and correct and left a database behind per package per run until there were
+hundreds of them. They now share `hookubit_test`, taking a PostgreSQL advisory
+lock on it for the lifetime of each test binary and truncating it on the way
+in. DB-backed packages therefore queue rather than run side by side, and two
+concurrent runs queue too.
+
+Because a run *empties* the database it is given, `internal/testsupport`
+refuses any database whose name does not end in `_test`. Pointing
+`DATABASE_URL` at `hookubit` and running `go test` fails with a message saying
+so rather than destroying your development data.
 
 ## 2. Generate secrets and write .env
 

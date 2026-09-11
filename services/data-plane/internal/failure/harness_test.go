@@ -43,7 +43,7 @@ func requirePool(t *testing.T) *pgxpool.Pool {
 	return testsupport.Pool(t)
 }
 
-// separatePool opens a second pool on the same per-package database, for the
+// separatePool opens a second pool on the same test database, for the
 // tests that need two genuinely independent clients - two workers racing for
 // one delivery, or an "ingest process" whose connections die while the rest of
 // the test carries on.
