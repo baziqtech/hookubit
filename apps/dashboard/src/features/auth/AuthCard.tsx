@@ -10,8 +10,8 @@ import { AlertGlyph } from './AuthField';
  * There is deliberately no box any more. The old card — a 22rem bordered panel
  * on an empty canvas — was doing the job of separating the form from nothing,
  * and it made a sign-in read like a settings dialog. `AuthLayout` now owns the
- * composition, and the column IS the card: the form sits on `panel`, the
- * fields are `canvas`, and the elevation is the same in light and dark rather
+ * composition, and the column IS the card: the page is `canvas` and the fields
+ * are `panel`, so the elevation reads the same way in light and dark rather
  * than inverting (`raised` is lighter than `panel` in one theme and darker in
  * the other, which is exactly the trap a nested card falls into here).
  *
@@ -61,9 +61,10 @@ export function AuthCard({
           ref={titleRef}
           tabIndex={titleRef ? -1 : undefined}
           className={cn(
-            // 40px at weight 500 is Convoy's hero, near enough exactly, and it
-            // is the single decision that stops this page reading as a dialog.
-            'text-[2.5rem] font-medium leading-[1.05] tracking-[-0.03em] text-ink',
+            // `text-hero` (34px/500) is the top of the design's own scale.
+            // It used to be an arbitrary text-[2.5rem]; the scale has display
+            // sizes now, so headlines stop being one-offs.
+            'text-hero font-medium text-ink',
             titleRef && 'focus:outline-none focus-visible:ring-0 focus-visible:ring-offset-0',
           )}
         >

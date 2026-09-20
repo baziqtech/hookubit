@@ -26,10 +26,26 @@ export default {
         'danger-soft': 'rgb(var(--c-danger-soft) / <alpha-value>)',
         info: 'rgb(var(--c-info) / <alpha-value>)',
         'info-soft': 'rgb(var(--c-info-soft) / <alpha-value>)',
+        // From the pen.dev system: a nav surface distinct from `panel` (in
+        // dark it is darker than the panels it sits beside), the saturated
+        // badge-dot forms, a tinted accent border, chart gridlines, and a code
+        // surface that stays dark in both themes.
+        nav: 'rgb(var(--c-nav) / <alpha-value>)',
+        'accent-line': 'rgb(var(--c-accent-line) / <alpha-value>)',
+        'ok-dot': 'rgb(var(--c-ok-dot) / <alpha-value>)',
+        'warn-dot': 'rgb(var(--c-warn-dot) / <alpha-value>)',
+        'danger-dot': 'rgb(var(--c-danger-dot) / <alpha-value>)',
+        grid: 'rgb(var(--c-grid) / <alpha-value>)',
+        code: 'rgb(var(--c-code) / <alpha-value>)',
+        'code-ink': 'rgb(var(--c-code-ink) / <alpha-value>)',
       },
       fontFamily: {
-        sans: ['Inter', 'ui-sans-serif', 'system-ui', '-apple-system', 'Segoe UI', 'sans-serif'],
-        mono: ['ui-monospace', 'SFMono-Regular', 'Menlo', 'Consolas', 'monospace'],
+        // Both are SELF-HOSTED (@fontsource-variable, imported in index.css).
+        // Inter used to be named here and never loaded, so the product silently
+        // rendered in whatever the OS supplied; the fallbacks below are now a
+        // genuine fallback rather than what everyone actually saw.
+        sans: ['Inter Variable', 'Inter', 'ui-sans-serif', 'system-ui', 'sans-serif'],
+        mono: ['JetBrains Mono Variable', 'ui-monospace', 'SFMono-Regular', 'Menlo', 'monospace'],
       },
       fontSize: {
         // Dense by default: the product baseline is 13px, not 16px.
@@ -37,6 +53,13 @@ export default {
         xs: ['0.75rem', { lineHeight: '1.05rem' }],
         sm: ['0.8125rem', { lineHeight: '1.25rem' }],
         base: ['0.875rem', { lineHeight: '1.375rem' }],
+        // Display sizes, which the scale previously lacked entirely - every
+        // heading above 14px was an arbitrary value. Taken from the design's
+        // own clusters: section titles at 19, metric figures at 23, and the
+        // one hero number at 34.
+        title: ['1.1875rem', { lineHeight: '1.5rem', letterSpacing: '-0.01em' }],
+        display: ['1.4375rem', { lineHeight: '1.75rem', letterSpacing: '-0.02em' }],
+        hero: ['2.125rem', { lineHeight: '2.375rem', letterSpacing: '-0.025em' }],
       },
       boxShadow: {
         panel: '0 1px 2px 0 rgb(0 0 0 / 0.04), 0 1px 1px -1px rgb(0 0 0 / 0.06)',

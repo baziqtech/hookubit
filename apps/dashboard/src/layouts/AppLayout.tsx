@@ -127,7 +127,7 @@ function Sidebar({ orgId, projectId }: { orgId: string; projectId?: string }) {
   return (
     <nav
       aria-label="Primary"
-      className="sticky top-0 flex h-screen w-60 shrink-0 flex-col border-r border-line bg-panel"
+      className="sticky top-0 flex h-screen w-60 shrink-0 flex-col border-r border-line bg-nav"
     >
       <div className="flex items-center gap-2 border-b border-line px-3 py-3">
         <Wordmark />

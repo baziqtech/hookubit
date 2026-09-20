@@ -62,7 +62,7 @@ export function CodeBlock({
 
   return (
     <figure
-      className={cn('overflow-hidden rounded-md border border-line bg-raised/60', className)}
+      className={cn('overflow-hidden rounded-md border border-line bg-code', className)}
     >
       <figcaption className="flex items-center justify-between gap-2 border-b border-line bg-panel px-2.5 py-1.5">
         <span className="text-2xs font-medium uppercase tracking-wider text-ink-subtle">
@@ -87,7 +87,7 @@ export function CodeBlock({
           {lines && (
             <span
               aria-hidden="true"
-              className="select-none border-r border-line px-2 py-2.5 text-right font-mono text-ink-subtle"
+              className="select-none border-r border-white/10 px-2 py-2.5 text-right font-mono text-code-ink/40"
             >
               {lines.map((_, index) => (
                 <span key={index} className="block tabular">
@@ -96,7 +96,7 @@ export function CodeBlock({
               ))}
             </span>
           )}
-          <code className="block flex-1 whitespace-pre px-3 py-2.5 font-mono text-ink">{text}</code>
+          <code className="block flex-1 whitespace-pre px-3 py-2.5 font-mono text-code-ink">{text}</code>
         </pre>
       </div>
 

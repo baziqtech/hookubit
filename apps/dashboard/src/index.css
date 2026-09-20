@@ -1,3 +1,6 @@
+@import '@fontsource-variable/inter';
+@import '@fontsource-variable/jetbrains-mono';
+
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
@@ -5,48 +8,71 @@
 @layer base {
   :root {
     color-scheme: light;
-    --c-canvas: 250 250 249;
+    /* Surfaces */
+    --c-canvas: 246 247 249;
     --c-panel: 255 255 255;
-    --c-raised: 245 245 244;
-    --c-line: 231 229 228;
-    --c-line-strong: 214 211 209;
-    --c-ink: 28 25 23;
-    --c-ink-muted: 87 83 78;
-    --c-ink-subtle: 138 133 127;
-    --c-accent: 67 56 202;
+    --c-raised: 241 243 246;
+    --c-nav: 255 255 255;
+    --c-line: 227 230 235;
+    --c-line-strong: 205 211 219;
+    --c-grid: 237 239 243;
+    /* Text */
+    --c-ink: 13 17 23;
+    --c-ink-muted: 92 102 114;
+    --c-ink-subtle: 135 146 160;
+    /* Accent */
+    --c-accent: 76 77 220;
     --c-accent-ink: 255 255 255;
-    --c-accent-soft: 238 238 255;
-    --c-ok: 21 128 61;
-    --c-ok-soft: 220 252 231;
-    --c-warn: 180 83 9;
-    --c-warn-soft: 254 243 199;
-    --c-danger: 185 28 28;
-    --c-danger-soft: 254 226 226;
-    --c-info: 29 78 216;
-    --c-info-soft: 219 234 254;
+    --c-accent-soft: 237 237 253;
+    --c-accent-line: 201 201 247;
+    /* Status. `-dot` is the saturated form for the 6px badge dot, which needs
+       more chroma than the text beside it to read at that size. */
+    --c-ok: 14 124 90;
+    --c-ok-soft: 227 245 238;
+    --c-ok-dot: 18 164 114;
+    --c-warn: 154 91 6;
+    --c-warn-soft: 253 242 224;
+    --c-warn-dot: 224 138 11;
+    --c-danger: 188 43 65;
+    --c-danger-soft: 253 236 239;
+    --c-danger-dot: 224 71 94;
+    --c-info: 29 102 196;
+    --c-info-soft: 232 241 253;
+    /* Code is dark in BOTH themes: a payload is a quotation from another
+       system, and it reads as one when it keeps its own surface. */
+    --c-code: 14 17 23;
+    --c-code-ink: 214 222 232;
   }
 
   :root[data-theme='dark'] {
     color-scheme: dark;
-    --c-canvas: 12 12 14;
-    --c-panel: 22 22 25;
-    --c-raised: 30 30 34;
-    --c-line: 42 42 47;
-    --c-line-strong: 60 60 66;
-    --c-ink: 244 244 245;
-    --c-ink-muted: 168 166 170;
-    --c-ink-subtle: 120 118 123;
-    --c-accent: 129 140 248;
-    --c-accent-ink: 17 17 20;
-    --c-accent-soft: 41 41 63;
-    --c-ok: 74 222 128;
-    --c-ok-soft: 20 45 30;
+    --c-canvas: 11 13 17;
+    --c-panel: 18 21 27;
+    --c-raised: 30 35 44;
+    --c-nav: 14 17 22;
+    --c-line: 35 41 50;
+    --c-line-strong: 51 59 71;
+    --c-grid: 28 33 42;
+    --c-ink: 233 237 242;
+    --c-ink-muted: 139 149 163;
+    --c-ink-subtle: 104 114 127;
+    --c-accent: 126 124 245;
+    --c-accent-ink: 11 13 17;
+    --c-accent-soft: 30 30 58;
+    --c-accent-line: 58 58 107;
+    --c-ok: 52 211 153;
+    --c-ok-soft: 14 44 35;
+    --c-ok-dot: 52 211 153;
     --c-warn: 251 191 36;
-    --c-warn-soft: 56 41 12;
-    --c-danger: 248 113 113;
-    --c-danger-soft: 60 22 22;
+    --c-warn-soft: 51 38 10;
+    --c-warn-dot: 251 191 36;
+    --c-danger: 251 113 133;
+    --c-danger-soft: 54 20 25;
+    --c-danger-dot: 251 113 133;
     --c-info: 96 165 250;
-    --c-info-soft: 23 37 68;
+    --c-info-soft: 18 35 61;
+    --c-code: 8 10 13;
+    --c-code-ink: 214 222 232;
   }
 
   html {

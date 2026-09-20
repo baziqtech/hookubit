@@ -6,9 +6,11 @@ was read out of `apps/dashboard/` and is true as of this commit; everything in
 *Open questions* is a decision nobody has made yet, stated plainly so a designer
 can make it rather than infer it.
 
-**What this is not.** It is not a brand. There is no typeface, no colour anyone
-chose on purpose, and no defined display type. That is the gap this document
-exists to describe.
+**Status.** A design was delivered as `hookubit.pen` (pen.dev) covering 28
+screens and a component library, and its system — tokens, both themes, two
+typefaces, a display scale — has been adopted. Four of the seven open questions
+below are now answered and marked as such. What the design proposed that this
+product does not do was deliberately not built; §16 lists it.
 
 Source of truth for the values below:
 `apps/dashboard/tailwind.config.js`, `apps/dashboard/src/index.css`,
@@ -60,30 +62,33 @@ palette anywhere in the product, and there must not be.**
 
 | Token | Light | Dark | Use |
 |---|---|---|---|
-| `canvas` | `250 250 249` | `12 12 14` | The page. |
-| `panel` | `255 255 255` | `22 22 25` | Cards, the sidebar, table surfaces, form fields on auth pages. |
-| `raised` | `245 245 244` | `30 30 34` | Hover states, disabled fields, inset strips. |
-| `line` | `231 229 228` | `42 42 47` | Every hairline border. |
-| `line-strong` | `214 211 209` | `60 60 66` | Hover borders, scrollbar thumb. |
-| `ink` | `28 25 23` | `244 244 245` | Primary text. |
-| `ink-muted` | `87 83 78` | `168 166 170` | Secondary text, labels. |
-| `ink-subtle` | `138 133 127` | `120 118 123` | Tertiary — hints, timestamps, footnotes. |
+| `canvas` | `#F6F7F9` | `#0B0D11` | The page. |
+| `panel` | `#FFFFFF` | `#12151B` | Cards, tables, form fields. |
+| `raised` | `#F1F3F6` | `#1E232C` | Hover states, disabled fields, inset strips. |
+| `nav` | `#FFFFFF` | `#0E1116` | The sidebar rail — its own surface, distinct from `panel`. |
+| `line` | `#E3E6EB` | `#232932` | Every hairline border. |
+| `line-strong` | `#CDD3DB` | `#333B47` | Hover borders, input borders, scrollbar thumb. |
+| `grid` | `#EDEFF3` | `#1C212A` | Chart gridlines. |
+| `ink` | `#0D1117` | `#E9EDF2` | Primary text. |
+| `ink-muted` | `#5C6672` | `#8B95A3` | Secondary text, labels. |
+| `ink-subtle` | `#8792A0` | `#68727F` | Tertiary — hints, timestamps, footnotes. |
+| `code` / `code-ink` | `#0E1117` / `#D6DEE8` | `#080A0D` / `#D6DEE8` | Payloads and signatures. **Dark in both themes** — a payload is a quotation from another system and reads as one when it keeps its own surface. |
 
-Note the light surfaces are **warm** (`250 250 249`, `28 25 23` — stone, not
-slate) and the dark surfaces are **neutral-cool** (`12 12 14`, `244 244 245`).
-That is an inconsistency nobody decided; see §14.
+The palette is **cool** throughout, in both themes. It used to be warm stone in
+light and cool neutral in dark, which nobody had decided; that is resolved.
 
 ### Accent
 
 | Token | Light | Dark |
 |---|---|---|
-| `accent` | `67 56 202` (indigo 700) | `129 140 248` (indigo 400) |
-| `accent-ink` | `255 255 255` | `17 17 20` |
-| `accent-soft` | `238 238 255` | `41 41 63` |
+| `accent` | `#4C4DDC` | `#7E7CF5` |
+| `accent-ink` | `#FFFFFF` | `#0B0D11` |
+| `accent-soft` | `#EDEDFD` | `#1E1E3A` |
+| `accent-line` | `#C9C9F7` | `#3A3A6B` |
 
 The accent carries: primary buttons, links, focus rings, the active nav item,
-text selection, and the product mark. **It is Tailwind's default indigo. Nobody
-chose it.** See §14.
+text selection, and the product mark. It was Tailwind's factory indigo, chosen
+by nobody; it is now the design's, chosen on purpose.
 
 ### Status — the domain's colour vocabulary
 
@@ -92,13 +97,16 @@ by colour before they read the word.
 
 | Tone | Light | Dark | Means |
 |---|---|---|---|
-| `ok` | `21 128 61` | `74 222 128` | Succeeded. Terminal and good. |
-| `warn` | `180 83 9` | `251 191 36` | Retrying. Failing, but not over. |
-| `danger` | `185 28 28` | `248 113 113` | Failed, or exhausted — terminal and bad. |
-| `info` | `29 78 216` | `96 165 250` | Processing. In flight right now. |
+| `ok` | `#0E7C5A` | `#34D399` | Succeeded. Terminal and good. |
+| `warn` | `#9A5B06` | `#FBBF24` | Retrying. Failing, but not over. |
+| `danger` | `#BC2B41` | `#FB7185` | Failed, or exhausted — terminal and bad. |
+| `info` | `#1D66C4` | `#60A5FA` | Processing. In flight right now. |
 | neutral | `ink-muted` on `raised` | — | Pending, scheduled, queued, cancelled. |
 
-Each has a `-soft` companion for badge and panel backgrounds.
+Each has a `-soft` companion for badge backgrounds, and `ok`/`warn`/`danger`
+each have a **`-dot`** form (`#12A472`, `#E08A0B`, `#E0475E`) used only for the
+6px badge dot: a colour chosen for contrast as 11.5px text reads as grey at dot
+size, so the dot carries more chroma than the label beside it.
 
 **Rule: colour is never the only carrier of meaning.** Every status badge pairs
 its colour with the word, and every chart is accompanied by a table of the same
@@ -120,32 +128,34 @@ Defined in `tailwind.config.js`. Dense on purpose: **the product baseline is
 | `xs` | 12px | 16.8px | Labels, nav items, secondary rows. |
 | `sm` | 13px | 20px | **Body default** (`<body>` is `text-sm`). |
 | `base` | 14px | 22px | Emphasised body, dialog content. |
+| `title` | 19px | 24px, −0.01em | Section and page headings. |
+| `display` | 23px | 28px, −0.02em | Metric figures. |
+| `hero` | 34px | 38px, −0.025em | The one headline on an auth page. |
 
-**The scale stops at 14px.** There is no defined display size. Everything larger
-in the product today is either a Tailwind default or a one-off arbitrary value
-(`text-[1.625rem]`, `text-[2.5rem]`). A display scale is one of the things
-branding needs to supply — see §14.
+The scale used to stop at 14px, so every heading above it was an arbitrary
+value. The three display sizes are the design's own clusters.
 
-### The typeface — this is a live defect
+### The typefaces
+
+**Inter** for the interface, **JetBrains Mono** for payloads, signatures, IDs
+and headers. Both are self-hosted through `@fontsource-variable/*` and imported
+at the top of `src/index.css` — no CDN at runtime, no third-party request on a
+page that is about to hold a session cookie.
 
 ```js
-sans: ['Inter', 'ui-sans-serif', 'system-ui', '-apple-system', 'Segoe UI', 'sans-serif']
-mono: ['ui-monospace', 'SFMono-Regular', 'Menlo', 'Consolas', 'monospace']
+sans: ['Inter Variable', 'Inter', 'ui-sans-serif', 'system-ui', 'sans-serif']
+mono: ['JetBrains Mono Variable', 'ui-monospace', 'SFMono-Regular', 'Menlo', 'monospace']
 ```
 
-**Inter is declared and never loaded.** There is no `<link>` in `index.html`, no
-`@font-face`, and no font package in `package.json`. Measured in the running
-browser, a string set in `Inter` is exactly as wide as the same string set in a
-nonexistent family — both fall through to `ui-sans-serif`.
+This was a live defect until the design landed: `Inter` was named in the config
+and **never loaded** — no `<link>`, no `@font-face`, no package — so a string
+set in Inter measured exactly as wide as the same string in a nonexistent
+family, and the product silently rendered in whatever the OS supplied. Every
+screenshot taken before this was of the system font. The fallbacks above are
+now a genuine fallback rather than what everybody actually saw.
 
-So the product renders in whatever the operating system supplies: SF Pro on
-macOS, Segoe UI on Windows, something else on Linux. **It has no typeface of its
-own, and every screenshot ever taken of it is of the OS font.** This is a large
-part of why the interface reads as generic, and it is the single highest-leverage
-thing branding can fix.
-
-For reference, the three sites named as inspiration all load a real face:
-Convoy ships Inter; Antigravity and Flutter both ship Google Sans Flex.
+Variable builds: one file per family, every weight from 100–900, so the 500 and
+600 the design leans on cost nothing extra.
 
 ### Numerals
 
@@ -324,31 +334,24 @@ something being withheld.
 typeface, a considered colour, and a point of view about what HookuBit *is*.
 That is the brief.
 
-## 14. What branding needs to decide
+## 14. What branding needed to decide
 
-1. **A typeface.** The highest-leverage single decision. Must have: tabular
-   figures, a usable 11px, weights ~400–600, and a monospace companion (payloads,
-   signatures, IDs and headers are shown as code constantly). Self-hosted or
-   properly loaded — declaring a face without loading it is the current bug.
-2. **An accent colour.** Currently Tailwind indigo, unchosen, and close to the
-   default of every AI-generated interface. It must survive being: a 32px solid
-   button, a 2px focus ring at 70% alpha, an active-nav tint, and a 1.5px dot —
-   in both themes, without colliding with the five status hues.
-3. **Warm or cool.** Light surfaces are warm stone, dark surfaces are cool
-   neutral. Pick one and make both themes agree.
-4. **A display scale.** The type scale stops at 14px. Define 3–4 sizes above it,
-   with weights and tracking, so headlines stop being arbitrary values.
+1. ~~**A typeface.**~~ **Answered:** Inter + JetBrains Mono, self-hosted. §4.
+2. ~~**An accent colour.**~~ **Answered:** `#4C4DDC` light / `#7E7CF5` dark. §3.
+3. ~~**Warm or cool.**~~ **Answered:** cool, in both themes. §3.
+4. ~~**A display scale.**~~ **Answered:** `title` 19 / `display` 23 / `hero` 34. §4.
 5. **Is dark the primary theme?** An operator tool used at 2am has a real claim
    to being designed dark-first. Today dark is a mechanical inversion of light.
    The control now exists (System / Light / Dark, per device); which one it
    *defaults* to, and which one the product is *designed for*, is unanswered.
 6. **The mark.** A fishing hook — eye, shank, bend, barb — in an accent square.
-   It is legible and it is four weeks old. Whether the name's "hook" should be
-   taken literally at all is open.
+   Still open: the `.pen` file carries no mark of its own (its wordmark reads
+   "Relay", a placeholder from another product), so nothing here supersedes it.
 7. **What the sign-in page says.** Not the layout — the claim. The candidates
    from the product itself: *the record is the product*; *webhooks that arrive,
-   or tell you why they did not*; *proof of every attempt*. Choosing one is a
-   brand decision, and it is what attempt 2 was missing.
+   or tell you why they did not*; *proof of every attempt*. Still open: the
+   design does not answer it either.
+
 
 ## 15. Hard constraints on any brand
 
@@ -369,10 +372,41 @@ Non-negotiable for technical reasons, not taste:
   share the wordmark and should share the palette; the docs site currently uses
   VitePress defaults.
 
+## 16. What the design proposed, and what was not built
+
+`hookubit.pen` draws 28 screens. Its **visual system** was adopted wholesale.
+Its **information architecture** was not, because in several places it
+describes a product with different capabilities from this one. Recorded so the
+divergence is a decision rather than an oversight.
+
+Not built, because the thing does not exist:
+
+| In the design | Reality |
+|---|---|
+| Command palette (⌘K) with global search | No search endpoint, and no command palette. |
+| "Export" / "Export CSV" on Events and Analytics | No export route on the control API. |
+| "Send test event" | Deliberately absent: there is no test-delivery route. Publish a real event and watch its delivery. |
+| Test/Production switcher in the top bar | `environment` is **immutable per project**. It is a badge, not a control; switching means a second project. |
+| Billing with "Billing portal" and "Change plan" | No billing module at all. The page stays an honest empty state. |
+| "Organization Selection" and "Project Selection" screens | `RootRedirect` forwards to your first org and project; switching is in the sidebar, and creating is in the switcher menu. |
+| 15m / 1h / 6h time ranges | The analytics API's minimum window is 1 hour, so 15m cannot be served. The dashboard offers 24h / 7d / 30d, which map to `window_hours` 24 / 168 / 720. |
+| "Replay all failed deliveries" bulk action | Replay is per delivery and per event; bulk requeue exists only for the outbox. |
+
+Drawn by the design but absent from it, and kept: **Outbox**, **Policies**,
+**Get started**, **Usage**, and the whole account flow (register, verify,
+reset, accept invitation) — all real screens the design did not cover. They use
+the same tokens and components, so they are consistent without having been
+drawn.
+
+Also kept: the **HookuBit** wordmark. The design's says "Relay".
+
 ---
 
 **Where this comes from.** `apps/dashboard/tailwind.config.js`,
 `apps/dashboard/src/index.css`, `apps/dashboard/src/components/`,
 `apps/dashboard/src/lib/delivery-status.ts`, `apps/dashboard/src/features/auth/`,
-`ARCHITECTURE.md`. The Inter finding was measured in a running browser, not read
-from configuration.
+`ARCHITECTURE.md`, and `hookubit.pen` (pen.dev, 28 screens + component library)
+for everything in §3, §4 and §16. The typeface finding was measured in a running
+browser, not read from configuration — before, both families fell back; after,
+`Inter Variable` measures differently from an unknown family, which is how the
+fix was confirmed.
