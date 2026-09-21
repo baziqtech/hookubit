@@ -1,7 +1,7 @@
 import { Link } from 'react-router-dom';
 import { cn } from '../../lib/cn';
 import { useOutboxEntries } from './api';
-import { stuckEventsSummary } from './stuck-summary';
+import { stuckEventsState } from './stuck-summary';
 
 /**
  * "Some events in this project produced nothing, and they are over there."
@@ -21,7 +21,7 @@ import { stuckEventsSummary } from './stuck-summary';
  *
  * This closes that path from the two screens people are actually on.
  *
- * ## It is silent unless it is not
+ * ## Three states, because it is now the main door
  *
  * Most projects have nothing stuck, most of the time, so the common case must
  * cost nothing: no reserved space, no zero count, no "all clear" to read past.
@@ -42,10 +42,31 @@ export function StuckEventsNotice({
   className?: string;
 }) {
   const parked = useOutboxEntries(projectId, { status: 'failed' }, 0);
-  const summary = stuckEventsSummary(parked.data);
+  const state = stuckEventsState(parked.data, parked.isError);
+  const to = `/orgs/${orgId}/projects/${projectId}/outbox`;
 
-  // Silent while loading and silent when nothing is stuck. See `stuck-summary`.
-  if (!summary) return null;
+  if (state.kind === 'silent') return null;
+
+  // Could not find out. Said quietly, because it is not itself bad news — but
+  // said, because this notice is the way to that screen and silence here would
+  // read as "nothing is stuck" at the one moment the project is misbehaving.
+  if (state.kind === 'unknown') {
+    return (
+      <div
+        role="status"
+        className={cn(
+          'flex flex-wrap items-baseline gap-x-2 rounded-[0.625rem] border border-line',
+          'bg-raised px-3.5 py-2.5 text-xs text-ink-muted',
+          className,
+        )}
+      >
+        <span>Could not check whether any events are stuck before fan-out.</span>
+        <Link to={to} className="font-medium text-accent underline-offset-2 hover:underline">
+          Open stuck events
+        </Link>
+      </div>
+    );
+  }
 
   return (
     <div
@@ -57,16 +78,13 @@ export function StuckEventsNotice({
       )}
     >
       <span className="font-semibold">
-        {summary.atLeast ? 'At least ' : ''}
-        {summary.count} {summary.noun} {summary.verb} accepted but never fanned out.
+        {state.atLeast ? 'At least ' : ''}
+        {state.count} {state.noun} {state.verb} accepted but never fanned out.
       </span>
       <span className="text-ink-muted">
-        {summary.pronoun} no deliveries to show here, or only some of them.
+        {state.pronoun} no deliveries to show here, or only some of them.
       </span>
-      <Link
-        to={`/orgs/${orgId}/projects/${projectId}/outbox`}
-        className="font-medium text-accent underline-offset-2 hover:underline"
-      >
+      <Link to={to} className="font-medium text-accent underline-offset-2 hover:underline">
         Show stuck events
       </Link>
     </div>

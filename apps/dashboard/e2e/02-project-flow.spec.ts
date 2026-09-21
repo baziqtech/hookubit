@@ -423,17 +423,21 @@ test.describe.serial('a project, end to end', () => {
     await expect(page.getByText('endpoint.enabled').first()).toBeVisible();
   });
 
-  test('stuck events: the page renders with nothing stuck, and nothing shouts about it', async ({ page }) => {
+  test('stuck events: not in the navigation, still reachable and still named', async ({ page }) => {
+    await page.goto(`${projectBase()}/deliveries`);
+    // It earns no permanent slot: the condition is absent almost always.
+    await expect(page.getByRole('link', { name: 'Stuck events' })).toHaveCount(0);
+    // And with nothing stuck, the notice says nothing either.
+    await expect(page.getByRole('status').filter({ hasText: /never fanned out/i })).toHaveCount(0);
+    await page.goto(`${projectBase()}/overview`);
+    await expect(page.getByRole('status').filter({ hasText: /never fanned out/i })).toHaveCount(0);
+
+    // The page is still a page: reachable by address, and it tells you where
+    // you are even though nothing in the rail pointed here.
     await page.goto(`${projectBase()}/outbox`);
     await expect(page.getByRole('heading', { name: 'Stuck events' })).toBeVisible();
     await expect(page.getByText(/nothing is stuck/i)).toBeVisible();
-
-    // The signal is silent when there is nothing to say — a zero count on the
-    // two screens people live on would be furniture, not information.
-    for (const page_ of [`${projectBase()}/deliveries`, `${projectBase()}/overview`]) {
-      await page.goto(page_);
-      await expect(page.getByRole('status').filter({ hasText: /never fanned out/i })).toHaveCount(0);
-    }
+    await expect(page.getByRole('navigation', { name: 'Breadcrumb' })).toContainText('Stuck events');
   });
 
   test('revoking the key stops publishing', async ({ page, request }) => {

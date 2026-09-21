@@ -242,6 +242,13 @@ per address. See [Replay](/guide/07-replay) for the consumer-side view.
 
 ## Stuck events (parked before fan-out)
 
+**This screen is not in the navigation.** Most projects have nothing stuck most
+of the time, so it is reached the two ways that matter: a notice on Deliveries
+and on Overview that appears when something *is* stuck, and its address —
+`/orgs/<org>/projects/<project>/outbox` — which keeps working in a pasted link.
+When the check itself fails, the notice says so rather than staying silent: on
+those two screens, silence would read as "nothing is stuck".
+
 `/orgs/:orgId/projects/:projectId/outbox` is the router's record of what it
 still owes each accepted event. It opens on the rows that need a person.
 
