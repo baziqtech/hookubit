@@ -1486,6 +1486,54 @@ export interface components {
              * @default test
              */
             environment?: components["schemas"]["Environment"];
+            /**
+             * @description Copy the CONFIGURATION of an existing project in this organization: endpoints with their timeouts, limits and custom headers, retry policies, and subscriptions.
+             *
+             *     NEVER copied: signing secrets, API keys, the delivery record, notification destinations. A leak in one project stays in one project.
+             *
+             *     Every copied endpoint arrives PAUSED and without a secret, because the URL it points at belongs to the source project — often the test one — and an endpoint that arrived live would start delivering real traffic to a staging server before anybody looked at the list.
+             * @example proj_01J8ZK...
+             */
+            copy_from_project_id?: string;
+        };
+        TemplateResultDto: {
+            endpoints: number;
+            subscriptions: number;
+            retry_policies: number;
+            /** @description ALWAYS 0, and it is in the response so the client can say so out loud. Secrets are never copied — a leak in one project stays in one project — and it is why nothing this copy produced is delivering yet. */
+            signing_secrets: number;
+        };
+        CreatedProjectDto: {
+            /** @example proj_01J8ZK... */
+            id: string;
+            /** @example org_01J8ZK... */
+            organization_id: string;
+            /** @example Payments */
+            name: string;
+            /**
+             * @description Unique within the organization. Deleted projects keep theirs.
+             * @example payments
+             */
+            slug: string;
+            /** @description IMMUTABLE after creation. It selects which API keys (wk_live_/wk_test_) and which ingest traffic belong to this project, so changing it would silently re-scope every key and endpoint underneath it. */
+            environment: components["schemas"]["Environment"];
+            /** @description `deleted` is a soft delete: the row and its delivery ledger survive, but the project is invisible to this API and the ingest path refuses its API keys. */
+            status: components["schemas"]["ProjectStatus"];
+            /**
+             * @description Addresses permitted to PUBLISH events to this project. EMPTY means every address may, which is the default. The data plane checks this before it judges whether the API key is valid, so a blocked address learns nothing about the credential it presented. Publishing only - never consulted for reading the record or for signing in, so it cannot lock anyone out of the dashboard.
+             * @example [
+             *       "203.0.113.0/24"
+             *     ]
+             */
+            allowed_ips: string[];
+            /** Format: date-time */
+            created_at: string;
+            /** Format: date-time */
+            updated_at: string;
+            /** @description Null when nothing was copied. */
+            copied: components["schemas"]["TemplateResultDto"] | null;
+            /** @description Why the copy failed, when one was asked for and did not work. The PROJECT still exists: an empty project is recoverable — copy again, or start from empty — and rolling the create back would lose it and explain nothing. */
+            copy_error: string | null;
         };
         UpdateProjectDto: {
             /** @example Payments */
@@ -3382,7 +3430,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["ProjectDto"];
+                    "application/json": components["schemas"]["CreatedProjectDto"];
                 };
             };
             /** @description Membership is proven but the role is short of the permission. (error.code: `forbidden`, `email_not_verified`) */

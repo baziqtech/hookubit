@@ -26,6 +26,7 @@ Every request and response body in the control API, by name. Operation pages lin
 | [`CreatedApiKeyDto`](#createdapikeydto) | object |
 | [`CreatedEndpointDto`](#createdendpointdto) | object |
 | [`CreateDestinationDto`](#createdestinationdto) | object |
+| [`CreatedProjectDto`](#createdprojectdto) | object |
 | [`CreateEndpointDto`](#createendpointdto) | object |
 | [`CreateOrganizationDto`](#createorganizationdto) | object |
 | [`CreateProjectDto`](#createprojectdto) | object |
@@ -96,6 +97,7 @@ Every request and response body in the control API, by name. Operation pages lin
 | [`SessionResponseDto`](#sessionresponsedto) | object |
 | [`SubscriptionDto`](#subscriptiondto) | object |
 | [`SubscriptionListDto`](#subscriptionlistdto) | object |
+| [`TemplateResultDto`](#templateresultdto) | object |
 | [`UpdateDestinationDto`](#updatedestinationdto) | object |
 | [`UpdateEndpointDto`](#updateendpointdto) | object |
 | [`UpdateMemberRoleDto`](#updatememberroledto) | object |
@@ -367,6 +369,26 @@ The response body of EVERY non-2xx response from this API. There is no other err
 | `label` | string | no |  | What to call it on screen. Defaults to the address. |
 | `events` | string[] | no |  | Omitted, the destination is subscribed to everything. |
 
+### CreatedProjectDto
+
+| Property | Type | Required | Constraints | Description |
+|---|---|---|---|---|
+| `id` | string | yes |  |  |
+| `organization_id` | string | yes |  |  |
+| `name` | string | yes |  |  |
+| `slug` | string | yes |  | Unique within the organization. Deleted projects keep theirs. |
+| `environment` | string | yes | one of `test`, `live` | IMMUTABLE after creation. It selects which API keys (wk_live_/wk_test_) and which ingest traffic belong to this project, so changing it would silently re-scope every key and endpoint underneath it. |
+| `status` | string | yes | one of `active`, `suspended`, `deleted` | `deleted` is a soft delete: the row and its delivery ledger survive, but the project is invisible to this API and the ingest path refuses its API keys. |
+| `allowed_ips` | string[] | yes |  | Addresses permitted to PUBLISH events to this project. EMPTY means every address may, which is the default. The data plane checks this before it judges whether the API key is valid, so a blocked address learns nothing about the credential it presented. Publishing only - never consulted for reading the record or for signing in, so it cannot lock anyone out of the dashboard. |
+| `created_at` | string | yes | format `date-time` |  |
+| `updated_at` | string | yes | format `date-time` |  |
+| `copied` | [TemplateResultDto](./schemas.md#templateresultdto) \| null | yes |  | Null when nothing was copied. |
+| `copied.endpoints` | number | yes |  |  |
+| `copied.subscriptions` | number | yes |  |  |
+| `copied.retry_policies` | number | yes |  |  |
+| `copied.signing_secrets` | number | yes |  | ALWAYS 0, and it is in the response so the client can say so out loud. Secrets are never copied — a leak in one project stays in one project — and it is why nothing this copy produced is delivering yet. |
+| `copy_error` | string \| null | yes |  | Why the copy failed, when one was asked for and did not work. The PROJECT still exists: an empty project is recoverable — copy again, or start from empty — and rolling the create back would lose it and explain nothing. |
+
 ### CreateEndpointDto
 
 | Property | Type | Required | Constraints | Description |
@@ -395,6 +417,7 @@ The response body of EVERY non-2xx response from this API. There is no other err
 | `name` | string | yes | max 200 chars |  |
 | `slug` | string | no | 2 to 64 chars | Lowercase letters, digits and single hyphens. Unique within the organization. Derived from `name` when omitted; a supplied slug is validated, never rewritten. |
 | `environment` | string | no | one of `test`, `live`; default `"test"` | CANNOT BE CHANGED LATER. Defaults to `test`, so a project is never created live by omission. API keys minted here must carry the matching prefix (wk_test_/wk_live_) and the ingest path re-checks the pair on every request. |
+| `copy_from_project_id` | string | no |  | Copy the CONFIGURATION of an existing project in this organization: endpoints with their timeouts, limits and custom headers, retry policies, and subscriptions.<br><br>NEVER copied: signing secrets, API keys, the delivery record, notification destinations. A leak in one project stays in one project.<br><br>Every copied endpoint arrives PAUSED and without a secret, because the URL it points at belongs to the source project — often the test one — and an endpoint that arrived live would start delivering real traffic to a staging server before anybody looked at the list. |
 
 ### CreateRateLimitDto
 
@@ -1435,6 +1458,15 @@ string enum: `active`, `suspended`, `deleted`
 | `data[].updated_at` | string | yes |  |  |
 | `has_more` | boolean | yes |  | More subscriptions match than this page carries. |
 | `next_offset` | number \| null | yes |  | Pass back as `offset` for the next page. Null when this page was the last. |
+
+### TemplateResultDto
+
+| Property | Type | Required | Constraints | Description |
+|---|---|---|---|---|
+| `endpoints` | number | yes |  |  |
+| `subscriptions` | number | yes |  |  |
+| `retry_policies` | number | yes |  |  |
+| `signing_secrets` | number | yes |  | ALWAYS 0, and it is in the response so the client can say so out loud. Secrets are never copied — a leak in one project stays in one project — and it is why nothing this copy produced is delivering yet. |
 
 ### UpdateDestinationDto
 

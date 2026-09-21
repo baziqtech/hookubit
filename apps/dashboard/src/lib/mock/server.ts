@@ -1421,7 +1421,81 @@ const handlers: Handler[] = [
         updated_at: now,
       };
       db.projects.push(project);
-      return project;
+
+      /*
+       * The copy, mirrored to the extent the fixture can: endpoints arrive
+       * PAUSED and with no live secret, which is the rule the dialog is built
+       * around. Secrets are not copied — and the response says `signing_secrets:
+       * 0` out loud, because that zero is the reason nothing delivers yet.
+       */
+      const copyFrom =
+        typeof input.copy_from_project_id === 'string' ? input.copy_from_project_id : null;
+      if (!copyFrom) return { ...project, copied: null, copy_error: null };
+
+      const source = db.projects.find(
+        (candidate) => candidate.id === copyFrom && candidate.organization_id === params.orgId,
+      );
+      if (!source) {
+        return {
+          ...project,
+          copied: null,
+          copy_error:
+            'The project to copy from does not exist, or belongs to another organization.',
+        };
+      }
+
+      const sourceEndpoints = db.endpoints.filter(
+        (row) => row.project_id === source.id && row.status !== 'deleted',
+      );
+      const endpointMap = new Map<string, string>();
+      for (const row of sourceEndpoints) {
+        const id = `ep_01JQCOPY${endpointMap.size + 1}`;
+        endpointMap.set(row.id, id);
+        db.endpoints.push({
+          ...row,
+          id,
+          project_id: project.id,
+          status: 'paused',
+          enabled: false,
+          disabled_reason:
+            'Copied from another project. Check the URL, issue a signing secret, then resume it.',
+          has_live_secret: false,
+          health: null,
+          created_at: now,
+          updated_at: now,
+        });
+      }
+
+      let copiedSubscriptions = 0;
+      for (const row of db.subscriptions.filter((s2) => s2.project_id === source.id)) {
+        const endpointId = endpointMap.get(row.endpoint_id);
+        // A subscription whose endpoint was not copied has nowhere to point.
+        // Pointing it at the SOURCE project's endpoint would deliver this
+        // project's events into another project's consumer.
+        if (!endpointId) continue;
+        db.subscriptions.push({
+          ...row,
+          id: `sub_01JQCOPY${copiedSubscriptions + 1}`,
+          project_id: project.id,
+          endpoint_id: endpointId,
+          created_at: now,
+          updated_at: now,
+        });
+        copiedSubscriptions += 1;
+      }
+
+      const copiedPolicies = db.retryPolicies.filter((row) => row.project_id === source.id).length;
+
+      return {
+        ...project,
+        copied: {
+          endpoints: endpointMap.size,
+          subscriptions: copiedSubscriptions,
+          retry_policies: copiedPolicies,
+          signing_secrets: 0,
+        },
+        copy_error: null,
+      };
     },
   },
   /*

@@ -18,6 +18,7 @@ import { AppExceptionFilter } from '../../common/errors';
 import { ThrottleGuard } from '../../common/throttle.guard';
 import { InMemoryThrottleStore, THROTTLE_STORE } from '../../common/throttle.store';
 import { ProjectsController } from '../projects.controller';
+import { ProjectTemplateService } from '../project-template.service';
 import { ProjectsService } from '../projects.service';
 
 /**
@@ -151,6 +152,7 @@ export async function startProjectsApp(options: HarnessOptions = {}): Promise<Ha
     controllers: [ProjectsController],
     providers: [
       ProjectsService,
+      ProjectTemplateService,
       { provide: SessionService, useClass: StubSessionService },
       SessionGuard,
       TenantGuard,

@@ -16,6 +16,7 @@ import { Throttle, ThrottleGuard } from '../common/throttle.guard';
 import {
   CreateProjectDto,
   ListProjectsQueryDto,
+  CreatedProjectDto,
   ProjectDto,
   ProjectListDto,
   UpdateProjectDto,
@@ -92,7 +93,7 @@ export class ProjectsController {
       '`name` and must be unique within the organization. Rate limited, and subject to a ' +
       'per-organization ceiling (`MAX_PROJECTS_PER_ORGANIZATION`) that counts live projects only.',
   })
-  @ApiCreatedResponse({ type: ProjectDto })
+  @ApiCreatedResponse({ type: CreatedProjectDto })
   @ApiConflictResponse({
     description:
       'Two different 409s, told apart by `error.code`, never by the message. ' +
@@ -103,7 +104,7 @@ export class ProjectsController {
   create(
     @Tenant() context: RequestContext,
     @Body() dto: CreateProjectDto,
-  ): Promise<ProjectDto> {
+  ): Promise<CreatedProjectDto> {
     return this.projects.create(context, dto);
   }
 

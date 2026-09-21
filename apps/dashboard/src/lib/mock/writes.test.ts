@@ -582,3 +582,48 @@ describe('notification destinations — silent until somebody says yes', () => {
     expect(muted.status).toBe('confirmed');
   });
 });
+
+/**
+ * Copying a project.
+ *
+ * Both tests are about the one rule that makes this safe to offer: what comes
+ * across cannot send, and a secret never comes across at all.
+ */
+describe('project templating — nothing copied can deliver', () => {
+  it('copies endpoints PAUSED, with no live secret and a reason saying why', async () => {
+    const created = await mockRequest<Project & { copied: { endpoints: number; signing_secrets: number } }>(
+      'POST',
+      `/v1/organizations/${ORG}/projects`,
+      { name: 'Copied', environment: 'test', copy_from_project_id: PROJECT },
+    );
+
+    expect(created.copied.endpoints).toBeGreaterThan(0);
+    // Stated out loud, because that zero is the reason nothing delivers yet.
+    expect(created.copied.signing_secrets).toBe(0);
+
+    const copied = db.endpoints.filter((row) => row.project_id === created.id);
+    expect(copied.length).toBe(created.copied.endpoints);
+    for (const row of copied) {
+      expect(row.status).toBe('paused');
+      expect(row.enabled).toBe(false);
+      expect(row.has_live_secret).toBe(false);
+    }
+  });
+
+  it('never points a copied subscription at the source project’s endpoint', async () => {
+    // That would deliver the new project's events into the old project's
+    // consumer — silently, and to a URL nobody re-checked.
+    const created = await mockRequest<Project>('POST', `/v1/organizations/${ORG}/projects`, {
+      name: 'Copied again',
+      environment: 'test',
+      copy_from_project_id: PROJECT,
+    });
+
+    const newEndpointIds = new Set(
+      db.endpoints.filter((row) => row.project_id === created.id).map((row) => row.id),
+    );
+    for (const subscription of db.subscriptions.filter((row) => row.project_id === created.id)) {
+      expect(newEndpointIds.has(subscription.endpoint_id)).toBe(true);
+    }
+  });
+});

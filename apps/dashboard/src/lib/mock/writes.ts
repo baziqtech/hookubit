@@ -456,6 +456,7 @@ export function rejectProjectCreate(body: Record<string, unknown>): Rejections {
   const rejections: Rejections = [];
   for (const key of Object.keys(body)) {
     if (key === 'name' || key === 'slug' || key === 'environment') continue;
+    if (key === 'copy_from_project_id') continue;
     rejections.push(`${key}: property ${key} should not exist`);
   }
   const name = body.name;

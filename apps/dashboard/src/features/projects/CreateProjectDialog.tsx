@@ -12,7 +12,7 @@ import {
   type CreateProjectBody,
   type Environment,
 } from '../../types/api';
-import { useCreateProject } from './api';
+import { useCreateProject, useProjects } from './api';
 
 /**
  * `POST /v1/organizations/:orgId/projects` — everything `CreateProjectDto`
@@ -44,6 +44,8 @@ type FormValues = {
   name: string;
   slug: string;
   environment: Environment;
+  /** Empty string means "start from empty". */
+  copy_from_project_id: string;
 };
 
 const SERVER_FIELDS: readonly (keyof FormValues)[] = ['name', 'slug', 'environment'];
@@ -78,7 +80,15 @@ export function CreateProjectDialog({
     reset,
     watch,
     formState: { errors },
-  } = useForm<FormValues>({ defaultValues: { name: '', slug: '', environment: 'test' } });
+  } = useForm<FormValues>({
+    defaultValues: { name: '', slug: '', environment: 'test', copy_from_project_id: '' },
+  });
+  // Only projects that exist and are not deleted can be copied from. Already
+  // in cache: the switcher that opened this dialog loaded them.
+  const projects = useProjects(orgId);
+  const sources = (projects.data?.rows ?? []).filter((row) => row.status === 'active');
+  const copyFrom = watch('copy_from_project_id');
+  const source = sources.find((row) => row.id === copyFrom);
   const errorRef = useRef<HTMLDivElement>(null);
   const claimed = SERVER_FIELDS.filter((field) => errors[field]);
   const environment = watch('environment');
@@ -98,6 +108,7 @@ export function CreateProjectDialog({
       const body: CreateProjectBody = { name: values.name.trim(), environment: values.environment };
       const slug = values.slug.trim();
       if (slug) body.slug = slug;
+      if (values.copy_from_project_id) body.copy_from_project_id = values.copy_from_project_id;
 
       create.mutate(body, {
         onSuccess: (project) => {
@@ -217,6 +228,91 @@ export function CreateProjectDialog({
             />
           )}
         </Field>
+
+        {/*
+          The production gate.
+          
+          Shown only when `live` is chosen, because a warning that is always on
+          screen is a warning nobody reads. Three consequences, and all three
+          are things people discover at the worst moment: the first event makes
+          the project billable, nothing sends until each endpoint has a signing
+          secret, and the publish allowlist starts empty so any valid key can
+          publish from anywhere.
+        */}
+        {environment === 'live' && (
+          <div
+            role="note"
+            className="flex flex-col gap-2 rounded-md border border-danger/30 bg-danger-soft/50 px-3 py-2.5 text-2xs leading-relaxed text-ink-muted"
+          >
+            <p className="text-2xs font-bold uppercase tracking-wide text-danger">
+              What changes in production
+            </p>
+            <p>
+              <strong className="font-semibold text-ink">
+                Events count towards your usage from the first one.
+              </strong>{' '}
+              Every event this project accepts is metered from the moment it is created.
+            </p>
+            <p>
+              <strong className="font-semibold text-ink">
+                Nothing sends until an endpoint has a signing secret.
+              </strong>{' '}
+              We will not make an unsigned request, so a new endpoint stays paused until you issue
+              one.
+            </p>
+            <p>
+              <strong className="font-semibold text-ink">
+                Anyone with a valid key can publish to it.
+              </strong>{' '}
+              The allowed-address list starts empty. Fill it in before you hand the key to
+              anything.
+            </p>
+          </div>
+        )}
+
+        <Field
+          label="Start from an existing project"
+          hint="Copies endpoints with their timeouts, limits and custom headers, retry policies and subscriptions. Signing secrets, API keys and the delivery record are never copied."
+          error={errors.copy_from_project_id?.message}
+        >
+          {({ id, describedBy }) => (
+            <Select
+              id={id}
+              aria-describedby={describedBy}
+              options={[
+                { value: '', label: 'Start from empty' },
+                ...sources.map((row) => ({
+                  value: row.id,
+                  label: `${row.name} — ${row.environment}`,
+                })),
+              ]}
+              {...register('copy_from_project_id')}
+            />
+          )}
+        </Field>
+
+        {source && (
+          <div
+            role="note"
+            className="flex flex-col gap-2 rounded-md border border-line bg-raised/50 px-3 py-2.5 text-2xs leading-relaxed text-ink-muted"
+          >
+            <p>
+              <strong className="font-semibold text-ink">
+                Everything copied arrives paused, with no signing secret.
+              </strong>{' '}
+              The URLs point at {source.name}&rsquo;s servers, so nothing can reach the wrong one
+              before you have looked at the list. Check every URL, issue a secret, then resume.
+            </p>
+            {source.environment === 'test' && environment === 'live' && (
+              <p className="text-warn">
+                <strong className="font-semibold">
+                  You are copying a test project into a production one.
+                </strong>{' '}
+                Those endpoints point at test URLs. Check every one of them before you resume it.
+              </p>
+            )}
+          </div>
+        )}
 
         <p
           role="note"
