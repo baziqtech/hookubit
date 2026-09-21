@@ -46,6 +46,7 @@ Every request and response body in the control API, by name. Operation pages lin
 | [`EndpointSecretDto`](#endpointsecretdto) | object |
 | [`EndpointSecretListDto`](#endpointsecretlistdto) | object |
 | [`Environment`](#environment) | enum |
+| [`EventDeliveryRollupDto`](#eventdeliveryrollupdto) | object |
 | [`EventDetailDto`](#eventdetaildto) | object |
 | [`EventDto`](#eventdto) | object |
 | [`EventListDto`](#eventlistdto) | object |
@@ -732,6 +733,17 @@ The response body of EVERY non-2xx response from this API. There is no other err
 
 string enum: `test`, `live`
 
+### EventDeliveryRollupDto
+
+| Property | Type | Required | Constraints | Description |
+|---|---|---|---|---|
+| `state` | string | yes | one of `received`, `in_progress`, `delivered`, `partly_delivered`, `all_failed`, `dropped` | `dropped` is the one worth reading twice: the fan-out COMPLETED and produced no deliveries, because no subscription matched. The publisher was answered 202 and the event went nowhere. `received` means the fan-out has not finished - which is also how an event stuck BEFORE fan-out appears here, because it has no deliveries and no completed fan-out. Telling those apart needs `event_outbox`; see `GET /projects/:id/outbox`. |
+| `total` | number | yes |  | Deliveries this event produced, across every status. |
+| `succeeded` | number | yes |  |  |
+| `failed` | number | yes |  | `failed` plus `exhausted`. |
+| `in_flight` | number | yes |  | pending, scheduled, queued, processing or retrying. |
+| `cancelled` | number | yes |  | Stopped before it could be sent - usually a paused endpoint. |
+
 ### EventDetailDto
 
 | Property | Type | Required | Constraints | Description |
@@ -749,6 +761,13 @@ string enum: `test`, `live`
 | `headers` | object<string, string> \| null | yes |  | Ingest request headers. Credential-shaped values are `[redacted]`. |
 | `created_at` | string | yes |  |  |
 | `processed_at` | string \| null | yes |  | When the fan-out first committed. Null until it has. |
+| `deliveries` | [EventDeliveryRollupDto](./schemas.md#eventdeliveryrollupdto) \| null | yes |  | What became of this event, rolled up from its DELIVERIES rather than from `status`. Read this, not `status`, to answer "did anyone receive it?" - `status: processed` means the router ran and committed, and says nothing about whether anybody got anything. Null on routes that do not compute it. |
+| `deliveries.state` | string | yes | one of `received`, `in_progress`, `delivered`, `partly_delivered`, `all_failed`, `dropped` | `dropped` is the one worth reading twice: the fan-out COMPLETED and produced no deliveries, because no subscription matched. The publisher was answered 202 and the event went nowhere. `received` means the fan-out has not finished - which is also how an event stuck BEFORE fan-out appears here, because it has no deliveries and no completed fan-out. Telling those apart needs `event_outbox`; see `GET /projects/:id/outbox`. |
+| `deliveries.total` | number | yes |  | Deliveries this event produced, across every status. |
+| `deliveries.succeeded` | number | yes |  |  |
+| `deliveries.failed` | number | yes |  | `failed` plus `exhausted`. |
+| `deliveries.in_flight` | number | yes |  | pending, scheduled, queued, processing or retrying. |
+| `deliveries.cancelled` | number | yes |  | Stopped before it could be sent - usually a paused endpoint. |
 | `payload` | [EventPayloadDto](./schemas.md#eventpayloaddto) | yes |  |  |
 | `payload.source` | string | yes | one of `inline`, `object_storage`, `unavailable` | Where the authoritative bytes are. `body` is non-null only for `inline`; the other two are told, not disguised as an empty payload. |
 | `payload.body` | string \| null | yes |  | THE DELIVERED BYTES, decoded. This is what was signed. |
@@ -776,6 +795,13 @@ string enum: `test`, `live`
 | `headers` | object<string, string> \| null | yes |  | Ingest request headers. Credential-shaped values are `[redacted]`. |
 | `created_at` | string | yes |  |  |
 | `processed_at` | string \| null | yes |  | When the fan-out first committed. Null until it has. |
+| `deliveries` | [EventDeliveryRollupDto](./schemas.md#eventdeliveryrollupdto) \| null | yes |  | What became of this event, rolled up from its DELIVERIES rather than from `status`. Read this, not `status`, to answer "did anyone receive it?" - `status: processed` means the router ran and committed, and says nothing about whether anybody got anything. Null on routes that do not compute it. |
+| `deliveries.state` | string | yes | one of `received`, `in_progress`, `delivered`, `partly_delivered`, `all_failed`, `dropped` | `dropped` is the one worth reading twice: the fan-out COMPLETED and produced no deliveries, because no subscription matched. The publisher was answered 202 and the event went nowhere. `received` means the fan-out has not finished - which is also how an event stuck BEFORE fan-out appears here, because it has no deliveries and no completed fan-out. Telling those apart needs `event_outbox`; see `GET /projects/:id/outbox`. |
+| `deliveries.total` | number | yes |  | Deliveries this event produced, across every status. |
+| `deliveries.succeeded` | number | yes |  |  |
+| `deliveries.failed` | number | yes |  | `failed` plus `exhausted`. |
+| `deliveries.in_flight` | number | yes |  | pending, scheduled, queued, processing or retrying. |
+| `deliveries.cancelled` | number | yes |  | Stopped before it could be sent - usually a paused endpoint. |
 
 ### EventListDto
 
@@ -795,6 +821,7 @@ string enum: `test`, `live`
 | `data[].headers` | object<string, string> \| null | yes |  | Ingest request headers. Credential-shaped values are `[redacted]`. |
 | `data[].created_at` | string | yes |  |  |
 | `data[].processed_at` | string \| null | yes |  | When the fan-out first committed. Null until it has. |
+| `data[].deliveries` | [EventDeliveryRollupDto](./schemas.md#eventdeliveryrollupdto) \| null | yes |  | What became of this event, rolled up from its DELIVERIES rather than from `status`. Read this, not `status`, to answer "did anyone receive it?" - `status: processed` means the router ran and committed, and says nothing about whether anybody got anything. Null on routes that do not compute it. |
 | `has_more` | boolean | yes |  |  |
 | `next_offset` | number \| null | yes |  |  |
 

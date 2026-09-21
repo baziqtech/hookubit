@@ -1,8 +1,8 @@
 import { Link, useParams, useSearchParams } from 'react-router-dom';
 import {
   Async,
+  Badge,
   EmptyState,
-  EventStatusBadge,
   Input,
   Pager,
   PageHeader,
@@ -13,6 +13,8 @@ import {
 } from '../../components';
 import { formatBytes, formatRelativeTime, truncateId } from '../../lib/format';
 import { DEFAULT_PAGE_SIZE, type EventStatus, type WebhookEvent } from '../../types/api';
+import { StuckEventsNotice } from '../outbox/StuckEventsNotice';
+import { describeRollup } from './rollup';
 import { useEvents, type EventFilters } from './api';
 
 /**
@@ -65,6 +67,14 @@ export function EventsPage() {
         title="Events"
         description="Everything published to this project. One event fans out to one delivery per matching subscription."
       />
+
+      {/*
+        A stuck event IS in this list — it was accepted — and its rollup reads
+        `received`, which is indistinguishable from an event published a second
+        ago. Telling them apart needs `event_outbox`, a different table and a
+        different screen. This is the door to it.
+      */}
+      <StuckEventsNotice orgId={orgId} projectId={projectId} />
 
       <Panel flush>
         <div className="flex flex-wrap items-end gap-2 border-b border-line px-3 py-2.5">
@@ -145,22 +155,44 @@ function eventColumns(orgId: string, projectId: string): Column<WebhookEvent>[] 
         </Link>
       ),
     },
-    { key: 'status', header: 'Status', render: (row) => <EventStatusBadge status={row.status} /> },
-    /*
-     * THE FAN-OUT COLUMN IS GONE, and its absence is deliberate.
-     *
-     * `EventDto` has no `delivery_counts` — the "3 ok / 1 exhausted" roll-up
-     * this column rendered was invented, and there is no route that returns
-     * per-event delivery counts in a list. Deriving it would mean one
-     * `…/events/:id/deliveries` request per visible row, which is fifty
-     * requests to paint one page.
-     *
-     * The event's own `status` is what the list can honestly report — it is the
-     * INGEST state, not a delivery outcome — and the fan-out is one click away
-     * on the detail page, where the deliveries are already fetched and the
-     * counts are derived from the rows themselves. See HANDOFF.md: a
-     * `delivery_counts` object on `EventDto` puts this column back.
-     */
+    {
+      key: 'status',
+      header: 'Status',
+      /*
+       * The DELIVERY rollup, not `status`.
+       *
+       * `status` is the ingest/fan-out state: `processed` means the router ran
+       * and committed, and says nothing about whether anybody received
+       * anything. A list built on it reports a project as healthy while every
+       * delivery it produced is failing — and it cannot express `dropped`,
+       * which is fan-out completing and matching nobody. That is the state
+       * newcomers actually hit: a cheerful 202, and the event goes nowhere.
+       */
+      render: (row) => {
+        const summary = describeRollup(row.deliveries);
+        return (
+          <Badge tone={summary.tone} dot>
+            {summary.label}
+          </Badge>
+        );
+      },
+    },
+    {
+      key: 'deliveries',
+      header: 'Deliveries',
+      /*
+       * THE FAN-OUT COLUMN IS BACK.
+       *
+       * It was removed because `EventDto` had no per-event delivery counts and
+       * deriving them meant one `…/events/:id/deliveries` request per visible
+       * row — fifty requests to paint one page. `EventsService` now rolls them
+       * up in one grouped query over the page's ids, which is what HANDOFF.md
+       * said would put this column back.
+       */
+      render: (row) => (
+        <span className="text-2xs text-ink-muted">{describeRollup(row.deliveries).detail}</span>
+      ),
+    },
     {
       key: 'idempotency',
       header: 'Idempotency key',

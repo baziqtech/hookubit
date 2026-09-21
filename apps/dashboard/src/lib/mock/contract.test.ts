@@ -4,6 +4,7 @@ import type {
   AttemptLatency,
   AuditLogEntry,
   DeliveryOutcomes,
+  WebhookEvent,
   DeliverySeries,
   EventVolume,
   FailingEndpoints,
@@ -980,6 +981,59 @@ describe('organization delete — OrganizationsController', () => {
       throw new Error('expected a 404');
     } catch (error) {
       expect((error as MockHttpError).status).toBe(404);
+    }
+  });
+});
+
+/**
+ * The event rollup: what became of the event, as opposed to what became of the
+ * ingest. Counted from the same delivery fixture the list routes serve, so the
+ * mock cannot report an outcome the deliveries it is built from disagree with.
+ */
+describe('events carry a delivery rollup, not just an ingest status', () => {
+  it('every listed event carries counts that add up', async () => {
+    const body = await mockRequest<{ data: WebhookEvent[] }>(
+      'GET',
+      `/v1/projects/${PROJECT}/events?limit=50`,
+    );
+
+    expect(body.data.length).toBeGreaterThan(0);
+    for (const event of body.data) {
+      const rollup = event.deliveries;
+      expect(rollup).not.toBeNull();
+      expect(rollup!.total).toBe(
+        rollup!.succeeded + rollup!.failed + rollup!.in_flight + rollup!.cancelled,
+      );
+    }
+  });
+
+  it('an event that matched no subscription reads DROPPED, not delivered', async () => {
+    // The state that exists nowhere else: fan-out completed and produced
+    // nothing. `status: processed` alone makes this event look finished and
+    // fine, and it reached nobody.
+    const body = await mockRequest<{ data: WebhookEvent[] }>(
+      'GET',
+      `/v1/projects/${PROJECT}/events?limit=200`,
+    );
+
+    const dropped = body.data.filter((event) => event.deliveries?.state === 'dropped');
+    for (const event of dropped) {
+      expect(event.deliveries!.total).toBe(0);
+      expect(event.status).toBe('processed');
+    }
+  });
+
+  it('never reports delivered for an event with a failure', async () => {
+    const body = await mockRequest<{ data: WebhookEvent[] }>(
+      'GET',
+      `/v1/projects/${PROJECT}/events?limit=200`,
+    );
+
+    for (const event of body.data) {
+      if (event.deliveries?.state !== 'delivered') continue;
+      expect(event.deliveries.failed).toBe(0);
+      expect(event.deliveries.cancelled).toBe(0);
+      expect(event.deliveries.in_flight).toBe(0);
     }
   });
 });

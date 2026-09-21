@@ -110,6 +110,77 @@ describe('listing events', () => {
   });
 });
 
+/**
+ * The rollup: what became of the event, as opposed to what became of the
+ * ingest.
+ *
+ * `Event.status` answers "did we store it and work out who wanted it?" and
+ * stops there. Every assertion below is about the difference between that and
+ * "did anybody receive it?", which is the question the list is actually asked.
+ */
+describe('the delivery rollup on a listing', () => {
+  const rollupOf = async (eventId: string) => {
+    const { events, context } = await ledgerHarness();
+    const page = await events.list(context, ALL);
+    return page.data.find((event) => event.id === eventId)?.deliveries;
+  };
+
+  it('an event whose fan-out matched nothing is DROPPED, not delivered', async () => {
+    // `status: processed` and zero deliveries. Read off `status` alone this
+    // event looks finished and fine; it reached nobody. This is the state
+    // newcomers actually hit, and it is invisible in every other column
+    // because there is no delivery row to be absent from.
+    const rollup = await rollupOf(LEDGER.eventOrphan);
+    expect(rollup?.state).toBe('dropped');
+    expect(rollup?.total).toBe(0);
+  });
+
+  it('an event with one success and one exhausted is PARTLY DELIVERED', async () => {
+    const rollup = await rollupOf(LEDGER.eventOrder);
+    expect(rollup?.state).toBe('partly_delivered');
+    expect(rollup?.succeeded).toBe(1);
+    expect(rollup?.failed).toBe(1);
+    expect(rollup?.total).toBe(2);
+  });
+
+  it('an event with a delivery still retrying is IN PROGRESS', async () => {
+    const rollup = await rollupOf(LEDGER.eventSettled);
+    expect(rollup?.state).toBe('in_progress');
+    expect(rollup?.in_flight).toBeGreaterThan(0);
+  });
+
+  it('counts only this event, never the neighbour above it in the page', async () => {
+    // The whole rollup is one grouped query over the page's ids. An off-by-a-
+    // key here would attribute one event's failures to another, which is the
+    // one error this column must not make.
+    const { events, context } = await ledgerHarness();
+    const page = await events.list(context, ALL);
+
+    for (const event of page.data) {
+      const rollup = event.deliveries;
+      expect(rollup).not.toBeNull();
+      expect(rollup!.total).toBe(
+        rollup!.succeeded + rollup!.failed + rollup!.in_flight + rollup!.cancelled,
+      );
+    }
+  });
+
+  it('does not issue one query per event', async () => {
+    // The N+1 the paged grouped query exists to avoid. A page of 50 events
+    // costing 50 round trips is how a list route becomes the slowest thing in
+    // the product.
+    const { events, context, db } = await ledgerHarness();
+    db.queries.length = 0;
+    const page = await events.list(context, ALL);
+
+    const groupBys = db.queries.filter(
+      (query) => query.table === 'delivery' && query.op === 'groupBy',
+    );
+    expect(groupBys.length).toBeLessThan(page.data.length);
+    expect(groupBys.length).toBeGreaterThan(0);
+  });
+});
+
 describe('fetching one event', () => {
   it('returns the AUTHORITATIVE raw bytes as the payload, and labels the jsonb copy', async () => {
     const { events, context } = await ledgerHarness();

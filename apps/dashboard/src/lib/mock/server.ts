@@ -461,7 +461,46 @@ function filterEvents(projectId: string, query: URLSearchParams): EventDetail[] 
 function withoutPayload(event: EventDetail): WebhookEvent {
   const { payload: _payload, ...summary } = event;
   void _payload;
-  return summary;
+  return { ...summary, deliveries: rollUpDeliveries(event) };
+}
+
+/**
+ * What became of an event, counted from the same delivery fixture the list
+ * routes serve — mirroring `EventsService.rollUpDeliveries` and
+ * `delivery-rollup.ts`.
+ *
+ * `dropped` is the state that only exists here: fan-out COMPLETED (`status:
+ * processed`) and produced no deliveries, because no subscription matched. It
+ * is invisible in every other column because there is no delivery row to be
+ * absent from.
+ */
+function rollUpDeliveries(event: EventDetail): WebhookEvent['deliveries'] {
+  const rows = db.deliveries.filter((delivery) => delivery.event_id === event.id);
+
+  const succeeded = rows.filter((row) => row.status === 'succeeded').length;
+  const failed = rows.filter((row) => row.status === 'failed' || row.status === 'exhausted').length;
+  const cancelled = rows.filter((row) => row.status === 'cancelled').length;
+  const inFlight = rows.filter((row) =>
+    ['pending', 'scheduled', 'queued', 'processing', 'retrying'].includes(row.status),
+  ).length;
+
+  const base = {
+    total: rows.length,
+    succeeded,
+    failed,
+    in_flight: inFlight,
+    cancelled,
+  };
+
+  if (rows.length === 0) {
+    return { ...base, state: event.status === 'processed' ? 'dropped' : 'received' };
+  }
+  if (inFlight > 0) return { ...base, state: 'in_progress' };
+  if (succeeded === rows.length) return { ...base, state: 'delivered' };
+  // Cancelled counts towards `all_failed`: not because a cancellation is a
+  // failure, but because from the EVENT's point of view nothing arrived.
+  if (succeeded === 0) return { ...base, state: 'all_failed' };
+  return { ...base, state: 'partly_delivered' };
 }
 
 /** The endpoint, or the 404 that never distinguishes "gone" from "not yours". */

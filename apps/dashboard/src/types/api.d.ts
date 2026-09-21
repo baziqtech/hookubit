@@ -1937,6 +1937,22 @@ export interface components {
             /** @description Bucket capacity. Null means "the same as `limit`". When set it must be at least `limit`, or the bucket could never hold one window’s worth of tokens and the configured limit would be unreachable. */
             burst?: number | null;
         };
+        EventDeliveryRollupDto: {
+            /**
+             * @description `dropped` is the one worth reading twice: the fan-out COMPLETED and produced no deliveries, because no subscription matched. The publisher was answered 202 and the event went nowhere. `received` means the fan-out has not finished - which is also how an event stuck BEFORE fan-out appears here, because it has no deliveries and no completed fan-out. Telling those apart needs `event_outbox`; see `GET /projects/:id/outbox`.
+             * @enum {string}
+             */
+            state: "received" | "in_progress" | "delivered" | "partly_delivered" | "all_failed" | "dropped";
+            /** @description Deliveries this event produced, across every status. */
+            total: number;
+            succeeded: number;
+            /** @description `failed` plus `exhausted`. */
+            failed: number;
+            /** @description pending, scheduled, queued, processing or retrying. */
+            in_flight: number;
+            /** @description Stopped before it could be sent - usually a paused endpoint. */
+            cancelled: number;
+        };
         EventDto: {
             id: string;
             project_id: string;
@@ -1965,6 +1981,8 @@ export interface components {
             created_at: string;
             /** @description When the fan-out first committed. Null until it has. */
             processed_at: string | null;
+            /** @description What became of this event, rolled up from its DELIVERIES rather than from `status`. Read this, not `status`, to answer "did anyone receive it?" - `status: processed` means the router ran and committed, and says nothing about whether anybody got anything. Null on routes that do not compute it. */
+            deliveries: components["schemas"]["EventDeliveryRollupDto"] | null;
         };
         EventListDto: {
             data: components["schemas"]["EventDto"][];
@@ -2024,6 +2042,8 @@ export interface components {
             created_at: string;
             /** @description When the fan-out first committed. Null until it has. */
             processed_at: string | null;
+            /** @description What became of this event, rolled up from its DELIVERIES rather than from `status`. Read this, not `status`, to answer "did anyone receive it?" - `status: processed` means the router ran and committed, and says nothing about whether anybody got anything. Null on routes that do not compute it. */
+            deliveries: components["schemas"]["EventDeliveryRollupDto"] | null;
             payload: components["schemas"]["EventPayloadDto"];
         };
         DeliveryDto: {

@@ -1,6 +1,6 @@
 import { Injectable } from '@nestjs/common';
-import { Delivery, Event, Prisma } from '@prisma/client';
-import { RequestContext, TenantScope, TenantScopeFactory } from '../authz';
+import { Delivery, DeliveryStatus, Event, Prisma } from '@prisma/client';
+import { MAX_PAGE_SIZE, RequestContext, TenantScope, TenantScopeFactory } from '../authz';
 import { AppError } from '../common/errors';
 import { DeliveriesService, dateRange } from '../deliveries/deliveries.service';
 import { MAX_REPLAY_FAN_OUT } from '../deliveries/delivery-limits';
@@ -18,6 +18,7 @@ import {
   toEventDetailDto,
   toEventDto,
 } from './dto';
+import { DeliveryRollup, emptyCounts, rollUp } from './delivery-rollup';
 import { crossTenantNotFound, withCrossTenantNotFound } from './not-found';
 
 /**
@@ -59,17 +60,88 @@ export class EventsService {
    * a bare array cannot say whether the bound was reached.
    */
   async list(context: RequestContext, query: ListEventsQueryDto): Promise<EventListDto> {
-    const page = await this.scopes.for(context).events.findPage({
+    const scope = this.scopes.for(context);
+    const page = await scope.events.findPage({
       where: EventsService.filterWhere(query),
       orderBy: { createdAt: 'desc' },
       take: query.limit,
       skip: query.offset,
     });
+
+    const rollups = await this.rollUpDeliveries(
+      scope,
+      page.rows.map((event) => event.id),
+      page.rows,
+    );
+
     return {
-      data: page.rows.map(toEventDto),
+      data: page.rows.map((event) => toEventDto(event, rollups.get(event.id))),
       has_more: page.hasMore,
       next_offset: page.nextSkip,
     };
+  }
+
+  /**
+   * What became of each event on this page, in one grouped query per 200
+   * groups.
+   *
+   * ## Why the list needs this at all
+   *
+   * `Event.status` is the ingest/fan-out state: `processed` means the router
+   * ran and committed, and says nothing about whether anyone received
+   * anything. A list built on it reports a project as healthy while every
+   * delivery it produced is failing, and it cannot express `dropped` - fan-out
+   * completed and matched nobody - which is the state newcomers actually hit.
+   *
+   * ## Why it is paged rather than one query
+   *
+   * `groupBy(['eventId', 'status'])` produces up to nine groups per event, so a
+   * 50-event page is 450 groups against a `MAX_PAGE_SIZE` of 200 - and
+   * `ScopedRepository.groupBy` with an explicit take SLICES. A silently
+   * truncated rollup would show `delivered` on an event whose failures fell off
+   * the end, which is the one error this column must not make. So it walks
+   * pages until one comes back short: three queries for a default page, nine
+   * for the largest one the API allows.
+   *
+   * Never one query per event. That is the N+1 this method exists to avoid.
+   */
+  private async rollUpDeliveries(
+    scope: TenantScope,
+    eventIds: string[],
+    events: Event[],
+  ): Promise<Map<string, DeliveryRollup>> {
+    const rollups = new Map<string, DeliveryRollup>();
+    if (eventIds.length === 0) return rollups;
+
+    const counts = new Map<string, Record<DeliveryStatus, number>>();
+    for (const id of eventIds) counts.set(id, emptyCounts());
+
+    for (let skip = 0; ; skip += MAX_PAGE_SIZE) {
+      const groups = await scope.deliveries.groupBy({
+        by: ['eventId', 'status'],
+        where: { eventId: { in: eventIds } } satisfies Prisma.DeliveryWhereInput,
+        _count: { _all: true },
+        take: MAX_PAGE_SIZE,
+        skip,
+      });
+
+      for (const group of groups) {
+        const eventId = group.eventId;
+        const status = group.status;
+        if (typeof eventId !== 'string' || typeof status !== 'string') continue;
+        const row = counts.get(eventId);
+        if (!row) continue;
+        const count = (group._count as { _all?: number } | undefined)?._all ?? 0;
+        row[status as DeliveryStatus] = count;
+      }
+
+      if (groups.length < MAX_PAGE_SIZE) break;
+    }
+
+    for (const event of events) {
+      rollups.set(event.id, rollUp(event.status, counts.get(event.id) ?? emptyCounts()));
+    }
+    return rollups;
   }
 
   /** One event, with the payload, labelled as raw-versus-jsonb. */

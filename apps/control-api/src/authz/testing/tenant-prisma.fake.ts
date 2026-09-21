@@ -265,7 +265,15 @@ export class FakeTenantPrisma {
     } else if (args._count && typeof args._count === 'object') {
       const counts: Row = {};
       for (const field of Object.keys(args._count as Row)) {
-        counts[field] = rows.filter((row) => row[field] !== null && row[field] !== undefined).length;
+        // `_all` counts EVERY row in the group; a named field counts the rows
+        // where it is non-null. Treating `_all` as a column looked for a
+        // property no row has and returned 0 for every group — a rollup that
+        // is uniformly, silently empty, which reads as "nothing happened"
+        // rather than as a broken fake.
+        counts[field] =
+          field === '_all'
+            ? rows.length
+            : rows.filter((row) => row[field] !== null && row[field] !== undefined).length;
       }
       out._count = counts;
     }
@@ -343,6 +351,8 @@ export class FakeTenantPrisma {
         where?: Row;
         _count?: unknown;
         _sum?: unknown;
+        take?: number;
+        skip?: number;
       }): Promise<Row[]> => {
         this.queries.push({ table, op: 'groupBy', where: args.where });
         const rows = this.find(table, { where: args.where });
@@ -353,11 +363,35 @@ export class FakeTenantPrisma {
           if (bucket) bucket.push(row);
           else groups.set(key, [row]);
         }
-        return [...groups.values()].map((bucket) => {
+
+        const built = [...groups.values()].map((bucket) => {
           const head: Row = {};
           for (const field of args.by) head[field] = bucket[0][field] ?? null;
           return { ...head, ...FakeTenantPrisma.summarise(bucket, args) };
         });
+
+        /*
+         * `take` and `skip` are HONOURED, and the order is the grouped columns
+         * ascending — the same default `ScopedRepository.groupBy` applies.
+         *
+         * They used to be ignored, which made this fake unable to fail on the
+         * one bug that class of query actually has: a caller that pages a
+         * grouped rollup and stops early, or one that does not page at all and
+         * is silently truncated. A fake that returns everything in one call
+         * passes both the correct and the broken version.
+         */
+        built.sort((left, right) => {
+          for (const field of args.by) {
+            const a = JSON.stringify(left[field] ?? null);
+            const b = JSON.stringify(right[field] ?? null);
+            if (a !== b) return a < b ? -1 : 1;
+          }
+          return 0;
+        });
+
+        const skip = args.skip ?? 0;
+        const take = args.take ?? built.length;
+        return built.slice(skip, skip + take);
       },
       deleteMany: async (args: { where?: Row } = {}): Promise<{ count: number }> => {
         const targets = this.find(table, { where: args.where });

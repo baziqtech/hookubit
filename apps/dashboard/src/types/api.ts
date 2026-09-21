@@ -629,6 +629,17 @@ export type FailingEndpoints = S['FailingEndpointsDto'];
  */
 export type AttemptLatency = S['AttemptLatencyDto'];
 
+/**
+ * What became of an event, rolled up from its DELIVERIES rather than from
+ * `status`. Read this, not `status`, to answer "did anyone receive it?" —
+ * `status: processed` means the router ran and committed, and says nothing
+ * about whether anybody got anything.
+ *
+ * `dropped` is the one worth reading twice: fan-out COMPLETED and produced no
+ * deliveries, because no subscription matched.
+ */
+export type EventDeliveryRollup = S['EventDeliveryRollupDto'];
+
 export type EventTypeCount = S['EventTypeCountDto'];
 export type EventVolume = S['EventVolumeDto'];
 

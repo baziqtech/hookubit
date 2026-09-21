@@ -52,6 +52,7 @@ Filter by event type, ingest status, date range, and a free-text fragment of the
 | `data[].headers` | object<string, string> \| null | yes |  | Ingest request headers. Credential-shaped values are `[redacted]`. |
 | `data[].created_at` | string | yes |  |  |
 | `data[].processed_at` | string \| null | yes |  | When the fan-out first committed. Null until it has. |
+| `data[].deliveries` | [EventDeliveryRollupDto](./schemas.md#eventdeliveryrollupdto) \| null | yes |  | What became of this event, rolled up from its DELIVERIES rather than from `status`. Read this, not `status`, to answer "did anyone receive it?" - `status: processed` means the router ran and committed, and says nothing about whether anybody got anything. Null on routes that do not compute it. |
 | `has_more` | boolean | yes |  |  |
 | `next_offset` | number \| null | yes |  |  |
 
@@ -101,6 +102,13 @@ The payload is returned as `payload.body` - the AUTHORITATIVE raw bytes, decoded
 | `headers` | object<string, string> \| null | yes |  | Ingest request headers. Credential-shaped values are `[redacted]`. |
 | `created_at` | string | yes |  |  |
 | `processed_at` | string \| null | yes |  | When the fan-out first committed. Null until it has. |
+| `deliveries` | [EventDeliveryRollupDto](./schemas.md#eventdeliveryrollupdto) \| null | yes |  | What became of this event, rolled up from its DELIVERIES rather than from `status`. Read this, not `status`, to answer "did anyone receive it?" - `status: processed` means the router ran and committed, and says nothing about whether anybody got anything. Null on routes that do not compute it. |
+| `deliveries.state` | string | yes | one of `received`, `in_progress`, `delivered`, `partly_delivered`, `all_failed`, `dropped` | `dropped` is the one worth reading twice: the fan-out COMPLETED and produced no deliveries, because no subscription matched. The publisher was answered 202 and the event went nowhere. `received` means the fan-out has not finished - which is also how an event stuck BEFORE fan-out appears here, because it has no deliveries and no completed fan-out. Telling those apart needs `event_outbox`; see `GET /projects/:id/outbox`. |
+| `deliveries.total` | number | yes |  | Deliveries this event produced, across every status. |
+| `deliveries.succeeded` | number | yes |  |  |
+| `deliveries.failed` | number | yes |  | `failed` plus `exhausted`. |
+| `deliveries.in_flight` | number | yes |  | pending, scheduled, queued, processing or retrying. |
+| `deliveries.cancelled` | number | yes |  | Stopped before it could be sent - usually a paused endpoint. |
 | `payload` | [EventPayloadDto](./schemas.md#eventpayloaddto) | yes |  |  |
 | `payload.source` | string | yes | one of `inline`, `object_storage`, `unavailable` | Where the authoritative bytes are. `body` is non-null only for `inline`; the other two are told, not disguised as an empty payload. |
 | `payload.body` | string \| null | yes |  | THE DELIVERED BYTES, decoded. This is what was signed. |

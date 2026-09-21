@@ -1,6 +1,7 @@
 import { ApiProperty } from '@nestjs/swagger';
 import { Event, EventStatus } from '@prisma/client';
 import { HEADER_REDACTED, isRedactedRequestHeader } from '../../deliveries/delivery-limits';
+import { DeliveryRollup } from '../delivery-rollup';
 import { PayloadEncoding, PayloadSource, renderPayload } from '../event-payload';
 
 function iso(value: Date | string | null | undefined): string | null {
@@ -107,9 +108,54 @@ export class EventDto {
     description: 'When the fan-out first committed. Null until it has.',
   })
   processed_at!: string | null;
+
+  @ApiProperty({
+    type: () => EventDeliveryRollupDto,
+    nullable: true,
+    description:
+      'What became of this event, rolled up from its DELIVERIES rather than from `status`. ' +
+      'Read this, not `status`, to answer "did anyone receive it?" - `status: processed` means ' +
+      'the router ran and committed, and says nothing about whether anybody got anything. ' +
+      'Null on routes that do not compute it.',
+  })
+  deliveries!: EventDeliveryRollupDto | null;
 }
 
-export function toEventDto(event: Event): EventDto {
+/**
+ * The event's deliveries, counted.
+ *
+ * `state` is the six-way rollup; the counts travel with it so a client can
+ * spell out the actual mix ("1 delivered, 1 cancelled") rather than paraphrase
+ * the state.
+ */
+export class EventDeliveryRollupDto {
+  @ApiProperty({
+    enum: ['received', 'in_progress', 'delivered', 'partly_delivered', 'all_failed', 'dropped'],
+    description:
+      '`dropped` is the one worth reading twice: the fan-out COMPLETED and produced no ' +
+      'deliveries, because no subscription matched. The publisher was answered 202 and the ' +
+      'event went nowhere. `received` means the fan-out has not finished - which is also how an ' +
+      'event stuck BEFORE fan-out appears here, because it has no deliveries and no completed ' +
+      'fan-out. Telling those apart needs `event_outbox`; see `GET /projects/:id/outbox`.',
+  })
+  state!: string;
+
+  @ApiProperty({ description: 'Deliveries this event produced, across every status.' })
+  total!: number;
+
+  @ApiProperty() succeeded!: number;
+
+  @ApiProperty({ description: '`failed` plus `exhausted`.' })
+  failed!: number;
+
+  @ApiProperty({ description: 'pending, scheduled, queued, processing or retrying.' })
+  in_flight!: number;
+
+  @ApiProperty({ description: 'Stopped before it could be sent - usually a paused endpoint.' })
+  cancelled!: number;
+}
+
+export function toEventDto(event: Event, rollup?: DeliveryRollup): EventDto {
   return {
     id: event.id,
     project_id: event.projectId,
@@ -124,6 +170,7 @@ export function toEventDto(event: Event): EventDto {
     headers: safeHeaders(event.headers),
     created_at: new Date(event.createdAt).toISOString(),
     processed_at: iso(event.processedAt),
+    deliveries: rollup ?? null,
   };
 }
 

@@ -1324,6 +1324,10 @@ function buildFixture(index: number): Fixture {
       idempotency_key: index % 3 === 0 ? `txn_${index}_settled_v1` : null,
       ordering_key: orderingKey,
       status: ingest.status,
+      // Computed by the list handler from the delivery rows, exactly as the
+      // server rolls it up — never stored, or the fixture could disagree with
+      // the deliveries it is built from.
+      deliveries: null,
       payload_size: size,
       payload_hash: sha256,
       payload_inline: index !== OFFLOADED_EVENT && index !== AGED_OUT_EVENT,
