@@ -26,25 +26,47 @@ export default {
         'danger-soft': 'rgb(var(--c-danger-soft) / <alpha-value>)',
         info: 'rgb(var(--c-info) / <alpha-value>)',
         'info-soft': 'rgb(var(--c-info-soft) / <alpha-value>)',
-        // From the pen.dev system: a nav surface distinct from `panel` (in
-        // dark it is darker than the panels it sits beside), the saturated
-        // badge-dot forms, a tinted accent border, chart gridlines, and a code
-        // surface that stays dark in both themes.
-        nav: 'rgb(var(--c-nav) / <alpha-value>)',
+        // `sunken` is the third surface the design uses for segmented controls
+        // and inset chips — the thing a control sits IN, as opposed to `raised`,
+        // which is a thing sitting ON the page.
+        sunken: 'rgb(var(--c-sunken) / <alpha-value>)',
         'accent-line': 'rgb(var(--c-accent-line) / <alpha-value>)',
+        // The darker accent, for accent-coloured TEXT on a soft accent ground,
+        // where the button violet does not carry enough contrast.
+        'accent-deep': 'rgb(var(--c-accent-deep) / <alpha-value>)',
+        // The rail's own vocabulary. Deliberately separate from the page
+        // surfaces so the navigation can be re-skinned without touching a
+        // single component that lives inside it.
+        nav: 'rgb(var(--c-nav) / <alpha-value>)',
+        'nav-ink': 'rgb(var(--c-nav-ink) / <alpha-value>)',
+        'nav-ink-muted': 'rgb(var(--c-nav-ink-muted) / <alpha-value>)',
+        'nav-line': 'rgb(var(--c-nav-line) / <alpha-value>)',
+        'nav-hover': 'rgb(var(--c-nav-hover) / <alpha-value>)',
+        'nav-active': 'rgb(var(--c-nav-active) / <alpha-value>)',
+        'nav-section': 'rgb(var(--c-nav-section) / <alpha-value>)',
+        // The saturated badge-dot forms: a 5px dot needs more chroma than the
+        // text beside it to read at all.
         'ok-dot': 'rgb(var(--c-ok-dot) / <alpha-value>)',
         'warn-dot': 'rgb(var(--c-warn-dot) / <alpha-value>)',
         'danger-dot': 'rgb(var(--c-danger-dot) / <alpha-value>)',
+        'info-dot': 'rgb(var(--c-info-dot) / <alpha-value>)',
         grid: 'rgb(var(--c-grid) / <alpha-value>)',
         code: 'rgb(var(--c-code) / <alpha-value>)',
         'code-ink': 'rgb(var(--c-code-ink) / <alpha-value>)',
       },
       fontFamily: {
         // Both are SELF-HOSTED (@fontsource-variable, imported in index.css).
-        // Inter used to be named here and never loaded, so the product silently
-        // rendered in whatever the OS supplied; the fallbacks below are now a
-        // genuine fallback rather than what everyone actually saw.
-        sans: ['Inter Variable', 'Inter', 'ui-sans-serif', 'system-ui', 'sans-serif'],
+        // A family named here and never loaded is invisible — the product just
+        // renders in whatever the OS supplies and nothing errors. Inter sat
+        // here unloaded for weeks. If you change either name, change the
+        // @import with it.
+        sans: [
+          'Plus Jakarta Sans Variable',
+          'Plus Jakarta Sans',
+          'ui-sans-serif',
+          'system-ui',
+          'sans-serif',
+        ],
         mono: ['JetBrains Mono Variable', 'ui-monospace', 'SFMono-Regular', 'Menlo', 'monospace'],
       },
       fontSize: {
