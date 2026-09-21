@@ -585,6 +585,22 @@ export const MAX_REQUEUE_REASON_LENGTH = 500;
  */
 export type AuditLogEntry = S['AuditLogDto'];
 
+/* ── Billing ──────────────────────────────────────────────────────────────── */
+
+/**
+ * Metered volume for the calendar month to date.
+ *
+ * `billable` is FALSE everywhere: there is no payment provider, no invoice and
+ * no price in this system. Render that as a sentence, never as an invoice table
+ * with a total of $0.00 — somebody would believe it.
+ *
+ * `plan` is null for every organization, which is not the same as a free tier
+ * anybody agreed to. `period_end` is the last COMPLETE hour, because usage is
+ * rolled up hourly and the hour in progress is not counted yet.
+ */
+export type BillingSummary = S['BillingDto'];
+export type UsageLine = S['UsageLineDto'];
+
 /* ── Notifications ────────────────────────────────────────────────────────── */
 
 /**

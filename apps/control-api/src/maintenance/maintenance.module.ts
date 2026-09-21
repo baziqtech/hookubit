@@ -11,6 +11,8 @@ import { PrismaModule } from '../infrastructure/prisma/prisma.module';
 import { AutoDisableScheduler } from './auto-disable.scheduler';
 import { EndpointAutoDisableService } from './endpoint-auto-disable.service';
 import { NotificationDispatcher } from './notification-dispatcher.service';
+import { UsageAggregatorService } from './usage-aggregator.service';
+import { UsageScheduler } from './usage.scheduler';
 
 /**
  * Periodic reconciliation the control plane owns.
@@ -33,7 +35,13 @@ import { NotificationDispatcher } from './notification-dispatcher.service';
   // NOTICES that an endpoint is dead, and telling somebody is the other half
   // of the job. It resolves the same mailer the rest of the product uses.
   imports: [AuthzModule, PrismaModule, NotificationDestinationsModule],
-  providers: [EndpointAutoDisableService, AutoDisableScheduler, NotificationDispatcher],
-  exports: [EndpointAutoDisableService],
+  providers: [
+    EndpointAutoDisableService,
+    AutoDisableScheduler,
+    NotificationDispatcher,
+    UsageAggregatorService,
+    UsageScheduler,
+  ],
+  exports: [EndpointAutoDisableService, UsageAggregatorService],
 })
 export class MaintenanceModule {}

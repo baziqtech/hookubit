@@ -3,6 +3,7 @@ import { ConfigModule } from '@nestjs/config';
 import { LoggerModule } from 'nestjs-pino';
 import { AuthModule } from './auth/auth.module';
 import { AuditModule } from './audit/audit.module';
+import { BillingModule } from './billing/billing.module';
 import { AuthzModule } from './authz/authz.module';
 import { AnalyticsModule } from './analytics/analytics.module';
 import { ApiKeysModule } from './api-keys/api-keys.module';
@@ -107,6 +108,7 @@ import { WebhookSubscriptionsModule } from './webhook-subscriptions/webhook-subs
     OutboxModule,
     AuditModule,
     AnalyticsModule,
+    BillingModule,
     // Periodic reconciliation with no routes of its own. It switches off
     // endpoints whose circuit breaker has been open past the window, so a dead
     // endpoint stops accruing a delivery row per matching event for ever, and

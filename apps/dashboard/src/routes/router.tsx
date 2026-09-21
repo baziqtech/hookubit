@@ -21,7 +21,7 @@ import { PoliciesPage } from '../features/policies/PoliciesPage';
 import { AnalyticsPage } from '../features/analytics/AnalyticsPage';
 import { OrganizationSettingsPage } from '../features/settings/OrganizationSettingsPage';
 import { ProjectSettingsPage } from '../features/settings/ProjectSettingsPage';
-import { BillingPage } from '../features/settings/placeholders';
+import { BillingPage } from '../features/settings/BillingPage';
 import { SubscriptionsPage } from '../features/subscriptions/SubscriptionsPage';
 import { AcceptInvitationPage } from '../features/team/AcceptInvitationPage';
 import { TeamPage } from '../features/team/TeamPage';

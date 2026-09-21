@@ -106,6 +106,18 @@ export const envSchema = z.object({
   ENDPOINT_AUTO_DISABLE_AFTER_HOURS: blankAsUnset(
     z.coerce.number().int().min(24).max(24 * 365).default(72),
   ),
+  /**
+   * How often complete hours are rolled into `usage_records`.
+   *
+   * Being late costs nothing: the sweep looks back two days and fills whatever
+   * is missing, because the work is keyed by hour and idempotent rather than
+   * tracked by a watermark. There is no "off" switch, because the alternative
+   * to aggregating is counting a month of the largest table in the system every
+   * time somebody opens the billing page.
+   */
+  USAGE_AGGREGATION_INTERVAL_MINUTES: blankAsUnset(
+    z.coerce.number().int().min(1).max(1440).default(15),
+  ),
   ENDPOINT_AUTO_DISABLE_INTERVAL_MINUTES: blankAsUnset(
     z.coerce.number().int().min(1).max(1440).default(15),
   ),

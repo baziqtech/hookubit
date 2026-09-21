@@ -1234,6 +1234,28 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/organizations/{orgId}/billing": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Metered volume for the calendar month to date
+         * @description Read from the HOURLY ROLLUPS in `usage_records`, not by counting `events` and `deliveries` — a month of those is a sequential scan of the two largest tables in the system, and this page would run it on every open. `period_end` is therefore the last COMPLETE hour, not now.
+         *
+         *     `billable` is false everywhere: there is no payment provider, no invoice and no price in this system. The response says so rather than returning a total of zero that somebody would believe.
+         */
+        get: operations["BillingController_summary"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
@@ -2673,6 +2695,38 @@ export interface components {
             by_type: components["schemas"]["EventTypeCountDto"][];
             /** @description True when more event types occurred than `limit`. */
             has_more: boolean;
+        };
+        PlanDto: {
+            id: string;
+            name: string;
+            slug: string;
+            /** @description How long payload history is kept, in days. */
+            retention_days: number;
+            max_projects: number | null;
+            max_endpoints: number | null;
+            max_members: number | null;
+            included_events_per_month: string | null;
+        };
+        UsageLineDto: {
+            /** @description `events_ingested`, `deliveries` or `replays`. */
+            metric: string;
+            /** @description Counted from the hourly rollups, not from the source tables. */
+            used: string;
+            /** @description What the plan includes, or null when the organization has no plan — which is not the same as an allowance of zero. */
+            included: string | null;
+        };
+        BillingDto: {
+            /** @description NULL when this organization has no plan assigned. That is the state every organization is in today — no plans are defined — and it is reported honestly rather than as a free tier nobody agreed to. */
+            plan: components["schemas"]["PlanDto"] | null;
+            /** @description `trialing`, `active`, `past_due` or `canceled`. Null with no subscription. */
+            status: string | null;
+            /** @description Start of the period these numbers cover, inclusive. */
+            period_start: string;
+            /** @description End of the period, EXCLUSIVE, and it is the start of the current hour rather than now: usage is rolled up by complete hour, so the hour in progress is not counted yet. */
+            period_end: string;
+            usage: components["schemas"]["UsageLineDto"][];
+            /** @description TRUE when there is a payment provider behind this. It is false everywhere today: there are no invoices, no payment method and no charges. The page says so rather than drawing an empty invoice table. */
+            billable: boolean;
         };
         /** @description The response body of EVERY non-2xx response from this API. There is no other error shape: every failure, including an unhandled internal error, is rendered as this envelope - the latter with `code: "internal_error"`. */
         ApiErrorResponse: {
@@ -6324,6 +6378,45 @@ export interface operations {
                 };
             };
             /** @description The project does not exist, or belongs to another tenant. One answer with one message, on purpose: a 403 here would confirm that a project id scraped from somewhere else names live infrastructure belonging to another customer. (error.code: `not_found`) */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorResponse"];
+                };
+            };
+        };
+    };
+    BillingController_summary: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                orgId: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["BillingDto"];
+                };
+            };
+            /** @description Owner, admin and billing only. Developers and viewers cannot see this. (error.code: `forbidden`, `email_not_verified`) */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorResponse"];
+                };
+            };
+            /** @description No such organization, or not yours. (error.code: `not_found`) */
             404: {
                 headers: {
                     [name: string]: unknown;

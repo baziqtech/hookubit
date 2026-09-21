@@ -19,6 +19,7 @@ Every request and response body in the control API, by name. Operation pages lin
 | [`AuditLogDto`](#auditlogdto) | object |
 | [`AuditLogListDto`](#auditloglistdto) | object |
 | [`AuthUserDto`](#authuserdto) | object |
+| [`BillingDto`](#billingdto) | object |
 | [`ConfirmDestinationDto`](#confirmdestinationdto) | object |
 | [`ConfirmedDestinationDto`](#confirmeddestinationdto) | object |
 | [`CreateApiKeyDto`](#createapikeydto) | object |
@@ -72,6 +73,7 @@ Every request and response body in the control API, by name. Operation pages lin
 | [`OrganizationListDto`](#organizationlistdto) | object |
 | [`OutboxEntryDto`](#outboxentrydto) | object |
 | [`OutboxEntryListDto`](#outboxentrylistdto) | object |
+| [`PlanDto`](#plandto) | object |
 | [`ProjectDto`](#projectdto) | object |
 | [`ProjectListDto`](#projectlistdto) | object |
 | [`ProjectStatus`](#projectstatus) | enum |
@@ -102,6 +104,7 @@ Every request and response body in the control API, by name. Operation pages lin
 | [`UpdateRateLimitDto`](#updateratelimitdto) | object |
 | [`UpdateRetryPolicyDto`](#updateretrypolicydto) | object |
 | [`UpdateSubscriptionDto`](#updatesubscriptiondto) | object |
+| [`UsageLineDto`](#usagelinedto) | object |
 | [`VerifyEmailDto`](#verifyemaildto) | object |
 
 ### AcceptedInvitationDto
@@ -257,6 +260,28 @@ The response body of EVERY non-2xx response from this API. There is no other err
 | `name` | string \| null | yes |  |  |
 | `email_verified` | boolean | yes |  | False until the verification token is presented. |
 | `onboarding_completed_at` | string \| null | yes | format `date-time` | ISO-8601 instant at which the user finished OR skipped the product tour; null if neither. Carried on every response that returns a user - session, login, verify-email - so the client never needs a second request to decide whether to show the tour. Set by POST /v1/auth/onboarding-completed. |
+
+### BillingDto
+
+| Property | Type | Required | Constraints | Description |
+|---|---|---|---|---|
+| `plan` | [PlanDto](./schemas.md#plandto) \| null | yes |  | NULL when this organization has no plan assigned. That is the state every organization is in today — no plans are defined — and it is reported honestly rather than as a free tier nobody agreed to. |
+| `plan.id` | string | yes |  |  |
+| `plan.name` | string | yes |  |  |
+| `plan.slug` | string | yes |  |  |
+| `plan.retention_days` | number | yes |  | How long payload history is kept, in days. |
+| `plan.max_projects` | number \| null | yes |  |  |
+| `plan.max_endpoints` | number \| null | yes |  |  |
+| `plan.max_members` | number \| null | yes |  |  |
+| `plan.included_events_per_month` | string \| null | yes |  |  |
+| `status` | string \| null | yes |  | `trialing`, `active`, `past_due` or `canceled`. Null with no subscription. |
+| `period_start` | string | yes |  | Start of the period these numbers cover, inclusive. |
+| `period_end` | string | yes |  | End of the period, EXCLUSIVE, and it is the start of the current hour rather than now: usage is rolled up by complete hour, so the hour in progress is not counted yet. |
+| `usage` | [UsageLineDto](./schemas.md#usagelinedto)[] | yes |  |  |
+| `usage[].metric` | string | yes |  | `events_ingested`, `deliveries` or `replays`. |
+| `usage[].used` | string | yes |  | Counted from the hourly rollups, not from the source tables. |
+| `usage[].included` | string \| null | yes |  | What the plan includes, or null when the organization has no plan — which is not the same as an allowance of zero. |
+| `billable` | boolean | yes |  | TRUE when there is a payment provider behind this. It is false everywhere today: there are no invoices, no payment method and no charges. The page says so rather than drawing an empty invoice table. |
 
 ### ConfirmDestinationDto
 
@@ -1118,6 +1143,19 @@ string enum: `owner`, `admin`, `developer`, `viewer`, `billing`
 | `has_more` | boolean | yes |  | More rows match than this page carries. |
 | `next_offset` | number \| null | yes |  | `offset` for the next page. |
 
+### PlanDto
+
+| Property | Type | Required | Constraints | Description |
+|---|---|---|---|---|
+| `id` | string | yes |  |  |
+| `name` | string | yes |  |  |
+| `slug` | string | yes |  |  |
+| `retention_days` | number | yes |  | How long payload history is kept, in days. |
+| `max_projects` | number \| null | yes |  |  |
+| `max_endpoints` | number \| null | yes |  |  |
+| `max_members` | number \| null | yes |  |  |
+| `included_events_per_month` | string \| null | yes |  |  |
+
 ### ProjectDto
 
 | Property | Type | Required | Constraints | Description |
@@ -1471,6 +1509,14 @@ string enum: `active`, `suspended`, `deleted`
 | `endpoint_id` | string | no | max 64 chars | Re-point this subscription at a different endpoint in the same project. Resolved through the tenant scope; a deleted endpoint is refused. |
 | `event_types` | string[] | no | 1 to 100 items | Replaces the whole filter - this is not a merge. The same three forms are accepted as on create, and the same refusals apply: an invalid pattern is a 400, never a silent widening to "*", and an empty array is refused. |
 | `payload_filter` | object \| null | no |  | Replaces the whole predicate. Null removes it. See the create DTO. |
+
+### UsageLineDto
+
+| Property | Type | Required | Constraints | Description |
+|---|---|---|---|---|
+| `metric` | string | yes |  | `events_ingested`, `deliveries` or `replays`. |
+| `used` | string | yes |  | Counted from the hourly rollups, not from the source tables. |
+| `included` | string \| null | yes |  | What the plan includes, or null when the organization has no plan — which is not the same as an allowance of zero. |
 
 ### VerifyEmailDto
 

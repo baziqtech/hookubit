@@ -1540,6 +1540,56 @@ const handlers: Handler[] = [
   },
 
   /*
+   * Billing. `billable: false` and `plan: null` travel on the wire, because
+   * they are the two facts the page is built to state: there is no payment
+   * provider and no plan is defined. A mock that invented either would let the
+   * dashboard ship an invoice table nobody could honour.
+   */
+  {
+    method: 'GET',
+    pattern: '/v1/organizations/:orgId/billing',
+    handle: () => {
+      const now = new Date();
+      const periodStart = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1));
+      const periodEnd = new Date(Math.floor(now.getTime() / 3_600_000) * 3_600_000);
+
+      const inPeriod = (iso: string) => {
+        const at = new Date(iso);
+        return at >= periodStart && at < periodEnd;
+      };
+
+      return {
+        plan: null,
+        status: null,
+        period_start: periodStart.toISOString(),
+        period_end: periodEnd.toISOString(),
+        usage: [
+          {
+            metric: 'events_ingested',
+            used: String(db.events.filter((row) => inPeriod(row.created_at)).length),
+            included: null,
+          },
+          {
+            metric: 'deliveries',
+            used: String(db.deliveries.filter((row) => inPeriod(row.created_at)).length),
+            included: null,
+          },
+          {
+            metric: 'replays',
+            used: String(
+              db.deliveries.filter(
+                (row) => inPeriod(row.created_at) && row.replay_of_delivery_id !== null,
+              ).length,
+            ),
+            included: null,
+          },
+        ],
+        billable: false,
+      };
+    },
+  },
+
+  /*
    * Notification destinations. The confirmation half is modelled properly
    * because `pending` is the state the UI is built around: a destination
    * receives nothing until somebody who can read the address says yes.

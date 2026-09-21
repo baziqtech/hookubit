@@ -36,9 +36,9 @@ The status column is the HTTP status the code is returned with, as documented on
 |---|---|---|
 | [`invalid_request`](#invalid-request) | 400 Bad Request | 8 |
 | [`unauthenticated`](#unauthenticated) | 401 Unauthorized | 0 |
-| [`forbidden`](#forbidden) | 403 Forbidden | 65 |
-| [`email_not_verified`](#email-not-verified) | 403 Forbidden | 65 |
-| [`not_found`](#not-found) | 404 Not Found | 63 |
+| [`forbidden`](#forbidden) | 403 Forbidden | 66 |
+| [`email_not_verified`](#email-not-verified) | 403 Forbidden | 66 |
+| [`not_found`](#not-found) | 404 Not Found | 64 |
 | [`conflict`](#conflict) | 409 Conflict | 25 |
 | [`limit_exceeded`](#limit-exceeded) | 409 Conflict | 25 |
 | [`idempotency_key_reused`](#idempotency-key-reused) | 409 Conflict | 25 |
