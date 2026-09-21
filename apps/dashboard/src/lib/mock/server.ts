@@ -545,6 +545,32 @@ function endpointHealth(endpointId: string): Endpoint['health'] {
   };
 }
 
+/**
+ * The same shape check `normaliseAllowedIps` applies on the server.
+ *
+ * Deliberately permissive about IPv6 beyond the character set: Go's net/netip
+ * is the authority at the point of use, and a stricter parser that disagreed
+ * with it would refuse addresses the data plane would have honoured.
+ */
+function looksLikeAddressOrBlock(entry: string): boolean {
+  const slash = entry.lastIndexOf('/');
+  const address = slash === -1 ? entry : entry.slice(0, slash);
+  const prefix = slash === -1 ? null : entry.slice(slash + 1);
+
+  const v4 = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(address);
+  const version = v4
+    ? v4.slice(1).every((octet) => Number(octet) <= 255)
+      ? 4
+      : null
+    : address.includes(':') && /^[0-9a-fA-F:.]+$/.test(address) && address.split('::').length <= 2
+      ? 6
+      : null;
+
+  if (version === null) return false;
+  if (prefix === null) return true;
+  return /^\d{1,3}$/.test(prefix) && Number(prefix) <= (version === 4 ? 32 : 128);
+}
+
 /** The endpoint, or the 404 that never distinguishes "gone" from "not yours". */
 function endpointOr404(projectId: string, endpointId: string) {
   const endpoint = db.endpoints.find(
@@ -1373,6 +1399,9 @@ const handlers: Handler[] = [
         slug,
         environment,
         status: 'active',
+        // A new project permits every address, which is the default and what
+        // the settings panel calls out as fine until a key leaks.
+        allowed_ips: [],
         created_at: now,
         updated_at: now,
       };
@@ -1458,6 +1487,34 @@ const handlers: Handler[] = [
         if (taken) {
           fail(409, 'conflict', `Another project in this organization already uses "${input.slug}".`);
         }
+      }
+
+      if (Array.isArray(input.allowed_ips)) {
+        // REPLACES the list, and a malformed entry is refused rather than
+        // dropped — mirroring `normaliseAllowedIps`. Silently discarding one
+        // would lock out the service it was for at the moment the operator
+        // believed they had just permitted it.
+        const entries: string[] = [];
+        for (const raw of input.allowed_ips) {
+          const entry = String(raw).trim();
+          if (entry === '') continue;
+          if (!looksLikeAddressOrBlock(entry)) {
+            fail(
+              400,
+              'invalid_request',
+              `'${entry}' is not an IP address or CIDR block. Entries look like '203.0.113.4', '203.0.113.0/24' or '2001:db8::/32'.`,
+            );
+          }
+          if (!entries.includes(entry)) entries.push(entry);
+        }
+        if (entries.length > 50) {
+          fail(
+            400,
+            'invalid_request',
+            `'allowed_ips' may hold at most 50 entries; ${entries.length} were given. Use a CIDR block rather than listing addresses individually.`,
+          );
+        }
+        project.allowed_ips = entries;
       }
 
       if (typeof input.name === 'string') project.name = input.name;

@@ -28,6 +28,11 @@ type APIKeyRecord struct {
 	ProjectStatus      string
 	RevokedAt          *time.Time
 	ExpiresAt          *time.Time
+	// ProjectAllowedIPs is the project's publish allowlist. Empty permits every
+	// address, which is the default. It rides this query rather than costing
+	// one of its own: the handler needs it on every published event, and the
+	// join to `projects` is already here.
+	ProjectAllowedIPs []string
 }
 
 // CreateEventParams is everything the ingest transaction writes.
@@ -90,7 +95,7 @@ func NewPostgresStore(pool *pgxpool.Pool) *PostgresStore { return &PostgresStore
 
 const findAPIKeySQL = `
 SELECT k.id, k.project_id, k.revoked_at, k.expires_at, k.environment::text,
-       p.organization_id, p.environment::text, p.status::text
+       p.organization_id, p.environment::text, p.status::text, p.allowed_ips
 FROM api_keys k
 JOIN projects p ON p.id = k.project_id
 WHERE k.key_hash = $1
@@ -100,7 +105,7 @@ func (s *PostgresStore) FindAPIKey(ctx context.Context, keyHash string) (*APIKey
 	var rec APIKeyRecord
 	err := s.pool.QueryRow(ctx, findAPIKeySQL, keyHash).Scan(
 		&rec.ID, &rec.ProjectID, &rec.RevokedAt, &rec.ExpiresAt, &rec.KeyEnvironment,
-		&rec.OrganizationID, &rec.ProjectEnvironment, &rec.ProjectStatus,
+		&rec.OrganizationID, &rec.ProjectEnvironment, &rec.ProjectStatus, &rec.ProjectAllowedIPs,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrNotFound

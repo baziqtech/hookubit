@@ -116,9 +116,23 @@ func (s *SourceLimiter) Penalise(addr string) {
 // is never reached. An n larger than the chain clamps to the left-most entry
 // rather than reading past it.
 func ClientAddress(r *http.Request, hops int) string {
+	return bucketKey(ClientIP(r, hops))
+}
+
+// ClientIP is the same hop selection as ClientAddress, but returns the address
+// ITSELF rather than a rate-limit bucket key.
+//
+// The two must not be conflated. `bucketKey` deliberately widens an IPv6
+// address to its /64 network, because a rate limit that treated every address
+// in a customer's /64 as a separate client would limit nothing. An allowlist
+// that compared against that widened form would match every address in a /64
+// against an entry naming one of them — silently turning `2001:db8::1` into
+// `2001:db8::/64`, which is 18 quintillion addresses the operator did not
+// permit. So the allowlist gets the address and the limiter gets the bucket.
+func ClientIP(r *http.Request, hops int) string {
 	peer := hostOnly(r.RemoteAddr)
 	if hops <= 0 {
-		return bucketKey(peer)
+		return peer
 	}
 
 	// The chain runs left (furthest from us) to right (nearest). The socket
@@ -138,7 +152,7 @@ func ClientAddress(r *http.Request, hops int) string {
 	if idx < 0 {
 		idx = 0
 	}
-	return bucketKey(hostOnly(chain[idx]))
+	return hostOnly(chain[idx])
 }
 
 // hostOnly strips a port and IPv6 brackets. A forwarded entry may legitimately

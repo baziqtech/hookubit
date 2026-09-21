@@ -176,6 +176,18 @@ model Project {
   slug           String
   environment    Environment   @default(test)
   status         ProjectStatus @default(active)
+  /// Addresses permitted to PUBLISH events to this project. Empty means every
+  /// address may, which is the default and is fine until a key leaks.
+  ///
+  /// Entries are IPv4/IPv6 addresses or CIDR blocks. The data plane checks this
+  /// list before it judges whether the API key is valid, so an address that is
+  /// not on it learns nothing about the credential it presented
+  /// (services/data-plane/internal/ingest/allowlist.go).
+  ///
+  /// PUBLISHING ONLY. It is deliberately not consulted for reading the record
+  /// or for signing in, so nobody can lock themselves out of the dashboard with
+  /// it - which is the failure mode that makes IP allowlists dangerous.
+  allowedIps     String[]      @default([]) @map("allowed_ips")
   createdAt      DateTime      @default(now()) @map("created_at")
   updatedAt      DateTime      @updatedAt @map("updated_at")
 

@@ -10,6 +10,7 @@ import {
 import { useOrganizations } from '../organizations/api';
 import { useDeleteProject, useProject, useUpdateProject } from '../projects/api';
 import { projectWriteGate } from '../projects/permissions';
+import { AllowedIpsPanel } from './AllowedIpsPanel';
 import { DangerZonePanel, TypeToConfirmDialog } from './DangerZone';
 import { IdentityForm } from './IdentityForm';
 import { ReadOnly } from './ReadOnly';
@@ -102,6 +103,8 @@ export function ProjectSettingsPage() {
                 can save from this form. The button is in the Danger zone at the foot of this page.
               </p>
             </Panel>
+
+            <AllowedIpsPanel orgId={orgId} project={data} gate={gate} />
           </>
         )}
       </Async>

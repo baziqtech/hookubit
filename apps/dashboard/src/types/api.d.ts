@@ -1321,6 +1321,13 @@ export interface components {
             environment: components["schemas"]["Environment"];
             /** @description `deleted` is a soft delete: the row and its delivery ledger survive, but the project is invisible to this API and the ingest path refuses its API keys. */
             status: components["schemas"]["ProjectStatus"];
+            /**
+             * @description Addresses permitted to PUBLISH events to this project. EMPTY means every address may, which is the default. The data plane checks this before it judges whether the API key is valid, so a blocked address learns nothing about the credential it presented. Publishing only - never consulted for reading the record or for signing in, so it cannot lock anyone out of the dashboard.
+             * @example [
+             *       "203.0.113.0/24"
+             *     ]
+             */
+            allowed_ips: string[];
             /** Format: date-time */
             created_at: string;
             /** Format: date-time */
@@ -1361,6 +1368,14 @@ export interface components {
              * @example payments
              */
             slug?: string;
+            /**
+             * @description Addresses permitted to PUBLISH events to this project. An EMPTY list means every address may, which is the default. Entries are IPv4/IPv6 addresses or CIDR blocks; a malformed one is REFUSED rather than dropped, because silently discarding it would lock out the service it was for at the moment you believed you had permitted it. Sending this field REPLACES the list. Publishing only: it is never consulted for reading the record or for signing in, so it cannot lock anyone out of the dashboard.
+             * @example [
+             *       "203.0.113.0/24",
+             *       "198.51.100.7"
+             *     ]
+             */
+            allowed_ips?: string[];
         };
         /** @enum {string} */
         MemberRole: "owner" | "admin" | "developer" | "viewer" | "billing";
@@ -1540,7 +1555,7 @@ export interface components {
             has_live_secret: boolean;
             created_at: string;
             updated_at: string;
-            /** @description How this endpoint has been doing, over a fixed trailing hour. Present on the LIST and null on the single-endpoint read. */
+            /** @description How this endpoint has been doing, over a fixed trailing hour. Null when it could not be computed - never an invented zero. */
             health: components["schemas"]["EndpointHealthDto"] | null;
         };
         EndpointListDto: {
@@ -1617,7 +1632,7 @@ export interface components {
             has_live_secret: boolean;
             created_at: string;
             updated_at: string;
-            /** @description How this endpoint has been doing, over a fixed trailing hour. Present on the LIST and null on the single-endpoint read. */
+            /** @description How this endpoint has been doing, over a fixed trailing hour. Null when it could not be computed - never an invented zero. */
             health: components["schemas"]["EndpointHealthDto"] | null;
             /** @description The version 1 signing secret, in plaintext, returned HERE AND NOWHERE ELSE. Present only when the caller also holds `endpoint-secrets.write` (owner or admin): a developer may create endpoints but may not read signing secrets, so for them this is null, the endpoint stays paused, and `secret_pending` says so. */
             secret: string | null;

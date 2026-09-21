@@ -474,3 +474,45 @@ describe('project create — the failures the dialog has to render', () => {
     expect(error.status).toBe(404);
   });
 });
+
+/**
+ * The publish allowlist.
+ *
+ * A deny-by-default control, so the tests are about what happens to an entry
+ * the server cannot parse and about the list being replaced rather than merged.
+ */
+describe('project allowed_ips — a deny-by-default control', () => {
+  const PATCH = `/v1/organizations/${ORG}/projects/${PROJECT}`;
+
+  it('starts empty, which means every address may publish', async () => {
+    const project = await mockRequest<Project>('GET', `/v1/organizations/${ORG}/projects/${PROJECT}`);
+    expect(project.allowed_ips).toEqual([]);
+  });
+
+  it('REFUSES a malformed entry rather than saving the rest', async () => {
+    // Silently dropping it would lock out the service it was for, at the
+    // moment the operator believed they had just permitted it.
+    await expect(
+      mockRequest('PATCH', PATCH, { allowed_ips: ['203.0.113.0/24', 'not-an-ip'] }),
+    ).rejects.toMatchObject({ status: 400 });
+
+    const project = await mockRequest<Project>('GET', `/v1/organizations/${ORG}/projects/${PROJECT}`);
+    expect(project.allowed_ips).toEqual([]);
+  });
+
+  it('REPLACES the list, so an address can actually be removed', async () => {
+    // A merge would make removal impossible through this route, and an
+    // allowlist you cannot shrink is not a security control.
+    await mockRequest('PATCH', PATCH, { allowed_ips: ['203.0.113.4', '198.51.100.0/24'] });
+    await mockRequest('PATCH', PATCH, { allowed_ips: ['203.0.113.4'] });
+
+    const project = await mockRequest<Project>('GET', `/v1/organizations/${ORG}/projects/${PROJECT}`);
+    expect(project.allowed_ips).toEqual(['203.0.113.4']);
+  });
+
+  it('collapses duplicates and ignores blanks', async () => {
+    await mockRequest('PATCH', PATCH, { allowed_ips: ['203.0.113.4', ' ', '203.0.113.4'] });
+    const project = await mockRequest<Project>('GET', `/v1/organizations/${ORG}/projects/${PROJECT}`);
+    expect(project.allowed_ips).toEqual(['203.0.113.4']);
+  });
+});

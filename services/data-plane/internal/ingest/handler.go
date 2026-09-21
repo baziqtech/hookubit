@@ -187,6 +187,11 @@ func (h *Handler) accept(r *http.Request, projectID string, log *slog.Logger) (s
 	// unauthenticated flood before that is the difference between a rate limit
 	// and a denial-of-service window (see SourceLimiter).
 	addr := ClientAddress(r, h.trustedProxyHops)
+	// The same hop, as an ADDRESS rather than a rate-limit bucket. See
+	// ClientIP for why the allowlist must not be given the bucket: it widens
+	// IPv6 to a /64, which would turn an entry naming one address into one
+	// permitting eighteen quintillion.
+	clientIP := ClientIP(r, h.trustedProxyHops)
 	if allowed, wait := h.source.Allow(addr); !allowed {
 		metrics.RateLimitHits.WithLabelValues("source_ip").Inc()
 		return "", errRateLimited(wait)
@@ -201,6 +206,39 @@ func (h *Handler) accept(r *http.Request, projectID string, log *slog.Logger) (s
 		if apiErr.Code == CodeUnauthenticated {
 			h.source.Penalise(addr)
 		}
+		return "", apiErr
+	}
+
+	// 1a. The project's publish allowlist, BEFORE anything is said about the
+	// key.
+	//
+	// Placed here and not further down on purpose. Every check below this line
+	// - revoked, expired, wrong project, wrong environment - answers a
+	// different error, and an attacker who can tell those apart has an oracle
+	// for whether a credential they hold is live. From a blocked address they
+	// all collapse into this one answer, so the list refuses first and says
+	// nothing about the key.
+	//
+	// What this does NOT hide is that the credential EXISTS: reaching this line
+	// at all means the hash matched. Hiding that too would need a project read
+	// before authentication and a single indistinguishable error for both,
+	// which costs a database round trip on every published event to deny an
+	// attacker who already holds a real key one bit. The trade is deliberate.
+	//
+	// The message names the address because the caller already knows their own
+	// address, and an operator debugging a deployment that moved subnets should
+	// not have to guess which one we saw.
+	if !AllowedIP(key.ProjectAllowedIPs, clientIP) {
+		log.Warn("refused by project allowlist", "project_id", projectID, "source", clientIP)
+		metrics.RateLimitHits.WithLabelValues("ip_allowlist").Inc()
+		return "", errForbidden("Address " + clientIP + " is not on this project's allowed list")
+	}
+
+	// 1b. NOW judge the credential. Everything from here down can answer a
+	// different error for a different reason, which is exactly why it runs
+	// after the list and not before it.
+	if apiErr := usableKey(key, h.now()); apiErr != nil {
+		h.source.Penalise(addr)
 		return "", apiErr
 	}
 
@@ -291,14 +329,27 @@ func (h *Handler) authenticate(ctx context.Context, r *http.Request) (*APIKeyRec
 		h.log.Error("api key lookup failed", "error", err.Error())
 		return nil, errInternal()
 	}
-	now := h.now()
+	// Revoked and expired are NOT checked here. They are judged by usableKey,
+	// after the project's publish allowlist has had its say — see step 1a. A
+	// blocked address must not be able to tell a live key from a dead one.
+	return record, nil
+}
+
+// usableKey judges a credential that has already been found.
+//
+// Separate from authenticate so the caller can interpose the publish allowlist
+// between "this hash matches a row" and "this row is still good". The error is
+// the same opaque one authenticate uses, for the same reason: distinguishing
+// "revoked" from "expired" hands an attacker an oracle about a key they hold.
+func usableKey(record *APIKeyRecord, now time.Time) *apiError {
+	const rejected = "Invalid API key"
 	if record.RevokedAt != nil && !record.RevokedAt.After(now) {
-		return nil, errUnauthenticated(rejected)
+		return errUnauthenticated(rejected)
 	}
 	if record.ExpiresAt != nil && !record.ExpiresAt.After(now) {
-		return nil, errUnauthenticated(rejected)
+		return errUnauthenticated(rejected)
 	}
-	return record, nil
+	return nil
 }
 
 // readBody enforces the hard payload ceiling while reading, so an oversized

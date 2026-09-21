@@ -42,6 +42,7 @@ Newest first. Soft-deleted projects are hidden unless `status=deleted`. Paged wi
 | `data[].slug` | string | yes |  | Unique within the organization. Deleted projects keep theirs. |
 | `data[].environment` | string | yes | one of `test`, `live` | IMMUTABLE after creation. It selects which API keys (wk_live_/wk_test_) and which ingest traffic belong to this project, so changing it would silently re-scope every key and endpoint underneath it. |
 | `data[].status` | string | yes | one of `active`, `suspended`, `deleted` | `deleted` is a soft delete: the row and its delivery ledger survive, but the project is invisible to this API and the ingest path refuses its API keys. |
+| `data[].allowed_ips` | string[] | yes |  | Addresses permitted to PUBLISH events to this project. EMPTY means every address may, which is the default. The data plane checks this before it judges whether the API key is valid, so a blocked address learns nothing about the credential it presented. Publishing only - never consulted for reading the record or for signing in, so it cannot lock anyone out of the dashboard. |
 | `data[].created_at` | string | yes | format `date-time` |  |
 | `data[].updated_at` | string | yes | format `date-time` |  |
 | `has_more` | boolean | yes |  | True when more projects match this filter than the page carries. The bound was reached; fetch `next_offset` to continue. |
@@ -101,6 +102,7 @@ The `environment` chosen here is permanent. `slug` defaults to a normalised form
 | `slug` | string | yes |  | Unique within the organization. Deleted projects keep theirs. |
 | `environment` | string | yes | one of `test`, `live` | IMMUTABLE after creation. It selects which API keys (wk_live_/wk_test_) and which ingest traffic belong to this project, so changing it would silently re-scope every key and endpoint underneath it. |
 | `status` | string | yes | one of `active`, `suspended`, `deleted` | `deleted` is a soft delete: the row and its delivery ledger survive, but the project is invisible to this API and the ingest path refuses its API keys. |
+| `allowed_ips` | string[] | yes |  | Addresses permitted to PUBLISH events to this project. EMPTY means every address may, which is the default. The data plane checks this before it judges whether the API key is valid, so a blocked address learns nothing about the credential it presented. Publishing only - never consulted for reading the record or for signing in, so it cannot lock anyone out of the dashboard. |
 | `created_at` | string | yes | format `date-time` |  |
 | `updated_at` | string | yes | format `date-time` |  |
 
@@ -153,6 +155,7 @@ Rate limited. Carries `Retry-After` (seconds) and `details.retry_after_seconds`.
 | `slug` | string | yes |  | Unique within the organization. Deleted projects keep theirs. |
 | `environment` | string | yes | one of `test`, `live` | IMMUTABLE after creation. It selects which API keys (wk_live_/wk_test_) and which ingest traffic belong to this project, so changing it would silently re-scope every key and endpoint underneath it. |
 | `status` | string | yes | one of `active`, `suspended`, `deleted` | `deleted` is a soft delete: the row and its delivery ledger survive, but the project is invisible to this API and the ingest path refuses its API keys. |
+| `allowed_ips` | string[] | yes |  | Addresses permitted to PUBLISH events to this project. EMPTY means every address may, which is the default. The data plane checks this before it judges whether the API key is valid, so a blocked address learns nothing about the credential it presented. Publishing only - never consulted for reading the record or for signing in, so it cannot lock anyone out of the dashboard. |
 | `created_at` | string | yes | format `date-time` |  |
 | `updated_at` | string | yes | format `date-time` |  |
 
@@ -197,6 +200,7 @@ Rate limited. Carries `Retry-After` (seconds) and `details.retry_after_seconds`.
 |---|---|---|---|---|
 | `name` | string | no | max 200 chars |  |
 | `slug` | string | no | 2 to 64 chars | Unique within the organization; a collision answers 409 `conflict`. |
+| `allowed_ips` | string[] | no |  | Addresses permitted to PUBLISH events to this project. An EMPTY list means every address may, which is the default. Entries are IPv4/IPv6 addresses or CIDR blocks; a malformed one is REFUSED rather than dropped, because silently discarding it would lock out the service it was for at the moment you believed you had permitted it. Sending this field REPLACES the list. Publishing only: it is never consulted for reading the record or for signing in, so it cannot lock anyone out of the dashboard. |
 
 #### Responses
 
@@ -210,6 +214,7 @@ Rate limited. Carries `Retry-After` (seconds) and `details.retry_after_seconds`.
 | `slug` | string | yes |  | Unique within the organization. Deleted projects keep theirs. |
 | `environment` | string | yes | one of `test`, `live` | IMMUTABLE after creation. It selects which API keys (wk_live_/wk_test_) and which ingest traffic belong to this project, so changing it would silently re-scope every key and endpoint underneath it. |
 | `status` | string | yes | one of `active`, `suspended`, `deleted` | `deleted` is a soft delete: the row and its delivery ledger survive, but the project is invisible to this API and the ingest path refuses its API keys. |
+| `allowed_ips` | string[] | yes |  | Addresses permitted to PUBLISH events to this project. EMPTY means every address may, which is the default. The data plane checks this before it judges whether the API key is valid, so a blocked address learns nothing about the credential it presented. Publishing only - never consulted for reading the record or for signing in, so it cannot lock anyone out of the dashboard. |
 | `created_at` | string | yes | format `date-time` |  |
 | `updated_at` | string | yes | format `date-time` |  |
 
@@ -264,6 +269,7 @@ Sets `status = deleted`. Nothing is erased: endpoints, API keys and the whole de
 | `slug` | string | yes |  | Unique within the organization. Deleted projects keep theirs. |
 | `environment` | string | yes | one of `test`, `live` | IMMUTABLE after creation. It selects which API keys (wk_live_/wk_test_) and which ingest traffic belong to this project, so changing it would silently re-scope every key and endpoint underneath it. |
 | `status` | string | yes | one of `active`, `suspended`, `deleted` | `deleted` is a soft delete: the row and its delivery ledger survive, but the project is invisible to this API and the ingest path refuses its API keys. |
+| `allowed_ips` | string[] | yes |  | Addresses permitted to PUBLISH events to this project. EMPTY means every address may, which is the default. The data plane checks this before it judges whether the API key is valid, so a blocked address learns nothing about the credential it presented. Publishing only - never consulted for reading the record or for signing in, so it cannot lock anyone out of the dashboard. |
 | `created_at` | string | yes | format `date-time` |  |
 | `updated_at` | string | yes | format `date-time` |  |
 

@@ -312,6 +312,8 @@ export const projects: Project[] = [
     slug: 'payments',
     environment: 'live',
     status: 'active',
+    // Empty means every address may publish, which is the default.
+    allowed_ips: [],
     created_at: minutesAgo(60 * 24 * 118),
     updated_at: minutesAgo(60 * 24 * 2),
   },
@@ -322,6 +324,8 @@ export const projects: Project[] = [
     slug: 'payments-staging',
     environment: 'test',
     status: 'active',
+    // Empty means every address may publish, which is the default.
+    allowed_ips: [],
     created_at: minutesAgo(60 * 24 * 118),
     updated_at: minutesAgo(60 * 24 * 118),
   },
@@ -332,6 +336,8 @@ export const projects: Project[] = [
     slug: 'rider-dispatch',
     environment: 'live',
     status: 'active',
+    // Empty means every address may publish, which is the default.
+    allowed_ips: [],
     created_at: minutesAgo(60 * 24 * 41),
     updated_at: minutesAgo(60 * 24 * 41),
   },
@@ -342,6 +348,8 @@ export const projects: Project[] = [
     slug: 'fulfilment',
     environment: 'live',
     status: 'active',
+    // Empty means every address may publish, which is the default.
+    allowed_ips: [],
     created_at: minutesAgo(60 * 24 * 29),
     updated_at: minutesAgo(60 * 24 * 29),
   },

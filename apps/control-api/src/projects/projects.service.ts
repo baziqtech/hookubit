@@ -3,6 +3,7 @@ import { ConfigService } from '@nestjs/config';
 import { Environment, Prisma, Project, ProjectStatus } from '@prisma/client';
 import { AuditService, RequestContext, ScopedUpdateInput, TenantScopeFactory } from '../authz';
 import { AppError } from '../common/errors';
+import { normaliseAllowedIps } from './allowed-ips';
 import { newId } from '../common/ids';
 import {
   CreateProjectDto,
@@ -130,8 +131,9 @@ export class ProjectsService {
     ProjectsService.assertEnvironmentNotSupplied(dto);
     ProjectsService.assertStatusNotSupplied(dto);
 
-    // Built field by field rather than spread, so a property that is not name
-    // or slug cannot reach the database even if it survives validation.
+    // Built field by field rather than spread, so a property that is not one
+    // of the three writable ones cannot reach the database even if it survives
+    // validation.
     const data: ProjectUpdate = {};
     const changed: Record<string, unknown> = {};
     if (dto.name !== undefined) {
@@ -142,8 +144,30 @@ export class ProjectsService {
       data.slug = dto.slug;
       changed.slug = dto.slug;
     }
+    if (dto.allowed_ips !== undefined) {
+      // REPLACES the list. A merge would make removing an address impossible
+      // through this route, and an allowlist you cannot shrink is not a
+      // security control.
+      data.allowedIps = normaliseAllowedIps(dto.allowed_ips);
+      /*
+       * The audit entry records the COUNT and whether the list went from empty
+       * to non-empty, not the addresses.
+       *
+       * The transition is the event worth being able to find later: an empty
+       * list accepts everything, so adding the first entry is the moment every
+       * other address in the world started being refused — including, quite
+       * often, the customer's own second service. The addresses themselves are
+       * on the project and do not need a second copy in a table with a longer
+       * retention.
+       */
+      changed.allowed_ips_count = data.allowedIps.length;
+      changed.allowed_ips_now_enforcing = data.allowedIps.length > 0;
+    }
     if (Object.keys(data).length === 0) {
-      throw new AppError('invalid_request', 'Supply at least one of "name" or "slug".');
+      throw new AppError(
+        'invalid_request',
+        'Supply at least one of "name", "slug" or "allowed_ips".',
+      );
     }
 
     let project: Project;

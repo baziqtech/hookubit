@@ -240,8 +240,8 @@ export function rejectEndpointPatch(body: Record<string, unknown>): Rejections {
 }
 
 /**
- * `UpdateProjectDto` / `UpdateOrganizationDto` — name and slug, and nothing
- * else.
+ * `UpdateProjectDto` / `UpdateOrganizationDto` — name, slug, and on a project
+ * `allowed_ips`. Nothing else.
  *
  * `environment` gets its own sentence rather than the generic whitelist one,
  * because `ProjectsService.update` checks for the key explicitly so the caller
@@ -255,6 +255,14 @@ export function rejectIdentityPatch(
 
   for (const key of Object.keys(body)) {
     if (key === 'name' || key === 'slug') continue;
+    // The publish allowlist is a project field only; an organization has no
+    // ingest path of its own to guard.
+    if (key === 'allowed_ips' && options.kind === 'project') {
+      if (!Array.isArray(body.allowed_ips)) {
+        rejections.push('allowed_ips: must be an array');
+      }
+      continue;
+    }
     if (key === 'environment' && options.kind === 'project') {
       rejections.push(
         'environment: a project’s environment cannot be changed. It scopes every API key and endpoint underneath the project, so switching it would silently re-point live traffic. Create a second project instead.',

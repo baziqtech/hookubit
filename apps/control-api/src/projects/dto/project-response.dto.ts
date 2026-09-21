@@ -40,6 +40,18 @@ export class ProjectDto {
   })
   status!: ProjectStatus;
 
+  @ApiProperty({
+    type: [String],
+    example: ['203.0.113.0/24'],
+    description:
+      'Addresses permitted to PUBLISH events to this project. EMPTY means every address may, ' +
+      'which is the default. The data plane checks this before it judges whether the API key ' +
+      'is valid, so a blocked address learns nothing about the credential it presented. ' +
+      'Publishing only - never consulted for reading the record or for signing in, so it ' +
+      'cannot lock anyone out of the dashboard.',
+  })
+  allowed_ips!: string[];
+
   @ApiProperty({ format: 'date-time' })
   created_at!: string;
 
@@ -91,6 +103,7 @@ export function toProjectDto(project: Project): ProjectDto {
     slug: project.slug,
     environment: project.environment,
     status: project.status,
+    allowed_ips: project.allowedIps ?? [],
     created_at: project.createdAt.toISOString(),
     updated_at: project.updatedAt.toISOString(),
   };

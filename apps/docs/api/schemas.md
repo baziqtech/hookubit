@@ -303,7 +303,7 @@ The response body of EVERY non-2xx response from this API. There is no other err
 | `has_live_secret` | boolean | yes |  | Whether this endpoint has at least one signing secret that is signing RIGHT NOW - one that is active and either has no expiry or has not reached it yet, which is the same test the delivery workers apply when they sign. False means `POST /enable` will refuse with 409: an enabled endpoint with nothing to sign with delivers nothing, because signing fails closed rather than sending an unsigned request. Read a secret's `active` flag alone and the two answers disagree for the window between a secret expiring and its flag being swept, which is exactly when an operator is looking.<br><br>A BOOLEAN, deliberately: no id, version, prefix or expiry. This field is visible to anyone with `endpoints.read` (a viewer included), and reading signing secrets is `endpoint-secrets.read` - owner and admin only. |
 | `created_at` | string | yes |  |  |
 | `updated_at` | string | yes |  |  |
-| `health` | [EndpointHealthDto](./schemas.md#endpointhealthdto) \| null | yes |  | How this endpoint has been doing, over a fixed trailing hour. Present on the LIST and null on the single-endpoint read. |
+| `health` | [EndpointHealthDto](./schemas.md#endpointhealthdto) \| null | yes |  | How this endpoint has been doing, over a fixed trailing hour. Null when it could not be computed - never an invented zero. |
 | `health.success_rate_1h` | number \| null | yes |  | Successes over SETTLED deliveries in the last hour. NULL, never 0, when nothing settled — an endpoint with no traffic reads "no data", and 0 means every delivery we attempted failed. Rendering the null as 0% turns a new endpoint into an outage. |
 | `health.deliveries_1h` | number | yes |  | Deliveries created in the last hour. Context for the rate. |
 | `health.deliveries_waiting` | number | yes |  | Created and still moving, at ANY age — not hour-bounded, because "what is queued behind this problem?" is not a question about the last hour. |
@@ -683,7 +683,7 @@ The response body of EVERY non-2xx response from this API. There is no other err
 | `has_live_secret` | boolean | yes |  | Whether this endpoint has at least one signing secret that is signing RIGHT NOW - one that is active and either has no expiry or has not reached it yet, which is the same test the delivery workers apply when they sign. False means `POST /enable` will refuse with 409: an enabled endpoint with nothing to sign with delivers nothing, because signing fails closed rather than sending an unsigned request. Read a secret's `active` flag alone and the two answers disagree for the window between a secret expiring and its flag being swept, which is exactly when an operator is looking.<br><br>A BOOLEAN, deliberately: no id, version, prefix or expiry. This field is visible to anyone with `endpoints.read` (a viewer included), and reading signing secrets is `endpoint-secrets.read` - owner and admin only. |
 | `created_at` | string | yes |  |  |
 | `updated_at` | string | yes |  |  |
-| `health` | [EndpointHealthDto](./schemas.md#endpointhealthdto) \| null | yes |  | How this endpoint has been doing, over a fixed trailing hour. Present on the LIST and null on the single-endpoint read. |
+| `health` | [EndpointHealthDto](./schemas.md#endpointhealthdto) \| null | yes |  | How this endpoint has been doing, over a fixed trailing hour. Null when it could not be computed - never an invented zero. |
 | `health.success_rate_1h` | number \| null | yes |  | Successes over SETTLED deliveries in the last hour. NULL, never 0, when nothing settled — an endpoint with no traffic reads "no data", and 0 means every delivery we attempted failed. Rendering the null as 0% turns a new endpoint into an outage. |
 | `health.deliveries_1h` | number | yes |  | Deliveries created in the last hour. Context for the rate. |
 | `health.deliveries_waiting` | number | yes |  | Created and still moving, at ANY age — not hour-bounded, because "what is queued behind this problem?" is not a question about the last hour. |
@@ -725,7 +725,7 @@ The response body of EVERY non-2xx response from this API. There is no other err
 | `data[].has_live_secret` | boolean | yes |  | Whether this endpoint has at least one signing secret that is signing RIGHT NOW - one that is active and either has no expiry or has not reached it yet, which is the same test the delivery workers apply when they sign. False means `POST /enable` will refuse with 409: an enabled endpoint with nothing to sign with delivers nothing, because signing fails closed rather than sending an unsigned request. Read a secret's `active` flag alone and the two answers disagree for the window between a secret expiring and its flag being swept, which is exactly when an operator is looking.<br><br>A BOOLEAN, deliberately: no id, version, prefix or expiry. This field is visible to anyone with `endpoints.read` (a viewer included), and reading signing secrets is `endpoint-secrets.read` - owner and admin only. |
 | `data[].created_at` | string | yes |  |  |
 | `data[].updated_at` | string | yes |  |  |
-| `data[].health` | [EndpointHealthDto](./schemas.md#endpointhealthdto) \| null | yes |  | How this endpoint has been doing, over a fixed trailing hour. Present on the LIST and null on the single-endpoint read. |
+| `data[].health` | [EndpointHealthDto](./schemas.md#endpointhealthdto) \| null | yes |  | How this endpoint has been doing, over a fixed trailing hour. Null when it could not be computed - never an invented zero. |
 | `has_more` | boolean | yes |  | More endpoints match than this page carries. |
 | `next_offset` | number \| null | yes |  | Pass back as `offset` for the next page. NULL - never absent, never 0 - on the last one. |
 
@@ -1065,6 +1065,7 @@ string enum: `owner`, `admin`, `developer`, `viewer`, `billing`
 | `slug` | string | yes |  | Unique within the organization. Deleted projects keep theirs. |
 | `environment` | string | yes | one of `test`, `live` | IMMUTABLE after creation. It selects which API keys (wk_live_/wk_test_) and which ingest traffic belong to this project, so changing it would silently re-scope every key and endpoint underneath it. |
 | `status` | string | yes | one of `active`, `suspended`, `deleted` | `deleted` is a soft delete: the row and its delivery ledger survive, but the project is invisible to this API and the ingest path refuses its API keys. |
+| `allowed_ips` | string[] | yes |  | Addresses permitted to PUBLISH events to this project. EMPTY means every address may, which is the default. The data plane checks this before it judges whether the API key is valid, so a blocked address learns nothing about the credential it presented. Publishing only - never consulted for reading the record or for signing in, so it cannot lock anyone out of the dashboard. |
 | `created_at` | string | yes | format `date-time` |  |
 | `updated_at` | string | yes | format `date-time` |  |
 
@@ -1079,6 +1080,7 @@ string enum: `owner`, `admin`, `developer`, `viewer`, `billing`
 | `data[].slug` | string | yes |  | Unique within the organization. Deleted projects keep theirs. |
 | `data[].environment` | string | yes | one of `test`, `live` | IMMUTABLE after creation. It selects which API keys (wk_live_/wk_test_) and which ingest traffic belong to this project, so changing it would silently re-scope every key and endpoint underneath it. |
 | `data[].status` | string | yes | one of `active`, `suspended`, `deleted` | `deleted` is a soft delete: the row and its delivery ledger survive, but the project is invisible to this API and the ingest path refuses its API keys. |
+| `data[].allowed_ips` | string[] | yes |  | Addresses permitted to PUBLISH events to this project. EMPTY means every address may, which is the default. The data plane checks this before it judges whether the API key is valid, so a blocked address learns nothing about the credential it presented. Publishing only - never consulted for reading the record or for signing in, so it cannot lock anyone out of the dashboard. |
 | `data[].created_at` | string | yes | format `date-time` |  |
 | `data[].updated_at` | string | yes | format `date-time` |  |
 | `has_more` | boolean | yes |  | True when more projects match this filter than the page carries. The bound was reached; fetch `next_offset` to continue. |
@@ -1366,6 +1368,7 @@ string enum: `active`, `suspended`, `deleted`
 |---|---|---|---|---|
 | `name` | string | no | max 200 chars |  |
 | `slug` | string | no | 2 to 64 chars | Unique within the organization; a collision answers 409 `conflict`. |
+| `allowed_ips` | string[] | no |  | Addresses permitted to PUBLISH events to this project. An EMPTY list means every address may, which is the default. Entries are IPv4/IPv6 addresses or CIDR blocks; a malformed one is REFUSED rather than dropped, because silently discarding it would lock out the service it was for at the moment you believed you had permitted it. Sending this field REPLACES the list. Publishing only: it is never consulted for reading the record or for signing in, so it cannot lock anyone out of the dashboard. |
 
 ### UpdateRateLimitDto
 
