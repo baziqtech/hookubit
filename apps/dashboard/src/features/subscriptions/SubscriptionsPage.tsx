@@ -72,6 +72,8 @@ export function SubscriptionsPage() {
         }
       />
 
+      <MatcherReference />
+
       <Panel flush>
         <Async
           query={subscriptions}
@@ -124,6 +126,57 @@ export function SubscriptionsPage() {
   );
 }
 
+/**
+ * The three matchers, and nothing else.
+ *
+ * `event_types` accepts an exact type, a trailing-wildcard prefix, or `*`.
+ * Anything else is refused by the API — and the refusal arrives after the form
+ * has been filled in, which is the wrong moment to learn the vocabulary. Three
+ * rows of reference above the table cost nothing and remove the whole class of
+ * guess.
+ *
+ * `*` is called out as matching types that do not exist yet, because that is
+ * the property people are surprised by: a catch-all subscription written today
+ * starts receiving a new event type the day someone else publishes one.
+ */
+function MatcherReference() {
+  const matchers = [
+    {
+      pattern: '*',
+      name: 'Everything',
+      detail:
+        'Every event type in this project, including types that do not exist yet. A new type starts arriving here the day it is first published.',
+    },
+    {
+      pattern: 'payment.*',
+      name: 'Prefix',
+      detail: 'Every type beginning payment. — payment.settled, payment.failed, and so on.',
+    },
+    { pattern: 'payment.settled', name: 'Exact', detail: 'That one type and nothing else.' },
+  ];
+
+  return (
+    <Panel
+      title="Accepted matchers"
+      description="Only these three. Anything else is refused when you save."
+    >
+      <ul className="grid gap-3 sm:grid-cols-3">
+        {matchers.map((matcher) => (
+          <li key={matcher.pattern} className="flex flex-col gap-1.5">
+            <span className="flex items-baseline gap-2">
+              <code className="rounded bg-raised px-1.5 py-0.5 font-mono text-2xs text-ink">
+                {matcher.pattern}
+              </code>
+              <span className="text-2xs font-semibold text-ink-muted">{matcher.name}</span>
+            </span>
+            <span className="text-2xs text-ink-subtle">{matcher.detail}</span>
+          </li>
+        ))}
+      </ul>
+    </Panel>
+  );
+}
+
 function buildColumns(
   projectId: string,
   nameOf: (endpointId: string) => string,
@@ -159,15 +212,31 @@ function buildColumns(
     },
     {
       key: 'filter',
-      header: 'Payload filter',
+      header: 'Condition',
       secondary: true,
-      // `payload_filter`, not `filter`. Stored, and NOT yet evaluated by the
-      // data plane — the form says so; the column just shows what is stored.
-      render: (row) => (
-        <span className="font-mono text-2xs text-ink-subtle">
-          {row.payload_filter ? JSON.stringify(row.payload_filter) : '—'}
-        </span>
-      ),
+      /*
+       * `payload_filter`, not `filter`. The control API stores it and the Go
+       * router never reads it, so a subscription with a condition delivers
+       * exactly as if it had none.
+       *
+       * A stored rule that does nothing is the most dangerous kind of
+       * configuration: it looks like a guard, it reads back correctly, and
+       * the only way to discover it is inert is for the wrong consumer to
+       * receive something. So the row that HAS one says so, every time, in
+       * the cell next to it — not in a footnote, and not only in the form
+       * where it was typed.
+       */
+      render: (row) =>
+        row.payload_filter ? (
+          <span className="flex flex-col items-start gap-1">
+            <span className="font-mono text-2xs text-ink-muted">
+              {JSON.stringify(row.payload_filter)}
+            </span>
+            <Badge tone="warn">stored, not yet applied</Badge>
+          </span>
+        ) : (
+          <span className="text-2xs text-ink-subtle">—</span>
+        ),
     },
     {
       key: 'enabled',

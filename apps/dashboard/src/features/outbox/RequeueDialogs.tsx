@@ -17,8 +17,8 @@ import {
   type OutboxEntry,
   type Role,
 } from '../../types/api';
-import { useRequeueOutboxEntry, useRequeueParked } from './api';
-import { explainParked, isParked } from './parked';
+import { useOutboxEntries, useRequeueOutboxEntry, useRequeueParked } from './api';
+import { explainParked, futileSummary, isParked } from './parked';
 import { ParkedExplanation } from './ParkedExplanation';
 import { mayRequeue, requeueDeniedReason, REQUEUE_ROLES, type RequeueGate } from './permissions';
 import {
@@ -299,6 +299,8 @@ export function BulkRequeueDialog({
       <div className="flex flex-col gap-3">
         <RequeueSemantics partial={false} />
 
+        <FutileWarning projectId={projectId} scopeEventId={scopeEventId} />
+
         <p className="text-2xs leading-relaxed text-ink-muted">
           Each pass returns at most {MAX_REQUEUE_BATCH} rows and every one becomes real outbound
           HTTP — usually to endpoints that were already struggling when the incident started —
@@ -378,5 +380,47 @@ export function EventLink({
     >
       {truncateId(eventId)}
     </Link>
+  );
+}
+
+/**
+ * "N of these will park again for the same reason."
+ *
+ * Read from the parked list the page already has in cache, so this costs no
+ * request. It renders nothing when there is nothing to say — the common case
+ * has to be free, or the warning becomes furniture that gets read past on the
+ * one day it matters.
+ *
+ * It does NOT disable the button. Requeueing a futile row is harmless and
+ * occasionally correct: somebody who has just deployed a router that handles
+ * that kind of row knows something this classification does not. The warning
+ * is there so that is a decision rather than a surprise.
+ */
+function FutileWarning({
+  projectId,
+  scopeEventId,
+}: {
+  projectId: string;
+  scopeEventId?: string;
+}) {
+  const parked = useOutboxEntries(projectId, { status: 'failed' }, 0);
+  const rows = (parked.data?.rows ?? []).filter(
+    (row) => !scopeEventId || row.event_id === scopeEventId,
+  );
+  const summary = futileSummary(rows);
+  if (!summary) return null;
+
+  return (
+    <div className="flex flex-col gap-1.5 rounded-[0.625rem] border border-warn/30 bg-warn-soft px-3 py-2.5">
+      <p className="text-xs font-semibold text-warn">
+        {summary.count} of {summary.total} will park again
+      </p>
+      <p className="text-2xs leading-relaxed text-ink-muted">
+        {summary.count === 1 ? 'One row is' : `${summary.count} rows are`} parked for a reason
+        putting them back cannot change — no router handles that kind of row, or the event they
+        point at is gone. They will be claimed, fail identically, and park again. Nothing changes
+        for them until a router that understands them is deployed.
+      </p>
+    </div>
   );
 }

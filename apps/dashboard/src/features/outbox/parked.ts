@@ -161,3 +161,33 @@ export function explainParked(
 export function isParked(entry: Pick<OutboxEntry, 'status'>): boolean {
   return entry.status === 'failed';
 }
+
+/**
+ * How many of a set of parked rows are beyond recovery by requeueing.
+ *
+ * `futile` is not "probably will not work" — it is the two reasons where
+ * putting the row back CANNOT change the outcome: no router handles that kind
+ * of row, or the event it points at is gone. Those rows will be claimed, fail
+ * for the identical reason, and park again, having produced a fresh burst of
+ * nothing.
+ *
+ * Counting them BEFORE the action is the difference between a bulk requeue that
+ * is a recovery and one that is a ritual. Someone who knows two of their five
+ * rows can never move goes and fixes the router first; someone who does not
+ * presses the button every hour and concludes the platform is broken.
+ *
+ * Returns null when there is nothing to warn about, so the caller renders
+ * nothing rather than an all-clear — the common case must cost no space.
+ */
+export function futileSummary(
+  entries: ReadonlyArray<Parameters<typeof explainParked>[0]>,
+): { count: number; total: number; ids: string[] } | null {
+  const futile = entries.filter((entry) => explainParked(entry).outlook === 'futile');
+  if (futile.length === 0) return null;
+  return {
+    count: futile.length,
+    total: entries.length,
+    // Only ever used to NAME a couple of them; the caller truncates.
+    ids: futile.map((entry) => (entry as { id?: string }).id ?? '').filter(Boolean),
+  };
+}

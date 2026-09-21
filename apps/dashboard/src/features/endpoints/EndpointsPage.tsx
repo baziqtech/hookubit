@@ -23,6 +23,7 @@ import { useCreateEndpoint, useEndpoints } from './api';
 import { EndpointActions } from './EndpointActions';
 import { EndpointEditDialog } from './EndpointEditDialog';
 import { EndpointSecretsDialog } from './EndpointSecretsDialog';
+import { SOURCE_LABEL, endpointFacts } from './endpoint-state';
 
 /** What the Secrets dialog needs of an endpoint — a created one qualifies too. */
 type SecretsTarget = Pick<Endpoint, 'id' | 'name' | 'status' | 'has_live_secret'>;
@@ -307,6 +308,14 @@ export function EndpointCreatedNotice({
  * `disabled_reason`/`disabled_at`, and the token bucket is `rate_limit` per
  * `rate_limit_window_seconds` rather than a per-second scalar.
  *
+ * "Your setting" and "HookuBit" are two columns rather than one status, and
+ * that is the most load-bearing decision on this screen. `enabled` is what the
+ * operator asked for; `status` is what the platform did about it. They are
+ * separate columns in the database because they DISAGREE — an endpoint
+ * auto-disabled after too many failures still reads `enabled: true` — and an
+ * endpoint you still want delivering that we stopped is a different problem,
+ * with a different fix, from one you paused yourself.
+ *
  * Built per render rather than declared once at module scope, because the
  * actions need the project id — every write route is nested under it — and the
  * edit dialog is owned by the page.
@@ -331,29 +340,39 @@ function buildColumns(
       ),
     },
     {
-      key: 'status',
-      header: 'Status',
-      render: (row) => (
-        <span className="flex flex-wrap gap-1">
-          <Badge tone={statusTone(row.status)} dot>
-            {row.status}
+      key: 'intent',
+      header: 'Your setting',
+      render: (row) => {
+        const facts = endpointFacts(row);
+        return (
+          <Badge tone={facts.intent.tone} dot>
+            {facts.intent.label}
           </Badge>
-          {/*
-           * Operator intent versus what the breaker did. `enabled: true` with a
-           * `disabled` status means the operator wants this endpoint delivering
-           * and the platform stopped it — a distinction an operator at 2am needs.
-           */}
-          {row.enabled && row.status === 'disabled' && <Badge tone="danger">auto-disabled</Badge>}
-          {!row.enabled && row.status !== 'deleted' && <Badge tone="neutral">operator paused</Badge>}
-          {/*
-           * The state "Resume" cannot fix. `POST …/enable` answers 409 until a
-           * secret signs, and the Secrets button on this row is the cure.
-           */}
-          {!row.has_live_secret && row.status !== 'deleted' && (
-            <Badge tone="warn">no live secret</Badge>
-          )}
-        </span>
-      ),
+        );
+      },
+    },
+    {
+      // Two columns, because they are two different facts. See
+      // `endpoint-state.ts` for why folding them into one is the thing that
+      // makes an outage unreadable at 2am.
+      key: 'platform',
+      header: 'HookuBit',
+      render: (row) => {
+        const facts = endpointFacts(row);
+        const source = SOURCE_LABEL[facts.source];
+        return (
+          <span className="flex flex-col items-start gap-1">
+            <Badge tone={facts.platform.tone} dot>
+              {facts.platform.label}
+            </Badge>
+            {source && (
+              <span className="text-[0.5625rem] font-bold tracking-wide text-ink-subtle">
+                {source}
+              </span>
+            )}
+          </span>
+        );
+      },
     },
     {
       key: 'limits',
@@ -410,8 +429,4 @@ function buildColumns(
   ];
 }
 
-function statusTone(status: Endpoint['status']): 'ok' | 'neutral' | 'danger' {
-  if (status === 'active') return 'ok';
-  if (status === 'paused') return 'neutral';
-  return 'danger';
-}
+

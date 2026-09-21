@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { OutboxEntry } from '../../types/api';
-import { explainParked, isParked, parkReasonOf } from './parked';
+import { explainParked, futileSummary, isParked, parkReasonOf } from './parked';
 
 /**
  * `OutboxEntryDto`, field for field. The factory builds the STALE case — a row
@@ -139,5 +139,23 @@ describe('isParked', () => {
     expect(isParked(entry({ status: 'pending' }))).toBe(false);
     expect(isParked(entry({ status: 'processing' }))).toBe(false);
     expect(isParked(entry({ status: 'processed' }))).toBe(false);
+  });
+});
+
+describe('futileSummary', () => {
+  const futile = () => entry({ last_error: 'unknown_outbox_type: no router handles \'ledger.synced\'' });
+
+  it('says nothing when nothing is futile, so the common case costs no space', () => {
+    expect(futileSummary([entry(), entry()])).toBeNull();
+  });
+
+  it('counts only the rows requeueing cannot move', () => {
+    // `caution` rows may well work — a poison row can be fixed by a deploy
+    // that did not change the router's registration. Counting them here would
+    // make the warning cry wolf and get read past on the day it is right.
+    const rows = [entry(), futile(), entry({ attempts: 14, unaccounted_attempts: 11 })];
+    const summary = futileSummary(rows);
+    expect(summary?.count).toBe(1);
+    expect(summary?.total).toBe(3);
   });
 });

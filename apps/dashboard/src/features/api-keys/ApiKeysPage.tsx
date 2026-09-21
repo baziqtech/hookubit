@@ -310,6 +310,27 @@ function buildColumns(onRevoke: (key: ApiKey) => void): Column<ApiKey>[] {
     ),
   },
   {
+    key: 'expires',
+    header: 'Expires',
+    align: 'right',
+    secondary: true,
+    /*
+     * "Never" is the common answer and it is worth SAYING rather than leaving
+     * blank. A key with an expiry is a key that will stop working at a moment
+     * nobody is watching for, and the column exists so that moment is on
+     * screen beside the key rather than in the dialog it was created from.
+     *
+     * A revoked key keeps showing its expiry: the status column already says
+     * revoked outranks it, and blanking the date here would lose the fact that
+     * it was also going to lapse.
+     */
+    render: (row) => (
+      <span className="text-2xs text-ink-subtle">
+        {row.expires_at ? formatRelativeTime(row.expires_at) : 'never'}
+      </span>
+    ),
+  },
+  {
     key: 'created',
     header: 'Created',
     align: 'right',
