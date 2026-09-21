@@ -2,6 +2,7 @@ export {
   AnalyticsWindowQueryDto,
   EventVolumeQueryDto,
   FailingEndpointsQueryDto,
+  DeliverySeriesQueryDto,
 } from './analytics-window.query.dto';
 export {
   AnalyticsWindowDto,
@@ -13,4 +14,6 @@ export {
   EventVolumeDto,
   FailingEndpointDto,
   FailingEndpointsDto,
+  DeliverySeriesDto,
+  SeriesBucketDto,
 } from './analytics-response.dto';

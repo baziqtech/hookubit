@@ -30,3 +30,14 @@ export const LATENCY_DELIVERY_SAMPLE = MAX_PAGE_SIZE;
 
 /** How many measured attempts the percentiles are computed from. */
 export const LATENCY_ATTEMPT_SAMPLE = MAX_PAGE_SIZE;
+
+/**
+ * How many of the delivery-series bucket queries may be in flight at once.
+ *
+ * The series issues two grouped counts per bucket (see
+ * `AnalyticsService.deliverySeries`), so the widest chart is 64 statements.
+ * Firing all of them at once would take sixty-four connections from a pool shared
+ * with every write path on the platform, to draw a chart. Eight keeps the
+ * wall-clock cost at a handful of round trips while leaving the pool alone.
+ */
+export const SERIES_QUERY_CONCURRENCY = 8;

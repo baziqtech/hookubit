@@ -37,6 +37,7 @@ Every request and response body in the control API, by name. Operation pages lin
 | [`DeliveryListDto`](#deliverylistdto) | object |
 | [`DeliveryOutcomesDto`](#deliveryoutcomesdto) | object |
 | [`DeliveryOutcomeSummaryDto`](#deliveryoutcomesummarydto) | object |
+| [`DeliverySeriesDto`](#deliveryseriesdto) | object |
 | [`DeliveryStatusCountsDto`](#deliverystatuscountsdto) | object |
 | [`DisableEndpointDto`](#disableendpointdto) | object |
 | [`DisableSubscriptionDto`](#disablesubscriptiondto) | object |
@@ -82,6 +83,7 @@ Every request and response body in the control API, by name. Operation pages lin
 | [`RetryPolicyListDto`](#retrypolicylistdto) | object |
 | [`RotatedSecretDto`](#rotatedsecretdto) | object |
 | [`RotateSecretDto`](#rotatesecretdto) | object |
+| [`SeriesBucketDto`](#seriesbucketdto) | object |
 | [`SessionResponseDto`](#sessionresponsedto) | object |
 | [`SubscriptionDto`](#subscriptiondto) | object |
 | [`SubscriptionListDto`](#subscriptionlistdto) | object |
@@ -601,6 +603,28 @@ The response body of EVERY non-2xx response from this API. There is no other err
 | `by_status.retrying` | number | yes |  |  |
 | `by_status.exhausted` | number | yes |  |  |
 | `by_status.cancelled` | number | yes |  |  |
+
+### DeliverySeriesDto
+
+| Property | Type | Required | Constraints | Description |
+|---|---|---|---|---|
+| `window` | [AnalyticsWindowDto](./schemas.md#analyticswindowdto) | yes |  |  |
+| `window.hours` | number | yes |  | Length of the window in hours, as requested. |
+| `window.from` | string | yes | format `date-time` | Inclusive lower bound. |
+| `window.to` | string | yes | format `date-time` | EXCLUSIVE upper bound; "now" at query time. |
+| `window.previous_from` | string | yes | format `date-time` | Inclusive lower bound of the comparison window, which is the same length. |
+| `window.previous_to` | string | yes | format `date-time` | Exclusive upper bound; equals `from`. |
+| `bucket` | string | yes |  | The bucket width actually used, e.g. `1h`. |
+| `bucket_ms` | number | yes |  | That width in milliseconds, so a client need not parse the name. |
+| `leading_partial` | boolean | yes |  | TRUE when the first bucket begins BEFORE the requested window did. Buckets are aligned to the wall clock, so a 24-hour window opened at 14:37 starts inside the 14:00 bucket. Say so on the chart, or the oldest bar looks like a dip that moves every time the page is opened. |
+| `buckets` | [SeriesBucketDto](./schemas.md#seriesbucketdto)[] | yes |  | Oldest first, contiguous, no gaps. |
+| `buckets[].start` | string | yes |  | Start of the bucket, inclusive. Aligned to a UTC boundary. |
+| `buckets[].end` | string | yes |  | End of the bucket, exclusive. Equal to the next bucket`s start. |
+| `buckets[].delivered_first_try` | number | yes |  | Succeeded on the first attempt. |
+| `buckets[].delivered_after_retry` | number | yes |  | Succeeded, but only after at least one attempt had failed. |
+| `buckets[].failed` | number | yes |  | `failed` plus `exhausted`: no further attempt is coming. |
+| `buckets[].in_flight` | number | yes |  | Created in this bucket and still moving. Not drawn, but the reason the newest bar is allowed to look short: without it, work that has not finished yet reads as a collapse in traffic. |
+| `buckets[].cancelled` | number | yes |  | Stopped before it could be sent - usually a paused endpoint. |
 
 ### DeliveryStatusCountsDto
 
@@ -1200,6 +1224,18 @@ string enum: `active`, `suspended`, `deleted`
 | Property | Type | Required | Constraints | Description |
 |---|---|---|---|---|
 | `overlap_seconds` | number | no | 0 to 2592000; default `86400` | How long the CURRENT secrets keep signing alongside the new one. Every active secret produces its own `v1=` component in Webhook-Signature and a consumer that matches any one of them verifies, so this is the window in which consumers can be rolled. 0 stops the old secrets immediately - use it for a leak, not for a routine rotation. |
+
+### SeriesBucketDto
+
+| Property | Type | Required | Constraints | Description |
+|---|---|---|---|---|
+| `start` | string | yes |  | Start of the bucket, inclusive. Aligned to a UTC boundary. |
+| `end` | string | yes |  | End of the bucket, exclusive. Equal to the next bucket`s start. |
+| `delivered_first_try` | number | yes |  | Succeeded on the first attempt. |
+| `delivered_after_retry` | number | yes |  | Succeeded, but only after at least one attempt had failed. |
+| `failed` | number | yes |  | `failed` plus `exhausted`: no further attempt is coming. |
+| `in_flight` | number | yes |  | Created in this bucket and still moving. Not drawn, but the reason the newest bar is allowed to look short: without it, work that has not finished yet reads as a collapse in traffic. |
+| `cancelled` | number | yes |  | Stopped before it could be sent - usually a paused endpoint. |
 
 ### SessionResponseDto
 

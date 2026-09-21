@@ -1,7 +1,8 @@
 import { ApiPropertyOptional } from '@nestjs/swagger';
 import { Type } from 'class-transformer';
-import { IsInt, IsOptional, Max, Min } from 'class-validator';
+import { IsIn, IsInt, IsOptional, Max, Min } from 'class-validator';
 import { DEFAULT_WINDOW_HOURS, MAX_WINDOW_HOURS } from '../analytics-window';
+import { BUCKET_UNITS, MAX_BUCKETS } from '../delivery-series';
 
 /**
  * The one query parameter every analytics route takes.
@@ -62,4 +63,23 @@ export class EventVolumeQueryDto extends AnalyticsWindowQueryDto {
   @Min(1)
   @Max(50)
   limit?: number;
+}
+
+/** `GET /analytics/deliveries/series` - the window, plus how finely to cut it. */
+export class DeliverySeriesQueryDto extends AnalyticsWindowQueryDto {
+  @ApiPropertyOptional({
+    enum: BUCKET_UNITS,
+    description:
+      'How wide each bucket is. Omitted, the finest bucket that fits the window inside ' +
+      `${MAX_BUCKETS} is chosen - twelve 5m bars for an hour, twenty-four 1h bars for a day. ` +
+      'Ask explicitly for a coarser one when the chart wants named bars: `1d` over a 7-day ' +
+      'window is seven bars labelled Mon to Sun, where the default `6h` would be twenty-eight ' +
+      'unlabelled ones. A combination needing more than ' +
+      `${MAX_BUCKETS} buckets is REFUSED with a 400 naming a bucket that fits, never coarsened: ` +
+      'the bucket count is the query count, and a response coarser than the one asked for would ' +
+      'hide the 3am spike it was opened to find.',
+  })
+  @IsOptional()
+  @IsIn(BUCKET_UNITS)
+  bucket?: string;
 }

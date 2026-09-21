@@ -1049,6 +1049,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/projects/{projectId}/analytics/deliveries/series": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Delivery outcomes bucketed across the window, for a chart
+         * @description The same window as `/deliveries`, cut into contiguous buckets aligned to the wall clock. The three drawn counts are disjoint and therefore stackable: a delivery that succeeded on its third attempt is `delivered_after_retry` and is NOT also `delivered_first_try`. Buckets are cut on `created_at`, so a bucket means "the deliveries created in this slice, and how they turned out" rather than "failures that happened in this slice" - which makes the newest bucket always partly `in_flight`.
+         */
+        get: operations["AnalyticsController_deliverySeries"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/projects/{projectId}/analytics/endpoints": {
         parameters: {
             query?: never;
@@ -2355,6 +2375,33 @@ export interface components {
             success_rate_delta: number | null;
             /** @description `current.total - previous.total`. Negative means quieter. */
             total_delta: number;
+        };
+        SeriesBucketDto: {
+            /** @description Start of the bucket, inclusive. Aligned to a UTC boundary. */
+            start: string;
+            /** @description End of the bucket, exclusive. Equal to the next bucket`s start. */
+            end: string;
+            /** @description Succeeded on the first attempt. */
+            delivered_first_try: number;
+            /** @description Succeeded, but only after at least one attempt had failed. */
+            delivered_after_retry: number;
+            /** @description `failed` plus `exhausted`: no further attempt is coming. */
+            failed: number;
+            /** @description Created in this bucket and still moving. Not drawn, but the reason the newest bar is allowed to look short: without it, work that has not finished yet reads as a collapse in traffic. */
+            in_flight: number;
+            /** @description Stopped before it could be sent - usually a paused endpoint. */
+            cancelled: number;
+        };
+        DeliverySeriesDto: {
+            window: components["schemas"]["AnalyticsWindowDto"];
+            /** @description The bucket width actually used, e.g. `1h`. */
+            bucket: string;
+            /** @description That width in milliseconds, so a client need not parse the name. */
+            bucket_ms: number;
+            /** @description TRUE when the first bucket begins BEFORE the requested window did. Buckets are aligned to the wall clock, so a 24-hour window opened at 14:37 starts inside the 14:00 bucket. Say so on the chart, or the oldest bar looks like a dip that moves every time the page is opened. */
+            leading_partial: boolean;
+            /** @description Oldest first, contiguous, no gaps. */
+            buckets: components["schemas"]["SeriesBucketDto"][];
         };
         FailingEndpointDto: {
             endpoint_id: string;
@@ -5549,6 +5596,60 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["DeliveryOutcomesDto"];
+                };
+            };
+            /** @description `window_hours` was out of range - above 720 is REFUSED, never clamped. (error.code: `invalid_request`) */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorResponse"];
+                };
+            };
+            /** @description You are in this tenant but your role does not allow it. (error.code: `forbidden`, `email_not_verified`) */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorResponse"];
+                };
+            };
+            /** @description The project does not exist, or belongs to another tenant. One answer with one message, on purpose: a 403 here would confirm that a project id scraped from somewhere else names live infrastructure belonging to another customer. (error.code: `not_found`) */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorResponse"];
+                };
+            };
+        };
+    };
+    AnalyticsController_deliverySeries: {
+        parameters: {
+            query?: {
+                /** @description How many hours back from now to summarise. The window is `[now - window_hours, now)`. Values above 720 (30 days) are REFUSED with a 400, never shortened: a clamped response would carry the number for a period the caller did not ask about. The dashboard shorthands map to 24 (24h), 168 (7d) and 720 (30d). */
+                window_hours?: number;
+                /** @description How wide each bucket is. Omitted, the finest bucket that fits the window inside 32 is chosen - twelve 5m bars for an hour, twenty-four 1h bars for a day. Ask explicitly for a coarser one when the chart wants named bars: `1d` over a 7-day window is seven bars labelled Mon to Sun, where the default `6h` would be twenty-eight unlabelled ones. A combination needing more than 32 buckets is REFUSED with a 400 naming a bucket that fits, never coarsened: the bucket count is the query count, and a response coarser than the one asked for would hide the 3am spike it was opened to find. */
+                bucket?: "5m" | "15m" | "30m" | "1h" | "2h" | "3h" | "6h" | "12h" | "1d";
+            };
+            header?: never;
+            path: {
+                /** @description Project id, `proj_…`. Resolved from the project row, never trusted as a claim. */
+                projectId: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DeliverySeriesDto"];
                 };
             };
             /** @description `window_hours` was out of range - above 720 is REFUSED, never clamped. (error.code: `invalid_request`) */

@@ -29,7 +29,16 @@ describe('analytics over HTTP', () => {
 
   const A1 = analyticsPath(IDS.projectA1);
   const B1 = analyticsPath(IDS.projectB1);
-  const ROUTES = ['deliveries', 'endpoints', 'latency', 'events'] as const;
+  const ROUTES = ['deliveries', 'deliveries/series', 'endpoints', 'latency', 'events'] as const;
+
+  /** Route path -> the controller method that serves it. */
+  const HANDLER: Record<(typeof ROUTES)[number], string> = {
+    deliveries: 'deliveries',
+    'deliveries/series': 'deliverySeries',
+    endpoints: 'endpoints',
+    latency: 'latency',
+    events: 'events',
+  };
 
   beforeAll(async () => {
     harness = await startAnalyticsApp();
@@ -178,23 +187,29 @@ describe('analytics over HTTP', () => {
       // Aggregates over the three largest tables in the product. An
       // unthrottled one is a self-inflicted load test one auto-refresh away.
       const handler = (AnalyticsController.prototype as unknown as Record<string, unknown>)[
-        route === 'deliveries' ? 'deliveries' : route
+        HANDLER[route]
       ];
       const options = Reflect.getMetadata(THROTTLE_KEY, handler as object) as
         | ThrottleOptions
         | undefined;
       expect(options).toBeDefined();
-      expect(options?.name).toBe(`analytics.${route}`);
+      // The throttle name is the route with slashes as dots, so a bucket in
+      // the store can be traced back to the URL that filled it.
+      expect(options?.name).toBe(`analytics.${route.replace('/', '.')}`);
       expect(options?.limit).toBeGreaterThan(0);
       expect(options?.windowMs).toBeGreaterThan(0);
     });
 
-    it('the latency route is the most tightly limited of the four', () => {
+    it('the two expensive routes are limited harder than the cheap ones', () => {
       const limitOf = (name: string): number => {
         const handler = (AnalyticsController.prototype as unknown as Record<string, unknown>)[name];
         return (Reflect.getMetadata(THROTTLE_KEY, handler as object) as ThrottleOptions).limit;
       };
+      // `latency` samples attempts; `deliverySeries` issues two grouped counts
+      // per bucket. Both cost multiples of what their neighbours do, and the
+      // budget has to say so or the ceiling is decoration.
       expect(limitOf('latency')).toBeLessThan(limitOf('deliveries'));
+      expect(limitOf('deliverySeries')).toBeLessThan(limitOf('deliveries'));
     });
   });
 });

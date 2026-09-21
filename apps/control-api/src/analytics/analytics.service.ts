@@ -12,7 +12,15 @@ import {
   MAX_ENDPOINT_RANKING,
   MAX_EVENT_TYPES,
   MAX_STATUS_GROUPS,
+  SERIES_QUERY_CONCURRENCY,
 } from './analytics-limits';
+import {
+  BucketUnit,
+  EMPTY_COUNTS,
+  SeriesBucket,
+  SeriesCounts,
+  planSeries,
+} from './delivery-series';
 import {
   AnalyticsWindowDto,
   AttemptLatencyDto,
@@ -25,6 +33,8 @@ import {
   FailingEndpointsDto,
   FailingEndpointsQueryDto,
   AnalyticsWindowQueryDto,
+  DeliverySeriesDto,
+  DeliverySeriesQueryDto,
 } from './dto';
 
 /** The nine statuses, from the Prisma enum so the list cannot drift. */
@@ -61,19 +71,27 @@ const IN_FLIGHT: readonly DeliveryStatus[] = [
  * with the plan that proves it recorded above each one. See HANDOFF.md for the
  * row counts at which each stops being acceptable.
  *
- * ## Why there is no hourly time series
+ * ## The time series, and what it costs
  *
- * The dashboard's speculative shape asked for 24 hourly buckets. Bucketing a
- * timestamp needs `date_trunc`, which needs raw SQL, which needs
- * `PrismaService` - banned outside the allowlist for the reason that makes this
- * whole layer worth having. The alternative, one grouped query per bucket, is
- * twenty-four index range scans of the same range to answer one question.
+ * `deliveryOutcomes` reports the window AND the immediately preceding window of
+ * equal length, with the delta, because "is it getting worse?" is a comparison
+ * and a single number cannot answer it. That stays the cheap answer: two index
+ * range scans.
  *
- * So the comparison is made explicit instead: every count is reported for the
- * window AND for the immediately preceding window of equal length, with the
- * delta. "Is it getting worse?" is a comparison, and this answers it in a
- * number rather than asking a human to eyeball the slope of a bar chart. The
- * cost is two index range scans, not twenty-four.
+ * `deliverySeries` is the expensive one, and it is deliberately separate. It
+ * buckets the window so a chart can be drawn, at the cost of two grouped counts
+ * per bucket - see the method for why two, and for why it is not one statement
+ * with `date_trunc`. It is throttled harder than its neighbours and its bucket
+ * count is capped, so the worst case is a known number of narrow index range
+ * scans rather than an open-ended one.
+ *
+ * An earlier version of this comment said there was no time series because
+ * bucketing needs `date_trunc`, which needs raw SQL, which needs
+ * `PrismaService`. The premise was right and the conclusion was not: the bucket
+ * boundaries can be computed in TypeScript and handed to the SAME scoped
+ * `groupBy` every other query here uses, which keeps the tenant predicate
+ * authored in exactly one place. Arbitrary bucket widths come free that way -
+ * five-minute buckets need no SQL support at all.
  */
 @Injectable()
 export class AnalyticsService {
@@ -125,6 +143,112 @@ export class AnalyticsService {
           ? null
           : round(currentSummary.success_rate - previousSummary.success_rate),
       total_delta: currentSummary.total - previousSummary.total,
+    };
+  }
+
+  /**
+   * Delivery outcomes bucketed across the window, for the chart.
+   *
+   * ## Why two queries per bucket, and not one statement for the lot
+   *
+   * One statement would need `date_trunc` in a `GROUP BY`, which needs raw SQL,
+   * which needs `PrismaService`. The objection is not raw SQL as such - it is
+   * that the delivery tenant predicate is a join through `endpoints` ANDed with
+   * two denormalised columns (see `tenantPredicate`, case `delivery`, and the
+   * FIX 3 note above it), and hand-writing that in SQL would be a SECOND copy
+   * of the rule `tenant-scope.ts` exists to have exactly one of. The two copies
+   * would not drift today. They would drift the first time the chain changed,
+   * and the symptom would be a chart that quietly includes another tenant's
+   * traffic.
+   *
+   * So the bucket boundaries are computed in TypeScript and handed to the same
+   * scoped `groupBy` everything else here uses. Each bucket costs:
+   *
+   *   1. `groupBy(status)` over `[start, end)` - at most nine groups, so it can
+   *      never truncate.
+   *   2. `count(status = succeeded AND attempt_count > 1)` over the same range.
+   *
+   * The second query exists because the three drawn series must be DISJOINT to
+   * stack, and "delivered after a retry" is a predicate on `attempt_count`
+   * rather than a status. Folding it into the first query by grouping on
+   * `(status, attempt_count)` was the obvious saving and is not safe:
+   * `max_attempts` is capped at 50 by CHECK constraint, so that grouping can
+   * produce 459 groups against a `MAX_PAGE_SIZE` of 200, and `groupBy` with an
+   * explicit take SLICES. A silently truncated rollup here would understate
+   * failures on exactly the projects having the worst day.
+   *
+   * Both bounds are enforced upstream: `planSeries` caps the bucket count at
+   * `MAX_BUCKETS`, so this issues at most 64 statements, `SERIES_QUERY_CONCURRENCY`
+   * at a time. Every one of them rides
+   * `deliveries_project_id_created_at_idx` over a slice of the window, so their
+   * combined I/O is approximately one scan of the window - the cost is round
+   * trips, which the concurrency bound turns into a handful of them.
+   *
+   * ## Why buckets are cut on `created_at`
+   *
+   * A bucket means "the deliveries this project CREATED in this slice, and how
+   * they turned out" - not "failures that happened in this slice". Those are
+   * different charts and the first is the one an operator wants: it attributes
+   * an outcome to the traffic that caused it, and it is the column the index is
+   * on. The consequence is that the newest bucket is always still settling,
+   * which is what `in_flight` is in the response to make visible.
+   */
+  async deliverySeries(
+    context: RequestContext,
+    query: DeliverySeriesQueryDto,
+    now?: Date,
+  ): Promise<DeliverySeriesDto> {
+    const window = resolveWindow(query.window_hours, now);
+    const plan = planSeries(window, query.bucket as BucketUnit | undefined);
+    const scope = this.scopes.for(context);
+
+    const counts = await mapWithConcurrency(
+      plan.buckets,
+      SERIES_QUERY_CONCURRENCY,
+      (bucket) => this.bucketCounts(scope, bucket),
+    );
+
+    return {
+      window: AnalyticsService.windowDto(window),
+      bucket: plan.unit,
+      bucket_ms: plan.widthMs,
+      leading_partial: plan.leadingPartial,
+      buckets: plan.buckets.map((bucket, index) => ({
+        start: bucket.start.toISOString(),
+        end: bucket.end.toISOString(),
+        ...(counts[index] ?? EMPTY_COUNTS),
+      })),
+    };
+  }
+
+  /** The two queries one bucket costs. See `deliverySeries` for why two. */
+  private async bucketCounts(scope: TenantScope, bucket: SeriesBucket): Promise<SeriesCounts> {
+    const where = { createdAt: range(bucket.start, bucket.end) } satisfies Prisma.DeliveryWhereInput;
+
+    const [statuses, retried] = await Promise.all([
+      this.statusCounts(scope, bucket.start, bucket.end),
+      scope.deliveries.count({
+        ...where,
+        status: DeliveryStatus.succeeded,
+        // `attempt_count` is the number of attempts MADE. Anything above one
+        // means the first request did not land, which is precisely what the
+        // amber band in the chart is there to show.
+        attemptCount: { gt: 1 },
+      } satisfies Prisma.DeliveryWhereInput),
+    ]);
+
+    const succeeded = statuses.succeeded;
+    // Clamped because the two queries are not one statement and a delivery can
+    // settle between them: without this, a race at the boundary could report a
+    // negative first-try count, which is a number no operator should ever see.
+    const afterRetry = Math.min(retried, succeeded);
+
+    return {
+      delivered_first_try: succeeded - afterRetry,
+      delivered_after_retry: afterRetry,
+      failed: FAILING.reduce((sum, status) => sum + statuses[status], 0),
+      in_flight: IN_FLIGHT.reduce((sum, status) => sum + statuses[status], 0),
+      cancelled: statuses.cancelled,
     };
   }
 
@@ -506,4 +630,32 @@ function percentile(ascending: readonly number[], fraction: number): number {
 /** Four decimal places. A rate is displayed, not summed; float noise is not. */
 function round(value: number): number {
   return Math.round(value * 10_000) / 10_000;
+}
+
+/**
+ * `Promise.all` with a ceiling on how many run at once.
+ *
+ * Results come back in input order regardless of completion order, because the
+ * caller is filling a time series and a chart whose bars arrived in race order
+ * would be gibberish.
+ */
+async function mapWithConcurrency<TIn, TOut>(
+  items: readonly TIn[],
+  limit: number,
+  run: (item: TIn, index: number) => Promise<TOut>,
+): Promise<TOut[]> {
+  const results = new Array<TOut>(items.length);
+  let next = 0;
+
+  const worker = async (): Promise<void> => {
+    for (;;) {
+      const index = next;
+      next += 1;
+      if (index >= items.length) return;
+      results[index] = await run(items[index], index);
+    }
+  };
+
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
+  return results;
 }

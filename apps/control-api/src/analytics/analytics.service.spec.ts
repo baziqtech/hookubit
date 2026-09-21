@@ -5,6 +5,7 @@ import {
   MAX_WINDOW_HOURS,
   resolveWindow,
 } from './analytics-window';
+import { MAX_BUCKETS } from './delivery-series';
 import { ANALYTICS, EXPECTED, NOW, analyticsHarness } from './testing/harness';
 
 const HOUR = 3_600_000;
@@ -299,4 +300,81 @@ describe('AnalyticsService', () => {
       expect(result).toMatchObject({ total: 0, previous_total: 0, total_delta: 0, by_type: [] });
     });
   });
+
+  /**
+   * The series, asserted as INVARIANTS against the window totals rather than as
+   * per-bucket literals.
+   *
+   * Writing down which bar each fixture row lands in would mean recomputing the
+   * alignment in the test, which is the thing under test — the assertion would
+   * pass for any alignment the implementation happened to choose, including a
+   * wrong one. `delivery-series.spec.ts` pins the geometry exactly, with no
+   * database. What is left for here is the part only a query can get wrong:
+   * whether the buckets, added up, are the same rows the window reports.
+   */
+  describe('delivery series', () => {
+    it('adds up to the window totals: no row counted twice, none dropped', async () => {
+      const { context, analytics } = await analyticsHarness();
+      const series = await analytics.deliverySeries(context, {}, NOW);
+
+      const sum = (key: 'delivered_first_try' | 'delivered_after_retry' | 'failed' | 'in_flight') =>
+        series.buckets.reduce((total, bucket) => total + bucket[key], 0);
+
+      // The buckets can reach at most one width before the window starts (the
+      // leading partial), and the fixture's previous-window decoys sit 26+
+      // hours back, so nothing from the previous window can leak in here.
+      expect(sum('delivered_first_try') + sum('delivered_after_retry')).toBe(
+        EXPECTED.window.succeeded,
+      );
+      expect(sum('failed')).toBe(EXPECTED.window.failed + EXPECTED.window.exhausted);
+      expect(sum('in_flight')).toBe(EXPECTED.window.inFlight);
+    });
+
+    it('splits delivered into two DISJOINT bands, so the bars stack', async () => {
+      const { context, analytics } = await analyticsHarness();
+      const series = await analytics.deliverySeries(context, {}, NOW);
+
+      const firstTry = series.buckets.reduce((t, b) => t + b.delivered_first_try, 0);
+      const afterRetry = series.buckets.reduce((t, b) => t + b.delivered_after_retry, 0);
+
+      expect(afterRetry).toBe(EXPECTED.series.deliveredAfterRetry);
+      expect(firstTry).toBe(EXPECTED.series.deliveredFirstTry);
+      // The property the chart depends on: a delivery that needed three
+      // attempts is in exactly one band, not in both.
+      expect(firstTry + afterRetry).toBe(EXPECTED.window.succeeded);
+    });
+
+    it('counts only this project, even though the fixture has decoys next door', async () => {
+      const { context, analytics } = await analyticsHarness();
+      const series = await analytics.deliverySeries(context, {}, NOW);
+
+      const total = series.buckets.reduce(
+        (t, b) => t + b.delivered_first_try + b.delivered_after_retry + b.failed + b.in_flight + b.cancelled,
+        0,
+      );
+      // The sibling project and the other organization both have in-window
+      // rows. If the tenant predicate were missing, this would be larger.
+      expect(total).toBe(EXPECTED.window.total);
+    });
+
+    it('returns contiguous buckets, oldest first, inside the ceiling', async () => {
+      const { context, analytics } = await analyticsHarness();
+      const series = await analytics.deliverySeries(context, {}, NOW);
+
+      expect(series.buckets.length).toBeLessThanOrEqual(MAX_BUCKETS);
+      expect(series.bucket).toBe('1h');
+      expect(series.bucket_ms).toBe(HOUR);
+      for (let index = 1; index < series.buckets.length; index += 1) {
+        expect(series.buckets[index].start).toBe(series.buckets[index - 1].end);
+      }
+    });
+
+    it('refuses a bucket too fine for the window rather than coarsening it', async () => {
+      const { context, analytics } = await analyticsHarness();
+      await expect(
+        analytics.deliverySeries(context, { window_hours: 720, bucket: '1h' }, NOW),
+      ).rejects.toBeInstanceOf(AppError);
+    });
+  });
+
 });

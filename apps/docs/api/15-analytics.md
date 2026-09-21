@@ -7,6 +7,7 @@
 | Operation | Summary |
 |---|---|
 | [GET `/v1/projects/{projectId}/analytics/deliveries`](#get-v1-projects-projectid-analytics-deliveries) | Delivery outcomes over a window, beside the window before it |
+| [GET `/v1/projects/{projectId}/analytics/deliveries/series`](#get-v1-projects-projectid-analytics-deliveries-series) | Delivery outcomes bucketed across the window, for a chart |
 | [GET `/v1/projects/{projectId}/analytics/endpoints`](#get-v1-projects-projectid-analytics-endpoints) | Which endpoints are failing, ranked worst first |
 | [GET `/v1/projects/{projectId}/analytics/latency`](#get-v1-projects-projectid-analytics-latency) | Attempt latency percentiles (p50/p95/p99) over measured attempt durations |
 | [GET `/v1/projects/{projectId}/analytics/events`](#get-v1-projects-projectid-analytics-events) | Event volume over a window, with the busiest event types |
@@ -58,6 +59,64 @@ Every `DeliveryStatus` counted exactly, rolled up into succeeded / failing / exh
 | `previous.by_status` | [DeliveryStatusCountsDto](./schemas.md#deliverystatuscountsdto) | yes |  |  |
 | `success_rate_delta` | number \| null | yes |  | `current.success_rate - previous.success_rate`. Negative means worse. NULL when either window had nothing settled, because a change from "unknown" is not a change. |
 | `total_delta` | number | yes |  | `current.total - previous.total`. Negative means quieter. |
+
+**400 Bad Request** - [ApiErrorResponse](./schemas.md#apierrorresponse)
+
+`window_hours` was out of range - above 720 is REFUSED, never clamped.
+
+`error.code`: [`invalid_request`](./errors.md#invalid-request)
+
+**403 Forbidden** - [ApiErrorResponse](./schemas.md#apierrorresponse)
+
+You are in this tenant but your role does not allow it.
+
+`error.code`: [`forbidden`](./errors.md#forbidden), [`email_not_verified`](./errors.md#email-not-verified)
+
+**404 Not Found** - [ApiErrorResponse](./schemas.md#apierrorresponse)
+
+The project does not exist, or belongs to another tenant. One answer with one message, on purpose: a 403 here would confirm that a project id scraped from somewhere else names live infrastructure belonging to another customer.
+
+`error.code`: [`not_found`](./errors.md#not-found)
+
+### GET `/v1/projects/{projectId}/analytics/deliveries/series`
+
+**Delivery outcomes bucketed across the window, for a chart**
+
+The same window as `/deliveries`, cut into contiguous buckets aligned to the wall clock. The three drawn counts are disjoint and therefore stackable: a delivery that succeeded on its third attempt is `delivered_after_retry` and is NOT also `delivered_first_try`. Buckets are cut on `created_at`, so a bucket means "the deliveries created in this slice, and how they turned out" rather than "failures that happened in this slice" - which makes the newest bucket always partly `in_flight`.
+
+**Auth:** signed-in dashboard session (cookie).
+
+#### Parameters
+
+| Name | In | Type | Required | Constraints | Description |
+|---|---|---|---|---|---|
+| `projectId` | path | string | yes |  | Project id, `proj_…`. Resolved from the project row, never trusted as a claim. |
+| `window_hours` | query | number | no | 1 to 720; default `24` | How many hours back from now to summarise. The window is `[now - window_hours, now)`. Values above 720 (30 days) are REFUSED with a 400, never shortened: a clamped response would carry the number for a period the caller did not ask about. The dashboard shorthands map to 24 (24h), 168 (7d) and 720 (30d). |
+| `bucket` | query | string | no | one of `5m`, `15m`, `30m`, `1h`, `2h`, `3h`, `6h`, `12h`, `1d` | How wide each bucket is. Omitted, the finest bucket that fits the window inside 32 is chosen - twelve 5m bars for an hour, twenty-four 1h bars for a day. Ask explicitly for a coarser one when the chart wants named bars: `1d` over a 7-day window is seven bars labelled Mon to Sun, where the default `6h` would be twenty-eight unlabelled ones. A combination needing more than 32 buckets is REFUSED with a 400 naming a bucket that fits, never coarsened: the bucket count is the query count, and a response coarser than the one asked for would hide the 3am spike it was opened to find. |
+
+#### Responses
+
+**200 OK** - [DeliverySeriesDto](./schemas.md#deliveryseriesdto)
+
+| Property | Type | Required | Constraints | Description |
+|---|---|---|---|---|
+| `window` | [AnalyticsWindowDto](./schemas.md#analyticswindowdto) | yes |  |  |
+| `window.hours` | number | yes |  | Length of the window in hours, as requested. |
+| `window.from` | string | yes | format `date-time` | Inclusive lower bound. |
+| `window.to` | string | yes | format `date-time` | EXCLUSIVE upper bound; "now" at query time. |
+| `window.previous_from` | string | yes | format `date-time` | Inclusive lower bound of the comparison window, which is the same length. |
+| `window.previous_to` | string | yes | format `date-time` | Exclusive upper bound; equals `from`. |
+| `bucket` | string | yes |  | The bucket width actually used, e.g. `1h`. |
+| `bucket_ms` | number | yes |  | That width in milliseconds, so a client need not parse the name. |
+| `leading_partial` | boolean | yes |  | TRUE when the first bucket begins BEFORE the requested window did. Buckets are aligned to the wall clock, so a 24-hour window opened at 14:37 starts inside the 14:00 bucket. Say so on the chart, or the oldest bar looks like a dip that moves every time the page is opened. |
+| `buckets` | [SeriesBucketDto](./schemas.md#seriesbucketdto)[] | yes |  | Oldest first, contiguous, no gaps. |
+| `buckets[].start` | string | yes |  | Start of the bucket, inclusive. Aligned to a UTC boundary. |
+| `buckets[].end` | string | yes |  | End of the bucket, exclusive. Equal to the next bucket`s start. |
+| `buckets[].delivered_first_try` | number | yes |  | Succeeded on the first attempt. |
+| `buckets[].delivered_after_retry` | number | yes |  | Succeeded, but only after at least one attempt had failed. |
+| `buckets[].failed` | number | yes |  | `failed` plus `exhausted`: no further attempt is coming. |
+| `buckets[].in_flight` | number | yes |  | Created in this bucket and still moving. Not drawn, but the reason the newest bar is allowed to look short: without it, work that has not finished yet reads as a collapse in traffic. |
+| `buckets[].cancelled` | number | yes |  | Stopped before it could be sent - usually a paused endpoint. |
 
 **400 Bad Request** - [ApiErrorResponse](./schemas.md#apierrorresponse)
 

@@ -101,6 +101,16 @@ export const EXPECTED = {
     /** 4 / 5 */
     successRate: 0.8,
   },
+  /**
+   * The series splits the ten in-window successes by attempt count. Two of
+   * them were given `attemptCount` above one at the fixture, so the two bands
+   * are non-empty and their sum is still the succeeded total — which is the
+   * property the chart depends on to stack without double-counting.
+   */
+  series: {
+    deliveredFirstTry: 8,
+    deliveredAfterRetry: 2,
+  },
   events: {
     total: 12,
     previousTotal: 3,
@@ -162,6 +172,12 @@ function delivery(
     organizationId?: string;
     eventId?: string;
     durationMs?: number | null;
+    /**
+     * Attempts MADE. Above one means the first request did not land, which is
+     * how the series tells "delivered" from "delivered after a retry" — the two
+     * bands that have to be disjoint for the chart to stack.
+     */
+    attemptCount?: number;
   },
 ): string {
   deliverySequence += 1;
@@ -174,7 +190,7 @@ function delivery(
     organizationId: options.organizationId ?? IDS.orgA,
     projectId: options.projectId ?? IDS.projectA1,
     status: options.status,
-    attemptCount: 1,
+    attemptCount: options.attemptCount ?? 1,
     maxAttempts: 8,
     nextAttemptAt: null,
     lastAttemptAt: options.createdAt,
@@ -311,12 +327,12 @@ export function seedAnalytics(db: FakeTenantPrisma = seedWorld()): FakeTenantPri
   // ep_quiet: 3 succeeded, 1 failed.
   delivery(db, { endpointId: ANALYTICS.endpointQuiet, status: 'succeeded', createdAt: recent(1), durationMs: take() });
   delivery(db, { endpointId: ANALYTICS.endpointQuiet, status: 'succeeded', createdAt: recent(2), durationMs: take() });
-  delivery(db, { endpointId: ANALYTICS.endpointQuiet, status: 'succeeded', createdAt: recent(3) });
+  delivery(db, { endpointId: ANALYTICS.endpointQuiet, status: 'succeeded', createdAt: recent(3), attemptCount: 3 });
   delivery(db, { endpointId: ANALYTICS.endpointQuiet, status: 'failed', createdAt: recent(4), durationMs: take() });
 
   // ep_payments: the culprit. 2 succeeded, 4 failed, 3 exhausted, 1 retrying.
   delivery(db, { endpointId: ANALYTICS.endpointPayments, status: 'succeeded', createdAt: recent(5), durationMs: take() });
-  delivery(db, { endpointId: ANALYTICS.endpointPayments, status: 'succeeded', createdAt: recent(6), durationMs: take() });
+  delivery(db, { endpointId: ANALYTICS.endpointPayments, status: 'succeeded', createdAt: recent(6), durationMs: take(), attemptCount: 2 });
   for (let index = 0; index < 4; index += 1) {
     delivery(db, {
       endpointId: ANALYTICS.endpointPayments,

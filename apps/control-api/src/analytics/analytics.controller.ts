@@ -15,6 +15,8 @@ import { MAX_WINDOW_HOURS } from './analytics-window';
 import { AnalyticsService } from './analytics.service';
 import {
   AnalyticsWindowQueryDto,
+  DeliverySeriesDto,
+  DeliverySeriesQueryDto,
   AttemptLatencyDto,
   DeliveryOutcomesDto,
   EventVolumeDto,
@@ -98,6 +100,29 @@ export class AnalyticsController {
     @Query() query: AnalyticsWindowQueryDto,
   ): Promise<DeliveryOutcomesDto> {
     return this.analytics.deliveryOutcomes(context, query);
+  }
+
+  @Get('deliveries/series')
+  @Authorized('deliveries.read')
+  // Half the budget of its neighbours, because one request here is up to 64
+  // statements rather than two. See `AnalyticsService.deliverySeries`.
+  @Throttle({ name: 'analytics.deliveries.series', limit: 60, windowMs: 5 * MINUTE })
+  @ApiOperation({
+    summary: 'Delivery outcomes bucketed across the window, for a chart',
+    description:
+      'The same window as `/deliveries`, cut into contiguous buckets aligned to the wall ' +
+      'clock. The three drawn counts are disjoint and therefore stackable: a delivery that ' +
+      'succeeded on its third attempt is `delivered_after_retry` and is NOT also ' +
+      '`delivered_first_try`. Buckets are cut on `created_at`, so a bucket means "the ' +
+      'deliveries created in this slice, and how they turned out" rather than "failures that ' +
+      'happened in this slice" - which makes the newest bucket always partly `in_flight`.',
+  })
+  @ApiOkResponse({ type: DeliverySeriesDto })
+  deliverySeries(
+    @Tenant() context: RequestContext,
+    @Query() query: DeliverySeriesQueryDto,
+  ): Promise<DeliverySeriesDto> {
+    return this.analytics.deliverySeries(context, query);
   }
 
   @Get('endpoints')

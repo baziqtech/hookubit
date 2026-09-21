@@ -246,3 +246,61 @@ export class EventVolumeDto {
   @ApiProperty({ description: 'True when more event types occurred than `limit`.' })
   has_more!: boolean;
 }
+
+/**
+ * One bar.
+ *
+ * The three drawn counts are DISJOINT so they stack without double-counting a
+ * delivery: one that succeeded on its third attempt is in
+ * `delivered_after_retry` and nowhere else.
+ */
+export class SeriesBucketDto {
+  @ApiProperty({ description: 'Start of the bucket, inclusive. Aligned to a UTC boundary.' })
+  start!: string;
+
+  @ApiProperty({ description: 'End of the bucket, exclusive. Equal to the next bucket`s start.' })
+  end!: string;
+
+  @ApiProperty({ description: 'Succeeded on the first attempt.' })
+  delivered_first_try!: number;
+
+  @ApiProperty({ description: 'Succeeded, but only after at least one attempt had failed.' })
+  delivered_after_retry!: number;
+
+  @ApiProperty({ description: '`failed` plus `exhausted`: no further attempt is coming.' })
+  failed!: number;
+
+  @ApiProperty({
+    description:
+      'Created in this bucket and still moving. Not drawn, but the reason the newest bar is ' +
+      'allowed to look short: without it, work that has not finished yet reads as a collapse ' +
+      'in traffic.',
+  })
+  in_flight!: number;
+
+  @ApiProperty({ description: 'Stopped before it could be sent - usually a paused endpoint.' })
+  cancelled!: number;
+}
+
+/** `GET /analytics/deliveries/series`. */
+export class DeliverySeriesDto {
+  @ApiProperty({ type: AnalyticsWindowDto }) window!: AnalyticsWindowDto;
+
+  @ApiProperty({ description: 'The bucket width actually used, e.g. `1h`.' })
+  bucket!: string;
+
+  @ApiProperty({ description: 'That width in milliseconds, so a client need not parse the name.' })
+  bucket_ms!: number;
+
+  @ApiProperty({
+    description:
+      'TRUE when the first bucket begins BEFORE the requested window did. Buckets are aligned ' +
+      'to the wall clock, so a 24-hour window opened at 14:37 starts inside the 14:00 bucket. ' +
+      'Say so on the chart, or the oldest bar looks like a dip that moves every time the page ' +
+      'is opened.',
+  })
+  leading_partial!: boolean;
+
+  @ApiProperty({ type: [SeriesBucketDto], description: 'Oldest first, contiguous, no gaps.' })
+  buckets!: SeriesBucketDto[];
+}
