@@ -138,7 +138,16 @@ test.describe.serial('a project, end to end', () => {
     state.signingSecret = (await plaintext.textContent())!.trim();
     expect(state.signingSecret.startsWith('whsec_')).toBe(true);
     await d.getByRole('button', { name: 'Done' }).click();
-    await expect(rowNamed(page, ENDPOINT)).toContainText('active');
+    /*
+     * "On" and "Delivering", not "active".
+     *
+     * The endpoints table carries the operator's setting and the platform's
+     * verdict as two separate columns, because an endpoint you still want
+     * delivering that WE stopped is a different problem from one you paused
+     * yourself. `active` was the single status this replaced.
+     */
+    await expect(rowNamed(page, ENDPOINT)).toContainText('On');
+    await expect(rowNamed(page, ENDPOINT)).toContainText('Delivering');
   });
 
   test('the endpoint is subscribed to every event type', async ({ page }) => {
@@ -303,7 +312,10 @@ test.describe.serial('a project, end to end', () => {
     await d.getByLabel('Reason').fill('e2e: pausing on purpose');
     await d.getByRole('button', { name: 'Pause deliveries' }).click();
     await expect(d).toBeHidden();
-    await expect(row).toContainText('paused');
+    // The operator's own decision, so the setting column says so and the
+    // platform column reports the consequence.
+    await expect(row).toContainText('Paused by you');
+    await expect(row).toContainText('Not sending');
 
     // The worker reaches the queued retry and finishes it `cancelled`.
     await page.goto(`${projectBase()}/deliveries`);
@@ -313,7 +325,7 @@ test.describe.serial('a project, end to end', () => {
     await rowNamed(page, ENDPOINT).getByRole('button', { name: 'Resume deliveries' }).click();
     await dialog(page).getByRole('button', { name: /resume/i }).click();
     await expect(dialog(page)).toBeHidden();
-    await expect(rowNamed(page, ENDPOINT)).toContainText('active');
+    await expect(rowNamed(page, ENDPOINT)).toContainText('Delivering');
 
     // Replay is the path back for a cancelled delivery, and it is delivery-level.
     await page.goto(`${projectBase()}/deliveries`);
@@ -410,8 +422,15 @@ test.describe.serial('a project, end to end', () => {
     await page.goto(`${projectBase()}/settings`);
     const main = page.getByRole('main');
     await main.getByLabel('Name').fill(`${PROJECT} renamed`);
-    await main.getByRole('button', { name: /save/i }).click();
-    await expect(page.getByRole('button', { name: 'Switch project' })).toContainText(`${PROJECT} renamed`);
+    // `Save changes`, exactly. The page now also carries "Save addresses" for
+    // the publish allowlist, so /save/i matches two buttons.
+    await main.getByRole('button', { name: 'Save changes' }).click();
+    // One card in the rail switches BOTH project and organization: people
+    // switch project many times a day and organization approximately never, so
+    // the card is the project and the organization is the line under it.
+    await expect(
+      page.getByRole('button', { name: 'Switch project or organization' }),
+    ).toContainText(`${PROJECT} renamed`);
   });
 
   test('usage and the audit log reflect what happened', async ({ page }) => {
@@ -492,7 +511,7 @@ test.describe.serial('a project, end to end', () => {
 
   test('a second organization is created from the switcher and becomes the current one', async ({ page }) => {
     await page.goto(`/orgs/${state.orgId}`);
-    await page.getByRole('button', { name: 'Switch organization' }).click();
+    await page.getByRole('button', { name: 'Switch project or organization' }).click();
     await page.getByRole('menuitem', { name: 'New organization…' }).click();
     const d = dialog(page);
     await d.getByLabel('Name').fill(`${account.organization} second`);
@@ -500,7 +519,9 @@ test.describe.serial('a project, end to end', () => {
     // The current URL already matches /orgs/org_…, so wait for a DIFFERENT one.
     await expect(page).toHaveURL(new RegExp(`/orgs/(?!${state.orgId})org_[A-Z0-9]+$`));
     await expect(page.getByText('No projects yet')).toBeVisible();
-    await expect(page.getByRole('button', { name: 'Switch organization' })).toContainText('second');
+    await expect(
+      page.getByRole('button', { name: 'Switch project or organization' }),
+    ).toContainText('second');
   });
 
   test('sign out', async ({ page }) => {

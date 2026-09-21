@@ -1,5 +1,6 @@
 import type { ReactNode } from 'react';
 import { cn } from '../lib/cn';
+import { PHONE_QUERY, useMediaQuery } from '../lib/use-media-query';
 
 export interface Column<T> {
   /** Stable key, also used for the React key of the cell. */
@@ -41,7 +42,7 @@ export interface TableProps<T> {
  * The operator surface is read with a screen reader and copied into support
  * threads, both of which a div grid breaks.
  *
- * ## Why the mobile view is a SECOND rendering rather than restyled rows
+ * ## Why the mobile view is a different DOM, chosen at runtime
  *
  * The usual trick is `display: block` on the table elements and `data-label`
  * pseudo-elements. It is less code and it destroys the table semantics that are
@@ -50,9 +51,12 @@ export interface TableProps<T> {
  * this readable on a desktop screen reader is thrown away to make it look right
  * on a phone.
  *
- * So: two renderings from ONE column definition. Each is `display: none` at the
- * other's width, which removes it from the accessibility tree rather than
- * merely hiding it, so nothing is announced twice.
+ * So: two renderings from ONE column definition, and exactly ONE of them is in
+ * the document. Rendering both and hiding one with CSS was tried and is wrong
+ * here — a table can hold two hundred rows, so it doubles the DOM to show half
+ * of it, and the hidden copy is still found by `getByText().first()` and by
+ * find-in-page, which makes the first match for any text on the page an element
+ * nobody can see.
  *
  * The first column becomes the card's heading, because in every table here it
  * is the thing the row is ABOUT — the delivery id, the endpoint name, the
@@ -70,64 +74,68 @@ export function Table<T>({
   className,
 }: TableProps<T>) {
   const showBody = !loading && rows.length > 0;
-
+  const phone = useMediaQuery(PHONE_QUERY);
   const [heading, ...rest] = columns;
+
+  if (phone) {
+    return (
+      <div className={cn('w-full', className)}>
+        <ul className="flex flex-col gap-2 p-2">
+          {/*
+            `loading` is `<tr>`-shaped — it belongs in a tbody — so the card
+            list gets its own placeholder rather than emitting table rows
+            inside a `<ul>`.
+          */}
+          {loading && (
+            <li className="flex flex-col gap-2">
+              {[0, 1, 2].map((index) => (
+                <span
+                  key={index}
+                  className="h-16 w-full animate-pulse rounded-[0.625rem] border border-line bg-raised"
+                />
+              ))}
+            </li>
+          )}
+          {showBody &&
+            rows.map((row) => (
+              <li
+                key={rowKey(row)}
+                onClick={onRowClick ? () => onRowClick(row) : undefined}
+                className={cn(
+                  'flex flex-col gap-2 rounded-[0.625rem] border border-line bg-panel p-3',
+                  onRowClick && 'cursor-pointer',
+                )}
+              >
+                {heading && <div className="min-w-0">{heading.render(row)}</div>}
+                {rest.length > 0 && (
+                  <dl className="flex flex-col gap-1.5">
+                    {rest
+                      .filter((column) => !column.secondary)
+                      .map((column) => (
+                        <div key={column.key} className="flex items-baseline justify-between gap-3">
+                          {!column.unlabelled && (
+                            <dt className="shrink-0 text-2xs uppercase tracking-wide text-ink-subtle">
+                              {column.header}
+                            </dt>
+                          )}
+                          <dd className={cn('min-w-0 text-right', column.unlabelled && 'w-full')}>
+                            {column.render(row)}
+                          </dd>
+                        </div>
+                      ))}
+                  </dl>
+                )}
+              </li>
+            ))}
+          {!loading && rows.length === 0 && empty && <li>{empty}</li>}
+        </ul>
+      </div>
+    );
+  }
 
   return (
     <div className={cn('w-full', className)}>
-      {/* Cards, on a phone. */}
-      <ul className="flex flex-col gap-2 p-2 md:hidden">
-        {/*
-          `loading` is `<tr>`-shaped — it is rendered into the tbody below — so
-          it cannot go here. The card list gets its own placeholder rather than
-          emitting table rows inside a `<ul>`.
-        */}
-        {loading && (
-          <li className="flex flex-col gap-2">
-            {[0, 1, 2].map((index) => (
-              <span
-                key={index}
-                className="h-16 w-full animate-pulse rounded-[0.625rem] border border-line bg-raised"
-              />
-            ))}
-          </li>
-        )}
-        {showBody &&
-          rows.map((row) => (
-            <li
-              key={rowKey(row)}
-              onClick={onRowClick ? () => onRowClick(row) : undefined}
-              className={cn(
-                'flex flex-col gap-2 rounded-[0.625rem] border border-line bg-panel p-3',
-                onRowClick && 'cursor-pointer',
-              )}
-            >
-              {heading && <div className="min-w-0">{heading.render(row)}</div>}
-              {rest.length > 0 && (
-                <dl className="flex flex-col gap-1.5">
-                  {rest
-                    .filter((column) => !column.secondary)
-                    .map((column) => (
-                      <div key={column.key} className="flex items-baseline justify-between gap-3">
-                        {!column.unlabelled && (
-                          <dt className="shrink-0 text-2xs uppercase tracking-wide text-ink-subtle">
-                            {column.header}
-                          </dt>
-                        )}
-                        <dd className={cn('min-w-0 text-right', column.unlabelled && 'w-full')}>
-                          {column.render(row)}
-                        </dd>
-                      </div>
-                    ))}
-                </dl>
-              )}
-            </li>
-          ))}
-        {!loading && rows.length === 0 && empty && <li>{empty}</li>}
-      </ul>
-
-      {/* The table, from `md` up. */}
-      <div className="hidden w-full overflow-x-auto scrollbar-thin md:block">
+      <div className="w-full overflow-x-auto scrollbar-thin">
         <table className="w-full border-collapse text-sm">
           {caption && <caption className="sr-only">{caption}</caption>}
           <thead>
