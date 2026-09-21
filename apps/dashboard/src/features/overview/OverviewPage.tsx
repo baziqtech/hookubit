@@ -19,6 +19,7 @@ import { formatNullableDuration, formatRate, formatRateDelta, rateTone } from '.
 import { ErrorTile, TileSkeletons } from '../analytics/tiles';
 import { useDeliveries } from '../deliveries/api';
 import { useEndpoints } from '../endpoints/api';
+import { StuckEventsNotice } from '../outbox/StuckEventsNotice';
 import { useSetupState } from '../onboarding/api';
 import { isSetupComplete, setupHeadline } from '../onboarding/setup';
 import { SetupChecklist } from '../onboarding/SetupChecklist';
@@ -134,6 +135,13 @@ function Health({ orgId, projectId }: { orgId: string; projectId: string }) {
 
   return (
     <>
+      {/*
+        A health screen built only from delivery outcomes reports a project as
+        healthy while events silently go nowhere: a stuck event produces no
+        delivery rows, so it is in none of the numbers below it.
+      */}
+      <StuckEventsNotice orgId={orgId} projectId={projectId} />
+
       <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-5">
         {outcomes.isPending ? (
           <TileSkeletons

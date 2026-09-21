@@ -14,6 +14,7 @@ import {
 } from '../../components';
 import { deliveryOutcome, describeDelivery } from '../../lib/delivery-status';
 import { formatRelativeTime, truncateId } from '../../lib/format';
+import { StuckEventsNotice } from '../outbox/StuckEventsNotice';
 import { DEFAULT_PAGE_SIZE, type Delivery, type DeliveryStatus } from '../../types/api';
 import { useEndpoints } from '../endpoints/api';
 import { useDeliveries, type DeliveryFilters } from './api';
@@ -88,6 +89,14 @@ export function DeliveriesPage() {
         title="Deliveries"
         description="One row per event per endpoint. An event you published once appears here once per matching subscription, and each row retries independently."
       />
+
+      {/*
+        An event stuck before fan-out has no rows in this list at all, so an
+        empty result here is indistinguishable from "never published". This is
+        the only thing on the page that can tell those apart, and it renders
+        nothing when there is nothing stuck.
+      */}
+      <StuckEventsNotice orgId={orgId} projectId={projectId} />
 
       {/*
         The glossary lives next to the filter that uses these words, not in a

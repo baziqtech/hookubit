@@ -14,7 +14,11 @@ export function projectNav(orgId: string, projectId: string): NavItem[] {
     { to: `${base}/overview`, label: 'Overview' },
     { to: `${base}/events`, label: 'Events' },
     { to: `${base}/deliveries`, label: 'Deliveries' },
-    { to: `${base}/outbox`, label: 'Outbox' },
+    // "Outbox" named the transactional-outbox table, not the condition. An
+    // operator has no reason to know the mechanism; they need to recognise,
+    // from the name alone, where an event that produced nothing would be. The
+    // PATH stays /outbox — links get pasted into incident channels.
+    { to: `${base}/outbox`, label: 'Stuck events' },
     { to: `${base}/endpoints`, label: 'Endpoints' },
     { to: `${base}/subscriptions`, label: 'Subscriptions' },
     { to: `${base}/policies`, label: 'Policies' },

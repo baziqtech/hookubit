@@ -205,7 +205,7 @@ describe('OutboxPage', () => {
 
   it('renders the honest empty state for the parked filter', () => {
     const html = renderPage({ rows: [] });
-    expect(html).toContain('Nothing is parked');
+    expect(html).toContain('Nothing is stuck');
     expect(html).toContain('Widen the status filter');
   });
 

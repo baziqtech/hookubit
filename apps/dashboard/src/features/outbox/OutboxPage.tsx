@@ -98,8 +98,8 @@ export function OutboxPage() {
   return (
     <div className="flex flex-col gap-4">
       <PageHeader
-        title="Outbox"
-        description="What the router still owes each accepted event. A parked row is an event the publisher was told we accepted and that nothing will deliver until someone requeues it."
+        title="Stuck events"
+        description="Events the publisher was told we accepted, that were never turned into deliveries. Nothing will deliver them until someone puts them back."
         actions={
           showingParked && (
             <RequeueButton
@@ -158,7 +158,7 @@ export function OutboxPage() {
           empty={
             showingParked ? (
               <EmptyState
-                title={filters.event_id ? 'Nothing parked for this event' : 'Nothing is parked'}
+                title={filters.event_id ? 'Nothing stuck for this event' : 'Nothing is stuck'}
                 description={
                   filters.event_id
                     ? 'This event has no parked outbox row. If its status still reads failed, a requeue is already in flight — or widen the status filter to see its row.'

@@ -23,7 +23,8 @@ The words the dashboard uses, in the sense it uses them.
 | **Invitation** | A single-use, 7-day token emailed to an address, redeemed while signed in as that address. Consumed before its checks run, so accepting from the wrong account uses it up. |
 | **Ordering key** | An optional per-event key stored and carried onto deliveries. Ordering is **not** enforced. |
 | **Organization** | The billing and people boundary. Owns members, roles and the audit log; contains projects. |
-| **Outbox** | The router's record of what it still owes each accepted event. |
+| **Stuck events** | The screen listing events that were accepted and never turned into deliveries, with why each one stopped and whether putting it back will help. The API resource behind it is still called `outbox`. |
+| **Outbox** | The router's record of what it still owes each accepted event — the mechanism behind *Stuck events*. |
 | **Parked** | An outbox row (`status: failed`) the router gave up on. The event is `failed` and has no deliveries; nothing will deliver it until it is requeued. |
 | **Paused** | An endpoint a person stopped (`status: paused`, `enabled: false`), or one created by a developer and waiting for a signing secret. |
 | **Payload filter** | A JSON predicate on the event body attached to a subscription. Validated and stored, **not yet evaluated** by the routers. |

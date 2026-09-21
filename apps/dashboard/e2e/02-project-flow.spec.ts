@@ -423,9 +423,17 @@ test.describe.serial('a project, end to end', () => {
     await expect(page.getByText('endpoint.enabled').first()).toBeVisible();
   });
 
-  test('the outbox page renders with nothing parked', async ({ page }) => {
+  test('stuck events: the page renders with nothing stuck, and nothing shouts about it', async ({ page }) => {
     await page.goto(`${projectBase()}/outbox`);
-    await expect(page.getByRole('heading', { name: /outbox/i })).toBeVisible();
+    await expect(page.getByRole('heading', { name: 'Stuck events' })).toBeVisible();
+    await expect(page.getByText(/nothing is stuck/i)).toBeVisible();
+
+    // The signal is silent when there is nothing to say — a zero count on the
+    // two screens people live on would be furniture, not information.
+    for (const page_ of [`${projectBase()}/deliveries`, `${projectBase()}/overview`]) {
+      await page.goto(page_);
+      await expect(page.getByRole('status').filter({ hasText: /never fanned out/i })).toHaveCount(0);
+    }
   });
 
   test('revoking the key stops publishing', async ({ page, request }) => {

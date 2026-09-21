@@ -43,7 +43,7 @@ outcome:
 | `received` | Accepted and stored; the router has not fanned it out yet. |
 | `processing` | A router holds it and is writing delivery rows. |
 | `processed` | The fan-out committed. This says nothing about whether any endpoint accepted it - that is what the deliveries are for. An event that matched no subscription is also `processed`, with zero deliveries. |
-| `failed` | **Parked.** The router gave up before writing any delivery rows. See [the Outbox](#the-outbox-parked-events). |
+| `failed` | **Parked.** The router gave up before writing any delivery rows. See [Stuck events](#stuck-events-parked-before-fan-out). |
 
 ### Event detail
 
@@ -240,7 +240,7 @@ Refused:
 Event replay is rate limited to 10 per five minutes, delivery replay to 30,
 per address. See [Replay](/guide/07-replay) for the consumer-side view.
 
-## The Outbox (parked events)
+## Stuck events (parked before fan-out)
 
 `/orgs/:orgId/projects/:projectId/outbox` is the router's record of what it
 still owes each accepted event. It opens on the rows that need a person.

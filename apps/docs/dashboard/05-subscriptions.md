@@ -194,7 +194,7 @@ Two consequences:
   the router never got to run, against the subscriptions that existed when
   the event was accepted, using their configuration *as of now* - so a
   subscription disabled or narrowed since applies, and one deleted since is
-  gone. See [the Outbox](./07-events-and-deliveries.md#the-outbox-parked-events).
+  gone. See [Stuck events](./07-events-and-deliveries.md#stuck-events-parked-before-fan-out).
 
 Two enabled subscriptions pointing at the same endpoint produce **one**
 delivery for that endpoint, not two; the oldest subscription is the one

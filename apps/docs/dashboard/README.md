@@ -53,7 +53,7 @@ else.
 
 - **Sidebar.** The organization and project switchers are at the top. Below
   them, the project navigation (Get started, Overview, Events, Deliveries,
-  Outbox, Endpoints, Subscriptions, Policies, API keys, Analytics, Settings)
+  Stuck events, Endpoints, Subscriptions, Policies, API keys, Analytics, Settings)
   and the organization navigation (Settings, Team, Billing, Usage, Audit log). The
   Product tour button and your account menu (with Sign out) are at the bottom.
 - **Breadcrumb.** `Organization / Project / Section` across the top. The
