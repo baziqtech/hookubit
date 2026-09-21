@@ -44,6 +44,30 @@ export function useSetupState(orgId: string, projectId: string): SetupState {
   // One row is enough to answer "has anything ever arrived?".
   const events = useEvents(projectId, {});
 
+  /*
+   * WATCH FOR THE FIRST EVENT.
+   *
+   * The last step of the checklist hands the operator a curl command and then
+   * asks them to believe it worked. Refreshing a page to find out is the
+   * moment a setup flow loses people — they run the command, see nothing
+   * change, and go looking for what they did wrong.
+   *
+   * A three-second poll, and only while it can matter: the project has no
+   * events yet, and the tab is in front of somebody. It stops of its own accord
+   * the moment one arrives, because `refetchInterval` is a function of the
+   * data.
+   *
+   * Deliberately NOT server-sent events. The claim on screen is "this page
+   * updates the moment one arrives"; a three-second poll satisfies a human
+   * reading a checklist, costs one indexed query, and needs no connection to
+   * keep alive, no proxy to configure and no reconnection story. SSE would be
+   * the right answer for a live delivery feed, which is a different feature.
+   */
+  useEvents(projectId, {}, 0, {
+    refetchInterval: (query) => ((query.state.data?.rows.length ?? 0) > 0 ? false : 3_000),
+    refetchIntervalInBackground: false,
+  });
+
   const queries = [organizations, project, apiKeys, endpoints, subscriptions, events];
   const isPending = queries.some((query) => query.isPending);
   const isError = queries.some((query) => query.isError);

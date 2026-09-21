@@ -103,6 +103,16 @@ function StepRow({ step, index, href }: { step: SetupStep; index: number; href: 
 
         <p className="mt-1 text-xs leading-relaxed text-ink-muted">{step.concept}</p>
 
+        {step.watching && step.state !== 'done' && (
+          <p className="mt-1.5 flex items-center gap-1.5 text-2xs text-ink-subtle">
+            <span
+              aria-hidden="true"
+              className="h-1.5 w-1.5 shrink-0 animate-pulse rounded-full bg-accent"
+            />
+            Watching for your first event — this page updates on its own the moment one arrives.
+          </p>
+        )}
+
         {step.evidence && (
           <p className="mt-1.5 text-2xs text-ink-subtle">
             <span className="text-ink-muted">{step.evidence}</span>

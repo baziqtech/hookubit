@@ -45,6 +45,11 @@ export interface SetupStep {
   evidence?: string;
   /** Why a satisfied step still will not deliver. */
   warning?: string;
+  /**
+   * True while the page is actively watching for this step to be satisfied by
+   * something happening OUTSIDE it — see the `event` step.
+   */
+  watching?: boolean;
 }
 
 export interface SetupInputs {
@@ -113,6 +118,17 @@ export function deriveSetupSteps(inputs: SetupInputs): SetupStep[] {
       action: 'Publish a test event with the request below.',
       state: inputs.eventCount > 0 ? 'done' : 'todo',
       evidence: inputs.eventCount > 0 ? `${count(inputs.eventCount, 'event')} received` : undefined,
+      /*
+       * The one step that WATCHES rather than waits to be told.
+       *
+       * Everything above this is satisfied by something the operator does in
+       * the dashboard, so the page already knows the moment it happens. This
+       * one is satisfied by a command run in a terminal somewhere else, and
+       * without saying so the operator runs it, sees nothing change, and goes
+       * looking for what they did wrong. `useSetupState` polls for it; this is
+       * the sentence that makes the polling visible.
+       */
+      watching: inputs.eventCount === 0,
     },
   ];
 

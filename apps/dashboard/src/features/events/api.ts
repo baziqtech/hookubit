@@ -1,6 +1,11 @@
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import {
+  useMutation,
+  useQuery,
+  useQueryClient,
+  type UseQueryOptions,
+} from '@tanstack/react-query';
 import { api, queryString } from '../../lib/api';
-import { offsetPage, pageParams } from '../../lib/pagination';
+import { offsetPage, pageParams, type Paged } from '../../lib/pagination';
 import { queryKeys } from '../../lib/query-keys';
 import type {
   Delivery,
@@ -29,7 +34,26 @@ export interface EventFilters {
 }
 
 /** `GET /v1/projects/:projectId/events` — offset paged, not cursor paged. */
-export function useEvents(projectId: string, filters: EventFilters, offset = 0) {
+export function useEvents(
+  projectId: string,
+  filters: EventFilters,
+  offset = 0,
+  /**
+   * Extra query options, merged last.
+   *
+   * The only caller that uses this is the setup checklist, which polls for the
+   * FIRST event and stops when it arrives. It is a parameter rather than a
+   * second hook so the polling caller shares this one's cache key — otherwise
+   * the checklist would poll one entry while the page read another, and the
+   * step would stay "waiting" after the event had landed.
+   */
+  options?: Partial<
+    Pick<
+      UseQueryOptions<Paged<WebhookEvent>>,
+      'refetchInterval' | 'refetchIntervalInBackground' | 'staleTime'
+    >
+  >,
+) {
   return useQuery({
     queryKey: queryKeys.events(projectId, filters as Record<string, string>, offset),
     queryFn: async () =>
@@ -39,6 +63,7 @@ export function useEvents(projectId: string, filters: EventFilters, offset = 0) 
         ),
       ),
     enabled: Boolean(projectId),
+    ...options,
   });
 }
 
