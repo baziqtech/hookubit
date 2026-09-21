@@ -9,6 +9,7 @@ import {
 } from '../authz';
 import { AppError } from '../common/errors';
 import { newId } from '../common/ids';
+import { EndpointHealthService } from './endpoint-health.service';
 import { EndpointSecretsService } from '../endpoint-secrets/endpoint-secrets.service';
 import {
   CreateEndpointDto,
@@ -96,6 +97,7 @@ export class EndpointsService {
     private readonly scopes: TenantScopeFactory,
     private readonly audit: AuditService,
     private readonly secrets: EndpointSecretsService,
+    private readonly health: EndpointHealthService,
   ) {}
 
   /**
@@ -124,12 +126,22 @@ export class EndpointsService {
     // ONE grouped read for the whole page, not one per row. `has_live_secret`
     // is on every endpoint in the busiest listing in the operator UI; asked per
     // endpoint, a page of MAX_PAGE_SIZE would be 200 extra round trips.
-    const live = await this.secrets.liveSecretEndpointIds(
-      context,
-      page.rows.map((endpoint) => endpoint.id),
-    );
+    const ids = page.rows.map((endpoint) => endpoint.id);
+
+    // Health is computed BESIDE the list, not inside it, and a failure to
+    // compute it must not take the list down: this page is how you fix a
+    // broken endpoint, and it has to render when the thing it describes is on
+    // fire. An endpoint whose health is missing shows its configuration and
+    // says nothing about its rate, which is the honest degradation.
+    const [live, health] = await Promise.all([
+      this.secrets.liveSecretEndpointIds(context, ids),
+      this.health.summarise(context, ids).catch(() => new Map()),
+    ]);
+
     return {
-      data: page.rows.map((endpoint) => toEndpointDto(endpoint, live.has(endpoint.id))),
+      data: page.rows.map((endpoint) =>
+        toEndpointDto(endpoint, live.has(endpoint.id), health.get(endpoint.id)),
+      ),
       has_more: page.hasMore,
       next_offset: page.nextSkip,
     };

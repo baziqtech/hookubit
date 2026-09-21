@@ -69,6 +69,15 @@ export class EndpointDto {
   has_live_secret!: boolean;
   @ApiProperty() created_at!: string;
   @ApiProperty() updated_at!: string;
+
+  @ApiProperty({
+    type: () => EndpointHealthDto,
+    nullable: true,
+    description:
+      'How this endpoint has been doing, over a fixed trailing hour. Present on the LIST and ' +
+      'null on the single-endpoint read.',
+  })
+  health!: EndpointHealthDto | null;
 }
 
 export class CreatedEndpointDto extends EndpointDto {
@@ -142,7 +151,54 @@ function customHeaders(value: Endpoint['customHeaders']): Record<string, string>
  * on a field the dashboard uses to decide whether to offer "Resume deliveries".
  * Stating it forces each call site to say where its answer came from.
  */
-export function toEndpointDto(endpoint: Endpoint, hasLiveSecret: boolean): EndpointDto {
+/**
+ * How this endpoint has been doing, over a fixed trailing hour.
+ *
+ * Present on the LIST, absent on the single-endpoint read — the list is where
+ * "which of these is the problem?" is asked, and computing it for one endpoint
+ * that the caller is already looking at adds a query to answer a question they
+ * did not ask.
+ */
+export class EndpointHealthDto {
+  @ApiProperty({
+    type: Number,
+    nullable: true,
+    description:
+      'Successes over SETTLED deliveries in the last hour. NULL, never 0, when nothing settled — ' +
+      'an endpoint with no traffic reads "no data", and 0 means every delivery we attempted ' +
+      'failed. Rendering the null as 0% turns a new endpoint into an outage.',
+  })
+  success_rate_1h!: number | null;
+
+  @ApiProperty({ description: 'Deliveries created in the last hour. Context for the rate.' })
+  deliveries_1h!: number;
+
+  @ApiProperty({
+    description:
+      'Created and still moving, at ANY age — not hour-bounded, because "what is queued behind ' +
+      'this problem?" is not a question about the last hour.',
+  })
+  deliveries_waiting!: number;
+
+  @ApiProperty({ description: 'From the circuit breaker. Zero when it has not been failing.' })
+  consecutive_failures!: number;
+
+  @ApiProperty({
+    type: String,
+    nullable: true,
+    description: 'When the breaker opened. Null when it is not open.',
+  })
+  opened_at!: string | null;
+
+  @ApiProperty({ type: String, nullable: true })
+  last_delivery_at!: string | null;
+}
+
+export function toEndpointDto(
+  endpoint: Endpoint,
+  hasLiveSecret: boolean,
+  health?: EndpointHealthDto,
+): EndpointDto {
   return {
     id: endpoint.id,
     project_id: endpoint.projectId,
@@ -162,5 +218,6 @@ export function toEndpointDto(endpoint: Endpoint, hasLiveSecret: boolean): Endpo
     has_live_secret: hasLiveSecret,
     created_at: new Date(endpoint.createdAt).toISOString(),
     updated_at: new Date(endpoint.updatedAt).toISOString(),
+    health: health ?? null,
   };
 }

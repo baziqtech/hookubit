@@ -369,6 +369,7 @@ describe('EndpointDto.has_live_secret - what it does not say', () => {
         'disabled_reason',
         'enabled',
         'has_live_secret',
+        'health',
         'id',
         'max_concurrency',
         'name',

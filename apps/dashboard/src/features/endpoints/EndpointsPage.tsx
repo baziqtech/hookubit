@@ -16,7 +16,8 @@ import {
   WriteErrorNotice,
   type Column,
 } from '../../components';
-import { formatDuration, formatRelativeTime } from '../../lib/format';
+import { cn } from '../../lib/cn';
+import { formatCount, formatDuration, formatPercent, formatRelativeTime } from '../../lib/format';
 import { DEFAULT_PAGE_SIZE, type CreatedEndpoint, type Endpoint } from '../../types/api';
 import { useOrganization } from '../organizations/api';
 import { useCreateEndpoint, useEndpoints } from './api';
@@ -373,6 +374,70 @@ function buildColumns(
           </span>
         );
       },
+    },
+    {
+      key: 'success',
+      header: 'Success (1h)',
+      align: 'right',
+      /*
+       * `null` and `0%` are NOT the same reading, and this is the column where
+       * conflating them does the most damage. Zero means every delivery we
+       * attempted failed — the loudest thing this table can say. An endpoint
+       * that simply had no traffic in the last hour, which includes every
+       * endpoint created today, would wear that badge for its first hour of
+       * life and page somebody.
+       */
+      render: (row) =>
+        row.health?.success_rate_1h === null || row.health === null ? (
+          <span className="text-2xs text-ink-subtle" title="Nothing settled in the last hour">
+            no data
+          </span>
+        ) : (
+          <span
+            className={cn(
+              'text-xs font-medium tabular',
+              row.health.success_rate_1h >= 0.99
+                ? 'text-ink'
+                : row.health.success_rate_1h >= 0.9
+                  ? 'text-warn'
+                  : 'text-danger',
+            )}
+            title={`${row.health.deliveries_1h} deliveries created in the last hour`}
+          >
+            {formatPercent(row.health.success_rate_1h)}
+          </span>
+        ),
+    },
+    {
+      key: 'waiting',
+      header: 'Waiting',
+      align: 'right',
+      secondary: true,
+      /*
+       * Not hour-bounded, unlike the column beside it. "What is queued behind
+       * this problem?" is not a question about the last hour — an endpoint
+       * stopped for a day has a day of backlog, and an hourly count would
+       * report almost none of it.
+       */
+      render: (row) =>
+        !row.health || row.health.deliveries_waiting === 0 ? (
+          <span className="text-2xs text-ink-subtle">—</span>
+        ) : (
+          <span className="text-xs tabular text-warn">
+            {formatCount(row.health.deliveries_waiting)}
+          </span>
+        ),
+    },
+    {
+      key: 'last-delivery',
+      header: 'Last delivery',
+      align: 'right',
+      secondary: true,
+      render: (row) => (
+        <span className="text-2xs text-ink-subtle">
+          {row.health?.last_delivery_at ? formatRelativeTime(row.health.last_delivery_at) : 'never'}
+        </span>
+      ),
     },
     {
       key: 'limits',

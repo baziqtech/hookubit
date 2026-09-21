@@ -257,8 +257,11 @@ export class FakeTenantPrisma {
     return flat;
   }
 
-  /** `_count` (true or per-field) and `_sum`; enough for the dashboard queries. */
-  private static summarise(rows: Row[], args: { _count?: unknown; _sum?: unknown }): Row {
+  /** `_count` (true or per-field), `_sum`, `_max` and `_min`. */
+  private static summarise(
+    rows: Row[],
+    args: { _count?: unknown; _sum?: unknown; _max?: unknown; _min?: unknown },
+  ): Row {
     const out: Row = {};
     if (args._count === true) {
       out._count = rows.length;
@@ -283,6 +286,29 @@ export class FakeTenantPrisma {
         sums[field] = rows.reduce((total, row) => total + Number(row[field] ?? 0), 0);
       }
       out._sum = sums;
+    }
+    /*
+     * `_max` and `_min` use the same `compare` every ordering here uses, and
+     * NOT `Math.max` — the fields these are asked for are timestamps, where
+     * `Math.max` coerces to NaN and returns undefined for every group. That
+     * reads as "this endpoint has never been delivered to", which is a
+     * plausible answer and a wrong one.
+     */
+    for (const key of ['_max', '_min'] as const) {
+      const spec = args[key];
+      if (!spec || typeof spec !== 'object') continue;
+      const picked: Row = {};
+      for (const field of Object.keys(spec as Row)) {
+        const values = rows.map((row) => row[field]).filter((value) => value !== null && value !== undefined);
+        picked[field] =
+          values.length === 0
+            ? null
+            : values.reduce((best, value) => {
+                const sign = FakeTenantPrisma.compare(value, best);
+                return (key === '_max' ? sign > 0 : sign < 0) ? value : best;
+              });
+      }
+      out[key] = picked;
     }
     return out;
   }

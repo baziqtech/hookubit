@@ -503,6 +503,48 @@ function rollUpDeliveries(event: EventDetail): WebhookEvent['deliveries'] {
   return { ...base, state: 'partly_delivered' };
 }
 
+/**
+ * One endpoint's health over the last hour, counted from the same delivery
+ * fixture the list routes serve — mirroring `EndpointHealthService`.
+ *
+ * `success_rate_1h` is NULL, never 0, when nothing settled. The difference is
+ * the whole point: 0 means every delivery we attempted failed, and an endpoint
+ * with no traffic must never be rendered as one.
+ *
+ * `deliveries_waiting` is deliberately NOT hour-bounded. "What is queued behind
+ * this problem?" is not a question about the last hour, and an endpoint stopped
+ * for a day has a day of backlog.
+ */
+function endpointHealth(endpointId: string): Endpoint['health'] {
+  const since = Date.now() - 3_600_000;
+  const mine = db.deliveries.filter((delivery) => delivery.endpoint_id === endpointId);
+  const recent = mine.filter((delivery) => new Date(delivery.created_at).getTime() >= since);
+
+  const succeeded = recent.filter((delivery) => delivery.status === 'succeeded').length;
+  const failing = recent.filter(
+    (delivery) => delivery.status === 'failed' || delivery.status === 'exhausted',
+  ).length;
+  const settled = succeeded + failing;
+
+  const waiting = mine.filter((delivery) =>
+    ['pending', 'scheduled', 'queued', 'processing', 'retrying'].includes(delivery.status),
+  ).length;
+
+  const newest = mine.reduce<string | null>((latest, delivery) => {
+    if (!latest) return delivery.created_at;
+    return new Date(delivery.created_at) > new Date(latest) ? delivery.created_at : latest;
+  }, null);
+
+  return {
+    success_rate_1h: settled === 0 ? null : Math.round((succeeded / settled) * 10_000) / 10_000,
+    deliveries_1h: recent.length,
+    deliveries_waiting: waiting,
+    consecutive_failures: 0,
+    opened_at: null,
+    last_delivery_at: newest,
+  };
+}
+
 /** The endpoint, or the 404 that never distinguishes "gone" from "not yours". */
 function endpointOr404(projectId: string, endpointId: string) {
   const endpoint = db.endpoints.find(
@@ -1439,7 +1481,10 @@ const handlers: Handler[] = [
         if (status && endpoint.status !== status) return false;
         return true;
       });
-      return offsetEnvelope<Endpoint>(rows, query);
+      return offsetEnvelope<Endpoint>(
+        rows.map((endpoint) => ({ ...endpoint, health: endpointHealth(endpoint.id) })),
+        query,
+      );
     },
   },
   {
@@ -1482,6 +1527,10 @@ const handlers: Handler[] = [
         // "Resume" on it will genuinely 409. Mirroring that here is the point
         // of the flag existing.
         has_live_secret: canReadSecrets,
+        // A create returns no health: nothing has been delivered to a URL that
+        // did not exist a moment ago, and `null` says "not computed" rather
+        // than inventing a rate of zero for it.
+        health: null,
         id: `ep_01JQNEW${Math.floor(Math.random() * 1e6).toString(36).toUpperCase()}`,
         project_id: params.projectId,
         name: input.name,

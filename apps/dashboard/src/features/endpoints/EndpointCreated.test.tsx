@@ -9,6 +9,7 @@ const base: CreatedEndpoint = {
   name: 'warehouse-sync',
   url: 'https://example.com/hooks',
   description: null,
+  health: null,
   status: 'active',
   enabled: true,
   disabled_reason: null,

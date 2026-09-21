@@ -1,6 +1,7 @@
 import { Module } from '@nestjs/common';
 import { EndpointSecretsModule } from '../endpoint-secrets/endpoint-secrets.module';
 import { EndpointsController } from './endpoints.controller';
+import { EndpointHealthService } from './endpoint-health.service';
 import { EndpointsService } from './endpoints.service';
 
 /**
@@ -11,7 +12,7 @@ import { EndpointsService } from './endpoints.service';
 @Module({
   imports: [EndpointSecretsModule],
   controllers: [EndpointsController],
-  providers: [EndpointsService],
-  exports: [EndpointsService],
+  providers: [EndpointsService, EndpointHealthService],
+  exports: [EndpointsService, EndpointHealthService],
 })
 export class EndpointsModule {}

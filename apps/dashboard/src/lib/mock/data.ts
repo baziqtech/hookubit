@@ -517,6 +517,8 @@ const namedEndpoints: Endpoint[] = [
     retry_policy_id: null,
     custom_headers: { 'x-shaq-source': 'webhooks' },
     has_live_secret: true,
+    // Computed by the list handler from the delivery rows, never stored.
+    health: null,
     created_at: minutesAgo(60 * 24 * 118),
     updated_at: minutesAgo(60 * 24 * 4),
   },
@@ -537,6 +539,8 @@ const namedEndpoints: Endpoint[] = [
     retry_policy_id: null,
     custom_headers: null,
     has_live_secret: true,
+    // Computed by the list handler from the delivery rows, never stored.
+    health: null,
     created_at: minutesAgo(60 * 24 * 90),
     updated_at: minutesAgo(60 * 24 * 90),
   },
@@ -570,6 +574,8 @@ const namedEndpoints: Endpoint[] = [
     retry_policy_id: null,
     custom_headers: null,
     has_live_secret: true,
+    // Computed by the list handler from the delivery rows, never stored.
+    health: null,
     created_at: minutesAgo(60 * 24 * 60),
     updated_at: minutesAgo(158),
   },
@@ -593,6 +599,8 @@ const namedEndpoints: Endpoint[] = [
     custom_headers: null,
     // Paused by a human, not by a missing credential: v2 still signs.
     has_live_secret: true,
+    // Computed by the list handler from the delivery rows, never stored.
+    health: null,
     created_at: minutesAgo(60 * 24 * 12),
     updated_at: minutesAgo(60 * 30),
   },
@@ -624,6 +632,8 @@ const namedEndpoints: Endpoint[] = [
     retry_policy_id: null,
     custom_headers: null,
     has_live_secret: false,
+    // Computed by the list handler from the delivery rows, never stored.
+    health: null,
     created_at: minutesAgo(90),
     updated_at: minutesAgo(90),
   },
@@ -647,6 +657,8 @@ const namedEndpoints: Endpoint[] = [
     retry_policy_id: null,
     custom_headers: null,
     has_live_secret: false,
+    // Computed by the list handler from the delivery rows, never stored.
+    health: null,
     created_at: minutesAgo(60 * 24 * 200),
     updated_at: minutesAgo(60 * 24 * 6),
   },
@@ -670,6 +682,8 @@ const fillerEndpoints: Endpoint[] = Array.from({ length: 56 }, (_, index) => ({
   retry_policy_id: null,
   custom_headers: null,
   has_live_secret: true,
+  // Computed by the list handler from the delivery rows, never stored.
+  health: null,
   created_at: minutesAgo(60 * 24 * (5 + index)),
   updated_at: minutesAgo(60 * 24 * (5 + index)),
 }));

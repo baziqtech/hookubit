@@ -1496,6 +1496,19 @@ export interface components {
              */
             key: string;
         };
+        EndpointHealthDto: {
+            /** @description Successes over SETTLED deliveries in the last hour. NULL, never 0, when nothing settled — an endpoint with no traffic reads "no data", and 0 means every delivery we attempted failed. Rendering the null as 0% turns a new endpoint into an outage. */
+            success_rate_1h: number | null;
+            /** @description Deliveries created in the last hour. Context for the rate. */
+            deliveries_1h: number;
+            /** @description Created and still moving, at ANY age — not hour-bounded, because "what is queued behind this problem?" is not a question about the last hour. */
+            deliveries_waiting: number;
+            /** @description From the circuit breaker. Zero when it has not been failing. */
+            consecutive_failures: number;
+            /** @description When the breaker opened. Null when it is not open. */
+            opened_at: string | null;
+            last_delivery_at: string | null;
+        };
         EndpointDto: {
             id: string;
             project_id: string;
@@ -1527,6 +1540,8 @@ export interface components {
             has_live_secret: boolean;
             created_at: string;
             updated_at: string;
+            /** @description How this endpoint has been doing, over a fixed trailing hour. Present on the LIST and null on the single-endpoint read. */
+            health: components["schemas"]["EndpointHealthDto"] | null;
         };
         EndpointListDto: {
             data: components["schemas"]["EndpointDto"][];
@@ -1602,6 +1617,8 @@ export interface components {
             has_live_secret: boolean;
             created_at: string;
             updated_at: string;
+            /** @description How this endpoint has been doing, over a fixed trailing hour. Present on the LIST and null on the single-endpoint read. */
+            health: components["schemas"]["EndpointHealthDto"] | null;
             /** @description The version 1 signing secret, in plaintext, returned HERE AND NOWHERE ELSE. Present only when the caller also holds `endpoint-secrets.write` (owner or admin): a developer may create endpoints but may not read signing secrets, so for them this is null, the endpoint stays paused, and `secret_pending` says so. */
             secret: string | null;
             /** @description True when the endpoint was created with a signing secret this caller may not receive, so it is PAUSED and not delivering. An owner or admin must rotate (POST /v1/endpoints/{id}/secrets/rotate), hand the consumer the plaintext, then enable it. Going live here instead would sign every delivery with a key nobody holds: the consumer would reject all of them, and the rotation that fixed it would change the secret AGAIN - two verification outages instead of none. */
