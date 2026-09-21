@@ -31,6 +31,7 @@ Runs as hosted SaaS or as a self-hosted Docker/Kubernetes deployment against
 | [docs/FAILURE_RECOVERY.md](docs/FAILURE_RECOVERY.md) | Every one of ARCHITECTURE.md's twenty failure scenarios: what breaks, what recovers it, what is still open. Written for 2am. |
 | [docs/LOAD_TESTING.md](docs/LOAD_TESTING.md) | The k6 suite, what each scenario proves, and the two that fail on purpose. |
 | [docs/BACKUP_RESTORE.md](docs/BACKUP_RESTORE.md) | What to back up, the two traps a restore hits, and the destroy-and-recreate proof. |
+| [docs/DESIGN_BRIEF.md](docs/DESIGN_BRIEF.md) | A prompt for a design agent: every feature and state the interface must express, with no visual direction at all. Hand this over when you want a design, not a restyle. |
 | [docs/DESIGN_SYSTEM.md](docs/DESIGN_SYSTEM.md) | The interface as built — tokens, type, components, voice — and the brand decisions nobody has made yet. Written to be handed to a designer. |
 | [docs/ROADMAP.md](docs/ROADMAP.md) | Phases 1–6, all complete, and what is explicitly not now. |
 | [docs/adr/](docs/adr/) | Decisions and their reasoning. |
