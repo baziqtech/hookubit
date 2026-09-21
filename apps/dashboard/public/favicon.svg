@@ -1,15 +1,19 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">
   <!--
     The HookuBit mark. Same geometry as `src/features/auth/Wordmark.tsx`:
-    eye, shank, bend, barbed point. The eye is what stops it reading as a J.
-    Indigo here is the light-theme --c-accent (67 56 202) rendered opaque,
+    eye, shank, bend, barbed point, and the one bit it has caught. The eye is
+    what stops it reading as a J; the bit is what makes it mean the product
+    name rather than just depict a hook.
+    Violet here is the light-theme --c-accent (#6B38D4) rendered opaque,
     because a favicon has no access to the page's custom properties.
   -->
-  <rect width="32" height="32" rx="8" fill="#4338CA"/>
+  <rect width="32" height="32" rx="8" fill="#6B38D4"/>
   <g transform="translate(4 4)" fill="none" stroke="#fff" stroke-width="2.5"
      stroke-linecap="round" stroke-linejoin="round">
     <circle cx="14.8" cy="5.6" r="2.9"/>
     <path d="M14.8 8.5v4.2a3.9 3.9 0 0 1-7.8 0v-2.4"/>
     <path d="m7 10.3 2.6 2.6"/>
   </g>
+  <!-- Filled, not stroked: a 2.5px stroke vanishes at 16px. -->
+  <rect x="20.4" y="18.9" width="6" height="6" rx="1.9" fill="#DCCDF7"/>
 </svg>

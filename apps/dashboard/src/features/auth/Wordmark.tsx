@@ -33,6 +33,14 @@ export function HookGlyph({ className }: { className?: string }) {
       />
       {/* The barb, spurring back down off the point. */}
       <path d="m7 10.3 2.6 2.6" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" />
+      {/*
+        The bit. The design's brand screen names the mark "a hook, and the
+        single bit it has caught", which is the whole pun in the product name
+        and the one thing that makes the glyph mean something rather than just
+        depict something. It is filled rather than stroked so it survives the
+        16px favicon, where a 1.5px stroke would disappear.
+      */}
+      <rect x="16.4" y="14.9" width="4.5" height="4.5" rx="1.4" fill="currentColor" opacity="0.55" />
     </svg>
   );
 }
@@ -54,14 +62,29 @@ export function HookMark({ className }: { className?: string }) {
 }
 
 /**
- * `HookuBit`, cased exactly, next to the mark. One component so the casing is
- * stated in a single place.
+ * `HookuBit`, cased exactly, with the second half in the accent.
+ *
+ * The split is the design's and it earns its keep: "HookuBit" set in one weight
+ * and one colour reads as an unfamiliar seven-letter word that people guess the
+ * casing of wrongly. Colouring `Bit` makes the two halves visible, so the name
+ * is legible as a compound the first time it is seen — and it is the one place
+ * the accent violet appears without being clickable, which is why it is stated
+ * here once rather than left to each caller.
  */
+export function WordmarkText({ className }: { className?: string }) {
+  return (
+    <span className={cn('text-[0.9375rem] font-extrabold tracking-tight text-ink', className)}>
+      Hooku<span className="text-accent">Bit</span>
+    </span>
+  );
+}
+
+/** The mark and the name together, as the auth pages and the rail use it. */
 export function Wordmark({ className }: { className?: string }) {
   return (
     <span className={cn('inline-flex items-center gap-2.5', className)}>
       <HookMark />
-      <span className="text-[0.9375rem] font-semibold tracking-tight text-ink">HookuBit</span>
+      <WordmarkText />
     </span>
   );
 }

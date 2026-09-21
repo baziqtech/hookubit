@@ -17,6 +17,12 @@ export interface MenuProps {
   align?: 'left' | 'right';
   className?: string;
   triggerClassName?: string;
+  /**
+   * The disclosure chevron the trigger draws for you. Set `false` when the
+   * trigger is a multi-line card that needs its own glyph placed against a
+   * particular row rather than centred against the whole control.
+   */
+  chevron?: boolean;
 }
 
 /**
@@ -33,6 +39,7 @@ export function Menu({
   align = 'left',
   className,
   triggerClassName,
+  chevron = true,
 }: MenuProps) {
   const [open, setOpen] = useState(false);
   const containerRef = useRef<HTMLDivElement>(null);
@@ -76,14 +83,16 @@ export function Menu({
         )}
       >
         {trigger}
-        <svg
-          className="ml-auto h-3 w-3 shrink-0 text-ink-subtle"
-          viewBox="0 0 12 12"
-          fill="none"
-          aria-hidden="true"
-        >
-          <path d="m3 4.5 3 3 3-3" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
-        </svg>
+        {chevron && (
+          <svg
+            className="ml-auto h-3 w-3 shrink-0 text-ink-subtle"
+            viewBox="0 0 12 12"
+            fill="none"
+            aria-hidden="true"
+          >
+            <path d="m3 4.5 3 3 3-3" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+          </svg>
+        )}
       </button>
 
       {open && (
