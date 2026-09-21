@@ -115,7 +115,17 @@ describe('OutboxPage', () => {
     // Both rows, each linked to its event.
     expect(html).toContain(`/orgs/${ORG}/projects/${PROJECT}/events/evt_stale`);
     expect(html).toContain(`/orgs/${ORG}/projects/${PROJECT}/events/evt_poison`);
-    expect(html.match(/data-testid="parked-explanation"/g)).toHaveLength(2);
+    /*
+     * TWICE PER ROW, and that is correct.
+     *
+     * `Table` renders every row twice — once as a card for phones, once as a
+     * table row from `md` up — because restyling table elements into blocks
+     * destroys the table semantics the operator surface depends on. Each
+     * rendering is `display: none` at the other's width, so exactly one is in
+     * the accessibility tree; `renderToStaticMarkup` has no CSS and therefore
+     * sees both.
+     */
+    expect(html.match(/data-testid="parked-explanation"/g)).toHaveLength(4);
 
     // The filter is exposed, and its selected value is the parked set.
     expect(html).toContain('aria-label="Filter by status"');
@@ -150,8 +160,9 @@ describe('OutboxPage', () => {
   it('offers a requeue per row and a bulk requeue in the header, to an owner', () => {
     const html = renderPage({ rows: [entry(), POISON] });
     const buttons = html.match(/data-testid="requeue-button"/g) ?? [];
-    // One per row plus the bulk control.
-    expect(buttons).toHaveLength(3);
+    // Two rows, each rendered as a card AND as a table row (see above), plus
+    // the single bulk control in the header.
+    expect(buttons).toHaveLength(5);
     expect(html).toContain('Requeue parked, 100 at a time');
     expect(html).not.toContain('aria-disabled="true"');
   });
@@ -159,8 +170,8 @@ describe('OutboxPage', () => {
   it('gates the actions for a viewer the way the role matrix does, and says why', () => {
     const html = renderPage({ rows: [entry()], role: 'viewer' });
     const disabled = html.match(/aria-disabled="true"/g) ?? [];
-    // The row button and the bulk button, both.
-    expect(disabled).toHaveLength(2);
+    // One row in both renderings, plus the bulk button.
+    expect(disabled).toHaveLength(3);
     expect(html).toContain('You are a viewer in this organization');
     // The listing itself is unaffected: a viewer may watch the incident.
     expect(html).toContain('Kept failing for longer than the retry window');

@@ -1,4 +1,4 @@
-import { useState, type ReactNode } from 'react';
+import { useEffect, useState, type ReactNode } from 'react';
 import { Link, NavLink, Outlet, useLocation, useNavigate, useParams } from 'react-router-dom';
 import { ThemeToggle } from '../components';
 import { useLogout, useSession } from '../features/auth/api';
@@ -12,7 +12,13 @@ import { cn } from '../lib/cn';
 import { HookGlyph, WordmarkText } from '../features/auth/Wordmark';
 import { Menu, MenuLabel } from './Menu';
 import { NavIcon } from './nav-icons';
-import { currentSectionLabel, navigationGroups, type NavGroup, type NavItem } from './navigation';
+import {
+  bottomNav,
+  currentSectionLabel,
+  navigationGroups,
+  type NavGroup,
+  type NavItem,
+} from './navigation';
 import { EnvironmentBadge, ProjectCard } from './Switchers';
 
 /**
@@ -30,16 +36,55 @@ import { EnvironmentBadge, ProjectCard } from './Switchers';
  */
 export function AppLayout() {
   const { orgId = '', projectId } = useParams();
+  const { pathname } = useLocation();
+  const [navOpen, setNavOpen] = useState(false);
+
+  // Close the slide-out on navigation. Without this, tapping a destination on
+  // a phone leaves the sheet covering the page it just went to.
+  useEffect(() => setNavOpen(false), [pathname]);
 
   return (
     <div className="flex min-h-screen bg-canvas">
-      <Sidebar orgId={orgId} projectId={projectId} />
+      {/*
+        Three shapes, one rail.
+        - Phone: off-canvas, opened from the topbar, over a scrim.
+        - Tablet: icons only, because 236px of labels is a quarter of an 834px
+          screen spent on navigation the operator already knows.
+        - Desktop: labels.
+      */}
+      <Sidebar
+        orgId={orgId}
+        projectId={projectId}
+        open={navOpen}
+        onClose={() => setNavOpen(false)}
+      />
+
+      {navOpen && (
+        <button
+          type="button"
+          aria-label="Close navigation"
+          onClick={() => setNavOpen(false)}
+          className="fixed inset-0 z-30 bg-ink/40 md:hidden"
+        />
+      )}
+
       <div className="flex min-w-0 flex-1 flex-col">
-        <Topbar orgId={orgId} projectId={projectId} />
-        <main id="main" className="min-w-0 flex-1 px-6 py-5">
+        <Topbar
+          orgId={orgId}
+          projectId={projectId}
+          onOpenNav={() => setNavOpen(true)}
+        />
+        {/*
+          `pb-20` on a phone clears the bottom bar. Without it the last row of
+          every table sits underneath it, which is invisible until somebody
+          cannot press the thing they scrolled to.
+        */}
+        <main id="main" className="min-w-0 flex-1 px-4 py-4 pb-20 sm:px-6 sm:py-5 md:pb-5">
           <Outlet />
         </main>
       </div>
+
+      {projectId && <BottomNav orgId={orgId} projectId={projectId} onMore={() => setNavOpen(true)} />}
       <ProductTour />
     </div>
   );
@@ -59,7 +104,15 @@ export function AppLayout() {
  * links to their landing pages, not menus — switching lives in the rail, and
  * offering it twice would make neither affordance obviously the one to use.
  */
-function Topbar({ orgId, projectId }: { orgId: string; projectId?: string }) {
+function Topbar({
+  orgId,
+  projectId,
+  onOpenNav,
+}: {
+  orgId: string;
+  projectId?: string;
+  onOpenNav: () => void;
+}) {
   const { pathname } = useLocation();
   const organizations = useOrganizations();
   const project = useProject(orgId, projectId ?? '');
@@ -68,7 +121,26 @@ function Topbar({ orgId, projectId }: { orgId: string; projectId?: string }) {
   const section = currentSectionLabel(pathname, orgId, projectId);
 
   return (
-    <header className="sticky top-0 z-20 flex h-[3.25rem] shrink-0 items-center gap-4 border-b border-line bg-canvas/95 pl-5 pr-4 backdrop-blur">
+    <header className="sticky top-0 z-20 flex h-[3.25rem] shrink-0 items-center gap-3 border-b border-line bg-canvas/95 pl-3 pr-4 backdrop-blur sm:gap-4 sm:pl-5">
+      <button
+        type="button"
+        aria-label="Open navigation"
+        onClick={onOpenNav}
+        className="-ml-1 flex h-8 w-8 shrink-0 items-center justify-center rounded-md text-ink-muted transition-colors hover:bg-raised hover:text-ink md:hidden"
+      >
+        <svg
+          aria-hidden="true"
+          viewBox="0 0 24 24"
+          className="h-4 w-4"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="2"
+          strokeLinecap="round"
+        >
+          <path d="M4 7h16M4 12h16M4 17h16" />
+        </svg>
+      </button>
+
       <nav aria-label="Breadcrumb" className="min-w-0 flex-1">
         <ol className="flex min-w-0 items-center gap-1.5 text-xs">
           <Crumb to={`/orgs/${orgId}`} label={organization?.name ?? 'Organization'} />
@@ -158,7 +230,8 @@ function CopyLinkButton() {
           </>
         )}
       </svg>
-      {copied ? 'Copied' : 'Copy link to this view'}
+      <span className="hidden lg:inline">{copied ? 'Copied' : 'Copy link to this view'}</span>
+      <span className="lg:hidden sr-only">{copied ? 'Copied' : 'Copy link to this view'}</span>
     </button>
   );
 }
@@ -186,31 +259,74 @@ function Separator() {
 // Rail
 // ---------------------------------------------------------------------------
 
-function Sidebar({ orgId, projectId }: { orgId: string; projectId?: string }) {
+function Sidebar({
+  orgId,
+  projectId,
+  open,
+  onClose,
+}: {
+  orgId: string;
+  projectId?: string;
+  open: boolean;
+  onClose: () => void;
+}) {
   return (
     <nav
       aria-label="Primary"
-      className="sticky top-0 flex h-screen w-[14.75rem] shrink-0 flex-col border-r border-nav-line bg-nav"
+      data-collapsed="tablet"
+      className={cn(
+        'z-40 flex h-screen shrink-0 flex-col border-r border-nav-line bg-nav',
+        // Phone: off-canvas, full labels, because there is room for them once
+        // it is over the page rather than beside it.
+        'fixed inset-y-0 left-0 w-[14.75rem] transition-transform md:sticky md:top-0 md:translate-x-0',
+        open ? 'translate-x-0' : '-translate-x-full',
+        // Tablet: icons only. Desktop: labels.
+        'md:w-14 xl:w-[14.75rem]',
+      )}
     >
-      <div className="flex items-center gap-2.5 px-4 pb-3.5 pt-4">
+      <button
+        type="button"
+        aria-label="Close navigation"
+        onClick={onClose}
+        className="absolute right-2 top-3 flex h-7 w-7 items-center justify-center rounded-md text-nav-ink-muted hover:bg-nav-hover md:hidden"
+      >
+        <svg
+          aria-hidden="true"
+          viewBox="0 0 24 24"
+          className="h-4 w-4"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="2"
+          strokeLinecap="round"
+        >
+          <path d="m6 6 12 12M18 6 6 18" />
+        </svg>
+      </button>
+
+      <div className="flex items-center gap-2.5 px-4 pb-3.5 pt-4 md:justify-center md:px-0 xl:justify-start xl:px-4">
         <span
           aria-hidden="true"
           className="flex h-6 w-6 items-center justify-center rounded-[0.4375rem] bg-accent text-accent-ink"
         >
           <HookGlyph className="h-4 w-4" />
         </span>
-        <WordmarkText className="text-sm" />
+        <WordmarkText className="text-sm md:hidden xl:inline" />
       </div>
 
-      <div className="px-3 pb-3">
+      {/*
+        The project card carries two lines of text, so it has nothing to show
+        in a 56px rail. At that width the breadcrumb above is where you read
+        which project you are in, and switching is one tap wider.
+      */}
+      <div className="px-3 pb-3 md:hidden xl:block">
         <ProjectCard orgId={orgId} projectId={projectId} />
       </div>
 
-      <div className="flex-1 overflow-y-auto scrollbar-thin px-2.5 pb-2">
+      <div className="flex-1 overflow-y-auto scrollbar-thin px-2.5 pb-2 md:px-2 xl:px-2.5">
         <RailGroups orgId={orgId} projectId={projectId} />
       </div>
 
-      <div className="flex flex-col gap-2 px-2.5 pb-2.5">
+      <div className="flex flex-col gap-2 px-2.5 pb-2.5 md:px-2 xl:px-2.5">
         <TourButton />
         <UserCard orgId={orgId} />
       </div>
@@ -260,7 +376,7 @@ function RailGroup({
   return (
     <div>
       {group.title && (
-        <p className="px-2 pb-1 pt-3 text-2xs font-bold uppercase tracking-wider text-nav-section">
+        <p className="px-2 pb-1 pt-3 text-2xs font-bold uppercase tracking-wider text-nav-section md:hidden xl:block">
           {group.title}
         </p>
       )}
@@ -279,9 +395,15 @@ function RailLink({ item, badge }: { item: NavItem; badge?: string }) {
   return (
     <NavLink
       to={item.to}
+      // The label is the accessible name at every width. In the tablet rail it
+      // is `display: none`, so the title is what a hovering mouse gets and the
+      // icon is all a sighted user has — which is why every icon is distinct in
+      // SHAPE rather than only in detail.
+      title={item.label}
       className={({ isActive }) =>
         cn(
           'flex items-center gap-2.5 rounded-md px-2 py-1.5 text-xs transition-colors',
+          'md:justify-center xl:justify-start',
           isActive
             ? 'bg-nav-active font-semibold text-accent-deep'
             : 'font-medium text-nav-ink-muted hover:bg-nav-hover hover:text-nav-ink',
@@ -289,9 +411,11 @@ function RailLink({ item, badge }: { item: NavItem; badge?: string }) {
       }
     >
       <NavIcon name={item.icon} className="h-[0.9375rem] w-[0.9375rem] shrink-0" />
-      <span className="min-w-0 flex-1 truncate">{item.label}</span>
+      <span className="min-w-0 flex-1 truncate md:hidden xl:inline">{item.label}</span>
+      {/* Collapsed, the label is still the accessible name. */}
+      <span className="sr-only hidden md:inline xl:hidden">{item.label}</span>
       {badge && (
-        <span className="shrink-0 rounded bg-accent px-1.5 py-px text-2xs font-bold tabular text-accent-ink">
+        <span className="shrink-0 rounded bg-accent px-1.5 py-px text-2xs font-bold tabular text-accent-ink md:hidden xl:inline">
           {badge}
         </span>
       )}
@@ -313,10 +437,11 @@ function TourButton() {
     <button
       type="button"
       onClick={openTour}
-      className="flex w-full items-center gap-2.5 rounded-md px-2 py-1.5 text-xs font-medium text-nav-ink-muted transition-colors hover:bg-nav-hover hover:text-nav-ink"
+      title="Product tour"
+      className="flex w-full items-center gap-2.5 rounded-md px-2 py-1.5 text-xs font-medium text-nav-ink-muted transition-colors hover:bg-nav-hover hover:text-nav-ink md:justify-center xl:justify-start"
     >
       <NavIcon name="tour" className="h-[0.9375rem] w-[0.9375rem] shrink-0" />
-      Product tour
+      <span className="md:hidden xl:inline">Product tour</span>
     </button>
   );
 }
@@ -429,5 +554,71 @@ function Initials({ name }: { name: string }) {
     >
       {letters || '?'}
     </span>
+  );
+}
+
+/**
+ * The phone's bottom bar.
+ *
+ * ## Why a bar and not just the slide-out
+ *
+ * The slide-out is two taps to anywhere. That is fine for Policies and wrong
+ * for the four screens an incident moves between constantly — and an operator
+ * holding a phone in one hand at 2am is the exact reader this product is for.
+ *
+ * ## Why "More" opens the same rail
+ *
+ * One navigation model, two shapes. A separate "more" screen would be a second
+ * place for a route to be missing from.
+ */
+function BottomNav({
+  orgId,
+  projectId,
+  onMore,
+}: {
+  orgId: string;
+  projectId: string;
+  onMore: () => void;
+}) {
+  const items = bottomNav(orgId, projectId);
+
+  return (
+    <nav
+      aria-label="Sections"
+      className="fixed inset-x-0 bottom-0 z-20 flex border-t border-nav-line bg-nav pb-[env(safe-area-inset-bottom)] md:hidden"
+    >
+      {items.map((item) => (
+        <NavLink
+          key={item.to}
+          to={item.to}
+          className={({ isActive }) =>
+            cn(
+              'flex flex-1 flex-col items-center gap-0.5 py-2 text-[0.5625rem] font-medium transition-colors',
+              isActive ? 'text-accent' : 'text-nav-ink-muted',
+            )
+          }
+        >
+          <NavIcon name={item.icon} className="h-[1.125rem] w-[1.125rem]" />
+          {item.label}
+        </NavLink>
+      ))}
+      <button
+        type="button"
+        onClick={onMore}
+        className="flex flex-1 flex-col items-center gap-0.5 py-2 text-[0.5625rem] font-medium text-nav-ink-muted"
+      >
+        <svg
+          aria-hidden="true"
+          viewBox="0 0 24 24"
+          className="h-[1.125rem] w-[1.125rem]"
+          fill="currentColor"
+        >
+          <circle cx="5" cy="12" r="1.8" />
+          <circle cx="12" cy="12" r="1.8" />
+          <circle cx="19" cy="12" r="1.8" />
+        </svg>
+        More
+      </button>
+    </nav>
   );
 }

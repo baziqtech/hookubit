@@ -158,3 +158,25 @@ export function currentSectionLabel(
   }
   return best?.label ?? null;
 }
+
+/**
+ * The five destinations a phone's bottom bar carries.
+ *
+ * Five, because a sixth stops being a target and starts being a guess at
+ * thumb width. They are the four screens an incident actually moves between —
+ * where am I, what failed, what was published, who was it going to — plus a
+ * door to everything else.
+ *
+ * Deliberately NOT derived from `navigationGroups`: the rail's order serves
+ * learning the product and this one serves reaching for something at 2am with
+ * one hand, and those are different orders.
+ */
+export function bottomNav(orgId: string, projectId: string): NavItem[] {
+  const base = `/orgs/${orgId}/projects/${projectId}`;
+  return [
+    { to: `${base}/overview`, label: 'Overview', icon: 'overview' },
+    { to: `${base}/deliveries`, label: 'Deliveries', icon: 'deliveries' },
+    { to: `${base}/events`, label: 'Events', icon: 'events' },
+    { to: `${base}/endpoints`, label: 'Endpoints', icon: 'endpoints' },
+  ];
+}
