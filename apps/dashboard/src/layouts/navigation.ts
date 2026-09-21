@@ -85,7 +85,10 @@ export function navigationGroups(orgId: string, projectId?: string): NavGroup[] 
     },
     {
       title: 'Project',
-      items: [{ to: `${base}/settings`, label: 'Project settings', icon: 'project-settings' }],
+      items: [
+        { to: `${base}/settings`, label: 'Project settings', icon: 'project-settings' },
+        { to: `${base}/notifications`, label: 'Notifications', icon: 'notifications' },
+      ],
     },
     { title: 'Organization', items: organizationItems(org) },
   ];

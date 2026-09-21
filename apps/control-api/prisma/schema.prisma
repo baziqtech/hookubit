@@ -199,6 +199,7 @@ model Project {
   retryPolicies     RetryPolicy[]
   rateLimitPolicies RateLimitPolicy[]
   idempotencyKeys   IdempotencyKey[]
+  notificationDestinations NotificationDestination[]
 
   @@unique([organizationId, slug])
   @@map("projects")
@@ -801,6 +802,98 @@ model DeliveryAttempt {
 // ===========================================================================
 // Audit, usage, billing
 // ===========================================================================
+
+enum NotificationKind {
+  email
+  slack
+}
+
+enum NotificationStatus {
+  /// Created, and waiting for whoever reads the address to say yes. Receives
+  /// nothing at all until they do.
+  pending
+  confirmed
+  /// Stopped delivering and the platform gave up on it. A human has to look.
+  failing
+  disabled
+}
+
+/// Where HookuBit tells a human that something went wrong, PER PROJECT.
+///
+/// Per project and not per organization, and the UI says so at the top: an
+/// on-call channel for payments is not the on-call channel for the archive
+/// project, and one list for both is one list nobody trusts.
+model NotificationDestination {
+  id        String             @id
+  projectId String             @map("project_id")
+  kind      NotificationKind
+  /// The address. Unique per (project, kind) so one channel cannot be added
+  /// twice and then receive everything twice.
+  target    String
+  /// What to call it on screen. Defaults to the target.
+  label     String
+  status    NotificationStatus @default(pending)
+  /// Which triggers this destination has asked for. Empty receives nothing,
+  /// which is a legal and deliberate state - it is how you mute one channel
+  /// without deleting it and losing its confirmation.
+  events    String[]           @default([])
+  /// CONFIRMATION. Nobody is signed up to receive mail without saying yes:
+  /// a group address exists precisely so one person can put everyone else on
+  /// it, and this is what stops that being a way to mail somebody forever.
+  confirmedAt DateTime?        @map("confirmed_at")
+  /// SHA-256 of the confirmation link's token. The raw token is in exactly one
+  /// place — the message that was sent — which is the property that makes the
+  /// link proof that whoever clicked it can read the address.
+  ///
+  /// Not a `UserToken`: that table is keyed by user, and the whole point of a
+  /// group address is that the person who confirms it may have no account here.
+  confirmationTokenHash String?   @unique @map("confirmation_token_hash")
+  confirmationExpiresAt DateTime? @map("confirmation_expires_at")
+  lastSentAt  DateTime?        @map("last_sent_at")
+  lastError   String?          @map("last_error")
+  createdAt   DateTime         @default(now()) @map("created_at")
+  updatedAt   DateTime         @updatedAt @map("updated_at")
+
+  project       Project                @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  notifications NotificationDispatch[]
+
+  @@unique([projectId, kind, target])
+  @@index([projectId])
+  @@map("notification_destinations")
+}
+
+/// One message sent, or deliberately not sent.
+///
+/// It exists for GROUPING, which is the rule that stops a bad afternoon
+/// becoming four hundred messages: the same subject within the grouping window
+/// updates this row's count instead of producing a new message. Without a
+/// record of what was already said, "do not repeat yourself" is not
+/// expressible.
+///
+/// `subject` is the DEDUPLICATION KEY, not the email subject line - it names
+/// the thing that happened ("endpoint:ep_123:stopped"), so two different
+/// endpoints failing are two messages and one endpoint failing twice is one.
+model NotificationDispatch {
+  id            String   @id
+  destinationId String   @map("destination_id")
+  event         String
+  subject       String
+  /// How many occurrences this message covers. Starts at 1 and grows while the
+  /// grouping window is open.
+  occurrences   Int      @default(1)
+  firstAt       DateTime @map("first_at")
+  lastAt        DateTime @map("last_at")
+  /// Null while held for quiet hours; set when it actually went out.
+  sentAt        DateTime? @map("sent_at")
+  createdAt     DateTime @default(now()) @map("created_at")
+  updatedAt     DateTime @updatedAt @map("updated_at")
+
+  destination NotificationDestination @relation(fields: [destinationId], references: [id], onDelete: Cascade)
+
+  @@unique([destinationId, subject])
+  @@index([destinationId, lastAt])
+  @@map("notification_dispatches")
+}
 
 model AuditLog {
   id             String   @id

@@ -1,6 +1,7 @@
 import { Logger } from '@nestjs/common';
 import { AuthMailer } from '../auth/mailer.port';
 import { InvitationInvite, InvitationMailer } from '../members/invitation-mailer.port';
+import { OperationalMailer } from '../notification-destinations/operational-mailer.port';
 import { MailKind, MailTransport } from './mail-transport';
 import { fingerprintToken, redactRecipient } from './redaction';
 import {
@@ -12,6 +13,9 @@ import {
   invitationMail,
   passwordResetMail,
   registrationAttemptMail,
+  notificationAlertMail,
+  notificationConfirmationMail,
+  type NotificationAlertInput,
 } from './templates';
 
 /** The dashboard pages each link lands on. Query parameter is always `token`. */
@@ -24,6 +28,8 @@ export const DASHBOARD_PATHS = {
    * redeems at `POST /v1/invitations/accept` reads `?token=` the same way.
    */
   acceptInvitation: '/accept-invitation',
+  /** Where a notification-confirmation link lands. */
+  confirmNotification: '/confirm-notifications',
 } as const;
 
 /**
@@ -42,7 +48,7 @@ export const DASHBOARD_PATHS = {
  * and they log the user id; this line adds the recipient hash and the SMTP
  * reason, which is what an operator needs at 2am.
  */
-export class SmtpMailer implements AuthMailer, InvitationMailer {
+export class SmtpMailer implements AuthMailer, InvitationMailer, OperationalMailer {
   private readonly logger = new Logger(SmtpMailer.name);
 
   constructor(
@@ -86,6 +92,23 @@ export class SmtpMailer implements AuthMailer, InvitationMailer {
 
   private link(path: string, rawToken: string): string {
     return buildDashboardLink(this.context.dashboardUrl, path, { token: rawToken });
+  }
+
+  async sendNotificationConfirmation(
+    email: string,
+    input: { projectName: string; rawToken: string },
+  ): Promise<void> {
+    const link = this.link(DASHBOARD_PATHS.confirmNotification, input.rawToken);
+    await this.deliver(
+      'notification_confirmation',
+      email,
+      notificationConfirmationMail(this.context, { projectName: input.projectName, link }),
+      input.rawToken,
+    );
+  }
+
+  async sendNotificationAlert(email: string, input: NotificationAlertInput): Promise<void> {
+    await this.deliver('notification_alert', email, notificationAlertMail(this.context, input));
   }
 
   private async deliver(

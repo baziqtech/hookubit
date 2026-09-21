@@ -5,6 +5,7 @@ import { AuditService } from '../authz';
 // PrismaService" in the class docblock; `src/maintenance/**` is allowlisted by
 // directory in .eslintrc.json alongside auth, infrastructure, cli and health.
 import { PrismaService } from '../infrastructure/prisma/prisma.service';
+import { NotificationDispatcher } from './notification-dispatcher.service';
 import {
   AUTO_DISABLE_ADVISORY_LOCK_KEY,
   AUTO_DISABLE_AUDIT_ACTION,
@@ -135,6 +136,7 @@ export class EndpointAutoDisableService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly audit: AuditService,
+    private readonly alerts: NotificationDispatcher,
   ) {}
 
   /**
@@ -328,6 +330,33 @@ export class EndpointAutoDisableService {
     this.logger.warn(
       `Endpoint ${candidate.endpointId} (${candidate.endpointUrl}) was auto-disabled: ${reason}`,
     );
+
+    /*
+     * Tell somebody. This is the design's most urgent trigger and the only one
+     * that wakes people out of hours, because the consequence is not "a
+     * delivery failed" — it is that every new matching event now creates
+     * nothing for this endpoint until a human acts.
+     *
+     * OUTSIDE the transaction and never awaited into the result: sending mail
+     * inside a SERIALIZABLE transaction holds it open for an SMTP round trip,
+     * and a failure must not roll back a disable that has already been decided.
+     * The dispatcher swallows its own errors and records them on the
+     * destination, where the operator can see them.
+     */
+    void this.alerts
+      .alert({
+        projectId: candidate.projectId,
+        event: 'endpoint.stopped',
+        subject: `endpoint:${candidate.endpointId}:stopped`,
+        headline: `We stopped sending to ${candidate.endpointName}`,
+        body:
+          `${candidate.endpointName} failed ${candidate.consecutiveFailures} times in a row, so we stopped sending to it. ` +
+          'New events create nothing for this endpoint and queued deliveries are being cancelled until someone starts it again. ' +
+          'Nothing you did caused this, and starting it again is a button on the endpoint.',
+        link: `/orgs/${candidate.organizationId}/projects/${candidate.projectId}/endpoints/${candidate.endpointId}`,
+      })
+      .catch(() => undefined);
+
     return true;
   }
 

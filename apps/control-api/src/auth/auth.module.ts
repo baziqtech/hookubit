@@ -51,6 +51,9 @@ import { TokenService } from './token.service';
         }),
     },
   ],
-  exports: [SessionService, SessionGuard, PasswordService, TokenService],
+  // MAILER_PORT is exported so the notifications module can reuse the ONE
+  // decision selectMailer makes about whether mail works, rather than making a
+  // second one that can disagree with it.
+  exports: [SessionService, SessionGuard, PasswordService, TokenService, MAILER_PORT],
 })
 export class AuthModule {}

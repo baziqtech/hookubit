@@ -36,12 +36,12 @@ The status column is the HTTP status the code is returned with, as documented on
 |---|---|---|
 | [`invalid_request`](#invalid-request) | 400 Bad Request | 8 |
 | [`unauthenticated`](#unauthenticated) | 401 Unauthorized | 0 |
-| [`forbidden`](#forbidden) | 403 Forbidden | 59 |
-| [`email_not_verified`](#email-not-verified) | 403 Forbidden | 59 |
-| [`not_found`](#not-found) | 404 Not Found | 57 |
-| [`conflict`](#conflict) | 409 Conflict | 23 |
-| [`limit_exceeded`](#limit-exceeded) | 409 Conflict | 23 |
-| [`idempotency_key_reused`](#idempotency-key-reused) | 409 Conflict | 23 |
+| [`forbidden`](#forbidden) | 403 Forbidden | 65 |
+| [`email_not_verified`](#email-not-verified) | 403 Forbidden | 65 |
+| [`not_found`](#not-found) | 404 Not Found | 63 |
+| [`conflict`](#conflict) | 409 Conflict | 25 |
+| [`limit_exceeded`](#limit-exceeded) | 409 Conflict | 25 |
+| [`idempotency_key_reused`](#idempotency-key-reused) | 409 Conflict | 25 |
 | [`payload_too_large`](#payload-too-large) | 413 Payload Too Large | 0 |
 | [`rate_limited`](#rate-limited) | 429 Too Many Requests | 15 |
 | [`internal_error`](#internal-error) | 500 Internal Server Error | 0 |

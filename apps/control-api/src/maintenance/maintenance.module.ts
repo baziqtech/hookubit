@@ -1,5 +1,6 @@
 import { Module } from '@nestjs/common';
 import { AuthzModule } from '../authz/authz.module';
+import { NotificationDestinationsModule } from '../notification-destinations/notification-destinations.module';
 // PrismaModule is deliberately NOT `@Global()` - a module that wants the raw,
 // unscoped client has to say so here, which is where the review question "why
 // is this talking to Prisma instead of TenantScopeFactory?" gets asked. The
@@ -9,6 +10,7 @@ import { AuthzModule } from '../authz/authz.module';
 import { PrismaModule } from '../infrastructure/prisma/prisma.module';
 import { AutoDisableScheduler } from './auto-disable.scheduler';
 import { EndpointAutoDisableService } from './endpoint-auto-disable.service';
+import { NotificationDispatcher } from './notification-dispatcher.service';
 
 /**
  * Periodic reconciliation the control plane owns.
@@ -27,8 +29,11 @@ import { EndpointAutoDisableService } from './endpoint-auto-disable.service';
  * system uses - configuration and the customer-visible record here, rows there.
  */
 @Module({
-  imports: [AuthzModule, PrismaModule],
-  providers: [EndpointAutoDisableService, AutoDisableScheduler],
+  // NotificationDestinationsModule for OPERATIONAL_MAILER: the sweep is what
+  // NOTICES that an endpoint is dead, and telling somebody is the other half
+  // of the job. It resolves the same mailer the rest of the product uses.
+  imports: [AuthzModule, PrismaModule, NotificationDestinationsModule],
+  providers: [EndpointAutoDisableService, AutoDisableScheduler, NotificationDispatcher],
   exports: [EndpointAutoDisableService],
 })
 export class MaintenanceModule {}

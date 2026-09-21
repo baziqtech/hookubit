@@ -191,3 +191,67 @@ export function describeDuration(ms: number): string {
   if (minutes % 60 === 0) return plural(minutes / 60, 'hour');
   return plural(minutes, 'minute');
 }
+
+/* ── Operational notifications ────────────────────────────────────────────── */
+
+/**
+ * "Somebody added this address to a project. Do you want it?"
+ *
+ * Sent before an address receives anything else, ever. A group address exists
+ * precisely so one person can put everybody else on it, and without this step
+ * adding `oncall@` to a project would be a way to mail a team forever with no
+ * one on it having agreed.
+ *
+ * The mail names the project, because the reader is being asked to agree to
+ * something and "a HookuBit project" is not enough to decide on.
+ */
+export function notificationConfirmationMail(
+  ctx: TemplateContext,
+  input: { projectName: string; link: string },
+): RenderedMail {
+  return render(ctx, {
+    subject: `Confirm alerts for ${input.projectName}`,
+    title: 'Confirm this address for alerts',
+    paragraphs: [
+      `Someone added this address to receive operational alerts for the ${input.projectName} project on ${ctx.productName}.`,
+      'Until you confirm, this address receives nothing at all. If you were not expecting this, ignore it — nothing will be sent.',
+    ],
+    action: { label: 'Confirm this address', link: input.link },
+  });
+}
+
+export interface NotificationAlertInput {
+  projectName: string;
+  /** One line. What happened. */
+  headline: string;
+  /** Two or three sentences. What it means and what to do. */
+  body: string;
+  /** Where to go and look. */
+  link: string;
+  /** How many times this happened inside the grouping window. */
+  occurrences: number;
+}
+
+/**
+ * An operational alert.
+ *
+ * `occurrences` is stated when it is above one, because the grouping rule means
+ * a single message can stand for a dozen failures — and a reader who thinks it
+ * stands for one will conclude the problem is smaller than it is.
+ */
+export function notificationAlertMail(
+  ctx: TemplateContext,
+  input: NotificationAlertInput,
+): RenderedMail {
+  const repeated =
+    input.occurrences > 1
+      ? [`This has happened ${input.occurrences} times in the last half hour. This is one message for all of them.`]
+      : [];
+
+  return render(ctx, {
+    subject: `[${input.projectName}] ${input.headline}`,
+    title: input.headline,
+    paragraphs: [input.body, ...repeated],
+    action: { label: 'Open in ' + ctx.productName, link: input.link },
+  });
+}

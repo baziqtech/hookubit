@@ -10,7 +10,13 @@ export type MailKind =
   | 'password_reset'
   | 'registration_attempt'
   | 'invitation'
-  | 'already_member';
+  | 'already_member'
+  // Operational alerts, and the confirmation that has to come before them.
+  // Kept as their own kinds so a transport, a log line or a suppression list
+  // can tell "your webhooks stopped" apart from "reset your password" — they
+  // have different urgency and, for most providers, different deliverability.
+  | 'notification_confirmation'
+  | 'notification_alert';
 
 export interface OutboundMail {
   kind: MailKind;

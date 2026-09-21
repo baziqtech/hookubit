@@ -749,6 +749,111 @@ export interface paths {
         patch: operations["RateLimitsController_update"];
         trace?: never;
     };
+    "/v1/projects/{projectId}/notification-destinations": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Where this project sends alerts
+         * @description Readable by everyone who can read the delivery record: "who gets told when this breaks?" is part of understanding what happened.
+         */
+        get: operations["NotificationDestinationsController_list"];
+        put?: never;
+        /**
+         * Add a destination and send its confirmation
+         * @description The destination is created `pending` and receives NOTHING until somebody who can read the address clicks the link. The row is written before the message is sent and a send failure does not roll it back: a pending destination with a Resend button is a better place to be than a form you have to fill in again.
+         */
+        post: operations["NotificationDestinationsController_create"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/projects/{projectId}/notification-destinations/{destinationId}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /** Remove a destination */
+        delete: operations["NotificationDestinationsController_remove"];
+        options?: never;
+        head?: never;
+        /**
+         * Rename a destination, or change what it receives
+         * @description `events` REPLACES the list. An empty array mutes the destination without deleting it, which keeps its confirmation.
+         */
+        patch: operations["NotificationDestinationsController_update"];
+        trace?: never;
+    };
+    "/v1/projects/{projectId}/notification-destinations/{destinationId}/resend": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Send the confirmation again, with a NEW token
+         * @description New rather than re-sent: the old link may be sitting in a mailbox somebody no longer has access to, which is very often exactly why a resend is being asked for.
+         */
+        post: operations["NotificationDestinationsController_resend"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/projects/{projectId}/notification-destinations/{destinationId}/test": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Send a test alert
+         * @description Goes through the same template and the same transport a real alert takes, so an arrival proves the path. It is NOT recorded as a dispatch, so it neither satisfies nor triggers the grouping rule — sending a test must not make the next real alert disappear.
+         */
+        post: operations["NotificationDestinationsController_test"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/notification-destinations/confirm": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Confirm an address for alerts
+         * @description Single use. "No such token", "already used" and "expired" all answer the same 404 with the same message: this endpoint is reachable by anyone, so distinguishing them is an oracle for which tokens exist — and all three are fixed the same way.
+         */
+        post: operations["NotificationConfirmationController_confirm"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/projects/{projectId}/events": {
         parameters: {
             query?: never;
@@ -1968,6 +2073,59 @@ export interface components {
             window_seconds?: number;
             /** @description Bucket capacity. Null means "the same as `limit`". When set it must be at least `limit`, or the bucket could never hold one window’s worth of tokens and the configured limit would be unreachable. */
             burst?: number | null;
+        };
+        DestinationDto: {
+            id: string;
+            project_id: string;
+            /** @enum {string} */
+            kind: "email" | "slack";
+            /** @description The address. Lower-cased on the way in. */
+            target: string;
+            label: string;
+            /**
+             * @description `pending` receives NOTHING. A destination is silent until somebody who can read the address clicks the confirmation link — which is also the only check available that the address is real, so a typo sits here visibly rather than swallowing every alert.
+             * @enum {string}
+             */
+            status: "pending" | "confirmed" | "failing" | "disabled";
+            /** @description Which triggers this destination has asked for. An EMPTY list receives nothing and is a legal, deliberate state: it is how a destination is muted without deleting it and losing its confirmation. */
+            events: string[];
+            confirmed_at: string | null;
+            last_sent_at: string | null;
+            /** @description Why the last attempt to reach this destination failed, if one did. */
+            last_error: string | null;
+            created_at: string;
+        };
+        DestinationListDto: {
+            data: components["schemas"]["DestinationDto"][];
+            has_more: boolean;
+            next_offset: number | null;
+        };
+        CreateDestinationDto: {
+            /**
+             * @description Only 'email' today. A Slack destination needs an app installed in your workspace; accepting the value before that exists would create a row nothing can deliver to.
+             * @enum {string}
+             */
+            kind: "email";
+            /** @example payments-oncall@example.com */
+            target: string;
+            /** @description What to call it on screen. Defaults to the address. */
+            label?: string;
+            /** @description Omitted, the destination is subscribed to everything. */
+            events?: ("endpoint.stopped" | "event.stuck" | "secret.retiring" | "delivery.exhausted")[];
+        };
+        UpdateDestinationDto: {
+            label?: string;
+            /** @description REPLACES the list. An empty array mutes the destination without deleting it. */
+            events?: ("endpoint.stopped" | "event.stuck" | "secret.retiring" | "delivery.exhausted")[];
+        };
+        ConfirmDestinationDto: {
+            /** @description The token from the confirmation link. */
+            token: string;
+        };
+        ConfirmedDestinationDto: {
+            project_name: string;
+            /** @description The address that was confirmed, so the page can name it. */
+            target: string;
         };
         EventDeliveryRollupDto: {
             /**
@@ -4934,6 +5092,289 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["ApiErrorResponse"];
+                };
+            };
+        };
+    };
+    NotificationDestinationsController_list: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                projectId: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DestinationListDto"];
+                };
+            };
+            /** @description You are in this tenant but your role does not allow it. (error.code: `forbidden`, `email_not_verified`) */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorResponse"];
+                };
+            };
+            /** @description The project or the destination does not exist or belongs to another tenant. One answer, one message. (error.code: `not_found`) */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorResponse"];
+                };
+            };
+        };
+    };
+    NotificationDestinationsController_create: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                projectId: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CreateDestinationDto"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DestinationDto"];
+                };
+            };
+            /** @description You are in this tenant but your role does not allow it. (error.code: `forbidden`, `email_not_verified`) */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorResponse"];
+                };
+            };
+            /** @description The project or the destination does not exist or belongs to another tenant. One answer, one message. (error.code: `not_found`) */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorResponse"];
+                };
+            };
+            /** @description This address is already a destination for this project, or the project is at its ceiling. (error.code: `conflict`, `limit_exceeded`, `idempotency_key_reused`) */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorResponse"];
+                };
+            };
+        };
+    };
+    NotificationDestinationsController_remove: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                destinationId: string;
+                projectId: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description You are in this tenant but your role does not allow it. (error.code: `forbidden`, `email_not_verified`) */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorResponse"];
+                };
+            };
+            /** @description The project or the destination does not exist or belongs to another tenant. One answer, one message. (error.code: `not_found`) */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorResponse"];
+                };
+            };
+        };
+    };
+    NotificationDestinationsController_update: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                destinationId: string;
+                projectId: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["UpdateDestinationDto"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DestinationDto"];
+                };
+            };
+            /** @description You are in this tenant but your role does not allow it. (error.code: `forbidden`, `email_not_verified`) */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorResponse"];
+                };
+            };
+            /** @description The project or the destination does not exist or belongs to another tenant. One answer, one message. (error.code: `not_found`) */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorResponse"];
+                };
+            };
+        };
+    };
+    NotificationDestinationsController_resend: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                destinationId: string;
+                projectId: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DestinationDto"];
+                };
+            };
+            /** @description You are in this tenant but your role does not allow it. (error.code: `forbidden`, `email_not_verified`) */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorResponse"];
+                };
+            };
+            /** @description The project or the destination does not exist or belongs to another tenant. One answer, one message. (error.code: `not_found`) */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorResponse"];
+                };
+            };
+            /** @description Already confirmed; there is nothing to send. (error.code: `conflict`, `limit_exceeded`, `idempotency_key_reused`) */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorResponse"];
+                };
+            };
+        };
+    };
+    NotificationDestinationsController_test: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                destinationId: string;
+                projectId: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description You are in this tenant but your role does not allow it. (error.code: `forbidden`, `email_not_verified`) */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorResponse"];
+                };
+            };
+            /** @description The project or the destination does not exist or belongs to another tenant. One answer, one message. (error.code: `not_found`) */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorResponse"];
+                };
+            };
+        };
+    };
+    NotificationConfirmationController_confirm: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ConfirmDestinationDto"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ConfirmedDestinationDto"];
                 };
             };
         };

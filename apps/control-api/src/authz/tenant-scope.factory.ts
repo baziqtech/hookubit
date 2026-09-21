@@ -11,6 +11,7 @@ import {
   Event,
   EventOutbox,
   IdempotencyKey,
+  NotificationDestination,
   Organization,
   OrganizationMember,
   Prisma,
@@ -63,6 +64,7 @@ export type TenantRepositoryName =
   | 'subscriptions'
   | 'retryPolicies'
   | 'rateLimitPolicies'
+  | 'notificationDestinations'
   | 'idempotencyKeys'
   | 'events'
   | 'eventOutbox'
@@ -84,6 +86,7 @@ type DelegateKey =
   | 'apiKey'
   | 'retryPolicy'
   | 'rateLimitPolicy'
+  | 'notificationDestination'
   | 'idempotencyKey'
   | 'event'
   | 'eventOutbox'
@@ -280,6 +283,24 @@ export class TenantScope implements OwnershipVerifier {
     RetryPolicy
   > {
     return this.repo('retryPolicy', 'project', 'Retry policy');
+  }
+
+  /**
+   * Alert destinations, scoped by project.
+   *
+   * `project`, not `projectAndOrganization`: the table carries only
+   * `project_id`, and the design's rule is that these belong to ONE project —
+   * connecting a channel for Payments deliberately does not connect it for
+   * Ledger.
+   */
+  get notificationDestinations(): Repo<
+    Prisma.NotificationDestinationWhereInput,
+    Prisma.NotificationDestinationOrderByWithRelationInput,
+    Prisma.NotificationDestinationCreateManyInput,
+    Prisma.NotificationDestinationUncheckedUpdateManyInput,
+    NotificationDestination
+  > {
+    return this.repo('notificationDestination', 'project', 'Notification destination');
   }
 
   get rateLimitPolicies(): Repo<

@@ -63,6 +63,7 @@
     },
     {
       "files": [
+        "src/notification-destinations/notification-confirmation.service.ts",
         "src/organizations/user-scope.ts",
         "src/organizations/user-directory.ts",
         "src/organizations/tenant-transaction.ts",

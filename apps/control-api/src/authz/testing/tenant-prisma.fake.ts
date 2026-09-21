@@ -45,6 +45,10 @@ const SCHEMA: Record<string, Record<string, Relation>> = {
   apiKey: { project: { table: 'project', fk: 'projectId' } },
   retryPolicy: { project: { table: 'project', fk: 'projectId' } },
   rateLimitPolicy: { project: { table: 'project', fk: 'projectId' } },
+  notificationDestination: { project: { table: 'project', fk: 'projectId' } },
+  notificationDispatch: {
+    destination: { table: 'notificationDestination', fk: 'destinationId' },
+  },
   idempotencyKey: { project: { table: 'project', fk: 'projectId' } },
   event: {
     project: { table: 'project', fk: 'projectId' },
@@ -439,6 +443,8 @@ export class FakeTenantPrisma {
   readonly apiKey = this.delegate('apiKey');
   readonly retryPolicy = this.delegate('retryPolicy');
   readonly rateLimitPolicy = this.delegate('rateLimitPolicy');
+  readonly notificationDestination = this.delegate('notificationDestination');
+  readonly notificationDispatch = this.delegate('notificationDispatch');
   readonly idempotencyKey = this.delegate('idempotencyKey');
   readonly event = this.delegate('event');
   readonly eventOutbox = this.delegate('eventOutbox');

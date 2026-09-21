@@ -19,9 +19,12 @@ Every request and response body in the control API, by name. Operation pages lin
 | [`AuditLogDto`](#auditlogdto) | object |
 | [`AuditLogListDto`](#auditloglistdto) | object |
 | [`AuthUserDto`](#authuserdto) | object |
+| [`ConfirmDestinationDto`](#confirmdestinationdto) | object |
+| [`ConfirmedDestinationDto`](#confirmeddestinationdto) | object |
 | [`CreateApiKeyDto`](#createapikeydto) | object |
 | [`CreatedApiKeyDto`](#createdapikeydto) | object |
 | [`CreatedEndpointDto`](#createdendpointdto) | object |
+| [`CreateDestinationDto`](#createdestinationdto) | object |
 | [`CreateEndpointDto`](#createendpointdto) | object |
 | [`CreateOrganizationDto`](#createorganizationdto) | object |
 | [`CreateProjectDto`](#createprojectdto) | object |
@@ -39,6 +42,8 @@ Every request and response body in the control API, by name. Operation pages lin
 | [`DeliveryOutcomeSummaryDto`](#deliveryoutcomesummarydto) | object |
 | [`DeliverySeriesDto`](#deliveryseriesdto) | object |
 | [`DeliveryStatusCountsDto`](#deliverystatuscountsdto) | object |
+| [`DestinationDto`](#destinationdto) | object |
+| [`DestinationListDto`](#destinationlistdto) | object |
 | [`DisableEndpointDto`](#disableendpointdto) | object |
 | [`DisableSubscriptionDto`](#disablesubscriptiondto) | object |
 | [`EndpointDto`](#endpointdto) | object |
@@ -89,6 +94,7 @@ Every request and response body in the control API, by name. Operation pages lin
 | [`SessionResponseDto`](#sessionresponsedto) | object |
 | [`SubscriptionDto`](#subscriptiondto) | object |
 | [`SubscriptionListDto`](#subscriptionlistdto) | object |
+| [`UpdateDestinationDto`](#updatedestinationdto) | object |
 | [`UpdateEndpointDto`](#updateendpointdto) | object |
 | [`UpdateMemberRoleDto`](#updatememberroledto) | object |
 | [`UpdateOrganizationDto`](#updateorganizationdto) | object |
@@ -252,6 +258,19 @@ The response body of EVERY non-2xx response from this API. There is no other err
 | `email_verified` | boolean | yes |  | False until the verification token is presented. |
 | `onboarding_completed_at` | string \| null | yes | format `date-time` | ISO-8601 instant at which the user finished OR skipped the product tour; null if neither. Carried on every response that returns a user - session, login, verify-email - so the client never needs a second request to decide whether to show the tour. Set by POST /v1/auth/onboarding-completed. |
 
+### ConfirmDestinationDto
+
+| Property | Type | Required | Constraints | Description |
+|---|---|---|---|---|
+| `token` | string | yes |  | The token from the confirmation link. |
+
+### ConfirmedDestinationDto
+
+| Property | Type | Required | Constraints | Description |
+|---|---|---|---|---|
+| `project_name` | string | yes |  |  |
+| `target` | string | yes |  | The address that was confirmed, so the page can name it. |
+
 ### CreateApiKeyDto
 
 | Property | Type | Required | Constraints | Description |
@@ -313,6 +332,15 @@ The response body of EVERY non-2xx response from this API. There is no other err
 | `secret` | string \| null | yes |  | The version 1 signing secret, in plaintext, returned HERE AND NOWHERE ELSE. Present only when the caller also holds `endpoint-secrets.write` (owner or admin): a developer may create endpoints but may not read signing secrets, so for them this is null, the endpoint stays paused, and `secret_pending` says so. |
 | `secret_pending` | boolean | yes |  | True when the endpoint was created with a signing secret this caller may not receive, so it is PAUSED and not delivering. An owner or admin must rotate (POST /v1/endpoints/{id}/secrets/rotate), hand the consumer the plaintext, then enable it. Going live here instead would sign every delivery with a key nobody holds: the consumer would reject all of them, and the rotation that fixed it would change the secret AGAIN - two verification outages instead of none. |
 | `secret_version` | number | yes |  | Version of the secret that was minted with this endpoint. |
+
+### CreateDestinationDto
+
+| Property | Type | Required | Constraints | Description |
+|---|---|---|---|---|
+| `kind` | string | yes | one of `email` | Only 'email' today. A Slack destination needs an app installed in your workspace; accepting the value before that exists would create a row nothing can deliver to. |
+| `target` | string | yes |  |  |
+| `label` | string | no |  | What to call it on screen. Defaults to the address. |
+| `events` | string[] | no |  | Omitted, the destination is subscribed to everything. |
 
 ### CreateEndpointDto
 
@@ -648,6 +676,41 @@ The response body of EVERY non-2xx response from this API. There is no other err
 | `retrying` | number | yes |  |  |
 | `exhausted` | number | yes |  |  |
 | `cancelled` | number | yes |  |  |
+
+### DestinationDto
+
+| Property | Type | Required | Constraints | Description |
+|---|---|---|---|---|
+| `id` | string | yes |  |  |
+| `project_id` | string | yes |  |  |
+| `kind` | string | yes | one of `email`, `slack` |  |
+| `target` | string | yes |  | The address. Lower-cased on the way in. |
+| `label` | string | yes |  |  |
+| `status` | string | yes | one of `pending`, `confirmed`, `failing`, `disabled` | `pending` receives NOTHING. A destination is silent until somebody who can read the address clicks the confirmation link — which is also the only check available that the address is real, so a typo sits here visibly rather than swallowing every alert. |
+| `events` | string[] | yes |  | Which triggers this destination has asked for. An EMPTY list receives nothing and is a legal, deliberate state: it is how a destination is muted without deleting it and losing its confirmation. |
+| `confirmed_at` | string \| null | yes |  |  |
+| `last_sent_at` | string \| null | yes |  |  |
+| `last_error` | string \| null | yes |  | Why the last attempt to reach this destination failed, if one did. |
+| `created_at` | string | yes |  |  |
+
+### DestinationListDto
+
+| Property | Type | Required | Constraints | Description |
+|---|---|---|---|---|
+| `data` | [DestinationDto](./schemas.md#destinationdto)[] | yes |  |  |
+| `data[].id` | string | yes |  |  |
+| `data[].project_id` | string | yes |  |  |
+| `data[].kind` | string | yes | one of `email`, `slack` |  |
+| `data[].target` | string | yes |  | The address. Lower-cased on the way in. |
+| `data[].label` | string | yes |  |  |
+| `data[].status` | string | yes | one of `pending`, `confirmed`, `failing`, `disabled` | `pending` receives NOTHING. A destination is silent until somebody who can read the address clicks the confirmation link — which is also the only check available that the address is real, so a typo sits here visibly rather than swallowing every alert. |
+| `data[].events` | string[] | yes |  | Which triggers this destination has asked for. An EMPTY list receives nothing and is a legal, deliberate state: it is how a destination is muted without deleting it and losing its confirmation. |
+| `data[].confirmed_at` | string \| null | yes |  |  |
+| `data[].last_sent_at` | string \| null | yes |  |  |
+| `data[].last_error` | string \| null | yes |  | Why the last attempt to reach this destination failed, if one did. |
+| `data[].created_at` | string | yes |  |  |
+| `has_more` | boolean | yes |  |  |
+| `next_offset` | number \| null | yes |  |  |
 
 ### DisableEndpointDto
 
@@ -1334,6 +1397,13 @@ string enum: `active`, `suspended`, `deleted`
 | `data[].updated_at` | string | yes |  |  |
 | `has_more` | boolean | yes |  | More subscriptions match than this page carries. |
 | `next_offset` | number \| null | yes |  | Pass back as `offset` for the next page. Null when this page was the last. |
+
+### UpdateDestinationDto
+
+| Property | Type | Required | Constraints | Description |
+|---|---|---|---|---|
+| `label` | string | no |  |  |
+| `events` | string[] | no |  | REPLACES the list. An empty array mutes the destination without deleting it. |
 
 ### UpdateEndpointDto
 

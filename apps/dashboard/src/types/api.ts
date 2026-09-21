@@ -585,6 +585,24 @@ export const MAX_REQUEUE_REASON_LENGTH = 500;
  */
 export type AuditLogEntry = S['AuditLogDto'];
 
+/* ── Notifications ────────────────────────────────────────────────────────── */
+
+/**
+ * Where a project sends operational alerts.
+ *
+ * `status: 'pending'` receives NOTHING. A destination is silent until somebody
+ * who can read the address clicks the confirmation link — which is also the
+ * only check available that the address is real, so a typo sits in the list
+ * visibly rather than swallowing every alert the project ever raises.
+ *
+ * An EMPTY `events` array is legal and deliberate: it is how a destination is
+ * muted without deleting it and losing its confirmation.
+ */
+export type NotificationDestination = S['DestinationDto'];
+export type CreateDestinationBody = S['CreateDestinationDto'];
+export type UpdateDestinationBody = S['UpdateDestinationDto'];
+export type ConfirmedDestination = S['ConfirmedDestinationDto'];
+
 /* ── Analytics ────────────────────────────────────────────────────────────── */
 
 /**

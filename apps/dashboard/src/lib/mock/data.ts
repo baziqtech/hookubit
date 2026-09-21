@@ -31,6 +31,7 @@ import type {
   EventPayload,
   EventStatus,
   Member,
+  NotificationDestination,
   Organization,
   Role,
   OutboxEntry,
@@ -1709,5 +1710,42 @@ export const auditLogs: AuditLogEntry[] = [
     ip_address: '41.66.12.9',
     user_agent: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36',
     created_at: minutesAgo(60 * 24 * 3),
+  },
+];
+
+/* ── Notification destinations ────────────────────────────────────────────── */
+
+/**
+ * Two destinations, and the second one is the point: an address that was added
+ * and never confirmed. It receives nothing, it sits visibly in the list, and
+ * the dashboard has to render that state as a first-class row with a Resend
+ * button rather than as a spinner.
+ */
+export const notificationDestinations: NotificationDestination[] = [
+  {
+    id: 'ntd_01JQONCALL',
+    project_id: PROD,
+    kind: 'email',
+    target: 'payments-oncall@example.com',
+    label: 'payments-oncall@example.com',
+    status: 'confirmed',
+    events: ['endpoint.stopped', 'event.stuck', 'secret.retiring', 'delivery.exhausted'],
+    confirmed_at: minutesAgo(60 * 300),
+    last_sent_at: minutesAgo(120),
+    last_error: null,
+    created_at: minutesAgo(60 * 320),
+  },
+  {
+    id: 'ntd_01JQPERSON',
+    project_id: PROD,
+    kind: 'email',
+    target: 'mara@example.com',
+    label: 'mara@example.com',
+    status: 'pending',
+    events: ['endpoint.stopped'],
+    confirmed_at: null,
+    last_sent_at: null,
+    last_error: null,
+    created_at: minutesAgo(360),
   },
 ];

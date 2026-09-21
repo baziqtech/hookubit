@@ -22,6 +22,7 @@ import type {
   EndpointSecret,
   EventDetail,
   Member,
+  NotificationDestination,
   OffsetPage,
   Organization,
   OutboxEntry,
@@ -195,6 +196,11 @@ const THROTTLE_LIMITS: Record<string, number> = {
   // reaches for during an incident, which is exactly when a 429 on one of them
   // is most confusing — so the path has to be reachable here.
   'endpoints.toggle': 10,
+  // Every one of these causes MAIL to an address the caller chose, which is
+  // why the real route is throttled harder than an ordinary write: a loop on
+  // create is a way to send somebody a lot of confirmations using our
+  // reputation.
+  'notifications.create': 10,
   'organizations.create': 10,
   'organizations.update': 30,
   // `SUBSCRIPTION_CREATE_THROTTLE` is 30 a minute on the real route. The
@@ -569,6 +575,15 @@ function looksLikeAddressOrBlock(entry: string): boolean {
   if (version === null) return false;
   if (prefix === null) return true;
   return /^\d{1,3}$/.test(prefix) && Number(prefix) <= (version === 4 ? 32 : 128);
+}
+
+/** The destination, or the 404 that never distinguishes "gone" from "not yours". */
+function destinationOr404(projectId: string, destinationId: string) {
+  const row = db.notificationDestinations.find(
+    (candidate) => candidate.id === destinationId && candidate.project_id === projectId,
+  );
+  if (!row) fail(404, 'not_found', `Notification destination ${destinationId} was not found`);
+  return row;
 }
 
 /** The endpoint, or the 404 that never distinguishes "gone" from "not yours". */
@@ -1521,6 +1536,122 @@ const handlers: Handler[] = [
       if (typeof input.slug === 'string') project.slug = input.slug;
       project.updated_at = new Date().toISOString();
       return project;
+    },
+  },
+
+  /*
+   * Notification destinations. The confirmation half is modelled properly
+   * because `pending` is the state the UI is built around: a destination
+   * receives nothing until somebody who can read the address says yes.
+   */
+  {
+    method: 'GET',
+    pattern: '/v1/projects/:projectId/notification-destinations',
+    handle: ({ params, query }) =>
+      offsetEnvelope<NotificationDestination>(
+        db.notificationDestinations.filter((row) => row.project_id === params.projectId),
+        query,
+      ),
+  },
+  {
+    method: 'POST',
+    pattern: '/v1/projects/:projectId/notification-destinations',
+    handle: ({ params, body }) => {
+      charge('notifications.create');
+      const input = requireBody<{ kind: string; target: string; label?: string }>(body, [
+        'kind',
+        'target',
+      ]);
+      if (input.kind !== 'email') {
+        fail(
+          400,
+          'invalid_request',
+          "Only 'email' destinations can be created today. A Slack destination needs an app installed in your workspace, which is not built yet.",
+        );
+      }
+      const target = String(input.target).trim().toLowerCase();
+      if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(target)) {
+        fail(400, 'invalid_request', `'${input.target}' is not a valid email address.`);
+      }
+      const taken = db.notificationDestinations.some(
+        (row) => row.project_id === params.projectId && row.target === target,
+      );
+      if (taken) {
+        fail(
+          409,
+          'conflict',
+          `${target} is already a destination for this project. One address cannot be added twice — it would receive everything twice.`,
+        );
+      }
+
+      const created: NotificationDestination = {
+        id: `ntd_01JQNEW${db.notificationDestinations.length + 1}`,
+        project_id: params.projectId,
+        kind: 'email',
+        target,
+        label: input.label?.trim() || target,
+        // Created PENDING. The row exists before the message is sent and a send
+        // failure does not roll it back: a pending destination with a Resend
+        // button is a better place to be than a form you fill in again.
+        status: 'pending',
+        events: ['endpoint.stopped', 'event.stuck', 'secret.retiring', 'delivery.exhausted'],
+        confirmed_at: null,
+        last_sent_at: null,
+        last_error: null,
+        created_at: new Date().toISOString(),
+      };
+      db.notificationDestinations.push(created);
+      return created;
+    },
+  },
+  {
+    method: 'PATCH',
+    pattern: '/v1/projects/:projectId/notification-destinations/:destinationId',
+    handle: ({ params, body }) => {
+      const row = destinationOr404(params.projectId, params.destinationId);
+      const input = (typeof body === 'object' && body !== null ? body : {}) as Record<
+        string,
+        unknown
+      >;
+      if (Array.isArray(input.events)) row.events = input.events.map(String);
+      if (typeof input.label === 'string') row.label = input.label;
+      return row;
+    },
+  },
+  {
+    method: 'DELETE',
+    pattern: '/v1/projects/:projectId/notification-destinations/:destinationId',
+    handle: ({ params }) => {
+      const row = destinationOr404(params.projectId, params.destinationId);
+      db.notificationDestinations.splice(db.notificationDestinations.indexOf(row), 1);
+      return undefined;
+    },
+  },
+  {
+    method: 'POST',
+    pattern: '/v1/projects/:projectId/notification-destinations/:destinationId/resend',
+    handle: ({ params }) => {
+      const row = destinationOr404(params.projectId, params.destinationId);
+      if (row.status === 'confirmed') {
+        fail(409, 'conflict', 'This address is already confirmed. Nothing to send.');
+      }
+      return row;
+    },
+  },
+  {
+    method: 'POST',
+    pattern: '/v1/projects/:projectId/notification-destinations/:destinationId/test',
+    handle: ({ params }) => {
+      const row = destinationOr404(params.projectId, params.destinationId);
+      if (row.status !== 'confirmed') {
+        fail(
+          409,
+          'conflict',
+          'This address has not been confirmed yet, so nothing can be sent to it.',
+        );
+      }
+      row.last_sent_at = new Date().toISOString();
+      return undefined;
     },
   },
 

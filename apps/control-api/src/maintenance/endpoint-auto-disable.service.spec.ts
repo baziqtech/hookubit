@@ -13,15 +13,45 @@ function hoursAgo(hours: number): Date {
   return new Date(NOW.getTime() - hours * 3_600_000);
 }
 
+/**
+ * A dispatcher that records rather than sends.
+ *
+ * The sweep's job is stopping a dead endpoint accruing rows; telling somebody
+ * is the other half and must never be able to fail the first half. These tests
+ * assert that the disable happens and, separately, that the alert was raised —
+ * so a change that made the two share a fate would fail here.
+ */
+class RecordingDispatcher {
+  readonly alerts: Array<{ projectId: string; subject: string }> = [];
+  /** Set to make every alert throw, proving the sweep survives it. */
+  broken = false;
+
+  async alert(input: { projectId: string; subject: string }) {
+    if (this.broken) throw new Error('smtp is down');
+    this.alerts.push({ projectId: input.projectId, subject: input.subject });
+    return { considered: 1, sent: 1, grouped: 0, held: 0, failed: 0 };
+  }
+}
+
 interface World {
   db: FakeMaintenancePrisma;
   service: EndpointAutoDisableService;
+  alerts: RecordingDispatcher;
 }
 
 function world(): World {
   const db = new FakeMaintenancePrisma();
   db.seedProject('proj_a', 'org_a');
-  return { db, service: new EndpointAutoDisableService(db.asPrisma(), new AuditService(db.asPrisma())) };
+  const alerts = new RecordingDispatcher();
+  return {
+    db,
+    alerts,
+    service: new EndpointAutoDisableService(
+      db.asPrisma(),
+      new AuditService(db.asPrisma()),
+      alerts as unknown as ConstructorParameters<typeof EndpointAutoDisableService>[2],
+    ),
+  };
 }
 
 /** An endpoint whose breaker has been open for `hours`. */
@@ -233,5 +263,38 @@ describe('EndpointAutoDisableService', () => {
     expect(report).toMatchObject({ skipped: false, considered: 0, disabled: 0 });
     expect(db.transactions).toBe(0);
     expect(db.endpoints.get('ep_dead')).toMatchObject({ status: 'active', enabled: true });
+  });
+});
+
+/**
+ * The alert is the other half of the job, and it must never be able to take
+ * the first half down with it.
+ */
+describe('auto-disable raises an alert', () => {
+  it('tells somebody, naming the endpoint in the deduplication subject', async () => {
+    const { db, service, alerts } = world();
+    dark(db, 'ep_dead', 100);
+
+    await service.sweep(OPTIONS, NOW);
+    // Fired without being awaited into the transaction, so let the microtask
+    // that sends it run.
+    await Promise.resolve();
+
+    expect(alerts.alerts).toEqual([{ projectId: 'proj_a', subject: 'endpoint:ep_dead:stopped' }]);
+  });
+
+  it('disables the endpoint even when the alert throws', async () => {
+    // An SMTP outage must not stop endpoints being disabled. That would be the
+    // tail wagging the dog: the disable is what stops a dead endpoint accruing
+    // a delivery row per matching event, for ever.
+    const { db, service, alerts } = world();
+    alerts.broken = true;
+    dark(db, 'ep_dead', 100);
+
+    const report = await service.sweep(OPTIONS, NOW);
+    await Promise.resolve();
+
+    expect(report.disabled).toBe(1);
+    expect(db.endpoints.get('ep_dead')).toMatchObject({ status: 'disabled' });
   });
 });

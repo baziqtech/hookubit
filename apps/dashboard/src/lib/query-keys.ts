@@ -61,6 +61,8 @@ export const queryKeys = {
   analyticsRoot: (projectId: string) => ['project', projectId, 'analytics'] as const,
   analyticsDeliveries: (projectId: string, windowHours: number) =>
     ['project', projectId, 'analytics', 'deliveries', { windowHours }] as const,
+  notificationDestinations: (projectId: string) =>
+    ['project', projectId, 'notification-destinations'] as const,
   analyticsSeries: (projectId: string, windowHours: number, bucket: string | undefined) =>
     ['project', projectId, 'analytics', 'deliveries', 'series', { windowHours, bucket }] as const,
   analyticsEndpoints: (projectId: string, windowHours: number, limit: number) =>

@@ -11,6 +11,8 @@ import { DeliveryDetailPage } from '../features/deliveries/DeliveryDetailPage';
 import { OutboxPage } from '../features/outbox/OutboxPage';
 import { EndpointDetailPage } from '../features/endpoints/EndpointDetailPage';
 import { EndpointsPage } from '../features/endpoints/EndpointsPage';
+import { ConfirmNotificationsPage } from '../features/notifications/ConfirmNotificationsPage';
+import { NotificationsPage } from '../features/notifications/NotificationsPage';
 import { EventDetailPage } from '../features/events/EventDetailPage';
 import { EventsPage } from '../features/events/EventsPage';
 import { GetStartedPage } from '../features/onboarding/GetStartedPage';
@@ -52,6 +54,11 @@ export const router = createBrowserRouter([
       // and the page itself decides whether to redeem or to send them to sign in
       // with the token kept.
       { path: '/accept-invitation', element: <AcceptInvitationPage /> },
+      // Where a notification-confirmation link lands. Outside RequireSession
+      // deliberately: the person who can read a group address is very often
+      // not a member of the organization that added it, and that is the whole
+      // point of using one.
+      { path: '/confirm-notifications', element: <ConfirmNotificationsPage /> },
     ],
   },
   {
@@ -87,6 +94,7 @@ export const router = createBrowserRouter([
               { path: 'policies', element: <PoliciesPage /> },
               { path: 'api-keys', element: <ApiKeysPage /> },
               { path: 'analytics', element: <AnalyticsPage /> },
+              { path: 'notifications', element: <NotificationsPage /> },
               { path: 'settings', element: <ProjectSettingsPage /> },
             ],
           },

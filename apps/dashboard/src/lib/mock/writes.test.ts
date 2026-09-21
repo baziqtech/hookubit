@@ -1,5 +1,11 @@
 import { beforeEach, describe, expect, it } from 'vitest';
-import type { Endpoint, Organization, Project, Subscription } from '../../types/api';
+import type {
+  Endpoint,
+  NotificationDestination,
+  Organization,
+  Project,
+  Subscription,
+} from '../../types/api';
 import * as db from './data';
 import { MockHttpError, mockRequest, resetMockState } from './server';
 
@@ -514,5 +520,65 @@ describe('project allowed_ips — a deny-by-default control', () => {
     await mockRequest('PATCH', PATCH, { allowed_ips: ['203.0.113.4', ' ', '203.0.113.4'] });
     const project = await mockRequest<Project>('GET', `/v1/organizations/${ORG}/projects/${PROJECT}`);
     expect(project.allowed_ips).toEqual(['203.0.113.4']);
+  });
+});
+
+/**
+ * Notification destinations.
+ *
+ * `pending` is the state the UI is built around, so the tests are about a
+ * destination existing and receiving nothing until somebody confirms it.
+ */
+describe('notification destinations — silent until somebody says yes', () => {
+  const PATH = `/v1/projects/${PROJECT}/notification-destinations`;
+
+  it('is created PENDING, so it receives nothing yet', async () => {
+    const created = await mockRequest<NotificationDestination>('POST', PATH, {
+      kind: 'email',
+      target: 'New-OnCall@Example.com',
+    });
+    expect(created.status).toBe('pending');
+    expect(created.confirmed_at).toBeNull();
+    // Lower-cased on the way in, so the same mailbox cannot be added twice
+    // under two spellings and receive everything twice.
+    expect(created.target).toBe('new-oncall@example.com');
+  });
+
+  it('refuses the same address twice', async () => {
+    await mockRequest('POST', PATH, { kind: 'email', target: 'dup@example.com' });
+    await expect(
+      mockRequest('POST', PATH, { kind: 'email', target: 'dup@example.com' }),
+    ).rejects.toMatchObject({ status: 409 });
+  });
+
+  it('refuses Slack with a reason rather than creating a row nothing can reach', async () => {
+    await expect(
+      mockRequest('POST', PATH, { kind: 'slack', target: '#payments' }),
+    ).rejects.toMatchObject({ status: 400 });
+  });
+
+  it('refuses to test an unconfirmed address', async () => {
+    const created = await mockRequest<NotificationDestination>('POST', PATH, {
+      kind: 'email',
+      target: 'untested@example.com',
+    });
+    await expect(
+      mockRequest('POST', `${PATH}/${created.id}/test`, {}),
+    ).rejects.toMatchObject({ status: 409 });
+  });
+
+  it('mutes by emptying the event list, which keeps the confirmation', async () => {
+    // The expensive part of a destination is that somebody read the mailbox and
+    // clicked a link. Deleting to mute throws that away.
+    const confirmed = db.notificationDestinations.find((row) => row.status === 'confirmed');
+    expect(confirmed).toBeDefined();
+
+    const muted = await mockRequest<NotificationDestination>(
+      'PATCH',
+      `${PATH}/${confirmed!.id}`,
+      { events: [] },
+    );
+    expect(muted.events).toEqual([]);
+    expect(muted.status).toBe('confirmed');
   });
 });

@@ -20,6 +20,7 @@ import { MembersModule } from './members/members.module';
 import { OrganizationsModule } from './organizations/organizations.module';
 import { OutboxModule } from './outbox/outbox.module';
 import { ProjectsModule } from './projects/projects.module';
+import { NotificationDestinationsModule } from './notification-destinations/notification-destinations.module';
 import { RateLimitsModule } from './rate-limits/rate-limits.module';
 import { RetryPoliciesModule } from './retry-policies/retry-policies.module';
 import { traceLogFields } from './tracing/log-correlation';
@@ -94,6 +95,7 @@ import { WebhookSubscriptionsModule } from './webhook-subscriptions/webhook-subs
     WebhookSubscriptionsModule,
     RetryPoliciesModule,
     RateLimitsModule,
+    NotificationDestinationsModule,
     // The operator surface. ARCHITECTURE.md is blunt that this is what people
     // pay for: answering "what happened to this event?" without reaching for
     // psql. It reads the rows the Go router and worker write.
