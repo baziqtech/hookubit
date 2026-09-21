@@ -4,8 +4,10 @@ import { queryKeys } from '../../lib/query-keys';
 import type {
   AttemptLatency,
   DeliveryOutcomes,
+  DeliverySeries,
   EventVolume,
   FailingEndpoints,
+  SeriesBucketUnit,
 } from '../../types/api';
 import { DEFAULT_ANALYTICS_LIMIT, DEFAULT_WINDOW_HOURS } from '../../types/api';
 
@@ -55,6 +57,43 @@ export function deliveryOutcomesQuery(projectId: string, windowHours = DEFAULT_W
 
 export function useDeliveryOutcomes(projectId: string, windowHours = DEFAULT_WINDOW_HOURS) {
   return useQuery(deliveryOutcomesQuery(projectId, windowHours));
+}
+
+/**
+ * The same window, cut into buckets, for the chart.
+ *
+ * Its own hook and its own key because it is the dearest route in the module —
+ * two grouped counts per bucket, up to 64 statements — and it is throttled at
+ * half the budget of its neighbours. Sharing a key with `deliveryOutcomes`
+ * would make the four cheap summary tiles wait for it.
+ *
+ * `bucket` is optional and usually omitted: the API picks the finest width that
+ * fits the window. Pass one when the chart's bars have to be NAMED — `1d` over
+ * a week is seven bars labelled Mon to Sun, where the default `6h` would be
+ * twenty-eight unlabelled ones.
+ */
+export function deliverySeriesQuery(
+  projectId: string,
+  windowHours = DEFAULT_WINDOW_HOURS,
+  bucket?: SeriesBucketUnit,
+) {
+  return queryOptions({
+    queryKey: queryKeys.analyticsSeries(projectId, windowHours, bucket),
+    queryFn: () =>
+      api.get<DeliverySeries>(
+        `${base(projectId)}/deliveries/series${queryString({ window_hours: windowHours, bucket })}`,
+      ),
+    enabled: Boolean(projectId),
+    staleTime: ANALYTICS_STALE_MS,
+  });
+}
+
+export function useDeliverySeries(
+  projectId: string,
+  windowHours = DEFAULT_WINDOW_HOURS,
+  bucket?: SeriesBucketUnit,
+) {
+  return useQuery(deliverySeriesQuery(projectId, windowHours, bucket));
 }
 
 /**

@@ -632,6 +632,32 @@ export type AttemptLatency = S['AttemptLatencyDto'];
 export type EventTypeCount = S['EventTypeCountDto'];
 export type EventVolume = S['EventVolumeDto'];
 
+/**
+ * One bar.
+ *
+ * The three drawn counts are DISJOINT and therefore stackable: a delivery that
+ * succeeded on its third attempt is `delivered_after_retry` and is NOT also
+ * `delivered_first_try`. Adding `delivered_first_try` to a separate "delivered"
+ * total would double it.
+ *
+ * `in_flight` is why the newest bar is allowed to look short — it is work
+ * created in that bucket that has not finished. Draw it or not, but do not
+ * leave it out of the bar's total, or the current hour reads as a collapse in
+ * traffic every time the page is opened.
+ */
+export type SeriesBucket = S['SeriesBucketDto'];
+
+/**
+ * `leading_partial` is true when the OLDEST bucket begins before the window
+ * did, which happens whenever the clock is not on a bucket boundary — i.e.
+ * almost always. Say so on the chart, or that bar looks like a dip that moves
+ * every minute.
+ */
+export type DeliverySeries = S['DeliverySeriesDto'];
+
+/** Bucket widths the API accepts. The finest that fits is chosen when omitted. */
+export type SeriesBucketUnit = '5m' | '15m' | '30m' | '1h' | '2h' | '3h' | '6h' | '12h' | '1d';
+
 /** `@Max(720)` on `window_hours` — 30 days, and the longest window the UI offers. */
 export const MAX_WINDOW_HOURS = 720;
 export const DEFAULT_WINDOW_HOURS = 24;

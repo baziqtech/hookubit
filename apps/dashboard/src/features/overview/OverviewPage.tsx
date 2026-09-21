@@ -13,17 +13,28 @@ import {
 import { formatCount, formatDuration, formatPercent, formatRelativeTime, truncateId } from '../../lib/format';
 import { deliveryOutcome, describeDelivery } from '../../lib/delivery-status';
 import type { Delivery, Endpoint, FailingEndpoint } from '../../types/api';
-import { DEFAULT_WINDOW_HOURS } from '../../types/api';
-import { useAttemptLatency, useDeliveryOutcomes, useFailingEndpoints } from '../analytics/api';
+
+import {
+  useAttemptLatency,
+  useDeliveryOutcomes,
+  useDeliverySeries,
+  useFailingEndpoints,
+} from '../analytics/api';
+import { OutcomeChart, OutcomeLegend } from '../analytics/OutcomeChart';
+import { OutcomeSplit } from '../analytics/OutcomeSplit';
+import { WindowSelector, useAnalyticsWindow } from '../analytics/WindowSelector';
 import { formatNullableDuration, formatRate, formatRateDelta, rateTone } from '../analytics/derive';
 import { ErrorTile, TileSkeletons } from '../analytics/tiles';
 import { useDeliveries } from '../deliveries/api';
 import { useEndpoints } from '../endpoints/api';
 import { StuckEventsNotice } from '../outbox/StuckEventsNotice';
+import { useOutboxEntries } from '../outbox/api';
+import { stuckEventsState } from '../outbox/stuck-summary';
 import { useSetupState } from '../onboarding/api';
 import { isSetupComplete, setupHeadline } from '../onboarding/setup';
 import { SetupChecklist } from '../onboarding/SetupChecklist';
 import type { SetupStep } from '../onboarding/setup';
+import type { AnalyticsWindowChoice } from '../analytics/window';
 
 /**
  * The 2am page — once there is something to be at 2am about.
@@ -37,6 +48,7 @@ import type { SetupStep } from '../onboarding/setup';
 export function OverviewPage() {
   const { orgId = '', projectId = '' } = useParams();
   const setup = useSetupState(orgId, projectId);
+  const { key: windowKey, window, setKey: setWindow } = useAnalyticsWindow();
 
   const ready = setup.isPending || setup.isError || isSetupComplete(setup.steps);
 
@@ -50,10 +62,15 @@ export function OverviewPage() {
             : 'This project cannot deliver a webhook yet. Here is what is left.'
         }
         actions={
-          !ready && (
+          ready ? (
+            <WindowSelector value={windowKey} onChange={setWindow} />
+          ) : (
+            // While setup is incomplete there is nothing to window: every
+            // period would read the same empty. The one control that helps is
+            // the one that finishes the setup.
             <Link to={`/orgs/${orgId}/projects/${projectId}/get-started`}>
               <Button variant="primary" size="sm">
-                Open Get started
+                Open setup checklist
               </Button>
             </Link>
           )
@@ -62,7 +79,7 @@ export function OverviewPage() {
 
       {!ready && <FirstRun orgId={orgId} projectId={projectId} steps={setup.steps} />}
 
-      {ready && <Health orgId={orgId} projectId={projectId} />}
+      {ready && <Health orgId={orgId} projectId={projectId} window={window} />}
     </div>
   );
 }
@@ -122,16 +139,31 @@ function FirstRun({
  * `analytics/latency` for p95. They render as they land — the controller
  * split them precisely so the cheapest tile never waits for the dearest query
  * — and each fails alone, with its own request id, rather than blanking the
- * row. The window is the API default (24h); the Analytics page is where the
+ * row. The window is whichever the page header selects; Analytics is where the
  * window is a choice.
  */
-function Health({ orgId, projectId }: { orgId: string; projectId: string }) {
-  const outcomes = useDeliveryOutcomes(projectId, DEFAULT_WINDOW_HOURS);
-  const latency = useAttemptLatency(projectId, DEFAULT_WINDOW_HOURS);
-  const ranking = useFailingEndpoints(projectId, DEFAULT_WINDOW_HOURS, 5);
+function Health({
+  orgId,
+  projectId,
+  window,
+}: {
+  orgId: string;
+  projectId: string;
+  window: AnalyticsWindowChoice;
+}) {
+  const outcomes = useDeliveryOutcomes(projectId, window.hours);
+  const series = useDeliverySeries(projectId, window.hours, window.bucket);
+  const latency = useAttemptLatency(projectId, window.hours);
+  const ranking = useFailingEndpoints(projectId, window.hours, 5);
   const endpoints = useEndpoints(projectId);
   const failing = useDeliveries(projectId, { status: 'exhausted' });
   const base = `/orgs/${orgId}/projects/${projectId}`;
+
+  // Already fetched by `StuckEventsNotice` under the same key, so this is a
+  // cache read rather than a second request.
+  const parked = useOutboxEntries(projectId, { status: 'failed' }, 0);
+  const stuck = stuckEventsState(parked.data, parked.isError);
+  const stuckCount = stuck.kind === 'stuck' ? stuck.count : 0;
 
   return (
     <>
@@ -145,11 +177,16 @@ function Health({ orgId, projectId }: { orgId: string; projectId: string }) {
       <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-5">
         {outcomes.isPending ? (
           <TileSkeletons
-            labels={['Success rate (24h)', 'Failing (24h)', 'Exhausted (24h)', 'In flight']}
+            labels={[
+              `Success rate (${window.key})`,
+              `Failing (${window.key})`,
+              `Exhausted (${window.key})`,
+              'In flight',
+            ]}
           />
         ) : outcomes.isError ? (
           <ErrorTile
-            label="Delivery outcomes (24h)"
+            label={`Delivery outcomes (${window.key})`}
             error={outcomes.error}
             onRetry={() => void outcomes.refetch()}
             className="sm:col-span-2 xl:col-span-4"
@@ -163,23 +200,23 @@ function Health({ orgId, projectId }: { orgId: string; projectId: string }) {
               settled, because a change from "unknown" is not a change.
             */}
             <Stat
-              label="Success rate (24h)"
+              label={`Success rate (${window.key})`}
               value={formatRate(outcomes.data.current.success_rate)}
               tone={rateTone(outcomes.data.current.success_rate)}
               hint={
                 outcomes.data.current.success_rate === null
-                  ? 'No delivery settled in the last 24 hours'
-                  : `${formatRateDelta(outcomes.data.success_rate_delta)} vs the 24 hours before · ${formatCount(outcomes.data.current.total)} deliveries created`
+                  ? `No delivery settled in the ${window.label.toLowerCase()}`
+                  : `${formatRateDelta(outcomes.data.success_rate_delta)} vs ${window.previous} · ${formatCount(outcomes.data.current.total)} deliveries created`
               }
             />
             <Stat
-              label="Failing (24h)"
+              label={`Failing (${window.key})`}
               value={formatCount(outcomes.data.current.failing)}
               tone={outcomes.data.current.failing > 0 ? 'danger' : 'default'}
               hint={`${formatCount(outcomes.data.current.by_status.failed)} failed with retries left · ${formatCount(outcomes.data.current.exhausted)} exhausted`}
             />
             <Stat
-              label="Exhausted (24h)"
+              label={`Exhausted (${window.key})`}
               value={formatCount(outcomes.data.current.exhausted)}
               tone={outcomes.data.current.exhausted > 0 ? 'danger' : 'default'}
               hint="Gave up; will not retry without a replay"
@@ -194,20 +231,49 @@ function Health({ orgId, projectId }: { orgId: string; projectId: string }) {
         )}
 
         {latency.isPending ? (
-          <TileSkeletons labels={['p95 latency (24h)']} />
+          <TileSkeletons labels={[`p95 latency (${window.key})`]} />
         ) : latency.isError ? (
           <ErrorTile
-            label="p95 latency (24h)"
+            label={`p95 latency (${window.key})`}
             error={latency.error}
             onRetry={() => void latency.refetch()}
           />
         ) : (
           <Stat
-            label="p95 latency (24h)"
+            label={`p95 latency (${window.key})`}
             value={formatNullableDuration(latency.data.p95_ms, formatDuration)}
             hint={latencyCaveat(latency.data)}
           />
         )}
+      </div>
+
+      <div className="grid gap-4 xl:grid-cols-[2fr,1fr]">
+        <Panel
+          title="Delivery outcomes"
+          description={`Deliveries created in each bucket of the ${window.label.toLowerCase()}, and how they turned out.`}
+          actions={<OutcomeLegend />}
+        >
+          <Async query={series}>{(data) => <OutcomeChart series={data} />}</Async>
+        </Panel>
+
+        {/*
+          The same numbers as the chart, totalled, plus the one thing neither
+          the chart nor the success rate can see: events that never became
+          deliveries at all. A rate computed from deliveries is blind to them
+          by construction, so the panel that reports the rate is the right
+          place to say so.
+        */}
+        <Panel title="Outcome split" description={window.label}>
+          <Async query={series}>
+            {(data) => (
+              <OutcomeSplit
+                series={data}
+                stuckCount={stuckCount}
+                stuckHref={`${base}/outbox`}
+              />
+            )}
+          </Async>
+        </Panel>
       </div>
 
       <div className="grid gap-4 xl:grid-cols-2">
@@ -276,12 +342,12 @@ function Health({ orgId, projectId }: { orgId: string; projectId: string }) {
         {/*
           The panel above is about STATE — what the breaker or an operator has
           stopped. This one is about OUTCOMES — which endpoints the deliveries
-          of the last 24 hours actually failed against, from the ranking route
+          of the selected window actually failed against, from the ranking route
           that exists for exactly this question. An endpoint can be on both
           (auto-disabled because it was failing) or on either alone.
         */}
         <Panel
-          title="Failing endpoints (24h)"
+          title={`Failing endpoints (${window.key})`}
           description="Worst first by failed + exhausted. Read the rate beside the count."
           flush
           actions={
@@ -296,14 +362,14 @@ function Health({ orgId, projectId }: { orgId: string; projectId: string }) {
             empty={
               <EmptyState
                 title="No failed or exhausted deliveries"
-                description="No endpoint had a delivery end badly in the last 24 hours."
+                description={`No endpoint had a delivery end badly in the ${window.label.toLowerCase()}.`}
               />
             }
           >
             {(data) => (
               <>
                 <Table
-                  caption="Endpoints ranked by failing deliveries in the last 24 hours"
+                  caption={`Endpoints ranked by failing deliveries in the ${window.label.toLowerCase()}`}
                   columns={rankingColumns(base)}
                   rows={data.data}
                   rowKey={(row) => row.endpoint_id}
@@ -369,7 +435,7 @@ function latencyCaveat(data: {
   sample_size: number;
   sampled_deliveries: number;
 }): string {
-  if (data.sample_size === 0) return 'No measured attempts in the last 24 hours';
+  if (data.sample_size === 0) return 'No measured attempts in this window';
   const scope = `${formatCount(data.sample_size)} attempts across ${formatCount(data.sampled_deliveries)} deliveries`;
   return data.exact ? `Exact over ${scope}` : `Most recent ${scope} — a sample, not the whole day`;
 }

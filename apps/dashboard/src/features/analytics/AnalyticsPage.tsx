@@ -1,4 +1,4 @@
-import { Link, useParams, useSearchParams } from 'react-router-dom';
+import { Link, useParams } from 'react-router-dom';
 import {
   Async,
   Badge,
@@ -24,6 +24,7 @@ import { DEFAULT_ANALYTICS_LIMIT } from '../../types/api';
 import {
   useAttemptLatency,
   useDeliveryOutcomes,
+  useDeliverySeries,
   useEventVolume,
   useFailingEndpoints,
 } from './api';
@@ -38,48 +39,37 @@ import {
   share,
 } from './derive';
 import { WindowCaption } from './tiles';
-import {
-  ANALYTICS_WINDOWS,
-  DEFAULT_WINDOW_KEY,
-  parseWindowKey,
-  windowFor,
-  type AnalyticsWindowKey,
-} from './window';
+import { OutcomeChart, OutcomeLegend } from './OutcomeChart';
+import { WindowSelector, useAnalyticsWindow } from './WindowSelector';
 
 /**
- * Four questions, four routes, four panels that land independently.
+ * Five questions, five routes, five panels that land independently.
  *
- * There is NO hourly time series. `AnalyticsService` explains why: bucketing
- * needs `date_trunc`, which needs raw SQL, which is banned outside the
- * allowlist; the honest alternative it offers is every count for the window
- * AND for the immediately preceding window of equal length, with the delta.
- * So this page compares rather than charts. The bars beside each table are
- * proportions of counts the response actually carries — never a bucket this
- * page made up — and the table is the accessible equal of every bar.
+ * The chart at the top is a real time series now — `/analytics/deliveries/series`
+ * buckets the window, and `series-layout.ts` turns it into bars. Everything
+ * below it still COMPARES rather than charts: each count is reported for the
+ * window and for the immediately preceding window of equal length, with the
+ * delta, which answers "is it getting worse?" in a number rather than asking
+ * someone to eyeball a slope. The two are complements — the chart says WHEN,
+ * the deltas say WHETHER.
  *
- * The window is in the URL (`?window=24h|7d|30d`) so a link pasted into an
- * incident channel opens on the same period. Everything on the page is read
- * from a response field; the two derivations (fan-out and share-of-total) are
- * named where they appear.
+ * Every proportional bar beside a table is a share of counts the response
+ * actually carries, never a bucket this page invented, and the table is the
+ * accessible equal of every bar.
+ *
+ * The window is in the URL (`?window=1h|24h|7d|30d`) so a link pasted into an
+ * incident channel opens on the same period.
  */
 export function AnalyticsPage() {
   const { orgId = '', projectId = '' } = useParams();
-  const [searchParams, setSearchParams] = useSearchParams();
-  const windowKey = parseWindowKey(searchParams.get('window'));
-  const window = windowFor(windowKey);
+  const { key: windowKey, window, setKey: setWindow } = useAnalyticsWindow();
   const base = `/orgs/${orgId}/projects/${projectId}`;
 
+  const series = useDeliverySeries(projectId, window.hours, window.bucket);
   const outcomes = useDeliveryOutcomes(projectId, window.hours);
   const ranking = useFailingEndpoints(projectId, window.hours, DEFAULT_ANALYTICS_LIMIT);
   const latency = useAttemptLatency(projectId, window.hours);
   const events = useEventVolume(projectId, window.hours, DEFAULT_ANALYTICS_LIMIT);
-
-  const setWindow = (key: AnalyticsWindowKey) => {
-    const next = new URLSearchParams(searchParams);
-    if (key === DEFAULT_WINDOW_KEY) next.delete('window');
-    else next.set('window', key);
-    setSearchParams(next, { replace: true });
-  };
 
   return (
     <div className="flex flex-col gap-4">
@@ -88,6 +78,25 @@ export function AnalyticsPage() {
         description={`Delivery outcomes, failing endpoints, attempt latency and event volume over the ${window.label.toLowerCase()}, each beside ${window.previous}.`}
         actions={<WindowSelector value={windowKey} onChange={setWindow} />}
       />
+
+      <Panel
+        title="Delivery over time"
+        description={`Deliveries created in each bucket of the ${window.label.toLowerCase()}, and how they turned out.`}
+        actions={<OutcomeLegend />}
+      >
+        <Async
+          query={series}
+          isEmpty={(data) => data.buckets.every((row) => row.delivered_first_try + row.delivered_after_retry + row.failed + row.in_flight === 0)}
+          empty={
+            <EmptyState
+              title={`Nothing was delivered in the ${window.label.toLowerCase()}`}
+              description="A delivery exists once a published event matches a subscription. An empty chart here means no event matched one, not that something failed."
+            />
+          }
+        >
+          {(data) => <OutcomeChart series={data} height={200} />}
+        </Async>
+      </Panel>
 
       <Panel
         title="Delivery outcomes"
@@ -176,40 +185,6 @@ export function AnalyticsPage() {
           )}
         </Async>
       </Panel>
-    </div>
-  );
-}
-
-/**
- * A group of pressed/unpressed buttons rather than tabs: the panels below are
- * not tab panels, and the value is a URL parameter that survives a reload.
- */
-function WindowSelector({
-  value,
-  onChange,
-}: {
-  value: AnalyticsWindowKey;
-  onChange: (key: AnalyticsWindowKey) => void;
-}) {
-  return (
-    <div role="group" aria-label="Window" className="flex rounded-md border border-line bg-panel p-0.5">
-      {ANALYTICS_WINDOWS.map((window) => {
-        const active = window.key === value;
-        return (
-          <button
-            key={window.key}
-            type="button"
-            aria-pressed={active}
-            onClick={() => onChange(window.key)}
-            className={cn(
-              'h-6 rounded px-2.5 text-xs transition-colors',
-              active ? 'bg-raised font-medium text-ink' : 'text-ink-muted hover:text-ink',
-            )}
-          >
-            {window.key}
-          </button>
-        );
-      })}
     </div>
   );
 }

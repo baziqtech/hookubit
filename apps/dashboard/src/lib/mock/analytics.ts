@@ -15,6 +15,8 @@
  * clamp — above `MAX_WINDOW_HOURS`.
  */
 import type {
+  DeliverySeries,
+  SeriesBucket,
   AnalyticsWindow,
   AttemptLatency,
   DeliveryOutcomeSummary,
@@ -314,5 +316,113 @@ export function eventVolume(projectId: string, windowHours: number, limit: numbe
     total_delta: inWindow.length - previousTotal,
     by_type: ranked.slice(0, limit),
     has_more: ranked.length > limit,
+  };
+}
+
+/* ── The series ───────────────────────────────────────────────────────────── */
+
+/**
+ * Bucket widths, mirroring `apps/control-api/src/analytics/delivery-series.ts`.
+ * Every one divides a day, so a bucket boundary is found by flooring epoch ms.
+ */
+const BUCKET_MS: Record<string, number> = {
+  '5m': 5 * 60_000,
+  '15m': 15 * 60_000,
+  '30m': 30 * 60_000,
+  '1h': HOUR_MS,
+  '2h': 2 * HOUR_MS,
+  '3h': 3 * HOUR_MS,
+  '6h': 6 * HOUR_MS,
+  '12h': 12 * HOUR_MS,
+  '1d': 24 * HOUR_MS,
+};
+
+const MAX_BUCKETS = 32;
+
+export const BUCKET_UNITS = Object.keys(BUCKET_MS);
+
+/** The finest width whose worst-case count fits, as the service chooses it. */
+function defaultBucket(windowHours: number): string {
+  const spanMs = windowHours * HOUR_MS;
+  for (const unit of BUCKET_UNITS) {
+    if (Math.ceil(spanMs / BUCKET_MS[unit]) + 1 <= MAX_BUCKETS) return unit;
+  }
+  return '1d';
+}
+
+export type SeriesQuery =
+  | { ok: true; windowHours: number; bucket?: string }
+  | { ok: false; messages: string[] };
+
+/** `window_hours` as above, plus `bucket` against the enum. */
+export function parseSeriesQuery(query: URLSearchParams): SeriesQuery {
+  const base = parseAnalyticsQuery(query, false);
+  const messages = base.ok ? [] : [...base.messages];
+
+  const bucket = query.get('bucket') ?? undefined;
+  if (bucket !== undefined && !(bucket in BUCKET_MS)) {
+    messages.push(`bucket: must be one of the following values: ${BUCKET_UNITS.join(', ')}`);
+  }
+
+  if (messages.length > 0) return { ok: false, messages };
+  return { ok: true, windowHours: (base as { windowHours: number }).windowHours, bucket };
+}
+
+/**
+ * The bucketed series, counted from the same `deliveries` fixture as everything
+ * else here — so the bars add up to the totals `deliveryOutcomes` reports, which
+ * is the invariant the control-api tests assert against the real database.
+ *
+ * Both ends are aligned OUTWARD to bucket boundaries before counting. Deriving
+ * the count from the span and hanging it off the last bucket leaves a gap at
+ * the old end whenever the clock is not on a boundary, which silently drops
+ * deliveries. The service had that bug; its test caught it; this mirror must
+ * not reintroduce it.
+ */
+export function deliverySeries(
+  projectId: string,
+  windowHours: number,
+  bucketUnit?: string,
+): DeliverySeries {
+  const window = resolveWindow(windowHours);
+  const unit = bucketUnit ?? defaultBucket(windowHours);
+  const widthMs = BUCKET_MS[unit];
+
+  const firstStart = Math.floor(window.from / widthMs) * widthMs;
+  const lastStart = Math.floor(window.to / widthMs) * widthMs;
+  const count = (lastStart - firstStart) / widthMs + 1;
+
+  const buckets: SeriesBucket[] = [];
+  for (let index = 0; index < count; index += 1) {
+    const start = firstStart + index * widthMs;
+    const counts = statusCounts(projectId, start, start + widthMs);
+
+    // `attempt_count > 1` is what separates the two delivered bands. They must
+    // stay disjoint or the stacked bar double-counts a retried delivery.
+    let afterRetry = 0;
+    for (const delivery of db.deliveries) {
+      if (delivery.project_id !== projectId) continue;
+      if (delivery.status !== 'succeeded') continue;
+      if (!within(delivery.created_at, start, start + widthMs)) continue;
+      if ((delivery.attempt_count ?? 0) > 1) afterRetry += 1;
+    }
+
+    buckets.push({
+      start: new Date(start).toISOString(),
+      end: new Date(start + widthMs).toISOString(),
+      delivered_first_try: counts.succeeded - afterRetry,
+      delivered_after_retry: afterRetry,
+      failed: FAILING.reduce((sum, status) => sum + counts[status], 0),
+      in_flight: IN_FLIGHT.reduce((sum, status) => sum + counts[status], 0),
+      cancelled: counts.cancelled,
+    });
+  }
+
+  return {
+    window: windowDto(window),
+    bucket: unit,
+    bucket_ms: widthMs,
+    leading_partial: firstStart < window.from,
+    buckets,
   };
 }

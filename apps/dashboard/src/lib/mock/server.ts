@@ -46,7 +46,7 @@ import {
   PROJECT_SLUG_MAX_LENGTH,
 } from '../../types/api';
 import * as analytics from './analytics';
-import { parseAnalyticsQuery } from './analytics';
+import { parseAnalyticsQuery, parseSeriesQuery } from './analytics';
 import * as db from './data';
 import type { RateLimit, RateLimitScope } from '../../types/api';
 import {
@@ -2188,6 +2188,15 @@ const handlers: Handler[] = [
       const parsed = parseAnalyticsQuery(query, false);
       if (!parsed.ok) fail(400, 'invalid_request', parsed.messages);
       return analytics.deliveryOutcomes(params.projectId, parsed.windowHours);
+    },
+  },
+  {
+    method: 'GET',
+    pattern: '/v1/projects/:projectId/analytics/deliveries/series',
+    handle: ({ params, query }) => {
+      const parsed = parseSeriesQuery(query);
+      if (!parsed.ok) fail(400, 'invalid_request', parsed.messages);
+      return analytics.deliverySeries(params.projectId, parsed.windowHours, parsed.bucket);
     },
   },
   {

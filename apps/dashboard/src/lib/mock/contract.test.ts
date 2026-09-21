@@ -4,6 +4,7 @@ import type {
   AttemptLatency,
   AuditLogEntry,
   DeliveryOutcomes,
+  DeliverySeries,
   EventVolume,
   FailingEndpoints,
   CreatedApiKey,
@@ -432,13 +433,13 @@ describe('modules that were speculative and are now real', () => {
 });
 
 /**
- * The four analytics routes, computed from the ledger the list routes serve.
+ * The five analytics routes, computed from the ledger the list routes serve.
  * Shapes mirror `apps/control-api/src/analytics/dto/analytics-response.dto.ts`
  * and the arithmetic mirrors `AnalyticsService`; the one-route
  * `GET /v1/projects/:id/analytics` and `GET /v1/organizations/:id/usage` the
  * mock used to invent are gone, and the last test pins that they stay gone.
  */
-describe('analytics — four routes, not one dashboard payload', () => {
+describe('analytics — five routes, not one dashboard payload', () => {
   const EMPTY_PROJECT = 'proj_01JQPAYSTG';
   const STATUSES = [
     'pending',
@@ -488,6 +489,61 @@ describe('analytics — four routes, not one dashboard payload', () => {
     expect(body.current.total).toBe(ledger.length);
     expect(typeof body.current.success_rate).toBe('number');
     expect(body.total_delta).toBe(body.current.total - body.previous.total);
+  });
+
+  it('deliveries/series: buckets the same ledger, and the bars add up to the window', async () => {
+    const body = await mockRequest<DeliverySeries>(
+      'GET',
+      `/v1/projects/${PROJECT}/analytics/deliveries/series`,
+    );
+
+    expect(body.bucket).toBe('1h');
+    expect(body.bucket_ms).toBe(3_600_000);
+    expect(body.buckets.length).toBeGreaterThan(0);
+    expect(body.buckets.length).toBeLessThanOrEqual(32);
+
+    // Contiguous: no gap a delivery could fall into, no overlap it could be
+    // counted twice in.
+    for (let index = 1; index < body.buckets.length; index += 1) {
+      expect(body.buckets[index].start).toBe(body.buckets[index - 1].end);
+    }
+
+    // The invariant the control-api tests assert against the real database:
+    // the bars, added up, are the rows the window reports.
+    const outcomes = await mockRequest<DeliveryOutcomes>(
+      'GET',
+      `/v1/projects/${PROJECT}/analytics/deliveries`,
+    );
+    const sum = (key: 'delivered_first_try' | 'delivered_after_retry' | 'failed' | 'in_flight') =>
+      body.buckets.reduce((total, bucket) => total + bucket[key], 0);
+
+    expect(sum('delivered_first_try') + sum('delivered_after_retry')).toBe(
+      outcomes.current.by_status.succeeded,
+    );
+    expect(sum('failed')).toBe(outcomes.current.failing);
+    expect(sum('in_flight')).toBe(outcomes.current.in_flight);
+  });
+
+  it('deliveries/series: the two delivered bands never overlap', async () => {
+    const body = await mockRequest<DeliverySeries>(
+      'GET',
+      `/v1/projects/${PROJECT}/analytics/deliveries/series`,
+    );
+    // A delivery that needed three attempts belongs to exactly one band. If it
+    // were in both, every stacked bar on the overview would be too tall.
+    for (const bucket of body.buckets) {
+      expect(bucket.delivered_first_try).toBeGreaterThanOrEqual(0);
+      expect(bucket.delivered_after_retry).toBeGreaterThanOrEqual(0);
+    }
+  });
+
+  it('deliveries/series: refuses a bucket outside the enum', async () => {
+    await expect(
+      mockRequest(
+        'GET',
+        `/v1/projects/${PROJECT}/analytics/deliveries/series?bucket=7m`,
+      ),
+    ).rejects.toMatchObject({ status: 400 });
   });
 
   it('deliveries: success_rate is NULL, never 0, when nothing settled', async () => {
