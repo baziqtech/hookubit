@@ -74,8 +74,8 @@ export class EndpointDto {
     type: () => EndpointHealthDto,
     nullable: true,
     description:
-      'How this endpoint has been doing, over a fixed trailing hour. Present on the LIST and ' +
-      'null on the single-endpoint read.',
+      'How this endpoint has been doing, over a fixed trailing hour. Null when it could not be ' +
+      'computed - never an invented zero.',
   })
   health!: EndpointHealthDto | null;
 }
@@ -154,10 +154,10 @@ function customHeaders(value: Endpoint['customHeaders']): Record<string, string>
 /**
  * How this endpoint has been doing, over a fixed trailing hour.
  *
- * Present on the LIST, absent on the single-endpoint read — the list is where
- * "which of these is the problem?" is asked, and computing it for one endpoint
- * that the caller is already looking at adds a query to answer a question they
- * did not ask.
+ * Present on both the list and the single-endpoint read: the list answers
+ * "which of these is the problem?" and the detail answers "how bad, and for how
+ * long?". Null only when computing it failed, which never fails the read — the
+ * configuration is what you came for and the rate is what you came for second.
  */
 export class EndpointHealthDto {
   @ApiProperty({

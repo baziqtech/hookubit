@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { useParams } from 'react-router-dom';
+import { Link, useParams } from 'react-router-dom';
 import {
   Async,
   Badge,
@@ -332,7 +332,13 @@ function buildColumns(
       header: 'Endpoint',
       render: (row) => (
         <span className="flex flex-col">
-          <span className="text-xs font-medium text-ink">{row.name}</span>
+          <Link
+            to={`endpoints/${row.id}`}
+            relative="path"
+            className="text-xs font-medium text-ink hover:underline"
+          >
+            {row.name}
+          </Link>
           <span className="font-mono text-2xs text-ink-subtle">{row.url}</span>
           {row.disabled_reason && (
             <span className="mt-0.5 text-2xs text-danger">{row.disabled_reason}</span>

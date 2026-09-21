@@ -9,6 +9,7 @@ import { VerifyEmailPage } from '../features/auth/VerifyEmailPage';
 import { DeliveriesPage } from '../features/deliveries/DeliveriesPage';
 import { DeliveryDetailPage } from '../features/deliveries/DeliveryDetailPage';
 import { OutboxPage } from '../features/outbox/OutboxPage';
+import { EndpointDetailPage } from '../features/endpoints/EndpointDetailPage';
 import { EndpointsPage } from '../features/endpoints/EndpointsPage';
 import { EventDetailPage } from '../features/events/EventDetailPage';
 import { EventsPage } from '../features/events/EventsPage';
@@ -81,6 +82,7 @@ export const router = createBrowserRouter([
               { path: 'deliveries/:deliveryId', element: <DeliveryDetailPage /> },
               { path: 'outbox', element: <OutboxPage /> },
               { path: 'endpoints', element: <EndpointsPage /> },
+              { path: 'endpoints/:endpointId', element: <EndpointDetailPage /> },
               { path: 'subscriptions', element: <SubscriptionsPage /> },
               { path: 'policies', element: <PoliciesPage /> },
               { path: 'api-keys', element: <ApiKeysPage /> },

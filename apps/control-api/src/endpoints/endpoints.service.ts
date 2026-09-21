@@ -157,7 +157,17 @@ export class EndpointsService {
    */
   async get(context: RequestContext, endpointId: string): Promise<EndpointDto> {
     const endpoint = await this.require(this.scopes.for(context), endpointId);
-    return toEndpointDto(endpoint, await this.secrets.hasLiveSecret(context, endpointId));
+
+    const [hasLiveSecret, health] = await Promise.all([
+      this.secrets.hasLiveSecret(context, endpointId),
+      // Same degradation as the list: an endpoint whose health cannot be
+      // computed still shows its configuration. This route is how you find the
+      // URL behind a delivery in the ledger, and it must answer that when the
+      // delivery tables are unhappy.
+      this.health.summarise(context, [endpointId]).catch(() => new Map()),
+    ]);
+
+    return toEndpointDto(endpoint, hasLiveSecret, health.get(endpointId));
   }
 
   /**
