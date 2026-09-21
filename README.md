@@ -31,7 +31,7 @@ Runs as hosted SaaS or as a self-hosted Docker/Kubernetes deployment against
 | [docs/FAILURE_RECOVERY.md](docs/FAILURE_RECOVERY.md) | Every one of ARCHITECTURE.md's twenty failure scenarios: what breaks, what recovers it, what is still open. Written for 2am. |
 | [docs/LOAD_TESTING.md](docs/LOAD_TESTING.md) | The k6 suite, what each scenario proves, and the two that fail on purpose. |
 | [docs/BACKUP_RESTORE.md](docs/BACKUP_RESTORE.md) | What to back up, the two traps a restore hits, and the destroy-and-recreate proof. |
-| [docs/DESIGN_GAP_AND_SPECS.md](docs/DESIGN_GAP_AND_SPECS.md) | The pen.dev design's 71 screens against what is built: the brand change to make first, what the API already supports, eleven specs for what it does not, and what the product does that the design forgot. |
+| [docs/DESIGN_GAP_AND_SPECS.md](docs/DESIGN_GAP_AND_SPECS.md) | The pen.dev design's 71 screens against what is built — now mostly a record of what landed, the six silent bugs the tests caught on the way, and what is deliberately still open. |
 | [docs/DESIGN_BRIEF.md](docs/DESIGN_BRIEF.md) | A prompt for a design agent: every feature and state the interface must express, with no visual direction at all. Hand this over when you want a design, not a restyle. |
 | [docs/DESIGN_SYSTEM.md](docs/DESIGN_SYSTEM.md) | The interface as built — tokens, type, components, voice — and the brand decisions nobody has made yet. Written to be handed to a designer. |
 | [docs/ROADMAP.md](docs/ROADMAP.md) | Phases 1–6, all complete, and what is explicitly not now. |
@@ -78,7 +78,17 @@ above the inline limit. Containers hold nothing.
   probe, not a thundering herd.
 - **Operator surface** — the dashboard answers "what happened to this event?",
   replays a delivery or an event, shows why an event parked and requeues it,
-  and renders the trace id of any sampled attempt.
+  and renders the trace id of any sampled attempt. It reports what became of an
+  EVENT (six states rolled up from its deliveries, including `dropped` — fan-out
+  completed and matched nobody) rather than only what became of the ingest, and
+  keeps an endpoint's two facts apart: what you asked for, and what we are doing
+  about it.
+- **Alerting** — per-project email destinations for the things a person has to
+  act on, confirmed before they receive anything, grouped within half an hour,
+  and quiet between 22:00 and 07:00 except for an endpoint we stopped.
+- **Guardrails you configure** — a publish allowlist checked in the ingest path
+  *before* anything is said about the API key, so a refused address learns
+  nothing about the credential it presented.
 - **Accounts** — self-serve registration with email verification, password
   reset, team invitations, roles; all outbound mail through SMTP with a
   transport that refuses to boot in production unless configured.
@@ -88,7 +98,8 @@ above the inline limit. Containers hold nothing.
   (each stage a new root linked to its cause, not a six-hour parent).
 - **Housekeeping** — attempt detail pruned at 60 days, delivery summaries at
   90, in batches that never queue behind live traffic; large payloads offloaded
-  to object storage with an orphan sweep.
+  to object storage with an orphan sweep; hourly usage rollups, so what a
+  customer was charged for outlives the ledger it was counted from.
 
 ## Quick start
 
@@ -168,6 +179,11 @@ Phases 1–6 of [the roadmap](docs/ROADMAP.md) are complete and every line of
 ARCHITECTURE.md's definition of done has been exercised rather than argued —
 crash recovery, tenant fairness, SSRF, double-claim safety, graceful shutdown
 under load, and destroy-and-recreate against the same PostgreSQL.
+
+The dashboard has since been rebuilt against the pen.dev design —
+[docs/DESIGN_GAP_AND_SPECS.md](docs/DESIGN_GAP_AND_SPECS.md) records what
+landed and what is deliberately still open, the largest being Slack
+destinations, prices and the marketing site.
 
 One gap stays open by choice: per-endpoint isolation is a **ceiling, not a
 reservation**. It holds when `sum(max_concurrency of endpoints that can be slow)`
