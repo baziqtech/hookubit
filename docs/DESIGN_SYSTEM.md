@@ -62,33 +62,53 @@ palette anywhere in the product, and there must not be.**
 
 | Token | Light | Dark | Use |
 |---|---|---|---|
-| `canvas` | `#F6F7F9` | `#0B0D11` | The page. |
-| `panel` | `#FFFFFF` | `#12151B` | Cards, tables, form fields. |
-| `raised` | `#F1F3F6` | `#1E232C` | Hover states, disabled fields, inset strips. |
-| `nav` | `#FFFFFF` | `#0E1116` | The sidebar rail — its own surface, distinct from `panel`. |
-| `line` | `#E3E6EB` | `#232932` | Every hairline border. |
-| `line-strong` | `#CDD3DB` | `#333B47` | Hover borders, input borders, scrollbar thumb. |
-| `grid` | `#EDEFF3` | `#1C212A` | Chart gridlines. |
-| `ink` | `#0D1117` | `#E9EDF2` | Primary text. |
-| `ink-muted` | `#5C6672` | `#8B95A3` | Secondary text, labels. |
-| `ink-subtle` | `#8792A0` | `#68727F` | Tertiary — hints, timestamps, footnotes. |
-| `code` / `code-ink` | `#0E1117` / `#D6DEE8` | `#080A0D` / `#D6DEE8` | Payloads and signatures. **Dark in both themes** — a payload is a quotation from another system and reads as one when it keeps its own surface. |
+| `canvas` | `#FAFAFC` | `#0C0C0E` | The page. |
+| `panel` | `#FFFFFF` | `#161619` | Cards, tables, form fields. |
+| `raised` | `#F7F7FA` | `#1A1A1E` | Hover states, disabled fields, inset strips. |
+| `sunken` | `#F4F4F8` | `#1E1E22` | What a control sits **in**: segmented controls, inset chips. `raised` is a thing sitting **on** the page; `sunken` is a recess in it. |
+| `line` | `#E4E4EB` | `#2A2A2F` | Every hairline border. |
+| `line-strong` | `#D2D2DC` | `#3C3C42` | Hover borders, input borders, scrollbar thumb. |
+| `grid` | `#EFEFF4` | `#232327` | Chart gridlines. |
+| `ink` | `#18181E` | `#F4F4F5` | Primary text. |
+| `ink-muted` | `#53535E` | `#A8A6AA` | Secondary text, labels. |
+| `ink-subtle` | `#868694` | `#78767B` | Tertiary — hints, timestamps, footnotes. |
+| `code` / `code-ink` | `#0C0C0E` / `#D6DEE8` | `#08080A` / `#D6DEE8` | Payloads and signatures. **Dark in both themes** — a payload is a quotation from another system and reads as one when it keeps its own surface. |
 
-The palette is **cool** throughout, in both themes. It used to be warm stone in
-light and cool neutral in dark, which nobody had decided; that is resolved.
+The palette is **cool** throughout, in both themes.
+
+### The navigation's own vocabulary
+
+Seven `nav-*` tokens — `nav`, `nav-ink`, `nav-ink-muted`, `nav-line`,
+`nav-hover`, `nav-active`, `nav-section` — exist so the rail does not borrow the
+page's surfaces. Re-skinning navigation then touches seven lines in `index.css`
+and **no component**, which is the whole reason they are separate.
 
 ### Accent
 
 | Token | Light | Dark |
 |---|---|---|
-| `accent` | `#4C4DDC` | `#7E7CF5` |
-| `accent-ink` | `#FFFFFF` | `#0B0D11` |
-| `accent-soft` | `#EDEDFD` | `#1E1E3A` |
-| `accent-line` | `#C9C9F7` | `#3A3A6B` |
+| `accent` | `#6B38D4` | `#9267F2` |
+| `accent-ink` | `#FFFFFF` | `#111114` |
+| `accent-deep` | `#582DB0` | `#B8A0FA` |
+| `accent-soft` | `#F3EEFC` | `#29293F` |
+| `accent-line` | `#DCCDF7` | `#3D3560` |
 
-The accent carries: primary buttons, links, focus rings, the active nav item,
-text selection, and the product mark. It was Tailwind's factory indigo, chosen
-by nobody; it is now the design's, chosen on purpose.
+Violet, from the design's brand screen, and it comes with a rule that is worth
+repeating wherever it might be forgotten:
+
+> **Violet is for things you CLICK** — buttons, links, focus rings, the active
+> nav item. It never means a state.
+
+That is why it sits far from the blue that means in-flight. If the accent could
+also be a status, every screen would have to be read twice. The one exception is
+the wordmark, where `Bit` is set in the accent and is not clickable — stated once
+in `Wordmark.tsx` rather than left to each caller.
+
+`accent-deep` is for accent-coloured TEXT on `accent-soft`, where the button
+violet does not carry enough contrast.
+
+It was Tailwind's factory indigo, chosen by nobody; then an indigo from a stale
+copy of the design file; it is now the design's own, chosen on purpose.
 
 ### Status — the domain's colour vocabulary
 
@@ -137,22 +157,23 @@ value. The three display sizes are the design's own clusters.
 
 ### The typefaces
 
-**Inter** for the interface, **JetBrains Mono** for payloads, signatures, IDs
-and headers. Both are self-hosted through `@fontsource-variable/*` and imported
-at the top of `src/index.css` — no CDN at runtime, no third-party request on a
-page that is about to hold a session cookie.
+**Plus Jakarta Sans** for the interface, **JetBrains Mono** for payloads,
+signatures, IDs and headers. Both are self-hosted through
+`@fontsource-variable/*` and imported at the top of `src/index.css` — no CDN at
+runtime, no third-party request on a page that is about to hold a session
+cookie.
 
 ```js
-sans: ['Inter Variable', 'Inter', 'ui-sans-serif', 'system-ui', 'sans-serif']
+sans: ['Plus Jakarta Sans Variable', 'Plus Jakarta Sans', 'ui-sans-serif', 'system-ui', 'sans-serif']
 mono: ['JetBrains Mono Variable', 'ui-monospace', 'SFMono-Regular', 'Menlo', 'monospace']
 ```
 
-This was a live defect until the design landed: `Inter` was named in the config
-and **never loaded** — no `<link>`, no `@font-face`, no package — so a string
-set in Inter measured exactly as wide as the same string in a nonexistent
-family, and the product silently rendered in whatever the OS supplied. Every
-screenshot taken before this was of the system font. The fallbacks above are
-now a genuine fallback rather than what everybody actually saw.
+**A family named here and never loaded is invisible.** Nothing errors; the
+product simply renders in whatever the OS supplies. `Inter` sat in this config
+for weeks with no `<link>`, no `@font-face` and no package, so a string set in
+Inter measured exactly as wide as the same string in a nonexistent family, and
+every screenshot taken in that period was of the system font. If either name
+above changes, change the `@import` with it.
 
 Variable builds: one file per family, every weight from 100–900, so the 500 and
 600 the design leans on cost nothing extra.
@@ -336,21 +357,24 @@ That is the brief.
 
 ## 14. What branding needed to decide
 
-1. ~~**A typeface.**~~ **Answered:** Inter + JetBrains Mono, self-hosted. §4.
-2. ~~**An accent colour.**~~ **Answered:** `#4C4DDC` light / `#7E7CF5` dark. §3.
+1. ~~**A typeface.**~~ **Answered:** Plus Jakarta Sans + JetBrains Mono,
+   self-hosted. §4.
+2. ~~**An accent colour.**~~ **Answered:** violet, `#6B38D4` light / `#9267F2`
+   dark, with the rule that it is only ever for things you click. §3.
 3. ~~**Warm or cool.**~~ **Answered:** cool, in both themes. §3.
 4. ~~**A display scale.**~~ **Answered:** `title` 19 / `display` 23 / `hero` 34. §4.
-5. **Is dark the primary theme?** An operator tool used at 2am has a real claim
+5. ~~**The mark.**~~ **Answered:** a fishing hook — eye, shank, bend, barb — and
+   the single bit it has caught, in an accent square. The bit is the part that
+   makes the mark *mean* the product name rather than merely depict a hook.
+6. ~~**What the sign-in page says.**~~ **Answered:** *A call that is never lost*,
+   over *Proof of every attempt* and three rows of the delivery record. The
+   tagline belongs on outward-facing surfaces only — never inside the product
+   shell, where it would take up room and say nothing new.
+7. **Is dark the primary theme?** An operator tool used at 2am has a real claim
    to being designed dark-first. Today dark is a mechanical inversion of light.
-   The control now exists (System / Light / Dark, per device); which one it
-   *defaults* to, and which one the product is *designed for*, is unanswered.
-6. **The mark.** A fishing hook — eye, shank, bend, barb — in an accent square.
-   Still open: the `.pen` file carries no mark of its own (its wordmark reads
-   "Relay", a placeholder from another product), so nothing here supersedes it.
-7. **What the sign-in page says.** Not the layout — the claim. The candidates
-   from the product itself: *the record is the product*; *webhooks that arrive,
-   or tell you why they did not*; *proof of every attempt*. Still open: the
-   design does not answer it either.
+   The control exists (System / Light / Dark, per device); which one it
+   *defaults* to, and which one the product is *designed for*, is still
+   unanswered — and the design file does not answer it either.
 
 
 ## 15. Hard constraints on any brand
@@ -405,8 +429,14 @@ Also kept: the **HookuBit** wordmark. The design's says "Relay".
 **Where this comes from.** `apps/dashboard/tailwind.config.js`,
 `apps/dashboard/src/index.css`, `apps/dashboard/src/components/`,
 `apps/dashboard/src/lib/delivery-status.ts`, `apps/dashboard/src/features/auth/`,
-`ARCHITECTURE.md`, and `hookubit.pen` (pen.dev, 28 screens + component library)
-for everything in §3, §4 and §16. The typeface finding was measured in a running
-browser, not read from configuration — before, both families fell back; after,
-`Inter Variable` measures differently from an unknown family, which is how the
-fix was confirmed.
+`ARCHITECTURE.md`, and `~/Documents/hookubit.pen` (pen.dev, 71 screens + two
+components) for everything in §3, §4 and §16.
+
+Two health warnings about that last source. An earlier read of this document was
+made against a **stale copy** on the Desktop — 43 frames, an indigo palette and a
+"Relay" wordmark from another product — and every colour it produced was wrong.
+Check the file's size and screen count before trusting it. And the typeface
+finding was measured in a **running browser**, not read from configuration:
+before, both families fell back to the system font; after, the named family
+measures differently from an unknown one, which is how the fix was confirmed.
+Configuration cannot tell you whether a font loaded.
