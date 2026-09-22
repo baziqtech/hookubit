@@ -63,7 +63,7 @@ Authorization: Bearer wk_live_3xAmPl3S3cr3tK3yV4lu3Chars32Aa
 
 ### Sessions - people using the dashboard
 
-A browser signs in with [`POST /v1/auth/login`](./16-auth.md#post-v1-auth-login)
+A browser signs in with [`POST /v1/auth/login`](./18-auth.md#post-v1-auth-login)
 and receives an HTTP-only, `SameSite=Lax` cookie named `session`, valid for
 seven days or until `POST /v1/auth/logout`, whichever is first. The cookie is
 the credential for every control API operation; there is nothing to put in a
@@ -236,5 +236,7 @@ unit (`timeout_ms`, `overlap_seconds`).
 | [Retry policies](./09-retry-policies.md), [Rate-limit policies](./10-rate-limits.md) | You are tuning how failure and volume are handled. |
 | [Events](./11-events.md), [Deliveries](./12-deliveries.md), [Outbox](./13-outbox.md) | Something did not arrive and you need to know what happened, then replay it. |
 | [Audit log](./14-audit.md), [Analytics](./15-analytics.md) | Who changed what; which endpoints are failing; how latency looks. |
-| [Authentication](./16-auth.md) | You are building on the dashboard's own sign-in flow. Most integrators never need this page. |
+| [Billing](./16-billing.md) | Metered volume for the month to date. There are no prices in this system yet, and the response says so. |
+| [Notifications](./17-notifications.md) | Where a project sends operational alerts, and confirming an address before it receives anything. |
+| [Authentication](./18-auth.md) | You are building on the dashboard's own sign-in flow. Most integrators never need this page. |
 | [Errors](./errors.md), [Schemas](./schemas.md) | Reference: every error code; every request and response body by name. |

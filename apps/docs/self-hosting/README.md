@@ -54,8 +54,10 @@ Details, sizing and the traps for each are in [Requirements](/self-hosting/01-re
 | **Helm chart** | You run Kubernetes and want guard rails: the chart refuses to install without a database URL, the three secrets and an SMTP URL, renders NetworkPolicies by default, and carries the migration job and HPA. Recommended. | [Helm](/self-hosting/02-helm) |
 | **Raw manifests** | You run Kubernetes and your platform team owns the YAML (GitOps, Kustomize overlays, no Helm). Same workloads, same probes, same policies, nothing templated. | [Kubernetes manifests](/self-hosting/03-kubernetes-manifests) |
 | **Docker Compose** | One host, a small installation or a staging environment. Every process, no orchestration. | [Docker Compose](/self-hosting/04-docker-compose) |
+| **Bare metal** | One Ubuntu box and no appetite for containers. systemd units, the four data-plane roles in one process, an existing PostgreSQL on your network. | [Bare metal on Ubuntu](/self-hosting/09-bare-metal-ubuntu) |
 
-All three deploy the same images with the same environment variables. The
+The first three deploy the same images with the same environment variables; the
+fourth builds the same artefacts from source and sets the same keys. The
 [Configuration](/self-hosting/05-configuration) reference is the one place
 every key is listed.
 
@@ -64,7 +66,7 @@ every key is listed.
 | Order | Page | When you need it |
 |---|---|---|
 | 1 | [Requirements](/self-hosting/01-requirements) | Before provisioning anything. PostgreSQL version, sizing, what Redis and object storage do and do not do, egress rules. |
-| 2 | One of [Helm](/self-hosting/02-helm), [Kubernetes manifests](/self-hosting/03-kubernetes-manifests), [Docker Compose](/self-hosting/04-docker-compose) | The install. |
+| 2 | One of [Helm](/self-hosting/02-helm), [Kubernetes manifests](/self-hosting/03-kubernetes-manifests), [Docker Compose](/self-hosting/04-docker-compose), [Bare metal](/self-hosting/09-bare-metal-ubuntu) | The install. |
 | 3 | [Configuration](/self-hosting/05-configuration) | Every environment key, its default, which plane reads it, and the values that refuse to boot. |
 | 4 | [Mail](/self-hosting/06-mail) | Before the first operator tries to sign in. |
 | 5 | [Observability](/self-hosting/07-observability) | Before go-live: health endpoints, the alerts worth having, tracing, logs. |
