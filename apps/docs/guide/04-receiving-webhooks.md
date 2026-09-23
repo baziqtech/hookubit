@@ -26,7 +26,7 @@ The body is the **exact bytes the publisher sent** to the ingest API - the whole
 
 | Header | Value | Meaning |
 |---|---|---|
-| `Webhook-Id` | `evt_…` | The event. **Stable across every delivery of this event** - every endpoint, every retry, every replay. Deduplicate on this if you want one action per event. |
+| `Webhook-Id` | `evt_…` | The event. **Stable across every delivery of this event** - every endpoint, every retry, every replay. Deduplicate on this if you want one action per event - but see [Be idempotent](#be-idempotent), because this header is outside the signature. |
 | `Webhook-Delivery-Id` | `del_…` | This delivery: one (event, endpoint) pair and its retry chain. Stable across retries; a [replay](./07-replay.md) is a new delivery and gets a new id. |
 | `Webhook-Event-Type` | e.g. `order.created` | The event type, as published. Route on this rather than parsing the body first. |
 | `Webhook-Attempt` | `1`, `2`, … | 1-based attempt number within this delivery. `1` is the first try. |
@@ -283,6 +283,19 @@ Retries mean duplicates by design, and the platform prefers a duplicate to a los
 | `Webhook-Delivery-Id` | One action per **delivery**; a replay is a new delivery and is acted on again. | You use replay deliberately to re-run processing. |
 
 Store the id you chose with the result of processing, in the same transaction, and return `2xx` on a repeat without doing the work again.
+
+::: warning The ids above are headers, and headers are not signed
+
+The signature covers `"{timestamp}.{raw body}"` and nothing else, so `Webhook-Id` is outside it. Anyone who can replay a captured request inside your tolerance window can vary that header and slip past a uniqueness check keyed on it.
+
+If you publish the events yourself - which, if you are reading this, you probably do - **put your own event id inside the payload** and deduplicate on that instead. It is then covered by the signature, and it is the same identity your publisher already uses, so a consumer reached by two different routes recognises one event rather than two:
+
+```json
+{ "id": "01J8Z…", "event": "payment.succeeded", "occurred_at": "…", "data": { } }
+```
+
+`Webhook-Id` remains the right choice when you do not control the payload, and the window is bounded by your tolerance either way. But a dedupe key inside the signed bytes is strictly better, and costs one field.
+:::
 
 ## Custom headers
 

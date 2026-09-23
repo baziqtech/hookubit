@@ -118,6 +118,26 @@ be `/v2`, alongside. Two consequences for your code:
 - Branch on `error.code`, never on `error.message`. Codes are never removed or
   repurposed; messages are prose and may be reworded.
 
+### The one exception, before 1.0
+
+That promise holds from the first tagged release. One rename landed before it,
+and it is recorded here rather than quietly absorbed, because a promise with an
+undocumented exception is worth less than no promise.
+
+On 2026-09-23 the platform settled on one word for one thing: the component was
+already called the *router*, while what it did was called *fan-out*. Three
+published strings changed with the vocabulary:
+
+| Where | Was | Is |
+| --- | --- | --- |
+| `GET /v1/projects/:id/outbox`, each entry | `fan_out_cursor` | `routing_cursor` |
+| `409` body, `error.details.resource` | `replay_fan_out` | `replay_deliveries` |
+| `router_subscriptions_skipped_total`, label | `fan_out_cap_exceeded` | `routing_cap_exceeded` |
+| `router_events_routed_total`, label | `fan_out_continued` | `routing_continued` |
+
+If you integrated before that date, those are the four strings to change. From
+here on the rule above is absolute: a rename means `/v2`.
+
 ## Errors
 
 Every non-2xx response from either surface has the same body:
