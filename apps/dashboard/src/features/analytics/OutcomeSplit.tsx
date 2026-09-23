@@ -30,7 +30,7 @@ export function OutcomeSplit({
 }: {
   series: DeliverySeries;
   /**
-   * Events accepted and never fanned out. They have no delivery rows, so they
+   * Events accepted and never routed. They have no delivery rows, so they
    * are in NONE of the numbers here — which is exactly why the panel has to
    * mention them.
    */

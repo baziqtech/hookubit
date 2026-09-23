@@ -76,7 +76,7 @@ export class DeliveriesService {
   }
 
   /**
-   * Every delivery an event was fanned out to. "Did finance ever receive this?"
+   * Every delivery an event was routed to. "Did finance ever receive this?"
    *
    * Called by the events module for `GET /events/:id/deliveries`. The event id
    * is forced onto the predicate here rather than trusted from `event_id` in

@@ -507,7 +507,7 @@ export function RetryPolicyDialog({
           <p className="text-2xs leading-relaxed text-ink-subtle">
             Whether this policy is the project default is not on this form. Moving the default
             clears the previous one inside a single transaction, so it has its own action in the
-            table. Deliveries already fanned out keep the attempt budget stamped on their row; the
+            table. Deliveries already routed keep the attempt budget stamped on their row; the
             change applies to deliveries created from now on.
           </p>
         )}

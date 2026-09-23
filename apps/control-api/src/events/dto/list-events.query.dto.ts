@@ -55,7 +55,7 @@ export class ListEventsQueryDto {
   @ApiPropertyOptional({
     enum: EVENT_STATUSES,
     description:
-      'Ingest/fan-out state, NOT a delivery outcome. **NOT INDEX-SUPPORTED**: a filter applied ' +
+      'Ingest/routing state, NOT a delivery outcome. **NOT INDEX-SUPPORTED**: a filter applied ' +
       'to whatever the project and date predicates selected. Pair it with a date range.',
   })
   @IsOptional()

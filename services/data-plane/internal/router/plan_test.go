@@ -48,7 +48,7 @@ func endpointIDs(targets []Target) []string {
 	return out
 }
 
-func TestBuildPlanFansOutToEveryMatchingSubscription(t *testing.T) {
+func TestBuildPlanRoutesToEveryMatchingSubscription(t *testing.T) {
 	plan := BuildPlan(testEvent(), []Candidate{
 		healthy("sub_a", "ep_a", "payment.settled"),
 		healthy("sub_b", "ep_b", "payment.*"),
@@ -152,7 +152,7 @@ func TestBuildPlanEmitsOneDeliveryPerEndpoint(t *testing.T) {
 	}
 }
 
-func TestBuildPlanEnforcesFanOutCap(t *testing.T) {
+func TestBuildPlanEnforcesRoutingCap(t *testing.T) {
 	var candidates []Candidate
 	for _, id := range []string{"sub_1", "sub_2", "sub_3", "sub_4", "sub_5"} {
 		candidates = append(candidates, healthy(id, "ep_"+id))
@@ -165,8 +165,8 @@ func TestBuildPlanEnforcesFanOutCap(t *testing.T) {
 	if plan.Truncated != 2 {
 		t.Fatalf("Truncated = %d, want 2", plan.Truncated)
 	}
-	if plan.Skipped[SkipFanOutCapExceeded] != 2 {
-		t.Fatalf("fan_out_cap_exceeded = %d, want 2", plan.Skipped[SkipFanOutCapExceeded])
+	if plan.Skipped[SkipRoutingCapExceeded] != 2 {
+		t.Fatalf("routing_cap_exceeded = %d, want 2", plan.Skipped[SkipRoutingCapExceeded])
 	}
 	// Deterministic truncation: subscription ids are ULIDs, so the oldest
 	// subscriptions are the ones that keep working.

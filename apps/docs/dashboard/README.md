@@ -26,7 +26,7 @@ HookuBit has a three-level hierarchy, and it is in the URL:
 /orgs/:orgId/projects/:projectId/get-started   setup checklist and first request
 /orgs/:orgId/projects/:projectId/overview      health once setup is complete
 /orgs/:orgId/projects/:projectId/events        everything published
-/orgs/:orgId/projects/:projectId/events/:id    one event and its fan-out
+/orgs/:orgId/projects/:projectId/events/:id    one event and its routing
 /orgs/:orgId/projects/:projectId/deliveries    one row per event per endpoint
 /orgs/:orgId/projects/:projectId/deliveries/:id one delivery and its attempts
 /orgs/:orgId/projects/:projectId/outbox        what the router still owes, and what it gave up on

@@ -29,7 +29,7 @@ import {
   useFailingEndpoints,
 } from './api';
 import {
-  fanOutRatio,
+  deliveriesPerEvent,
   formatCountDelta,
   formatNullableDuration,
   formatRate,
@@ -162,7 +162,7 @@ export function AnalyticsPage() {
 
       <Panel
         title="Event volume"
-        description={`Events published in the ${window.label.toLowerCase()} — not deliveries. One event fans out to one delivery per matching subscription, so the two totals differ and their ratio is this project's fan-out.`}
+        description={`Events published in the ${window.label.toLowerCase()} — not deliveries. One event routes to one delivery per matching subscription, so the two totals differ and their ratio is this project's routing.`}
       >
         <Async
           query={events}
@@ -548,7 +548,7 @@ function Events({
   previousLabel: string;
   base: string;
 }) {
-  const ratio = fanOutRatio(deliveriesTotal, data.total);
+  const ratio = deliveriesPerEvent(deliveriesTotal, data.total);
 
   return (
     <div className="flex flex-col gap-4">
@@ -569,7 +569,7 @@ function Events({
           both are in hand and there were events; otherwise it says why.
         */}
         <Stat
-          label="Fan-out"
+          label="Routing"
           value={formatRatio(ratio)}
           hint={
             ratio !== null

@@ -441,7 +441,7 @@ UX and accessibility grounds, and it should not be "fixed" into a normal modal:
 
 - A tour that dims the page and swallows clicks teaches a new user that the
   product gets in the way. The app behind it stays fully interactive, so someone
-  reading the fan-out step can click into Deliveries and look at a real one.
+  reading the routing step can click into Deliveries and look at a real one.
 - **Trapping focus in a non-modal dialog is precisely the keyboard trap WCAG
   2.1.2 forbids.** Focus still moves in on open and returns to the invoking
   control on close, which is the part users actually need; it is simply not
@@ -704,7 +704,7 @@ paged route. The mock caps the embedded array at 5 so the flag is reachable.
 ### `EventDto` — no `delivery_counts`, and a renamed size
 
 `payload_size_bytes` → **`payload_size`**. **`delivery_counts` does not exist**;
-the "3 ok / 1 exhausted" fan-out column on the events list was invented, and
+the "3 ok / 1 exhausted" routing column on the events list was invented, and
 there is no route returning per-event counts in a list. Deriving it would mean
 one request per visible row — fifty requests to paint one page — so **the column
 is gone** and the list shows the idempotency key instead. The detail page keeps
@@ -835,7 +835,7 @@ Ordered by what costs most today.
    after 8 attempts" but not "HTTP 504", because the code is only on an attempt.
    One denormalised column would put the cause back in the list, which is where
    an operator scanning for a pattern needs it.
-3. **`delivery_counts` on `EventDto`.** Restores the fan-out column on the events
+3. **`delivery_counts` on `EventDto`.** Restores the routing column on the events
    list. Without it, "which of my events failed to reach somebody" needs one
    click per event.
 4. **`POST /v1/auth/resend-verification`** and **`onboarding_completed_at`** —

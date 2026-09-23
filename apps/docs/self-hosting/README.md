@@ -19,7 +19,7 @@ Four container images, published under `ghcr.io/shaq`:
 |---|---|---|
 | `webhook-control-api` | The control plane: REST API, authentication, organizations, projects, endpoints, subscriptions, policies, the delivery log, outbound mail. Node.js. | Availability. It is never in the delivery hot path; two replicas is for uptime, not throughput. |
 | `webhook-control-api:<version>-migrate` | The migration job. The same build with the migration tooling still present; it applies schema changes and exits. | Nothing. Run once per upgrade, explicitly. |
-| `webhook-data-plane` | The data plane. One Go binary, four roles chosen by argument: `ingest` (accepts events), `router` (fans out to delivery rows), `scheduler` (retries, retention, sweeps), `worker` (signs and sends). | Throughput. Workers are the dial. |
+| `webhook-data-plane` | The data plane. One Go binary, four roles chosen by argument: `ingest` (accepts events), `router` (routes to delivery rows), `scheduler` (retries, retention, sweeps), `worker` (signs and sends). | Throughput. Workers are the dial. |
 | `webhook-dashboard` | The operator dashboard, a static bundle served by nginx. | Nothing meaningful; it is files. |
 
 The two planes are separable on purpose. The control plane can be down and

@@ -2049,7 +2049,7 @@ Use k6 or equivalent.
 Test:
 
 - high ingestion
-- high fan-out
+- wide routing
 - slow endpoints
 - failing endpoints
 - high retry volume

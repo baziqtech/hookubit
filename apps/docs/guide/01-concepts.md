@@ -12,7 +12,7 @@ What the words mean, what HookuBit promises, and the path one event takes from y
 | **Subscription** | Binds an endpoint to a set of event-type patterns. An event is delivered to an endpoint once per enabled subscription that matches it. | Project |
 | **API key** | The credential a publisher presents to the ingest API. `wk_test_…` or `wk_live_…`, matching the project's environment. | Project |
 | **Event** | One published fact: an `event_type`, a `data` object, and optionally an `ordering_key`. Stored once, with the exact bytes you sent. | Project |
-| **Delivery** | One (event, endpoint) pair. Created by fan-out, one row per matching subscription, each with its own retry budget and its own history. | Event |
+| **Delivery** | One (event, endpoint) pair. Created by routing, one row per matching subscription, each with its own retry budget and its own history. | Event |
 | **Attempt** | One HTTP request made for a delivery, with the request headers, the response, the status, the duration and an error classification. Append-only. | Delivery |
 
 A subscription's `event_types` accepts exactly three forms, and nothing else is stored:
@@ -41,7 +41,7 @@ flowchart LR
 ```
 
 1. **Ingest.** The request is authenticated, validated and rate-limited, then the event and a row in the outbox are written in **one database transaction**. The `202 Accepted` is sent only after that commit. Nothing reaches any queue or worker before it.
-2. **Fan-out.** The router reads the outbox and matches the event against the project's enabled subscriptions as they existed when the event was accepted. It writes **one delivery row per matching subscription**. This is the materialised fan-out: one event, N deliveries, each with its own state, its own retry chain and its own attempt history.
+2. **Routing.** The router reads the outbox and matches the event against the project's enabled subscriptions as they existed when the event was accepted. It writes **one delivery row per matching subscription**. This is the materialised routing: one event, N deliveries, each with its own state, its own retry chain and its own attempt history.
 3. **Delivery.** Workers claim due deliveries, sign the payload with the endpoint's active secrets, make the HTTP request, and record the attempt. A retryable failure schedules the next attempt; a permanent one ends the delivery.
 
 Because every delivery is a row that exists *before* any request is made, the ledger is the record of what *should* have been delivered. That is what makes "did finance ever receive this?" a query rather than a guess, and it is what makes [replay](./07-replay.md) possible.
@@ -52,11 +52,11 @@ Because every delivery is a row that exists *before* any request is made, the le
 
 Every delivery is attempted until it succeeds or its retry budget is spent. When the platform must choose between a duplicate delivery and a lost one, it chooses the duplicate - a worker that crashes after your endpoint answered but before the outcome was recorded will re-send. **Your receiver must be idempotent.** Deduplicate on `Webhook-Id` (the event) or `Webhook-Delivery-Id` (the delivery); see [Receiving webhooks](./04-receiving-webhooks.md#be-idempotent).
 
-Fan-out itself is exactly-once: one event produces at most one *original* delivery per endpoint, enforced by a unique index. Duplicates come from retries and replays, never from fan-out.
+Routing itself is exactly-once: one event produces at most one *original* delivery per endpoint, enforced by a unique index. Duplicates come from retries and replays, never from routing.
 
 ### Nothing is published before COMMIT
 
-`202 Accepted` means the event is durable in the database, not that it has been delivered. If you did not receive a 202 - a timeout, a reset connection, a 5xx - nothing was accepted, and you should retry with the same `Idempotency-Key`. If you did, the event will be fanned out and delivered whether or not the ingest process survives the next millisecond.
+`202 Accepted` means the event is durable in the database, not that it has been delivered. If you did not receive a 202 - a timeout, a reset connection, a 5xx - nothing was accepted, and you should retry with the same `Idempotency-Key`. If you did, the event will be routed and delivered whether or not the ingest process survives the next millisecond.
 
 ::: warning Unordered by default
 Deliveries are made in parallel, retried independently, and may arrive in any order. `ordering_key` is accepted on publish, validated, stored on the event and carried onto every delivery - and **not yet enforced**: it does not currently serialise anything. Design the receiver to tolerate out-of-order arrival (for example, carry a version or a timestamp in `data` and ignore stale updates) rather than relying on a guarantee that is not there yet.
@@ -75,4 +75,4 @@ The full treatment is in [Retries and delivery](./05-retries-and-delivery.md).
 
 ---
 
-*Where this comes from:* `docs/API.md`; `services/data-plane/internal/ingest/errors.go` (package comment, the acceptance order); `services/data-plane/internal/router/store.go` (fan-out pinned to publish time); `docs/FAILURE_RECOVERY.md` ("Delivery guarantee, stated once"); `apps/control-api/src/webhook-subscriptions/event-type-pattern.ts`; `apps/control-api/src/events/dto/event-response.dto.ts` (`ordering_key`); `services/data-plane/internal/retry/retry.go` (`ShouldRetry`).
+*Where this comes from:* `docs/API.md`; `services/data-plane/internal/ingest/errors.go` (package comment, the acceptance order); `services/data-plane/internal/router/store.go` (routing pinned to publish time); `docs/FAILURE_RECOVERY.md` ("Delivery guarantee, stated once"); `apps/control-api/src/webhook-subscriptions/event-type-pattern.ts`; `apps/control-api/src/events/dto/event-response.dto.ts` (`ordering_key`); `services/data-plane/internal/retry/retry.go` (`ShouldRetry`).

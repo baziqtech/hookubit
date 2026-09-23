@@ -22,7 +22,7 @@ A retryable failure that has run out of budget becomes `exhausted`; a non-retrya
 
 ## The default schedule
 
-Every delivery carries a retry budget frozen onto it at fan-out from the endpoint's retry policy, or the project's default policy, or the built-in default:
+Every delivery carries a retry budget frozen onto it at routing from the endpoint's retry policy, or the project's default policy, or the built-in default:
 
 | Parameter | Built-in default |
 |---|---|
@@ -81,7 +81,7 @@ A project may hold up to 50 retry policies; each endpoint names one (`retry_poli
 
 ```mermaid
 stateDiagram-v2
-  [*] --> pending: fan-out writes the row
+  [*] --> pending: routing writes the row
   pending --> processing: a worker claims it
   scheduled --> processing: due
   retrying --> processing: due
@@ -100,7 +100,7 @@ stateDiagram-v2
 
 | State | Terminal | What it means to you |
 |---|---|---|
-| `pending` | no | Created by fan-out, not yet picked up. Due immediately. |
+| `pending` | no | Created by routing, not yet picked up. Due immediately. |
 | `scheduled` | no | Put back without an attempt - see [deferred](#deferred-not-attempted). `last_error` says why. |
 | `queued` | no | Reserved for a future queue implementation; you will not see it today. |
 | `processing` | no | A worker holds it and is making, or about to make, a request. If `locked_until` is in the past the worker died; another one will reclaim it. |
@@ -131,18 +131,18 @@ An endpoint that is failing consistently is not worth hammering. Each endpoint h
 
 ## Auto-disable
 
-A breaker that stays open is probed on the order of six times an hour, forever. Meanwhile every new event still fans out to the endpoint, each delivery is deferred behind the open breaker, and each expires 24 hours later. That is a backlog with no purpose, so:
+A breaker that stays open is probed on the order of six times an hour, forever. Meanwhile every new event still routes to the endpoint, each delivery is deferred behind the open breaker, and each expires 24 hours later. That is a backlog with no purpose, so:
 
 An endpoint whose breaker has been continuously open for **72 hours** (by default; the check runs every 15 minutes) is **automatically disabled**:
 
 - `status` becomes `disabled`, `enabled` becomes `false`;
 - `disabled_reason` is set to a sentence beginning `auto-disabled:` and `disabled_at` to the time - which is how you tell an automatic disable from one a person did (a human pause leaves `disabled_reason` null and writes the reason to the audit log);
 - an `endpoint.auto_disabled` entry is written to the organization's audit log;
-- **fan-out stops creating deliveries for it**, and any delivery still queued is `cancelled` with reason `endpoint_disabled` when a worker next picks it up;
+- **routing stops creating deliveries for it**, and any delivery still queued is `cancelled` with reason `endpoint_disabled` when a worker next picks it up;
 - replay to it is refused with `409` until it is re-enabled.
 
 ::: warning Events published while an endpoint is disabled or paused are not queued for it
-Fan-out skips a paused, disabled or deleted endpoint outright; it does not buffer. When you re-enable the endpoint, nothing published in between arrives. If you need those events, [replay](./07-replay.md) them from another endpoint's deliveries, or re-publish.
+Routing skips a paused, disabled or deleted endpoint outright; it does not buffer. When you re-enable the endpoint, nothing published in between arrives. If you need those events, [replay](./07-replay.md) them from another endpoint's deliveries, or re-publish.
 :::
 
 **Re-enabling** is the ordinary *Enable* action (`POST …/endpoints/{id}/enable`), and it requires the endpoint to have an active signing secret. It clears `disabled_reason` and `disabled_at` and **arms one probe** - it does not reset the breaker's history. The next delivery is the probe; the endpoint must then pass the half-open success count to close the breaker, and a failed probe re-opens it at the accumulated cooldown. This is deliberate: a reset would release the whole backlog at an endpoint whose recovery is, at that moment, only your assertion.
@@ -181,4 +181,4 @@ A slow endpoint holds a worker slot for up to `timeout_ms` per attempt, `max_con
 
 ---
 
-*Where this comes from:* `services/data-plane/internal/retry/retry.go` (`DefaultPolicy`, `Delay`, `ShouldRetry`, `IsRetryableNetworkError`, `Exhausted`, `DurationExhausted`); `internal/worker/state.go` (states, reasons, `Decide`, `clampRetryAfter`, `honourRetryAfter`); `internal/worker/breaker.go` (`DefaultBreakerConfig`, `Cooldown`, `NextHealth`, `Allow`); `internal/worker/deliver.go` (gate order, `deferDelivery`, `expireDelivery`, `recordHealth`, `deferBaseDelay`); `internal/worker/gate.go`; `internal/worker/store.go` (`Deliverable`); `internal/config/config.go` (`BREAKER_*`, `MAX_CONCURRENCY_*` defaults); `internal/router/plan.go` (fan-out skips paused/disabled endpoints); `apps/control-api/src/retry-policies/retry-policy-limits.ts`; `apps/control-api/src/endpoints/endpoint-limits.ts`; `apps/control-api/src/maintenance/auto-disable-policy.ts` and `endpoint-auto-disable.service.ts`; `apps/control-api/src/endpoints/endpoints.service.ts` (`enable`, `armBreakerProbe`); `docs/FAILURE_RECOVERY.md` scenarios 11, 12, 20.
+*Where this comes from:* `services/data-plane/internal/retry/retry.go` (`DefaultPolicy`, `Delay`, `ShouldRetry`, `IsRetryableNetworkError`, `Exhausted`, `DurationExhausted`); `internal/worker/state.go` (states, reasons, `Decide`, `clampRetryAfter`, `honourRetryAfter`); `internal/worker/breaker.go` (`DefaultBreakerConfig`, `Cooldown`, `NextHealth`, `Allow`); `internal/worker/deliver.go` (gate order, `deferDelivery`, `expireDelivery`, `recordHealth`, `deferBaseDelay`); `internal/worker/gate.go`; `internal/worker/store.go` (`Deliverable`); `internal/config/config.go` (`BREAKER_*`, `MAX_CONCURRENCY_*` defaults); `internal/router/plan.go` (routing skips paused/disabled endpoints); `apps/control-api/src/retry-policies/retry-policy-limits.ts`; `apps/control-api/src/endpoints/endpoint-limits.ts`; `apps/control-api/src/maintenance/auto-disable-policy.ts` and `endpoint-auto-disable.service.ts`; `apps/control-api/src/endpoints/endpoints.service.ts` (`enable`, `armBreakerProbe`); `docs/FAILURE_RECOVERY.md` scenarios 11, 12, 20.

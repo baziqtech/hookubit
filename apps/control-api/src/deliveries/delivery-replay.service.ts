@@ -4,7 +4,7 @@ import { AuditAction, RequestContext, TenantScope } from '../authz';
 import { AppError } from '../common/errors';
 import { newId } from '../common/ids';
 import { TenantTransactionRunner } from '../organizations/tenant-transaction';
-import { MAX_REPLAY_FAN_OUT } from './delivery-limits';
+import { MAX_REPLAY_DELIVERIES } from './delivery-limits';
 import { crossTenantNotFound } from './not-found';
 import { currentTraceparent } from './trace-context';
 
@@ -49,8 +49,8 @@ export interface ReplayPlan {
  *     CREATE UNIQUE INDEX deliveries_event_endpoint_original_key
  *       ON deliveries (event_id, endpoint_id) WHERE replay_of_delivery_id IS NULL;
  *
- * which is the arbiter the fan-out router names in its `ON CONFLICT` so a
- * re-run router cannot double-fan-out. It is PARTIAL precisely so replay can
+ * which is the arbiter the router names in its `ON CONFLICT` so a
+ * re-run router cannot double-routing. It is PARTIAL precisely so replay can
  * legitimately create a second row for the same `(event, endpoint)` pair. An
  * insert here that forgot `replay_of_delivery_id` would therefore collide with
  * the ORIGINAL row - and the natural "fix" for that collision is an upsert,
@@ -69,7 +69,7 @@ export interface ReplayPlan {
  *
  * ## Bounded on purpose
  *
- * `MAX_REPLAY_FAN_OUT` caps one request. See its docblock for both reasons.
+ * `MAX_REPLAY_DELIVERIES` caps one request. See its docblock for both reasons.
  */
 @Injectable()
 export class DeliveryReplayService {
@@ -98,17 +98,17 @@ export class DeliveryReplayService {
     // Captured here, before the transaction opens, so that what is stamped is
     // the request span - not whatever inner span a transaction runner or a
     // database hook may make active later - and captured once, because a
-    // fan-out of fifty replays has one cause, not fifty. Null when tracing is
+    // routing of fifty replays has one cause, not fifty. Null when tracing is
     // off or nothing is active; see currentTraceparent.
     const traceContext = currentTraceparent();
 
     return this.transactions.run(context, async (scope, audit) => {
       const { originals, action, resourceType, resourceId, metadata } = await plan(scope);
 
-      DeliveryReplayService.assertWithinFanOut(originals.length);
+      DeliveryReplayService.assertWithinReplayCap(originals.length);
 
       // Every endpoint is resolved and checked BEFORE anything is written, so a
-      // fan-out with one disabled endpoint in it fails as a whole rather than
+      // routing with one disabled endpoint in it fails as a whole rather than
       // half-replaying and then erroring. The transaction would roll the
       // inserts back anyway; doing it in this order also makes the error name
       // the endpoint that caused it rather than the first one that happened to
@@ -160,7 +160,7 @@ export class DeliveryReplayService {
    * (`deliveries.event_id`/`endpoint_id` are ON DELETE RESTRICT).
    *
    * `traceContext` is the OPERATOR'S, never the original's. The original's
-   * `trace_context` names the router span that fanned it out, weeks ago on a
+   * `trace_context` names the router span that routed it, weeks ago on a
    * request that has nothing to do with this one; copying it would attribute
    * this replay to that request. A replay is new work with a new cause
    * (migration 20260910000000 makes the same argument for why `events` carries
@@ -184,7 +184,7 @@ export class DeliveryReplayService {
       endpointId: original.endpointId,
       subscriptionId,
       // A fresh lifecycle. `pending` with `next_attempt_at = now` is exactly
-      // what the fan-out router writes, and it is what the queue's ready
+      // what the router writes, and it is what the queue's ready
       // predicate claims - see services/data-plane/internal/queue/postgres.go.
       status: 'pending',
       attemptCount: 0,
@@ -235,12 +235,12 @@ export class DeliveryReplayService {
     return endpoints;
   }
 
-  private static assertWithinFanOut(count: number): void {
-    if (count <= MAX_REPLAY_FAN_OUT) return;
+  private static assertWithinReplayCap(count: number): void {
+    if (count <= MAX_REPLAY_DELIVERIES) return;
     throw new AppError(
       'limit_exceeded',
-      `A single replay may create at most ${MAX_REPLAY_FAN_OUT} deliveries, and this one would create ${count}. Replay to one endpoint at a time.`,
-      { limit: MAX_REPLAY_FAN_OUT, current: count, resource: 'replay_fan_out' },
+      `A single replay may create at most ${MAX_REPLAY_DELIVERIES} deliveries, and this one would create ${count}. Replay to one endpoint at a time.`,
+      { limit: MAX_REPLAY_DELIVERIES, current: count, resource: 'replay_deliveries' },
     );
   }
 }

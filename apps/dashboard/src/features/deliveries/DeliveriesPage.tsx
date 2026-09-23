@@ -91,7 +91,7 @@ export function DeliveriesPage() {
       />
 
       {/*
-        An event stuck before fan-out has no rows in this list at all, so an
+        An event stuck before routing has no rows in this list at all, so an
         empty result here is indistinguishable from "never published". This is
         the only thing on the page that can tell those apart, and it renders
         nothing when there is nothing stuck.

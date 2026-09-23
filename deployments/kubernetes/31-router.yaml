@@ -1,5 +1,5 @@
 # Data plane, role `router`: drains the transactional outbox into delivery rows.
-# Safe to run more than one - fan-out inserts are keyed on
+# Safe to run more than one - routing inserts are keyed on
 # (event_id, endpoint_id), so a re-run cannot double-materialise.
 apiVersion: apps/v1
 kind: Deployment

@@ -41,7 +41,7 @@ Content-Type: application/json
 ```
 
 **`accepted` means durably persisted, not delivered.** The response returns once
-the event and its outbox row are committed; fan-out happens afterwards
+the event and its outbox row are committed; routing happens afterwards
 (ARCHITECTURE.md 16). Delivery is at-least-once and, unless you opt into
 ordering, unordered — deduplicate on the event ID.
 

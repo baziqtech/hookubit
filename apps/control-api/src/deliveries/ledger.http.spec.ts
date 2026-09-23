@@ -257,7 +257,7 @@ describe('the ledger over HTTP', () => {
       expect(res.body.error?.details).toMatchObject({ endpoint_status: 'deleted' });
     });
 
-    it('409 with structured details for a fan-out over the cap', async () => {
+    it('409 with structured details for a routing over the cap', async () => {
       const res = await call('POST', `${eventPath(LEDGER.eventWide)}/replay`, {
         as: IDS.ownerA,
         body: {},
@@ -265,7 +265,7 @@ describe('the ledger over HTTP', () => {
 
       expect(res.status).toBe(409);
       expect(res.body.error?.code).toBe('limit_exceeded');
-      expect(res.body.error?.details).toMatchObject({ resource: 'replay_fan_out' });
+      expect(res.body.error?.details).toMatchObject({ resource: 'replay_deliveries' });
     });
 
     it('rejects a reason longer than the limit rather than storing it', async () => {
@@ -308,7 +308,7 @@ describe('the ledger over HTTP', () => {
     });
 
     it('the event replay is tighter than the single-delivery replay', () => {
-      // One event replay can create up to MAX_REPLAY_FAN_OUT real HTTP calls;
+      // One event replay can create up to MAX_REPLAY_DELIVERIES real HTTP calls;
       // one delivery replay creates one.
       const perEvent = throttleOf('EventsController', 'replay');
       const perDelivery = throttleOf('DeliveriesController', 'replay');

@@ -9,7 +9,7 @@ import { HookMark, WordmarkText } from './Wordmark';
  * shape of the table this product is for, at the size it is read.
  *
  * Every row says something the prose above it cannot. One event reached three
- * endpoints, which is the fan-out. One of them is on its third attempt while
+ * endpoints, which is the routing. One of them is on its third attempt while
  * the other two are done, which is per-delivery retry. The attempt counts and
  * the durations are there because "we keep every attempt" is a claim, and a
  * claim beside evidence reads differently from a claim alone.

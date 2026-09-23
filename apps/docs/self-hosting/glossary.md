@@ -7,14 +7,14 @@ Operator vocabulary, in the sense these pages use it.
 | **Control plane** | The REST API and dashboard: organizations, projects, endpoints, subscriptions, policies, the delivery log, mail. Never in the delivery hot path; can be down without stopping deliveries. |
 | **Data plane** | The Go binary that accepts, routes, retries and sends. Four roles from one image. |
 | **Ingest** | The data-plane role that accepts `POST .../events` and writes the event durably. A `202` means stored, not delivered. The public write path, on port 8080. |
-| **Router** | The data-plane role that turns one stored event into one delivery row per matching subscription (the fan-out). |
+| **Router** | The data-plane role that turns one stored event into one delivery row per matching subscription (the routing). |
 | **Scheduler** | The singleton data-plane role that promotes due retries, sweeps the ledger (retention), sweeps orphan payloads and refreshes the queue-depth gauge. |
 | **Worker** | The data-plane role that claims delivery rows, decrypts the endpoint's signing secret, signs and sends. The throughput dial. |
 | **Event** | One published message. Stored once. |
-| **Outbox** | The table of accepted events not yet fanned out. `outbox_pending_age_seconds` is how far behind the router is. A **parked** outbox row is an event that will not fan out until an operator requeues it. |
+| **Outbox** | The table of accepted events not yet routed. `outbox_pending_age_seconds` is how far behind the router is. A **parked** outbox row is an event that will not route until an operator requeues it. |
 | **Delivery** | One row per (event, endpoint): the record of what should be delivered, written before any attempt is made. Has its own retry chain and terminal state (`succeeded`, `failed`, `exhausted`, `cancelled`). |
 | **Attempt** | One outbound HTTP call for a delivery, with request headers, response status, truncated body, duration and trace id. |
-| **Materialised fan-out** | Writing N delivery rows for an event with N matching subscriptions, rather than computing recipients at send time. What makes per-endpoint replay and "did finance ever get this" possible. |
+| **Materialised routing** | Writing N delivery rows for an event with N matching subscriptions, rather than computing recipients at send time. What makes per-endpoint replay and "did finance ever get this" possible. |
 | **Lease** | A worker's claim on a delivery, `DELIVERY_LEASE_SECONDS` long. A lapsed lease makes the row claimable by another worker; that is how a dead worker's work resumes. |
 | **Ready set** | Delivery rows due now and not leased. `queue_depth{state="ready"}` growing while attempts stay flat is the one visible sign of work that is not happening. |
 | **Head-of-line delay** | Time a ready delivery waits before being claimed. The measurement that shows tenant starvation. |

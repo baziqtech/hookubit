@@ -114,7 +114,7 @@ export function deriveSetupSteps(inputs: SetupInputs): SetupStep[] {
       id: 'event',
       title: 'First event',
       concept:
-        'You publish an event once. It fans out to one delivery per matching subscription, and each delivery retries on its own.',
+        'You publish an event once. It routes to one delivery per matching subscription, and each delivery retries on its own.',
       action: 'Publish a test event with the request below.',
       state: inputs.eventCount > 0 ? 'done' : 'todo',
       evidence: inputs.eventCount > 0 ? `${count(inputs.eventCount, 'event')} received` : undefined,

@@ -44,7 +44,7 @@ export function ParkedExplanation({
       <p className="flex flex-wrap items-center gap-x-2 gap-y-1">
         <span className="text-xs font-medium text-ink">{explanation.headline}</span>
         <Badge tone={OUTLOOK_TONE[explanation.outlook]}>{OUTLOOK_LABEL[explanation.outlook]}</Badge>
-        {explanation.partial && <Badge tone="warn">fan-out partly done</Badge>}
+        {explanation.partial && <Badge tone="warn">routing partly done</Badge>}
       </p>
 
       {!compact && (
@@ -65,7 +65,7 @@ export function ParkedExplanation({
         <p className="text-2xs leading-relaxed text-ink-subtle">
           Some endpoints already have their delivery for this event; the rest are still owed one.
           A requeue resumes from subscription{' '}
-          <code className="font-mono">{entry.fan_out_cursor}</code> rather than re-sending to
+          <code className="font-mono">{entry.routing_cursor}</code> rather than re-sending to
           endpoints it already reached.
         </p>
       )}

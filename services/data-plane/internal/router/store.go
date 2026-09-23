@@ -22,16 +22,16 @@ const OutboxTypeEventCreated = "event.created"
 // message cannot bloat the table.
 const maxErrorLength = 1000
 
-// ErrFanOutTruncated reports that BuildPlan dropped targets it was handed.
+// ErrRoutingTruncated reports that BuildPlan dropped targets it was handed.
 //
-// Under batched fan-out this is unreachable: the candidate query never returns
+// Under batched routing this is unreachable: the candidate query never returns
 // more rows than the batch size, and deduplication only ever shrinks the target
 // list, so the plan's own cap can never bite. It is checked anyway, and it
 // FAILS THE TRANSACTION rather than committing, because the alternative is the
-// bug this whole file was rewritten to remove: quietly committing a fan-out
+// bug this whole file was rewritten to remove: quietly committing a routing
 // that reached fewer endpoints than it should have. A loud release is
 // recoverable; a silent commit is not.
-var ErrFanOutTruncated = errors.New("router: fan-out plan truncated targets; refusing to commit a partial fan-out")
+var ErrRoutingTruncated = errors.New("router: routing plan truncated targets; refusing to commit a partial routing")
 
 // OutboxRow is a leased event_outbox row.
 type OutboxRow struct {
@@ -57,7 +57,7 @@ type OutboxRow struct {
 	// gives: a row whose event kills the process never reaches a failure
 	// handler, so an increment that only happened on failure would let it be
 	// reclaimed and re-run forever. But this one is DECREMENTED by any write
-	// this router commits under the lease - a recorded release, or a fan-out
+	// this router commits under the lease - a recorded release, or a routing
 	// batch that made progress.
 	//
 	// What survives is exactly "claims that ended with the router writing
@@ -66,9 +66,9 @@ type OutboxRow struct {
 	// failure and records it, no longer spends the same budget - which is what
 	// used to park an event that had already been answered with 202 Accepted.
 	UnaccountedAttempts int
-	// FanOutCursor is the subscription id the last committed batch stopped at.
-	// Empty means the fan-out has not started. See Route.
-	FanOutCursor string
+	// RoutingCursor is the subscription id the last committed batch stopped at.
+	// Empty means the routing has not started. See Route.
+	RoutingCursor string
 	// FailingSince is when this row's first RECORDED failure since the last
 	// progress happened, or nil if it is not currently failing. Recorded
 	// failures are bounded by TIME rather than by count - see the router's
@@ -79,7 +79,7 @@ type OutboxRow struct {
 	// TraceContext is the W3C `traceparent` of the INGEST request that
 	// committed this row (ARCHITECTURE.md 44). Empty for a row written with
 	// tracing off, or before the column existed; the router then starts an
-	// unlinked root, so nothing here can change what is fanned out.
+	// unlinked root, so nothing here can change what is routed.
 	TraceContext string
 }
 
@@ -89,11 +89,11 @@ type Outcome string
 const (
 	// OutcomeRouted: deliveries were materialised and everything committed.
 	OutcomeRouted Outcome = "routed"
-	// OutcomeFanOutContinued: this batch of the fan-out committed and more
+	// OutcomeRoutingContinued: this batch of the routing committed and more
 	// subscriptions remain. The event stays `processing`, the outbox row goes
 	// back to the ready set immediately with its cursor advanced, and the next
 	// claim resumes where this one stopped.
-	OutcomeFanOutContinued Outcome = "fan_out_continued"
+	OutcomeRoutingContinued Outcome = "routing_continued"
 	// OutcomeNoSubscriptions: nothing matched. A normal, committed outcome -
 	// the event is processed and the outbox row leaves the queue.
 	OutcomeNoSubscriptions Outcome = "no_subscriptions"
@@ -105,11 +105,11 @@ const (
 	OutcomeLeaseLost Outcome = "lease_lost"
 )
 
-// RouteRequest is one unit of fan-out work.
+// RouteRequest is one unit of routing work.
 type RouteRequest struct {
 	RouterID string
 	Row      OutboxRow
-	// FanOutBatch bounds ONE TRANSACTION, not one event. It is how many
+	// RoutingBatch bounds ONE TRANSACTION, not one event. It is how many
 	// subscriptions are examined and how many deliveries are created by this
 	// call; an event with more subscriptions than this takes several calls, each
 	// resuming from the cursor the previous one committed.
@@ -120,18 +120,18 @@ type RouteRequest struct {
 	// bound on the TOTAL, which silently dropped every subscription past the cap
 	// and had no recovery path, because replay is built on delivery rows and
 	// those endpoints had none.
-	FanOutBatch int
+	RoutingBatch int
 
-	// TraceContext is the W3C `traceparent` of the ROUTER's fan-out span,
+	// TraceContext is the W3C `traceparent` of the ROUTER's routing span,
 	// stamped onto every delivery row this call creates. The worker reads it
 	// and links each attempt to it (ARCHITECTURE.md 44).
 	//
 	// ONE value for the whole batch, not one per delivery. A per-delivery span
-	// would mean ROUTER_MAX_SUBSCRIPTIONS_PER_EVENT spans per fan-out - up to
+	// would mean ROUTER_MAX_SUBSCRIPTIONS_PER_EVENT spans per routing - up to
 	// 2000 per transaction at the shipped default, for an event that has not
-	// been delivered anywhere yet. The fan-out is one unit of work and gets one
+	// been delivered anywhere yet. The routing is one unit of work and gets one
 	// span; the deliveries it creates all point at it, which is exactly what
-	// "these N deliveries came from that fan-out" means.
+	// "these N deliveries came from that routing" means.
 	//
 	// Empty writes NULL, which is what a delivery created with tracing off
 	// carries.
@@ -147,9 +147,9 @@ type RouteResult struct {
 	Event   Event
 	Plan    Plan
 	Created int
-	// FanOutCursor is the subscription id this batch stopped at, committed onto
-	// the outbox row when Outcome is OutcomeFanOutContinued.
-	FanOutCursor string
+	// RoutingCursor is the subscription id this batch stopped at, committed onto
+	// the outbox row when Outcome is OutcomeRoutingContinued.
+	RoutingCursor string
 }
 
 // Store is the router's whole database surface.
@@ -162,7 +162,7 @@ type Store interface {
 	// ClaimOutbox leases up to limit ready rows to routerID and moves their
 	// events to `processing`.
 	ClaimOutbox(ctx context.Context, routerID string, limit int, lease time.Duration) ([]OutboxRow, error)
-	// Route performs one event's fan-out in a single transaction.
+	// Route performs one event's routing in a single transaction.
 	Route(ctx context.Context, req RouteRequest) (RouteResult, error)
 	// ParkOutbox retires a row as failed, with a recorded reason, and fails its
 	// event. The row leaves the ready set permanently: a human decides what
@@ -198,16 +198,16 @@ var _ Store = (*PostgresStore)(nil)
 //
 // BOTH attempt counters are incremented HERE, in the committed claim, not on
 // the failure path. A row whose event kills the process - a pathological
-// subscription set, an OOM on a huge fan-out - never reaches a failure handler,
+// subscription set, an OOM on a huge routing - never reaches a failure handler,
 // so an increment that only happened on failure would let it be reclaimed and
 // re-run forever.
 //
 // They then diverge. `attempts` is monotonic and is what an operator reads.
 // `unaccounted_attempts` is the poison bound, and every write this router
 // commits under the lease gives one back - see releaseOutboxSQL and
-// advanceFanOutSQL. So a claim that OBSERVED and RECORDED its failure costs
+// advanceRoutingSQL. So a claim that OBSERVED and RECORDED its failure costs
 // nothing, and only a claim that vanished silently does. Before that split, a
-// twenty-minute Postgres brownout burned all ten attempts on rows whose fan-out
+// twenty-minute Postgres brownout burned all ten attempts on rows whose routing
 // was never even tried, and parked events that had already been answered 202.
 // The batch is fixed in a MATERIALIZED CTE before the UPDATE runs. The
 // `WHERE id IN (SELECT ... LIMIT $3)` form this replaced can be planned with the
@@ -234,7 +234,7 @@ SET status               = 'processing',
 FROM picked
 WHERE o.id = picked.picked_id
 RETURNING o.id, o.event_id, o.type, o.attempts, o.unaccounted_attempts,
-          COALESCE(o.fan_out_cursor, ''), o.failing_since,
+          COALESCE(o.routing_cursor, ''), o.failing_since,
           COALESCE(o.trace_context, '')`
 
 // markEventsProcessingSQL is the `received -> processing` half of the event
@@ -268,7 +268,7 @@ func (s *PostgresStore) ClaimOutbox(
 	for rows.Next() {
 		var r OutboxRow
 		if err := rows.Scan(&r.ID, &r.EventID, &r.Type, &r.Attempts,
-			&r.UnaccountedAttempts, &r.FanOutCursor, &r.FailingSince,
+			&r.UnaccountedAttempts, &r.RoutingCursor, &r.FailingSince,
 			&r.TraceContext); err != nil {
 			rows.Close()
 			return nil, fmt.Errorf("scan claimed outbox row: %w", err)
@@ -300,13 +300,13 @@ func (s *PostgresStore) ClaimOutbox(
 
 // loadEventSQL reads the routing inputs only. The payload is never loaded: the
 // router decides destinations, and pulling a 1 MB body through this path to
-// throw it away would make fan-out cost scale with payload size.
+// throw it away would make routing cost scale with payload size.
 //
 // ordering_key falls back to the headers JSON because ingest still writes it
 // there (see requestMetadata in internal/ingest); the dedicated column landed
 // later. COALESCE means this keeps working whichever side migrates first.
 //
-// created_at is loaded because it is the fan-out's PIN: it decides which
+// created_at is loaded because it is the routing's PIN: it decides which
 // subscriptions this event is entitled to reach, whatever has happened to the
 // project since. See loadCandidatesSQL.
 const loadEventSQL = `
@@ -338,7 +338,7 @@ WHERE e.id = $1`
 // `s.created_at <= $3` PINS THE SUBSCRIPTION SET TO PUBLISH TIME, and it is
 // what stops the keyset walk from changing who receives an event.
 //
-// A batched fan-out spans several transactions and therefore several snapshots.
+// A batched routing spans several transactions and therefore several snapshots.
 // Without this predicate: an event is accepted at 09:59 and batch 1 commits, a
 // customer creates a subscription at 10:00 whose ULID sorts after the committed
 // cursor, and batch 2 at 10:01 hands that subscription a delivery for an event
@@ -397,7 +397,7 @@ WHERE s.project_id = $1
 ORDER BY s.id
 LIMIT $4`
 
-// insertDeliveriesSQL materialises the fan-out.
+// insertDeliveriesSQL materialises the routing.
 //
 // THE CONFLICT TARGET IS THE POINT OF THIS FILE. The arbiter is the PARTIAL
 // unique index deliveries_event_endpoint_original_key, and PostgreSQL will only
@@ -453,7 +453,7 @@ SELECT t.id, $1::text, t.endpoint_id, t.subscription_id,
        -- an outbox test fail 1 in 10, so it is worth knowing it exists.
        now(), $4::text,
        -- created_at, updated_at, trace_context. The trace context is one value
-       -- for the whole batch: the fan-out is one unit of work with one span,
+       -- for the whole batch: the routing is one unit of work with one span,
        -- and every delivery it creates links back to that span.
        now(), now(), $9::text
 FROM unnest($5::text[], $6::text[], $7::text[], $8::int[])
@@ -464,10 +464,10 @@ RETURNING id`
 
 // markEventProcessedSQL closes the event state machine. The status guard keeps
 // a re-run from rewriting processed_at, so the timestamp means "when the
-// fan-out first committed".
+// routing first committed".
 //
 // It runs ONLY on the batch that exhausts the subscription list. An event whose
-// fan-out is still in flight stays `processing`, which is the truth: `processed`
+// routing is still in flight stays `processing`, which is the truth: `processed`
 // is a claim that the system delivered what it accepted, and it must not be
 // made while endpoints are still waiting for their delivery rows.
 const markEventProcessedSQL = `
@@ -479,11 +479,11 @@ WHERE id = $1 AND status <> 'processed'`
 // the whole transaction safe under a lost lease. If our lease expired and
 // another router claimed the row, this affects zero rows and the caller rolls
 // back - including the deliveries. Without the guard we would retire a row we
-// no longer own and race the other router over the same fan-out.
+// no longer own and race the other router over the same routing.
 // The failure bookkeeping is cleared alongside last_error, for the same reason
 // last_error was already cleared: this row succeeded, and a retired row that
 // still reads "one unaccounted claim, failing since 09:14" invites an operator
-// to investigate a fan-out that completed.
+// to investigate a routing that completed.
 const markOutboxProcessedSQL = `
 UPDATE event_outbox
 SET status               = 'processed',
@@ -495,7 +495,7 @@ SET status               = 'processed',
     unaccounted_attempts = 0
 WHERE id = $1 AND locked_by = $2`
 
-// advanceFanOutSQL commits PROGRESS on a fan-out that is not finished.
+// advanceRoutingSQL commits PROGRESS on a routing that is not finished.
 //
 // It is the other half of markOutboxProcessedSQL and carries the same
 // `locked_by` guard, for the same reason: if the lease lapsed and another
@@ -507,12 +507,12 @@ WHERE id = $1 AND locked_by = $2`
 // next poll resumes it. It sorts behind everything already due, which is the
 // fairness property that keeps one 10,000-subscription event from monopolising
 // the queue: it takes its turn per batch rather than holding one transaction
-// open for the whole fan-out.
+// open for the whole routing.
 //
 // `unaccounted_attempts` gives one back and `failing_since` is cleared. This
 // claim demonstrably did work and recorded it, so it is not evidence of a
 // poisoned row, and progress means the row is not "still failing" however many
-// transient errors preceded it. Without the refund a large fan-out would spend
+// transient errors preceded it. Without the refund a large routing would spend
 // its own poison budget one batch at a time and park itself.
 //
 // available_at is date_trunc'd, not a bare now(). `available_at` is
@@ -527,11 +527,11 @@ WHERE id = $1 AND locked_by = $2`
 // second router replica both do - is entitled to see the row. date_trunc floors
 // instead of rounding, so the stored value can never be ahead of the write.
 // This is the same rounding hazard the note on insertDeliveriesSQL describes.
-const advanceFanOutSQL = `
+const advanceRoutingSQL = `
 UPDATE event_outbox
 SET status               = 'pending',
     available_at         = date_trunc('milliseconds', now()),
-    fan_out_cursor       = $3,
+    routing_cursor       = $3,
     locked_by            = NULL,
     locked_until         = NULL,
     last_error           = NULL,
@@ -539,24 +539,24 @@ SET status               = 'pending',
     unaccounted_attempts = GREATEST(unaccounted_attempts - 1, 0)
 WHERE id = $1 AND locked_by = $2`
 
-// Route materialises ONE BATCH of an event's fan-out.
+// Route materialises ONE BATCH of an event's routing.
 //
 // The batch is the unit of atomicity, not the event. For an event within
-// req.FanOutBatch subscriptions - which is every normal event - that is exactly
+// req.RoutingBatch subscriptions - which is every normal event - that is exactly
 // the old behaviour: one transaction inserts the deliveries, marks the event
 // `processed` and retires the outbox row. Beyond it, the transaction commits
 // what it wrote, advances a durable cursor and hands the row back to the queue.
 //
-// Committing a partial fan-out is safe because of the partial unique index
+// Committing a partial routing is safe because of the partial unique index
 // `deliveries_event_endpoint_original_key (event_id, endpoint_id) WHERE
 // replay_of_delivery_id IS NULL`: every insert here is already idempotent per
 // (event, endpoint), so a crash between batches re-runs at worst one batch and
 // creates nothing twice.
 //
-// It is also observable: an event mid-fan-out reads `processing`, not
+// It is also observable: an event mid-routing reads `processing`, not
 // `processed`, and its outbox row carries the cursor.
 //
-// The trade-off, stated plainly: a wide fan-out is no longer one atomic write,
+// The trade-off, stated plainly: a wide routing is no longer one atomic write,
 // so the endpoints in batch 1 start receiving the event while batch 2 is still
 // being materialised. At-least-once delivery and unenforced ordering (ADR-0004)
 // both already permit that, and the alternative it replaces is that the
@@ -576,7 +576,7 @@ func (s *PostgresStore) Route(ctx context.Context, req RouteRequest) (RouteResul
 		&ev.CreatedAt,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
-		// The outbox row outlived its event. Nothing to fan out, ever.
+		// The outbox row outlived its event. Nothing to route, ever.
 		res.Outcome = OutcomeEventMissing
 		return res, nil
 	}
@@ -585,15 +585,15 @@ func (s *PostgresStore) Route(ctx context.Context, req RouteRequest) (RouteResul
 	}
 	res.Event = ev
 
-	batch := req.FanOutBatch
+	batch := req.RoutingBatch
 	if batch <= 0 {
-		batch = DefaultFanOutBatch
+		batch = DefaultRoutingBatch
 	}
-	// ev.CreatedAt, not now(): every batch of this event's fan-out is measured
+	// ev.CreatedAt, not now(): every batch of this event's routing is measured
 	// against the same instant, so batch 7 sees the subscription set batch 1
 	// saw. See loadCandidatesSQL.
 	candidates, more, err := s.loadCandidates(
-		ctx, tx, ev.ProjectID, req.Row.FanOutCursor, ev.CreatedAt, batch)
+		ctx, tx, ev.ProjectID, req.Row.RoutingCursor, ev.CreatedAt, batch)
 	if err != nil {
 		return res, err
 	}
@@ -607,7 +607,7 @@ func (s *PostgresStore) Route(ctx context.Context, req RouteRequest) (RouteResul
 	res.Plan = plan
 	if plan.Truncated > 0 {
 		return res, fmt.Errorf("%w: event %s dropped %d of %d targets",
-			ErrFanOutTruncated, ev.ID, plan.Truncated, len(plan.Targets)+plan.Truncated)
+			ErrRoutingTruncated, ev.ID, plan.Truncated, len(plan.Targets)+plan.Truncated)
 	}
 
 	if len(plan.Targets) > 0 {
@@ -623,19 +623,19 @@ func (s *PostgresStore) Route(ctx context.Context, req RouteRequest) (RouteResul
 		// last one it delivered to. A batch made entirely of disabled or
 		// unmatched subscriptions still has to advance, or the walk stalls on
 		// them forever.
-		res.FanOutCursor = candidates[len(candidates)-1].SubscriptionID
-		tag, err := tx.Exec(ctx, advanceFanOutSQL, req.Row.ID, req.RouterID, res.FanOutCursor)
+		res.RoutingCursor = candidates[len(candidates)-1].SubscriptionID
+		tag, err := tx.Exec(ctx, advanceRoutingSQL, req.Row.ID, req.RouterID, res.RoutingCursor)
 		if err != nil {
-			return res, fmt.Errorf("advance fan-out cursor for outbox row %s: %w", req.Row.ID, err)
+			return res, fmt.Errorf("advance routing cursor for outbox row %s: %w", req.Row.ID, err)
 		}
 		if tag.RowsAffected() == 0 {
 			res.Outcome = OutcomeLeaseLost
 			return res, nil
 		}
 		if err := tx.Commit(ctx); err != nil {
-			return res, fmt.Errorf("commit fan-out batch: %w", err)
+			return res, fmt.Errorf("commit routing batch: %w", err)
 		}
-		res.Outcome = OutcomeFanOutContinued
+		res.Outcome = OutcomeRoutingContinued
 		return res, nil
 	}
 
@@ -663,7 +663,7 @@ func (s *PostgresStore) Route(ctx context.Context, req RouteRequest) (RouteResul
 	// earlier batches created deliveries is a routed event, and reporting it as
 	// no_subscriptions would put a misleading line in the log an operator reads
 	// to answer "why did nothing arrive?".
-	if len(plan.Targets) == 0 && req.Row.FanOutCursor == "" {
+	if len(plan.Targets) == 0 && req.Row.RoutingCursor == "" {
 		res.Outcome = OutcomeNoSubscriptions
 	} else {
 		res.Outcome = OutcomeRouted
@@ -828,7 +828,7 @@ func (s *PostgresStore) ParkOutbox(ctx context.Context, routerID, outboxID, even
 // budget, however this statement is reached.
 //
 // available_at is floored to the column's timestamp(3) precision rather than
-// left to round, for the reason advanceFanOutSQL gives: rounding can only ever
+// left to round, for the reason advanceRoutingSQL gives: rounding can only ever
 // push the row LATER than the schedule says, and "available at T" should mean
 // claimable at T. It is half a millisecond on a backoff measured in seconds, so
 // it changes nothing in production - but it makes a zero backoff mean "now",

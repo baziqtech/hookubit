@@ -12,7 +12,7 @@
 #
 # DO NOT RUN `prisma migrate dev` TO MAKE THIS GREEN. It will generate a
 # migration that DROPS deliveries_event_endpoint_original_key. That index is the
-# ON CONFLICT arbiter the router names when it materialises fan-out. Without it
+# ON CONFLICT arbiter the router names when it materialises routing. Without it
 # a router that inserted its delivery rows and then died before marking the
 # outbox row processed is re-run on restart — and every subscriber receives
 # every event a second time. Dropping it silently converts a crash into
@@ -27,7 +27,7 @@
 # One index name per line. Blank lines and #-comments are ignored.
 
 # Partial unique index (WHERE replay_of_delivery_id IS NULL). Prisma has no
-# partial-index syntax. This is the fan-out idempotency arbiter — see above.
+# partial-index syntax. This is the routing idempotency arbiter — see above.
 deliveries_event_endpoint_original_key
 
 # NULLS NOT DISTINCT (PostgreSQL 15+). Prisma always emits NULLS DISTINCT, under
@@ -72,7 +72,7 @@ retry_policies_one_default_per_project
 # FIRST, because the claim's ORDER BY dropped it once the column became NOT
 # NULL and the planner will not use a NULLS FIRST index for a NULLS LAST order;
 # and `id` appended so the claim's tiebreaker is served by the index rather
-# than by an Incremental Sort over each fan-out's tie group. Same predicate.
+# than by an Incremental Sort over each routing's tie group. Same predicate.
 deliveries_ready_idx
 
 # Same ready set, leading with (next_attempt_at, created_at, id) instead of the

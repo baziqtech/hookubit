@@ -268,7 +268,7 @@ jobs:
       #
       #  `prisma migrate dev` "resolves" that drift by generating a migration
       #  that DROPS deliveries_event_endpoint_original_key - the ON CONFLICT
-      #  arbiter the router names when it materialises fan-out. Drop it and a
+      #  arbiter the router names when it materialises routing. Drop it and a
       #  router that is re-run after a crash re-delivers every event to every
       #  subscriber. The check below fails on any identifier that is NOT in the
       #  fixture, which is the drift that actually means something.
@@ -317,7 +317,7 @@ jobs:
           done < /tmp/drift.stmts
 
           if [ "$unexpected" -ne 0 ]; then
-            echo "::error::schema.prisma and prisma/migrations genuinely disagree. Write a migration for the difference above. Do NOT run \`prisma migrate dev\` - see deployments/ci/expected-schema-drift.txt, it will drop the fan-out idempotency index."
+            echo "::error::schema.prisma and prisma/migrations genuinely disagree. Write a migration for the difference above. Do NOT run \`prisma migrate dev\` - see deployments/ci/expected-schema-drift.txt, it will drop the routing idempotency index."
             exit 1
           fi
           echo "OK - drift is limited to the documented inexpressible indexes"
@@ -344,7 +344,7 @@ jobs:
             fi
           done
           if [ "$missing" -ne 0 ]; then
-            echo "::error::deliveries_event_endpoint_original_key is the ON CONFLICT arbiter the router names when it materialises fan-out. Without it, a router re-run after a crash delivers every event to every subscriber a second time. Restore the index in a new migration; do not regenerate the history."
+            echo "::error::deliveries_event_endpoint_original_key is the ON CONFLICT arbiter the router names when it materialises routing. Without it, a router re-run after a crash delivers every event to every subscriber a second time. Restore the index in a new migration; do not regenerate the history."
             exit 1
           fi
 

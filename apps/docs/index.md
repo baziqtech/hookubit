@@ -4,7 +4,7 @@ layout: home
 hero:
   name: HookuBit
   text: Webhooks that arrive.
-  tagline: Durable ingestion, materialised fan-out, retries with backoff, signed deliveries, and a delivery log that answers "what happened to this event?" — without a support ticket.
+  tagline: Durable ingestion, materialised routing, retries with backoff, signed deliveries, and a delivery log that answers "what happened to this event?" — without a support ticket.
   actions:
     - theme: brand
       text: Get started
@@ -56,7 +56,7 @@ out, and a retry can arrive after an earlier attempt already got through —
 your receiver must be idempotent, keyed on `Webhook-Id`.
 
 **Nothing published before COMMIT.** The `202 Accepted` you get back means the
-event and its fan-out instruction are on disk. Anything that happens after
+event and its routing instruction are on disk. Anything that happens after
 that — a crash, a deploy, a database failover — costs latency, never the event.
 
 ## Reading these docs

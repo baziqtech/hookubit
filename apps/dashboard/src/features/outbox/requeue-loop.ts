@@ -11,7 +11,7 @@ import { MAX_REQUEUE_BATCH, type RequeueResult } from '../../types/api';
  * first, and says `has_more` when it left some behind. A page that looped
  * silently until `has_more` was false would be doing two things wrong at once:
  *
- *   1. Every requeued row becomes a fan-out, and every fan-out becomes real
+ *   1. Every requeued row becomes a routing, and every routing becomes real
  *      HTTP to endpoints that were, very often, already failing when the
  *      incident started. Draining 40,000 parked rows in one click is a
  *      self-inflicted burst. Bounded passes let an operator watch the first

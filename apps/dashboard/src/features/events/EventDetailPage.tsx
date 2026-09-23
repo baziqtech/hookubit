@@ -38,7 +38,7 @@ export function EventDetailPage() {
     (endpoints.data?.rows ?? []).map((endpoint) => [endpoint.id, endpoint.name]),
   );
   /*
-   * The fan-out roll-up is DERIVED from the delivery rows, not read off the
+   * The routing roll-up is DERIVED from the delivery rows, not read off the
    * event. `EventDto` has no `delivery_counts` — that object was invented — and
    * deriving it is better anyway: a denormalised counter can disagree with the
    * table printed directly beneath it, and this one cannot.
@@ -76,7 +76,7 @@ export function EventDetailPage() {
             />
 
             {/*
-              The 2am path. A `failed` event PARKED before it fanned out — the
+              The 2am path. A `failed` event PARKED before it routed — the
               publisher got 202, no delivery rows exist, replay has nothing to
               work from — and the only way back is a requeue. That row, its
               reason and the requeue live here rather than behind a menu.
@@ -85,7 +85,7 @@ export function EventDetailPage() {
               <ParkedEventNotice orgId={orgId} projectId={projectId} eventId={data.id} />
             )}
 
-            <FanOutSummary counts={counts} pending={deliveries.isPending} />
+            <RoutingSummary counts={counts} pending={deliveries.isPending} />
 
             <dl className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
               <Meta label="Payload size" value={formatBytes(data.payload_size)} />
@@ -156,7 +156,7 @@ export function EventDetailPage() {
               open={confirming}
               onClose={() => setConfirming(false)}
               title="Replay this event?"
-              description="Every matching subscription is fanned out again."
+              description="Every matching subscription is routed again."
               footer={
                 <>
                   <Button onClick={() => setConfirming(false)}>Cancel</Button>
@@ -188,7 +188,7 @@ export function EventDetailPage() {
 
 
 /**
- * Fan-out, stated as the sentence it is.
+ * Routing, stated as the sentence it is.
  *
  * The tile this replaces read "1 deliveries" — a grammar bug, but the real
  * problem was that a bare count does not explain WHY there is more than one
@@ -196,14 +196,14 @@ export function EventDetailPage() {
  * meeting that for the first time needs it said out loud rather than inferred
  * from a number.
  */
-function FanOutSummary({ counts, pending }: { counts: DeliveryCounts; pending: boolean }) {
+function RoutingSummary({ counts, pending }: { counts: DeliveryCounts; pending: boolean }) {
   const noun = counts.total === 1 ? 'delivery' : 'deliveries';
   // Counted from the rows below. Until they arrive, say so rather than showing
   // a confident zero that is about to change.
   if (pending) {
     return (
-      <section aria-label="Fan-out" className="rounded-lg border border-line bg-panel px-4 py-3">
-        <p className="text-sm text-ink">Counting the deliveries this event fanned out to…</p>
+      <section aria-label="Routing" className="rounded-lg border border-line bg-panel px-4 py-3">
+        <p className="text-sm text-ink">Counting the deliveries this event routed to…</p>
       </section>
     );
   }
@@ -211,11 +211,11 @@ function FanOutSummary({ counts, pending }: { counts: DeliveryCounts; pending: b
 
   return (
     <section
-      aria-label="Fan-out"
+      aria-label="Routing"
       className="rounded-lg border border-line bg-panel px-4 py-3"
     >
       <p className="text-sm text-ink">
-        Published once, fanned out to{' '}
+        Published once, routed to{' '}
         <strong className="font-semibold">
           {counts.total} {noun}
         </strong>{' '}

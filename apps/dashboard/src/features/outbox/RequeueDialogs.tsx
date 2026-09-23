@@ -181,7 +181,7 @@ export function RequeueEntryDialog({
             className="rounded-md border border-ok/30 bg-ok-soft/60 px-3 py-2 text-xs text-ink"
           >
             Back in the queue. The event is <strong>received</strong> again and the router will pick
-            it up shortly; the delivery rows appear on the event page as the fan-out writes them.
+            it up shortly; the delivery rows appear on the event page as the routing writes them.
           </p>
         )}
         <WriteErrorNotice error={requeue.error} />
@@ -199,7 +199,7 @@ function RequeueSemantics({ partial }: { partial: boolean }) {
     <ul className="flex flex-col gap-1 rounded-md border border-line bg-raised px-3 py-2 text-2xs leading-relaxed text-ink-muted">
       <li>
         <strong className="text-ink">Not a replay.</strong> A parked event has no delivery rows to
-        replay; requeueing lets the router run the fan-out it never got to run.
+        replay; requeueing lets the router run the routing it never got to run.
       </li>
       <li>
         Only subscriptions that existed when the event was <em>accepted</em> receive it, using
@@ -207,7 +207,7 @@ function RequeueSemantics({ partial }: { partial: boolean }) {
       </li>
       <li>
         {partial
-          ? 'The fan-out resumes from its cursor — endpoints already reached are not sent a second copy.'
+          ? 'The routing resumes from its cursor — endpoints already reached are not sent a second copy.'
           : 'The claim count and the last error are preserved, so the history survives the recovery.'}
       </li>
     </ul>

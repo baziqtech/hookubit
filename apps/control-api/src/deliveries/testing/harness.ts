@@ -28,7 +28,7 @@ import { EventsService } from '../../events/events.service';
 import { TenantTransactionRunner } from '../../organizations/tenant-transaction';
 import { DeliveriesController } from '../deliveries.controller';
 import { DeliveriesService } from '../deliveries.service';
-import { MAX_INLINE_ATTEMPTS, MAX_REPLAY_FAN_OUT } from '../delivery-limits';
+import { MAX_INLINE_ATTEMPTS, MAX_REPLAY_DELIVERIES } from '../delivery-limits';
 import { DeliveryReplayService } from '../delivery-replay.service';
 import { installRichTables } from './rich-fake';
 
@@ -40,7 +40,7 @@ import { installRichTables } from './rich-fake';
  * delivery, an exhausted one, one mid-retry, one pointing at a soft-deleted
  * endpoint, one at a paused endpoint, a delivery with more attempts than fit in
  * a response, an offloaded payload, a payload that is not valid UTF-8, an event
- * that matched nothing at all, and an event whose fan-out is wider than a
+ * that matched nothing at all, and an event whose routing is wider than a
  * single replay is allowed to re-send.
  *
  * Project A2 and organization B are seeded with matching rows throughout: a
@@ -68,7 +68,7 @@ export const LEDGER = {
   eventBinary: 'evt_a_binary',
   /** Matched no subscription. Nothing to replay. */
   eventOrphan: 'evt_a_orphan',
-  /** Fanned out wider than MAX_REPLAY_FAN_OUT. */
+  /** Routed wider than MAX_REPLAY_DELIVERIES. */
   eventWide: 'evt_a_wide',
   /** Project A2 - same organization, different project. */
   eventOtherProject: 'evt_a2_1',
@@ -92,8 +92,8 @@ export const LEDGER = {
 export const FINANCE_ATTEMPTS = 12;
 /** Attempts on `deliveryNoisy`. Past the inline cap, so a page is truncated. */
 export const NOISY_ATTEMPTS = MAX_INLINE_ATTEMPTS + 5;
-/** Endpoints `eventWide` reached. Past the fan-out cap. */
-export const WIDE_ENDPOINTS = MAX_REPLAY_FAN_OUT + 5;
+/** Endpoints `eventWide` reached. Past the routing cap. */
+export const WIDE_ENDPOINTS = MAX_REPLAY_DELIVERIES + 5;
 
 export const T = {
   order: new Date('2026-03-01T10:00:00.000Z'),
@@ -439,7 +439,7 @@ export function seedLedger(db: FakeTenantPrisma = seedWorld()): FakeTenantPrisma
     attempt(db, `att_noisy_${String(number).padStart(4, '0')}`, LEDGER.deliveryNoisy, number);
   }
 
-  // --- the wide fan-out ---------------------------------------------------
+  // --- the wide routing ---------------------------------------------------
   for (let index = 0; index < WIDE_ENDPOINTS; index += 1) {
     const id = `ep_wide_${String(index).padStart(3, '0')}`;
     endpoint(db, id, IDS.projectA1);

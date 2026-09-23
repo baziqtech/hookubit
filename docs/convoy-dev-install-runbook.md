@@ -2,7 +2,7 @@
 
 **Status:** running and verified end-to-end on the shared dev server.
 **Installed:** 2026-09-06.
-**Purpose:** fan out payment settlement events from `shaq_payment_gateway` to the ops API
+**Purpose:** route payment settlement events from `shaq_payment_gateway` to the ops API
 and the finance API, with per-endpoint HMAC, automatic retries, and a replayable delivery log.
 The provider's inbound callback stays direct to the gateway and does **not** go through Convoy.
 
@@ -329,7 +329,7 @@ curl -s -X POST "http://127.0.0.1:5005/api/v1/projects/$PROJ/subscriptions" \
 From then on the gateway publishes with the **project API key**, not a user JWT:
 
 ```bash
-# fan out to every subscription in the project
+# route to every subscription in the project
 POST /api/v1/projects/{projectID}/events/broadcast
 {"event_type":"payment.settled","idempotency_key":"…","data":{…}}
 
@@ -340,7 +340,7 @@ POST /api/v1/projects/{projectID}/events
 
 `POST /events` **requires** `endpoint_id` in this build — omitting it queues successfully and
 then fails asynchronously in the worker with `please provide an endpoint ID`, with no event row
-ever written. Use `/events/broadcast` for real fan-out.
+ever written. Use `/events/broadcast` for real routing.
 
 ---
 

@@ -4,7 +4,7 @@ import { emptyCounts, rollUp } from './delivery-rollup';
 const counts = (over: Partial<Record<DeliveryStatus, number>>) => ({ ...emptyCounts(), ...over });
 
 describe('rollUp', () => {
-  it('no deliveries and fan-out finished is DROPPED, not received', () => {
+  it('no deliveries and routing finished is DROPPED, not received', () => {
     // The single most confusing thing this product can do: a 202, and the
     // event goes nowhere because no subscription matched. It is invisible in
     // every other column because there is no delivery row to be absent from.
@@ -13,7 +13,7 @@ describe('rollUp', () => {
     expect(rollup.total).toBe(0);
   });
 
-  it('no deliveries and fan-out unfinished is RECEIVED', () => {
+  it('no deliveries and routing unfinished is RECEIVED', () => {
     expect(rollUp(EventStatus.received, counts({})).state).toBe('received');
     expect(rollUp(EventStatus.processing, counts({})).state).toBe('received');
   });

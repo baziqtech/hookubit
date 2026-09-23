@@ -83,7 +83,7 @@ is never written always looks healthy.
 | `rate_limit_hits_total{scope}` | Which ceiling bit. `endpoint_concurrency` climbing while deliveries are slow means a few slow endpoints are holding the pool (the isolation rule in [Requirements](/self-hosting/01-requirements)). |
 | `router_outbox_parked_total{reason}` | An event will not be delivered until an operator requeues it. Any non-zero value is an incident. Reasons: `attempts_exhausted`, `retry_duration_exceeded`, `unknown_outbox_type`, `event_missing`. |
 | `router_subscriptions_skipped_total{reason}` | A subscription was considered and not delivered to. Answers "we configured it, why is nothing arriving" without a database session. |
-| `router_fan_out_batches_total` | Some events are wider than one fan-out transaction. A capacity signal, not an error. |
+| `router_batch_continuations_total` | Some events are wider than one routing transaction. A capacity signal, not an error. |
 | `queue_leases_reclaimed_total` | Workers are dying mid-attempt. |
 | `queue_leases_lost_total{phase}` | Leases lapsing under live attempts: duplicates are being sent. |
 | `egress_blocked_total{reason}` | SSRF refusals by bounded code (`metadata`, `private`, `loopback`, `link_local`, `redirect`, ...). Never labelled by customer text. |
@@ -101,7 +101,7 @@ the platform writes.
 | Ingest: is work arriving, and is any of it being refused? | Events accepted /s, Rejected /s, Ingest rate by outcome, Payload offloads and fetches |
 | Delivery: what happened to the events we accepted? | Delivery outcomes /s, Outbound response classes /s, Attempt latency, End-to-end delivery latency (acceptance to first success), First-attempt success ratio, Retries scheduled /s, Deliveries created /s, Attempts in flight |
 | Backlog: is work piling up faster than it drains? | Queue depth by state, Head-of-line delay, Outbox age, Lease churn, Router outcomes /s |
-| Endpoint health and egress safety | Circuit breakers opening /s, SSRF refusals /s by reason, Rate limit deferrals /s by scope, Rate limiter running without its shared store, Fan-out size |
+| Endpoint health and egress safety | Circuit breakers opening /s, SSRF refusals /s by reason, Rate limit deferrals /s by scope, Rate limiter running without its shared store, Routing size |
 
 **The one panel to read first at 2am is "Queue depth by state".** A delivery
 held back by an open breaker or a rate limit produces no attempt, no response

@@ -2,7 +2,7 @@ import type { Paged } from '../../lib/pagination';
 import type { OutboxEntry } from '../../types/api';
 
 /**
- * What, if anything, to say about events stuck before fan-out.
+ * What, if anything, to say about events stuck before routing.
  *
  * Pure, and separate from the component, because the decisions worth pinning
  * are decisions rather than markup. This workspace renders with

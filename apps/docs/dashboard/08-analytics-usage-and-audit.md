@@ -61,7 +61,7 @@ response carries, and every bar has a table beside it with the numbers.
 | Delivery outcomes | `deliveries` | Six tiles: success rate (`current.success_rate`, delta from `success_rate_delta`, previous rate alongside), deliveries created (`current.total`, `total_delta`, `previous.total`), succeeded, failing (`failing`, split into `by_status.failed` and `exhausted`), in flight (`in_flight`), cancelled. Then a bar and a table of **all nine statuses** — this window, previous window, change, share of `current.total` — each status linking to the deliveries list filtered to it. |
 | Failing endpoints | `endpoints` (`limit=10`) | Ranked worst first. Endpoint name and URL (or "endpoint row missing" and the id when the row is gone), state now (`status`, with "paused by operator" when `enabled` is false and "auto-disabled" when `enabled` is true but `status` is `disabled`), failing (`failing`, split `failed`/`exhausted`), retrying, total, and `failure_rate`. The panel's own warning is repeated: read the rate beside the count. `has_more` renders as "more endpoints had failures than the 10 shown". |
 | Attempt latency | `latency` | p50, p95, p99, min and max (`*_ms`, nullable, "—" when null). A badge reads **exact** or **sampled** from `exact`, with a sentence built from `sample_size` and `sampled_deliveries`: either "computed from every measured attempt in the window" or "a sample, not the whole window: the most recent N measured attempts … the window held more traffic than the sample cap". |
-| Event volume | `events` (`limit=10`) | Events published (`total`, `total_delta`, `previous_total`), previous window, and **fan-out** = deliveries `current.total` ÷ events `total` — the one number on the page that combines two responses; it reads "—" with the reason while either is missing or when there were no events. Then a bar and a table of `by_type` (busiest first) with each type's share of `total`, linking to the events list. `has_more` renders as a note that the shares do not sum to 100%. |
+| Event volume | `events` (`limit=10`) | Events published (`total`, `total_delta`, `previous_total`), previous window, and **routing** = deliveries `current.total` ÷ events `total` — the one number on the page that combines two responses; it reads "—" with the reason while either is missing or when there were no events. Then a bar and a table of `by_type` (busiest first) with each type's share of `total`, linking to the events list. `has_more` renders as a note that the shares do not sum to 100%. |
 
 Under every panel the exact window the API applied is printed from the
 response's `window` (`from`, `to`, `previous_from`, `previous_to`, `hours`),
@@ -97,7 +97,7 @@ says when there are more) with one row each:
 |---|---|
 | Events published | `analytics/events` at `window_hours=720`, `total` |
 | Deliveries created | `analytics/deliveries` at `window_hours=720`, `current.total` |
-| Fan-out | deliveries ÷ events; "—" when there were no events or either request has not landed |
+| Routing | deliveries ÷ events; "—" when there were no events or either request has not landed |
 | Window ends | the `window.to` the events response echoed |
 
 Rows load independently; a row that fails shows the reason and `request_id`
@@ -180,7 +180,7 @@ resource filter with a date range on a busy organization. Reads are throttled
 **Where this comes from** (for maintainers):
 `apps/dashboard/src/features/overview/OverviewPage.tsx` (`Health`, `latencyCaveat`, `rankingColumns`),
 `apps/dashboard/src/features/analytics/AnalyticsPage.tsx`, `api.ts` (the four hooks and `staleTime`),
-`derive.ts` (`formatRate`, `fanOutRatio`), `window.ts` (the three windows), `tiles.tsx`,
+`derive.ts` (`formatRate`, `deliveriesPerEvent`), `window.ts` (the three windows), `tiles.tsx`,
 `apps/dashboard/src/features/usage/UsagePage.tsx`,
 `apps/dashboard/src/features/settings/placeholders.tsx` (BillingPage),
 `apps/dashboard/src/lib/mock/analytics.ts` (the mock's copy of the arithmetic),

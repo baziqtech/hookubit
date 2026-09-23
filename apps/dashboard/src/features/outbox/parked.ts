@@ -42,7 +42,7 @@ export interface ParkedExplanation {
   detail: string;
   /** The numbers behind the verdict, phrased. */
   evidence: string[];
-  /** True when `fan_out_cursor` says some endpoints already have their delivery. */
+  /** True when `routing_cursor` says some endpoints already have their delivery. */
   partial: boolean;
   outlook: RequeueOutlook;
 }
@@ -85,13 +85,13 @@ export function explainParked(
     | 'attempts'
     | 'unaccounted_attempts'
     | 'failing_since'
-    | 'fan_out_cursor'
+    | 'routing_cursor'
     | 'last_error'
     | 'processed_at'
   >,
 ): ParkedExplanation {
   const reason = parkReasonOf(entry);
-  const partial = entry.fan_out_cursor !== null;
+  const partial = entry.routing_cursor !== null;
   const evidence: string[] = [];
 
   // The two counters are ALWAYS stated together, because the ratio between
@@ -139,7 +139,7 @@ export function explainParked(
         reason,
         headline: 'The event this row points at no longer exists',
         detail:
-          'There is nothing to fan out. Requeueing will park it again for the same reason; this row is evidence of a deleted or lost event, not work to recover.',
+          'There is nothing to route. Requeueing will park it again for the same reason; this row is evidence of a deleted or lost event, not work to recover.',
         evidence,
         partial,
         outlook: 'futile',

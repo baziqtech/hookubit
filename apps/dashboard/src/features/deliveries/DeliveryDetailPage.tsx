@@ -50,7 +50,7 @@ import { attemptHistoryState, attemptsWerePruned } from './pruned';
  *     by the circuit breaker, in which case nothing is going to retry. That
  *     cross-check is the single most valuable fact on this page and it lives on
  *     a different resource, so it has to be fetched deliberately.
- *   - One event fans out to several deliveries. "Did finance get it?" is
+ *   - One event routes to several deliveries. "Did finance get it?" is
  *     answered by the siblings, so they are on the page rather than two clicks
  *     away.
  */
@@ -469,7 +469,7 @@ function AttemptPips({
 /**
  * The other deliveries created by the same event.
  *
- * This is where the fan-out model stops being an abstraction: one publish, one
+ * This is where the routing model stops being an abstraction: one publish, one
  * row per matching subscription, each with an independent chain. "Did finance
  * ever receive this?" is answered here, and the failure of a partner endpoint
  * is visibly not the failure of the ledger.
@@ -501,7 +501,7 @@ function SiblingDeliveries({
         >
           {delivery.event_id}
         </Link>{' '}
-        was published once and fanned out to one delivery per matching subscription. Each has its
+        was published once and routed to one delivery per matching subscription. Each has its
         own retry chain, and replaying one does not touch the others.
       </p>
 

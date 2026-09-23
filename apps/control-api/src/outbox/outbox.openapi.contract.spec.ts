@@ -174,7 +174,7 @@ describe('the outbox routes in the OpenAPI document', () => {
       expect([name, property.type]).toEqual([name, expect.stringMatching(/^(string|number)$/)]);
     }
     // Always present, sometimes null - a different contract from "may be absent".
-    expect(entry.required).toEqual(expect.arrayContaining(['last_error', 'fan_out_cursor']));
+    expect(entry.required).toEqual(expect.arrayContaining(['last_error', 'routing_cursor']));
   });
 
   it('documents the two counters, because their difference is the whole diagnosis', () => {
@@ -185,6 +185,6 @@ describe('the outbox routes in the OpenAPI document', () => {
     expect(entry.properties.unaccounted_attempts.description).toContain(
       'writing nothing at all',
     );
-    expect(entry.properties.fan_out_cursor.description).toContain('PARTLY done');
+    expect(entry.properties.routing_cursor.description).toContain('PARTLY done');
   });
 });

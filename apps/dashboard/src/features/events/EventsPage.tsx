@@ -65,7 +65,7 @@ export function EventsPage() {
     <div className="flex flex-col gap-4">
       <PageHeader
         title="Events"
-        description="Everything published to this project. One event fans out to one delivery per matching subscription."
+        description="Everything published to this project. One event routes to one delivery per matching subscription."
       />
 
       {/*
@@ -161,11 +161,11 @@ function eventColumns(orgId: string, projectId: string): Column<WebhookEvent>[] 
       /*
        * The DELIVERY rollup, not `status`.
        *
-       * `status` is the ingest/fan-out state: `processed` means the router ran
+       * `status` is the ingest/routing state: `processed` means the router ran
        * and committed, and says nothing about whether anybody received
        * anything. A list built on it reports a project as healthy while every
        * delivery it produced is failing — and it cannot express `dropped`,
-       * which is fan-out completing and matching nobody. That is the state
+       * which is routing completing and matching nobody. That is the state
        * newcomers actually hit: a cheerful 202, and the event goes nowhere.
        */
       render: (row) => {
@@ -181,7 +181,7 @@ function eventColumns(orgId: string, projectId: string): Column<WebhookEvent>[] 
       key: 'deliveries',
       header: 'Deliveries',
       /*
-       * THE FAN-OUT COLUMN IS BACK.
+       * THE ROUTING COLUMN IS BACK.
        *
        * It was removed because `EventDto` had no per-event delivery counts and
        * deriving them meant one `…/events/:id/deliveries` request per visible

@@ -165,7 +165,7 @@ function EnableDialog({
         <p>
           Matching resumes for events accepted from now on. The filter is untouched. Events that
           were accepted while it was disabled were not routed here and will not be routed
-          retroactively — fan-out is pinned to the subscriptions that existed when each event
+          retroactively — routing is pinned to the subscriptions that existed when each event
           arrived.
         </p>
         <Rule subscription={subscription} endpointName={endpointName} />

@@ -19,7 +19,7 @@ import { buildNav, buildSidebar } from './sidebar.mts'
 export default withMermaid(
   defineConfig({
     title: 'HookuBit',
-    description: 'Reliable webhook delivery: durable ingestion, materialised fan-out, retries, signing, and a delivery log you can answer questions from.',
+    description: 'Reliable webhook delivery: durable ingestion, materialised routing, retries, signing, and a delivery log you can answer questions from.',
     srcDir: '.',
     // Repo-facing file for people browsing the folder rather than the site.
     // No `**/` - each section's own README.md must stay included, because

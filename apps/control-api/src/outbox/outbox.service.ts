@@ -41,15 +41,15 @@ import { MAX_REQUEUE_BATCH, REQUEUEABLE_STATUS } from './outbox-limits';
  *
  * `POST /events/:id/replay` re-sends to the endpoints an event ACTUALLY reached,
  * read off the existing delivery rows, and it refuses an (event, endpoint) pair
- * that was never fanned out - correctly, because that would be a new delivery
+ * that was never routed - correctly, because that would be a new delivery
  * rather than a replay.
  *
  * A parked event has NO delivery rows. There is nothing for replay to work from,
  * which is why replay cannot be the recovery path here. Requeue does not create
  * deliveries at all: it puts the outbox row back and lets the router run the
- * fan-out it never got to run.
+ * routing it never got to run.
  *
- * That fan-out is bounded to the subscriptions that EXISTED when the event was
+ * That routing is bounded to the subscriptions that EXISTED when the event was
  * accepted (`loadCandidatesSQL` in the router: `s.created_at <= events.created_at`),
  * so requeueing an event parked three weeks ago does not hand it to customers
  * who subscribed since. What it does read as of now is their CONFIGURATION -
@@ -62,8 +62,8 @@ import { MAX_REQUEUE_BATCH, REQUEUEABLE_STATUS } from './outbox-limits';
  *
  * `last_error` is preserved. It is the router's field and the only record of why
  * the row was parked; overwriting it at the moment somebody decides the parking
- * was wrong would destroy the evidence. `fan_out_cursor` is preserved too, so a
- * row parked halfway through a wide fan-out resumes rather than re-walking work
+ * was wrong would destroy the evidence. `routing_cursor` is preserved too, so a
+ * row parked halfway through a wide routing resumes rather than re-walking work
  * that already committed - the partial unique index
  * `deliveries_event_endpoint_original_key` makes either choice safe, but
  * resuming is the cheap one.
@@ -137,7 +137,7 @@ export class OutboxService {
             parked_error: parked.lastError ?? null,
             parked_attempts: parked.attempts,
             parked_unaccounted_attempts: parked.unaccountedAttempts,
-            fan_out_cursor: parked.fanOutCursor ?? null,
+            routing_cursor: parked.routingCursor ?? null,
             requeued_count: 1,
           },
         });
@@ -285,9 +285,9 @@ export class OutboxService {
    * The event goes `failed -> received`, guarded on `failed`, because that is
    * the honest reversal of what parking did to it. Leaving it `failed` would
    * also break the router: its claim promotes `received -> processing`, so the
-   * event would sit reading `failed` right through a fan-out that was working.
+   * event would sit reading `failed` right through a routing that was working.
    *
-   * `last_error` and `fan_out_cursor` are deliberately untouched - see the class
+   * `last_error` and `routing_cursor` are deliberately untouched - see the class
    * docblock.
    */
   private static async returnToQueue(
@@ -364,7 +364,7 @@ export class OutboxService {
     throw new AppError(
       'conflict',
       row.status === 'processed'
-        ? `Outbox entry ${row.id} has already been fanned out; there is nothing to requeue. To re-send an event that WAS delivered, replay it: POST /v1/projects/{projectId}/events/${row.eventId}/replay.`
+        ? `Outbox entry ${row.id} has already been routed; there is nothing to requeue. To re-send an event that WAS delivered, replay it: POST /v1/projects/{projectId}/events/${row.eventId}/replay.`
         : `Outbox entry ${row.id} is ${row.status} - it is already in the queue and a router is working on it. Only parked entries (status "failed") can be requeued.`,
       { outbox_id: row.id, event_id: row.eventId, outbox_status: row.status },
     );

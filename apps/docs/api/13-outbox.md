@@ -15,7 +15,7 @@
 
 **List outbox entries, including PARKED ones**
 
-The outbox is the router's record of what it still owes an accepted event. Filter by `status=failed` for the entries that matter: those are PARKED - the router gave up, and the event will never be delivered until someone requeues it, even though the publisher was told `202 Accepted`. `last_error` says why, `attempts` versus `unaccounted_attempts` says whether the row was killing the router or the database was failing under it, and a non-null `fan_out_cursor` says the fan-out is partly done. Ordered newest first.
+The outbox is the router's record of what it still owes an accepted event. Filter by `status=failed` for the entries that matter: those are PARKED - the router gave up, and the event will never be delivered until someone requeues it, even though the publisher was told `202 Accepted`. `last_error` says why, `attempts` versus `unaccounted_attempts` says whether the row was killing the router or the database was failing under it, and a non-null `routing_cursor` says the routing is partly done. Ordered newest first.
 
 **Auth:** signed-in dashboard session (cookie).
 
@@ -37,14 +37,14 @@ The outbox is the router's record of what it still owes an accepted event. Filte
 |---|---|---|---|---|
 | `data` | [OutboxEntryDto](./schemas.md#outboxentrydto)[] | yes |  |  |
 | `data[].id` | string | yes |  | Outbox row id (`obx_...`). |
-| `data[].event_id` | string | yes |  | The event this row fans out. |
+| `data[].event_id` | string | yes |  | The event this row routes. |
 | `data[].type` | string | yes |  | What the row asks the router to do. `event.created` is the only type the router handles; anything else is parked on sight rather than re-claimed forever. |
-| `data[].status` | string | yes | one of `pending`, `processing`, `processed`, `failed` | `pending` is queued (possibly mid-fan-out, see `fan_out_cursor`); `processing` is leased by a router right now; `processed` is done; **`failed` is PARKED** - the router gave up, the event will never be delivered, and it stays that way until someone requeues it. |
+| `data[].status` | string | yes | one of `pending`, `processing`, `processed`, `failed` | `pending` is queued (possibly mid-routing, see `routing_cursor`); `processing` is leased by a router right now; `processed` is done; **`failed` is PARKED** - the router gave up, the event will never be delivered, and it stays that way until someone requeues it. |
 | `data[].attempts` | number | yes |  | Total times a router has picked this row up. Monotonic, and NOT the bound that parks it - see `unaccounted_attempts`. A high number here with a low one there is a row that keeps failing in ways the router understood and recorded, which is a database or configuration problem rather than a poisoned event. |
 | `data[].unaccounted_attempts` | number | yes |  | Claims that ended with the router writing nothing at all - a crash, an OOM, a lease left to lapse. THIS is the bound that parks a row (`ROUTER_MAX_OUTBOX_ATTEMPTS`), because it is the only counter that means "this row keeps killing the process". A failure the router observed and recorded hands its increment back. |
 | `data[].last_error` | string \| null | yes |  | The last error the router recorded, verbatim and truncated to 1000 characters. On a parked row this is why it was parked, and it is preserved through a requeue so the history is not erased by the recovery. |
 | `data[].failing_since` | string \| null | yes | format `date-time` | When the current run of recorded failures began; null when the row is not failing. Recorded failures are bounded by elapsed TIME rather than by a count, because no count distinguishes "the database was unavailable for twenty minutes" from "this row errors every time". |
-| `data[].fan_out_cursor` | string \| null | yes |  | Resume point for a fan-out too wide for one transaction: the subscription id the last committed batch stopped at. Non-null on a `pending` row means the fan-out is PARTLY done - some endpoints already have their delivery, the rest are still owed one. It is kept through a requeue, so recovery resumes rather than re-walking work that already committed. |
+| `data[].routing_cursor` | string \| null | yes |  | Resume point for a routing too wide for one transaction: the subscription id the last committed batch stopped at. Non-null on a `pending` row means the routing is PARTLY done - some endpoints already have their delivery, the rest are still owed one. It is kept through a requeue, so recovery resumes rather than re-walking work that already committed. |
 | `data[].available_at` | string | yes | format `date-time` | When this row next becomes claimable. In the future while it is backing off. |
 | `data[].locked_by` | string \| null | yes |  | The router replica holding the lease, if any. Useful when one replica misbehaves. |
 | `data[].locked_until` | string \| null | yes | format `date-time` |  |
@@ -69,7 +69,7 @@ The project, outbox entry or event does not exist, or belongs to another tenant.
 
 **Requeue parked outbox entries**
 
-Returns up to 100 PARKED entries to the router's queue, oldest first, so the fan-out that never ran gets to run. Read `has_more` and call again until it is false; the bound is per request, not per incident. **This is not a replay.** A parked event has no delivery rows for a replay to work from, so the router runs the subscription match it never got to run. That match is bounded to the subscriptions that existed when the event was ACCEPTED - an endpoint subscribed after that will not receive it - but their current configuration applies, and a subscription deleted since is gone. The router's `last_error` is preserved, `attempts` keeps counting from where it was, and a partly-completed fan-out resumes from its cursor rather than re-sending to endpoints it already reached.
+Returns up to 100 PARKED entries to the router's queue, oldest first, so the routing that never ran gets to run. Read `has_more` and call again until it is false; the bound is per request, not per incident. **This is not a replay.** A parked event has no delivery rows for a replay to work from, so the router runs the subscription match it never got to run. That match is bounded to the subscriptions that existed when the event was ACCEPTED - an endpoint subscribed after that will not receive it - but their current configuration applies, and a subscription deleted since is gone. The router's `last_error` is preserved, `attempts` keeps counting from where it was, and a partly-completed routing resumes from its cursor rather than re-sending to endpoints it already reached.
 
 **Auth:** signed-in dashboard session (cookie).
 
@@ -98,14 +98,14 @@ Returns up to 100 PARKED entries to the router's queue, oldest first, so the fan
 | `has_more` | boolean | yes |  | More parked rows matched than this request was allowed to requeue. Call again until it is false; the bound is per request, not per incident. |
 | `data` | [OutboxEntryDto](./schemas.md#outboxentrydto)[] | yes |  | The rows as they now stand, back in the queue. |
 | `data[].id` | string | yes |  | Outbox row id (`obx_...`). |
-| `data[].event_id` | string | yes |  | The event this row fans out. |
+| `data[].event_id` | string | yes |  | The event this row routes. |
 | `data[].type` | string | yes |  | What the row asks the router to do. `event.created` is the only type the router handles; anything else is parked on sight rather than re-claimed forever. |
-| `data[].status` | string | yes | one of `pending`, `processing`, `processed`, `failed` | `pending` is queued (possibly mid-fan-out, see `fan_out_cursor`); `processing` is leased by a router right now; `processed` is done; **`failed` is PARKED** - the router gave up, the event will never be delivered, and it stays that way until someone requeues it. |
+| `data[].status` | string | yes | one of `pending`, `processing`, `processed`, `failed` | `pending` is queued (possibly mid-routing, see `routing_cursor`); `processing` is leased by a router right now; `processed` is done; **`failed` is PARKED** - the router gave up, the event will never be delivered, and it stays that way until someone requeues it. |
 | `data[].attempts` | number | yes |  | Total times a router has picked this row up. Monotonic, and NOT the bound that parks it - see `unaccounted_attempts`. A high number here with a low one there is a row that keeps failing in ways the router understood and recorded, which is a database or configuration problem rather than a poisoned event. |
 | `data[].unaccounted_attempts` | number | yes |  | Claims that ended with the router writing nothing at all - a crash, an OOM, a lease left to lapse. THIS is the bound that parks a row (`ROUTER_MAX_OUTBOX_ATTEMPTS`), because it is the only counter that means "this row keeps killing the process". A failure the router observed and recorded hands its increment back. |
 | `data[].last_error` | string \| null | yes |  | The last error the router recorded, verbatim and truncated to 1000 characters. On a parked row this is why it was parked, and it is preserved through a requeue so the history is not erased by the recovery. |
 | `data[].failing_since` | string \| null | yes | format `date-time` | When the current run of recorded failures began; null when the row is not failing. Recorded failures are bounded by elapsed TIME rather than by a count, because no count distinguishes "the database was unavailable for twenty minutes" from "this row errors every time". |
-| `data[].fan_out_cursor` | string \| null | yes |  | Resume point for a fan-out too wide for one transaction: the subscription id the last committed batch stopped at. Non-null on a `pending` row means the fan-out is PARTLY done - some endpoints already have their delivery, the rest are still owed one. It is kept through a requeue, so recovery resumes rather than re-walking work that already committed. |
+| `data[].routing_cursor` | string \| null | yes |  | Resume point for a routing too wide for one transaction: the subscription id the last committed batch stopped at. Non-null on a `pending` row means the routing is PARTLY done - some endpoints already have their delivery, the rest are still owed one. It is kept through a requeue, so recovery resumes rather than re-walking work that already committed. |
 | `data[].available_at` | string | yes | format `date-time` | When this row next becomes claimable. In the future while it is backing off. |
 | `data[].locked_by` | string \| null | yes |  | The router replica holding the lease, if any. Useful when one replica misbehaves. |
 | `data[].locked_until` | string \| null | yes | format `date-time` |  |
@@ -146,14 +146,14 @@ The full router-side state of one entry, for the detail view behind a parked row
 | Property | Type | Required | Constraints | Description |
 |---|---|---|---|---|
 | `id` | string | yes |  | Outbox row id (`obx_...`). |
-| `event_id` | string | yes |  | The event this row fans out. |
+| `event_id` | string | yes |  | The event this row routes. |
 | `type` | string | yes |  | What the row asks the router to do. `event.created` is the only type the router handles; anything else is parked on sight rather than re-claimed forever. |
-| `status` | string | yes | one of `pending`, `processing`, `processed`, `failed` | `pending` is queued (possibly mid-fan-out, see `fan_out_cursor`); `processing` is leased by a router right now; `processed` is done; **`failed` is PARKED** - the router gave up, the event will never be delivered, and it stays that way until someone requeues it. |
+| `status` | string | yes | one of `pending`, `processing`, `processed`, `failed` | `pending` is queued (possibly mid-routing, see `routing_cursor`); `processing` is leased by a router right now; `processed` is done; **`failed` is PARKED** - the router gave up, the event will never be delivered, and it stays that way until someone requeues it. |
 | `attempts` | number | yes |  | Total times a router has picked this row up. Monotonic, and NOT the bound that parks it - see `unaccounted_attempts`. A high number here with a low one there is a row that keeps failing in ways the router understood and recorded, which is a database or configuration problem rather than a poisoned event. |
 | `unaccounted_attempts` | number | yes |  | Claims that ended with the router writing nothing at all - a crash, an OOM, a lease left to lapse. THIS is the bound that parks a row (`ROUTER_MAX_OUTBOX_ATTEMPTS`), because it is the only counter that means "this row keeps killing the process". A failure the router observed and recorded hands its increment back. |
 | `last_error` | string \| null | yes |  | The last error the router recorded, verbatim and truncated to 1000 characters. On a parked row this is why it was parked, and it is preserved through a requeue so the history is not erased by the recovery. |
 | `failing_since` | string \| null | yes | format `date-time` | When the current run of recorded failures began; null when the row is not failing. Recorded failures are bounded by elapsed TIME rather than by a count, because no count distinguishes "the database was unavailable for twenty minutes" from "this row errors every time". |
-| `fan_out_cursor` | string \| null | yes |  | Resume point for a fan-out too wide for one transaction: the subscription id the last committed batch stopped at. Non-null on a `pending` row means the fan-out is PARTLY done - some endpoints already have their delivery, the rest are still owed one. It is kept through a requeue, so recovery resumes rather than re-walking work that already committed. |
+| `routing_cursor` | string \| null | yes |  | Resume point for a routing too wide for one transaction: the subscription id the last committed batch stopped at. Non-null on a `pending` row means the routing is PARTLY done - some endpoints already have their delivery, the rest are still owed one. It is kept through a requeue, so recovery resumes rather than re-walking work that already committed. |
 | `available_at` | string | yes | format `date-time` | When this row next becomes claimable. In the future while it is backing off. |
 | `locked_by` | string \| null | yes |  | The router replica holding the lease, if any. Useful when one replica misbehaves. |
 | `locked_until` | string \| null | yes | format `date-time` |  |
@@ -202,14 +202,14 @@ The single-entry form of the bulk requeue above; see it for what a requeue does 
 | Property | Type | Required | Constraints | Description |
 |---|---|---|---|---|
 | `id` | string | yes |  | Outbox row id (`obx_...`). |
-| `event_id` | string | yes |  | The event this row fans out. |
+| `event_id` | string | yes |  | The event this row routes. |
 | `type` | string | yes |  | What the row asks the router to do. `event.created` is the only type the router handles; anything else is parked on sight rather than re-claimed forever. |
-| `status` | string | yes | one of `pending`, `processing`, `processed`, `failed` | `pending` is queued (possibly mid-fan-out, see `fan_out_cursor`); `processing` is leased by a router right now; `processed` is done; **`failed` is PARKED** - the router gave up, the event will never be delivered, and it stays that way until someone requeues it. |
+| `status` | string | yes | one of `pending`, `processing`, `processed`, `failed` | `pending` is queued (possibly mid-routing, see `routing_cursor`); `processing` is leased by a router right now; `processed` is done; **`failed` is PARKED** - the router gave up, the event will never be delivered, and it stays that way until someone requeues it. |
 | `attempts` | number | yes |  | Total times a router has picked this row up. Monotonic, and NOT the bound that parks it - see `unaccounted_attempts`. A high number here with a low one there is a row that keeps failing in ways the router understood and recorded, which is a database or configuration problem rather than a poisoned event. |
 | `unaccounted_attempts` | number | yes |  | Claims that ended with the router writing nothing at all - a crash, an OOM, a lease left to lapse. THIS is the bound that parks a row (`ROUTER_MAX_OUTBOX_ATTEMPTS`), because it is the only counter that means "this row keeps killing the process". A failure the router observed and recorded hands its increment back. |
 | `last_error` | string \| null | yes |  | The last error the router recorded, verbatim and truncated to 1000 characters. On a parked row this is why it was parked, and it is preserved through a requeue so the history is not erased by the recovery. |
 | `failing_since` | string \| null | yes | format `date-time` | When the current run of recorded failures began; null when the row is not failing. Recorded failures are bounded by elapsed TIME rather than by a count, because no count distinguishes "the database was unavailable for twenty minutes" from "this row errors every time". |
-| `fan_out_cursor` | string \| null | yes |  | Resume point for a fan-out too wide for one transaction: the subscription id the last committed batch stopped at. Non-null on a `pending` row means the fan-out is PARTLY done - some endpoints already have their delivery, the rest are still owed one. It is kept through a requeue, so recovery resumes rather than re-walking work that already committed. |
+| `routing_cursor` | string \| null | yes |  | Resume point for a routing too wide for one transaction: the subscription id the last committed batch stopped at. Non-null on a `pending` row means the routing is PARTLY done - some endpoints already have their delivery, the rest are still owed one. It is kept through a requeue, so recovery resumes rather than re-walking work that already committed. |
 | `available_at` | string | yes | format `date-time` | When this row next becomes claimable. In the future while it is backing off. |
 | `locked_by` | string \| null | yes |  | The router replica holding the lease, if any. Useful when one replica misbehaves. |
 | `locked_until` | string \| null | yes | format `date-time` |  |
@@ -230,6 +230,6 @@ The project, outbox entry or event does not exist, or belongs to another tenant.
 
 **409 Conflict** - [ApiErrorResponse](./schemas.md#apierrorresponse)
 
-The entry is not parked: `pending`/`processing` means a router is already working on it, `processed` means the fan-out completed and the route you want is event replay.
+The entry is not parked: `pending`/`processing` means a router is already working on it, `processed` means the routing completed and the route you want is event replay.
 
 `error.code`: [`conflict`](./errors.md#conflict), [`limit_exceeded`](./errors.md#limit-exceeded), [`idempotency_key_reused`](./errors.md#idempotency-key-reused)

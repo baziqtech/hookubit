@@ -13,7 +13,7 @@ import (
 	"github.com/shaq/hookubit/services/data-plane/internal/testsupport"
 )
 
-// These tests run the real fan-out SQL against a migrated database. They are
+// These tests run the real routing SQL against a migrated database. They are
 // the only place the ON CONFLICT arbiter, the partial unique index and the
 // atomicity of the route transaction are actually verified, so they skip rather
 // than fail when there is nothing to talk to - the same convention as
@@ -35,7 +35,7 @@ type fixture struct {
 	eventID   string
 	outboxID  string
 	// publishedAt is the fixture event's `created_at`, read back from the row
-	// rather than guessed, because it is now a ROUTING INPUT: the fan-out walk
+	// rather than guessed, because it is now a ROUTING INPUT: the routing walk
 	// is bounded to subscriptions that existed at this instant
 	// (loadCandidatesSQL). A fixture that seeds its subscriptions after its
 	// event is modelling a customer who subscribed after we accepted the
@@ -292,7 +292,7 @@ func newIntegrationRouter(t *testing.T, pool *pgxpool.Pool, routerID string) *Ro
 
 // ---------------------------------------------------------------------------
 
-func TestPostgresRouteMaterialisesFanOut(t *testing.T) {
+func TestPostgresRouteMaterialisesRouting(t *testing.T) {
 	pool := requirePool(t)
 	f := seed(t, pool, "payment.settled")
 	mustExec(t, pool, `UPDATE events SET ordering_key = 'customer_123' WHERE id = $1`, f.eventID)
@@ -436,7 +436,7 @@ func TestPostgresRouteReadsOrderingKeyFromHeadersFallback(t *testing.T) {
 // TestPostgresRerunningAPartiallyAppliedBatchIsANoOp is the single most
 // important test in this package.
 //
-// It simulates the crash the partial unique index exists for: the fan-out
+// It simulates the crash the partial unique index exists for: the routing
 // committed, the outbox row was put back on the queue (by a reclaim, a manual
 // replay, an operator), and the router runs it again. The second run must
 // insert NOTHING. If it inserts, every subscriber receives the event twice.
@@ -558,7 +558,7 @@ func TestPostgresPartialIndexArbitratesButPermitsReplay(t *testing.T) {
 
 // TestPostgresRouteRollsBackEverythingWhenTheLeaseIsLost is the atomicity test.
 // If another router took the row, the deliveries this transaction wrote must
-// not survive - otherwise both routers materialise the same fan-out and the
+// not survive - otherwise both routers materialise the same routing and the
 // created counts stop meaning anything.
 func TestPostgresRouteRollsBackEverythingWhenTheLeaseIsLost(t *testing.T) {
 	pool := requirePool(t)
@@ -578,7 +578,7 @@ func TestPostgresRouteRollsBackEverythingWhenTheLeaseIsLost(t *testing.T) {
 	// Another router steals the row while rtr_a is mid-flight.
 	mustExec(t, pool, `UPDATE event_outbox SET locked_by = 'rtr_b' WHERE id = $1`, f.outboxID)
 
-	res, err := store.Route(ctx, RouteRequest{RouterID: "rtr_a", Row: claimed[0], FanOutBatch: 100})
+	res, err := store.Route(ctx, RouteRequest{RouterID: "rtr_a", Row: claimed[0], RoutingBatch: 100})
 	if err != nil {
 		t.Fatalf("Route: %v", err)
 	}
@@ -586,7 +586,7 @@ func TestPostgresRouteRollsBackEverythingWhenTheLeaseIsLost(t *testing.T) {
 		t.Fatalf("outcome = %s, want %s", res.Outcome, OutcomeLeaseLost)
 	}
 	if got := loadDeliveries(t, pool, f.eventID); len(got) != 0 {
-		t.Fatalf("%d deliveries survived a rolled-back transaction; the fan-out is not atomic", len(got))
+		t.Fatalf("%d deliveries survived a rolled-back transaction; the routing is not atomic", len(got))
 	}
 	if got := eventStatus(t, pool, f.eventID); got == "processed" {
 		t.Fatal("the event was marked processed by a transaction that rolled back")
@@ -705,7 +705,7 @@ func TestPostgresRouteReportsAMissingEvent(t *testing.T) {
 	res, err := store.Route(context.Background(), RouteRequest{
 		RouterID:    "rtr_a",
 		Row:         OutboxRow{ID: ids.New(ids.Outbox), EventID: ids.New(ids.Event), Type: OutboxTypeEventCreated, Attempts: 1},
-		FanOutBatch: 10,
+		RoutingBatch: 10,
 	})
 	if err != nil {
 		t.Fatalf("Route: %v", err)
@@ -864,9 +864,9 @@ func TestPostgresOutboxLagSeconds(t *testing.T) {
 	}
 }
 
-// TestPostgresConcurrentRoutersDoNotDoubleFanOut runs two routers at the same
+// TestPostgresConcurrentRoutersDoNotDoubleRouting runs two routers at the same
 // event. Whichever loses must leave no trace.
-func TestPostgresConcurrentRoutersDoNotDoubleFanOut(t *testing.T) {
+func TestPostgresConcurrentRoutersDoNotDoubleRouting(t *testing.T) {
 	pool := requirePool(t)
 	ctx := context.Background()
 	f := seed(t, pool, "payment.settled")
@@ -891,10 +891,10 @@ func TestPostgresConcurrentRoutersDoNotDoubleFanOut(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// Resumable fan-out (the truncation gap)
+// Resumable routing (the truncation gap)
 // ---------------------------------------------------------------------------
 
-// newBatchedRouter is newIntegrationRouter with an explicit fan-out BATCH, so a
+// newBatchedRouter is newIntegrationRouter with an explicit routing BATCH, so a
 // handful of subscriptions can exercise the multi-batch path that a real
 // 10,000-subscription project would.
 func newBatchedRouter(t *testing.T, pool *pgxpool.Pool, routerID string, batch int) *Router {
@@ -915,17 +915,17 @@ func newBatchedRouter(t *testing.T, pool *pgxpool.Pool, routerID string, batch i
 	return r
 }
 
-// fanOutState is the bookkeeping the two fixes added to event_outbox.
-func fanOutState(t *testing.T, pool *pgxpool.Pool, outboxID string) (
+// routingState is the bookkeeping the two fixes added to event_outbox.
+func routingState(t *testing.T, pool *pgxpool.Pool, outboxID string) (
 	status string, attempts, unaccounted int, cursor *string, failingSince *time.Time,
 ) {
 	t.Helper()
 	err := pool.QueryRow(context.Background(),
-		`SELECT status::text, attempts, unaccounted_attempts, fan_out_cursor, failing_since
+		`SELECT status::text, attempts, unaccounted_attempts, routing_cursor, failing_since
 		 FROM event_outbox WHERE id = $1`, outboxID).
 		Scan(&status, &attempts, &unaccounted, &cursor, &failingSince)
 	if err != nil {
-		t.Fatalf("read outbox fan-out state: %v", err)
+		t.Fatalf("read outbox routing state: %v", err)
 	}
 	return
 }
@@ -949,7 +949,7 @@ func claimOurs(t *testing.T, store *PostgresStore, routerID, outboxID string) Ou
 	return OutboxRow{}
 }
 
-// drain polls until the queue is empty, so a multi-batch fan-out completes the
+// drain polls until the queue is empty, so a multi-batch routing completes the
 // way the running router completes it: one batch per poll.
 func drain(t *testing.T, r *Router, maxPolls int) int {
 	t.Helper()
@@ -963,7 +963,7 @@ func drain(t *testing.T, r *Router, maxPolls int) int {
 			return polls
 		}
 	}
-	t.Fatalf("queue did not drain in %d polls; the fan-out is not making progress", maxPolls)
+	t.Fatalf("queue did not drain in %d polls; the routing is not making progress", maxPolls)
 	return polls
 }
 
@@ -976,7 +976,7 @@ func drain(t *testing.T, r *Router, maxPolls int) int {
 // them because replay is built on delivery rows.
 //
 // Now the cap bounds one TRANSACTION. Every endpoint gets its delivery.
-func TestPostgresFanOutWiderThanOneBatchReachesEveryEndpoint(t *testing.T) {
+func TestPostgresRoutingWiderThanOneBatchReachesEveryEndpoint(t *testing.T) {
 	pool := requirePool(t)
 	f := seed(t, pool, "payment.settled")
 
@@ -992,7 +992,7 @@ func TestPostgresFanOutWiderThanOneBatchReachesEveryEndpoint(t *testing.T) {
 
 	got := loadDeliveries(t, pool, f.eventID)
 	if len(got) != subscriptions {
-		t.Fatalf("fan-out produced %d deliveries, want %d - the endpoints past the batch were dropped",
+		t.Fatalf("routing produced %d deliveries, want %d - the endpoints past the batch were dropped",
 			len(got), subscriptions)
 	}
 	for _, d := range got {
@@ -1003,18 +1003,18 @@ func TestPostgresFanOutWiderThanOneBatchReachesEveryEndpoint(t *testing.T) {
 	}
 	for endpointID, reached := range want {
 		if !reached {
-			t.Fatalf("endpoint %s never received the event; this is the fan-out cap dropping the "+
+			t.Fatalf("endpoint %s never received the event; this is the routing cap dropping the "+
 				"newest subscriptions, which no API can recover", endpointID)
 		}
 	}
 
-	status, _, unaccounted, cursor, _ := fanOutState(t, pool, f.outboxID)
+	status, _, unaccounted, cursor, _ := routingState(t, pool, f.outboxID)
 	if status != "processed" {
 		t.Fatalf("outbox status = %s, want processed once the walk finished", status)
 	}
 	if unaccounted != 0 {
 		t.Fatalf("unaccounted_attempts = %d, want 0: every batch committed and gave its claim back; "+
-			"a wide fan-out must not spend the poison budget one batch at a time", unaccounted)
+			"a wide routing must not spend the poison budget one batch at a time", unaccounted)
 	}
 	if got := eventStatus(t, pool, f.eventID); got != "processed" {
 		t.Fatalf("event status = %s, want processed", got)
@@ -1024,7 +1024,7 @@ func TestPostgresFanOutWiderThanOneBatchReachesEveryEndpoint(t *testing.T) {
 
 // `processed` is a claim that the system delivered what it accepted. It must not
 // be made while endpoints are still waiting for their delivery rows.
-func TestPostgresAnUnfinishedFanOutIsNotMarkedProcessed(t *testing.T) {
+func TestPostgresAnUnfinishedRoutingIsNotMarkedProcessed(t *testing.T) {
 	pool := requirePool(t)
 	ctx := context.Background()
 	f := seed(t, pool, "payment.settled")
@@ -1045,12 +1045,12 @@ func TestPostgresAnUnfinishedFanOutIsNotMarkedProcessed(t *testing.T) {
 			"claiming the event is processed would be a lie the operator UI repeats", got)
 	}
 
-	status, _, _, cursor, _ := fanOutState(t, pool, f.outboxID)
+	status, _, _, cursor, _ := routingState(t, pool, f.outboxID)
 	if status != "pending" {
 		t.Fatalf("outbox status = %s, want pending - the row must go back to the queue to finish", status)
 	}
 	if cursor == nil || *cursor == "" {
-		t.Fatal("no fan-out cursor was committed; the next claim would restart the walk from the beginning")
+		t.Fatal("no routing cursor was committed; the next claim would restart the walk from the beginning")
 	}
 
 	// And the row is claimable RIGHT NOW, not after a backoff.
@@ -1062,19 +1062,19 @@ func TestPostgresAnUnfinishedFanOutIsNotMarkedProcessed(t *testing.T) {
 	for _, row := range claimed {
 		if row.ID == f.outboxID {
 			found = true
-			if row.FanOutCursor != *cursor {
-				t.Fatalf("resumed with cursor %q, want %q", row.FanOutCursor, *cursor)
+			if row.RoutingCursor != *cursor {
+				t.Fatalf("resumed with cursor %q, want %q", row.RoutingCursor, *cursor)
 			}
 		}
 	}
 	if !found {
-		t.Fatal("an unfinished fan-out was not immediately reclaimable")
+		t.Fatal("an unfinished routing was not immediately reclaimable")
 	}
 }
 
 // A crash between batches re-runs at worst one batch. The partial unique index
 // deliveries_event_endpoint_original_key is what makes that free.
-func TestPostgresReplayingAFanOutBatchCreatesNoDuplicates(t *testing.T) {
+func TestPostgresReplayingARoutingBatchCreatesNoDuplicates(t *testing.T) {
 	pool := requirePool(t)
 	f := seed(t, pool, "payment.settled")
 	for i := 0; i < 5; i++ {
@@ -1084,20 +1084,20 @@ func TestPostgresReplayingAFanOutBatchCreatesNoDuplicates(t *testing.T) {
 	r := newBatchedRouter(t, pool, "rtr_"+f.orgID, 2)
 	drain(t, r, 10)
 	if got := len(loadDeliveries(t, pool, f.eventID)); got != 5 {
-		t.Fatalf("fan-out produced %d deliveries, want 5", got)
+		t.Fatalf("routing produced %d deliveries, want 5", got)
 	}
 
 	// Rewind: the row is back in the queue with no cursor at all, as if every
 	// batch had been lost. The whole walk re-runs.
 	mustExec(t, pool,
 		`UPDATE event_outbox
-		 SET status = 'pending', processed_at = NULL, fan_out_cursor = NULL,
+		 SET status = 'pending', processed_at = NULL, routing_cursor = NULL,
 		     available_at = now(), locked_by = NULL, locked_until = NULL
 		 WHERE id = $1`, f.outboxID)
 	drain(t, r, 10)
 
 	if got := len(loadDeliveries(t, pool, f.eventID)); got != 5 {
-		t.Fatalf("re-running the whole fan-out produced %d deliveries, want 5: every endpoint would "+
+		t.Fatalf("re-running the whole routing produced %d deliveries, want 5: every endpoint would "+
 			"have received the webhook twice", got)
 	}
 }
@@ -1127,7 +1127,7 @@ func TestPostgresARecordedReleaseRefundsTheClaimAndStartsTheClock(t *testing.T) 
 		t.Fatalf("ReleaseOutbox: %v", err)
 	}
 
-	status, attempts, unaccounted, _, failingSince := fanOutState(t, pool, f.outboxID)
+	status, attempts, unaccounted, _, failingSince := routingState(t, pool, f.outboxID)
 	if status != "pending" {
 		t.Fatalf("status = %s, want pending", status)
 	}
@@ -1149,7 +1149,7 @@ func TestPostgresARecordedReleaseRefundsTheClaimAndStartsTheClock(t *testing.T) 
 	if err := store.ReleaseOutbox(ctx, "rtr_a", f.outboxID, "connection reset again", 0); err != nil {
 		t.Fatalf("ReleaseOutbox: %v", err)
 	}
-	_, attempts, unaccounted, _, failingSince = fanOutState(t, pool, f.outboxID)
+	_, attempts, unaccounted, _, failingSince = routingState(t, pool, f.outboxID)
 	if attempts != 2 || unaccounted != 0 {
 		t.Fatalf("attempts = %d, unaccounted = %d; want 2 and 0", attempts, unaccounted)
 	}
@@ -1177,9 +1177,9 @@ func TestPostgresProgressClearsTheFailureClock(t *testing.T) {
 		t.Fatalf("RunOnce: %v", err)
 	}
 
-	status, _, _, cursor, failingSince := fanOutState(t, pool, f.outboxID)
+	status, _, _, cursor, failingSince := routingState(t, pool, f.outboxID)
 	if status != "pending" || cursor == nil {
-		t.Fatalf("status = %s, cursor = %v; want an in-flight fan-out", status, cursor)
+		t.Fatalf("status = %s, cursor = %v; want an in-flight routing", status, cursor)
 	}
 	if failingSince != nil {
 		t.Fatalf("failing_since = %s after a batch committed; the row is making progress and would "+
@@ -1190,7 +1190,7 @@ func TestPostgresProgressClearsTheFailureClock(t *testing.T) {
 // THE SUBSCRIPTION SET IS PINNED TO PUBLISH TIME, AND THAT DOES NOT DEPEND ON
 // HOW WIDE THE PROJECT IS.
 //
-// A batched fan-out spans several transactions and therefore several snapshots.
+// A batched routing spans several transactions and therefore several snapshots.
 // The keyset walk resumes at `s.id > cursor`, and ULIDs sort by creation time,
 // so a subscription created between two batches sorts AFTER the committed
 // cursor and the next batch picked it up: a customer who subscribed at 10:00
@@ -1201,7 +1201,7 @@ func TestPostgresProgressClearsTheFailureClock(t *testing.T) {
 // before I subscribed?" was "only if your project is wide enough", which is not
 // a rule a customer or an operator can reason about. Both halves below now give
 // the same answer, which is the property being asserted.
-func TestPostgresFanOutIsPinnedToTheSubscriptionsThatExistedAtPublishTime(t *testing.T) {
+func TestPostgresRoutingIsPinnedToTheSubscriptionsThatExistedAtPublishTime(t *testing.T) {
 	ctx := context.Background()
 	pool := requirePool(t)
 	f := seed(t, pool, "payment.settled")
@@ -1221,9 +1221,9 @@ func TestPostgresFanOutIsPinnedToTheSubscriptionsThatExistedAtPublishTime(t *tes
 	}
 	if got := len(loadDeliveries(t, pool, f.eventID)); got != 2 {
 		t.Fatalf("first batch created %d deliveries, want 2 (the batch bound); the rest of this "+
-			"test needs a fan-out that is genuinely mid-walk", got)
+			"test needs a routing that is genuinely mid-walk", got)
 	}
-	_, _, _, cursor, _ := fanOutState(t, pool, f.outboxID)
+	_, _, _, cursor, _ := routingState(t, pool, f.outboxID)
 	if cursor == nil || *cursor == "" {
 		t.Fatal("no cursor was committed; without a resumed walk this test proves nothing")
 	}
@@ -1245,7 +1245,7 @@ func TestPostgresFanOutIsPinnedToTheSubscriptionsThatExistedAtPublishTime(t *tes
 	for _, d := range got {
 		if d.EndpointID == lateEndpointID {
 			t.Fatalf("endpoint %s received an event published BEFORE it subscribed; a batched "+
-				"fan-out must not widen the subscription set between batches", lateEndpointID)
+				"routing must not widen the subscription set between batches", lateEndpointID)
 		}
 		if _, ok := early[d.EndpointID]; !ok {
 			t.Fatalf("delivery for an endpoint that was never subscribed: %s", d.EndpointID)
@@ -1253,7 +1253,7 @@ func TestPostgresFanOutIsPinnedToTheSubscriptionsThatExistedAtPublishTime(t *tes
 		early[d.EndpointID] = true
 	}
 	if len(got) != 3 {
-		t.Fatalf("fan-out produced %d deliveries, want 3 - one per subscription that existed when "+
+		t.Fatalf("routing produced %d deliveries, want 3 - one per subscription that existed when "+
 			"the event was accepted", len(got))
 	}
 	for endpointID, reached := range early {
@@ -1271,7 +1271,7 @@ func TestPostgresFanOutIsPinnedToTheSubscriptionsThatExistedAtPublishTime(t *tes
 	//
 	// This is the case that was always correct by accident: one transaction,
 	// one snapshot. It is asserted so that the two halves cannot drift apart
-	// again - a fan-out's reach must not be a function of the project's width.
+	// again - a routing's reach must not be a function of the project's width.
 	narrow := seed(t, pool, "payment.settled")
 	beforeEndpointID, _ := narrow.addEndpoint(t, []string{"payment.settled"}, endpointOpts{})
 	afterEndpointID, _ := narrow.addEndpoint(t, []string{"payment.settled"},
@@ -1282,7 +1282,7 @@ func TestPostgresFanOutIsPinnedToTheSubscriptionsThatExistedAtPublishTime(t *tes
 	narrowDeliveries := loadDeliveries(t, pool, narrow.eventID)
 	if len(narrowDeliveries) != 1 || narrowDeliveries[0].EndpointID != beforeEndpointID {
 		t.Fatalf("a project inside one batch produced %d deliveries (%+v), want exactly one for %s: "+
-			"the same rule has to hold whether or not the fan-out was batched",
+			"the same rule has to hold whether or not the routing was batched",
 			len(narrowDeliveries), narrowDeliveries, beforeEndpointID)
 	}
 	if narrowDeliveries[0].EndpointID == afterEndpointID {

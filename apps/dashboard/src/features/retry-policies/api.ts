@@ -137,7 +137,7 @@ export function useUpdateRetryPolicy(projectId: string, policyId: string) {
  * Clears the previous default and sets this one in a single SERIALIZABLE
  * transaction. Idempotent on the current default. It changes which policy
  * endpoints WITHOUT their own policy resolve to for deliveries created from
- * now on; a delivery already fanned out keeps the `max_attempts` stamped on
+ * now on; a delivery already routed keeps the `max_attempts` stamped on
  * its row.
  */
 export function useSetDefaultRetryPolicy(projectId: string) {

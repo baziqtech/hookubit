@@ -8,7 +8,7 @@
 |---|---|
 | [GET `/v1/projects/{projectId}/events`](#get-v1-projects-projectid-events) | List events in a project |
 | [GET `/v1/projects/{projectId}/events/{eventId}`](#get-v1-projects-projectid-events-eventid) | Fetch one event, with its payload |
-| [GET `/v1/projects/{projectId}/events/{eventId}/deliveries`](#get-v1-projects-projectid-events-eventid-deliveries) | List the deliveries this event fanned out to |
+| [GET `/v1/projects/{projectId}/events/{eventId}/deliveries`](#get-v1-projects-projectid-events-eventid-deliveries) | List the deliveries this event routed to |
 | [POST `/v1/projects/{projectId}/events/{eventId}/replay`](#post-v1-projects-projectid-events-eventid-replay) | Replay an event to one endpoint, or to all originally matched endpoints |
 
 ### GET `/v1/projects/{projectId}/events`
@@ -25,7 +25,7 @@ Filter by event type, ingest status, date range, and a free-text fragment of the
 |---|---|---|---|---|---|
 | `projectId` | path | string | yes |  | Project id, `proj_…`. Resolved from the project row, never trusted as a claim. |
 | `event_type` | query | string | no |  | Exact event type, e.g. `payment.settled`. INDEX-SUPPORTED: cheap at any volume, and with the default newest-first order it needs no sort step. No wildcards or prefixes - a partial type never matches. |
-| `status` | query | string | no | one of `received`, `processing`, `processed`, `failed` | Ingest/fan-out state, NOT a delivery outcome. **NOT INDEX-SUPPORTED**: a filter applied to whatever the project and date predicates selected. Pair it with a date range. |
+| `status` | query | string | no | one of `received`, `processing`, `processed`, `failed` | Ingest/routing state, NOT a delivery outcome. **NOT INDEX-SUPPORTED**: a filter applied to whatever the project and date predicates selected. Pair it with a date range. |
 | `created_after` | query | string | no | format `date-time` | Inclusive lower bound on `created_at`. INDEX-SUPPORTED. |
 | `created_before` | query | string | no | format `date-time` | Exclusive upper bound on `created_at`. INDEX-SUPPORTED, and non-overlapping. |
 | `idempotency_key` | query | string | no | min 3 chars | Case-insensitive substring of the producer-supplied idempotency key - the free-text search for "the producer says they sent order 41f9, did we get it?". **NOT INDEX-SUPPORTED**: `ILIKE '%fragment%'` cannot use a b-tree, so this is a scan of every event the other filters left. Minimum 3 characters, and always pair it with a date range on a busy project. |
@@ -43,15 +43,15 @@ Filter by event type, ingest status, date range, and a free-text fragment of the
 | `data[].project_id` | string | yes |  |  |
 | `data[].event_type` | string | yes |  |  |
 | `data[].idempotency_key` | string \| null | yes |  | The idempotency key the producer published this event with, if any. Publishing again with the same key in the same project resolves to this event instead of creating another. |
-| `data[].ordering_key` | string \| null | yes |  | Opt-in serialisation key, carried onto every delivery this event fanned out to. It is accepted and stored today so it is already in place when per-key ordering is enforced, but per-key ordering is NOT yet enforced: this field currently guarantees nothing about delivery order. |
-| `data[].status` | string | yes | one of `received`, `processing`, `processed`, `failed` | The INGEST/fan-out state, not a delivery outcome. `processed` means the fan-out committed, which says nothing about whether any endpoint accepted it - that is what the deliveries are for. |
+| `data[].ordering_key` | string \| null | yes |  | Opt-in serialisation key, carried onto every delivery this event routed to. It is accepted and stored today so it is already in place when per-key ordering is enforced, but per-key ordering is NOT yet enforced: this field currently guarantees nothing about delivery order. |
+| `data[].status` | string | yes | one of `received`, `processing`, `processed`, `failed` | The INGEST/routing state, not a delivery outcome. `processed` means the routing committed, which says nothing about whether any endpoint accepted it - that is what the deliveries are for. |
 | `data[].payload_size` | number | yes |  | Bytes of the authoritative payload as received. |
 | `data[].payload_hash` | string | yes |  | SHA-256 of the authoritative raw bytes, lowercase hex. |
 | `data[].payload_inline` | boolean | yes |  | False when the raw bytes are not in the database (offloaded, or aged out). |
 | `data[].payload_location` | string \| null | yes |  | `s3://bucket/key` when the payload was too large to store inline. |
 | `data[].headers` | object<string, string> \| null | yes |  | Ingest request headers. Credential-shaped values are `[redacted]`. |
 | `data[].created_at` | string | yes |  |  |
-| `data[].processed_at` | string \| null | yes |  | When the fan-out first committed. Null until it has. |
+| `data[].processed_at` | string \| null | yes |  | When the routing first committed. Null until it has. |
 | `data[].deliveries` | [EventDeliveryRollupDto](./schemas.md#eventdeliveryrollupdto) \| null | yes |  | What became of this event, rolled up from its DELIVERIES rather than from `status`. Read this, not `status`, to answer "did anyone receive it?" - `status: processed` means the router ran and committed, and says nothing about whether anybody got anything. Null on routes that do not compute it. |
 | `has_more` | boolean | yes |  |  |
 | `next_offset` | number \| null | yes |  |  |
@@ -93,17 +93,17 @@ The payload is returned as `payload.body` - the AUTHORITATIVE raw bytes, decoded
 | `project_id` | string | yes |  |  |
 | `event_type` | string | yes |  |  |
 | `idempotency_key` | string \| null | yes |  | The idempotency key the producer published this event with, if any. Publishing again with the same key in the same project resolves to this event instead of creating another. |
-| `ordering_key` | string \| null | yes |  | Opt-in serialisation key, carried onto every delivery this event fanned out to. It is accepted and stored today so it is already in place when per-key ordering is enforced, but per-key ordering is NOT yet enforced: this field currently guarantees nothing about delivery order. |
-| `status` | string | yes | one of `received`, `processing`, `processed`, `failed` | The INGEST/fan-out state, not a delivery outcome. `processed` means the fan-out committed, which says nothing about whether any endpoint accepted it - that is what the deliveries are for. |
+| `ordering_key` | string \| null | yes |  | Opt-in serialisation key, carried onto every delivery this event routed to. It is accepted and stored today so it is already in place when per-key ordering is enforced, but per-key ordering is NOT yet enforced: this field currently guarantees nothing about delivery order. |
+| `status` | string | yes | one of `received`, `processing`, `processed`, `failed` | The INGEST/routing state, not a delivery outcome. `processed` means the routing committed, which says nothing about whether any endpoint accepted it - that is what the deliveries are for. |
 | `payload_size` | number | yes |  | Bytes of the authoritative payload as received. |
 | `payload_hash` | string | yes |  | SHA-256 of the authoritative raw bytes, lowercase hex. |
 | `payload_inline` | boolean | yes |  | False when the raw bytes are not in the database (offloaded, or aged out). |
 | `payload_location` | string \| null | yes |  | `s3://bucket/key` when the payload was too large to store inline. |
 | `headers` | object<string, string> \| null | yes |  | Ingest request headers. Credential-shaped values are `[redacted]`. |
 | `created_at` | string | yes |  |  |
-| `processed_at` | string \| null | yes |  | When the fan-out first committed. Null until it has. |
+| `processed_at` | string \| null | yes |  | When the routing first committed. Null until it has. |
 | `deliveries` | [EventDeliveryRollupDto](./schemas.md#eventdeliveryrollupdto) \| null | yes |  | What became of this event, rolled up from its DELIVERIES rather than from `status`. Read this, not `status`, to answer "did anyone receive it?" - `status: processed` means the router ran and committed, and says nothing about whether anybody got anything. Null on routes that do not compute it. |
-| `deliveries.state` | string | yes | one of `received`, `in_progress`, `delivered`, `partly_delivered`, `all_failed`, `dropped` | `dropped` is the one worth reading twice: the fan-out COMPLETED and produced no deliveries, because no subscription matched. The publisher was answered 202 and the event went nowhere. `received` means the fan-out has not finished - which is also how an event stuck BEFORE fan-out appears here, because it has no deliveries and no completed fan-out. Telling those apart needs `event_outbox`; see `GET /projects/:id/outbox`. |
+| `deliveries.state` | string | yes | one of `received`, `in_progress`, `delivered`, `partly_delivered`, `all_failed`, `dropped` | `dropped` is the one worth reading twice: the routing COMPLETED and produced no deliveries, because no subscription matched. The publisher was answered 202 and the event went nowhere. `received` means the routing has not finished - which is also how an event stuck BEFORE routing appears here, because it has no deliveries and no completed routing. Telling those apart needs `event_outbox`; see `GET /projects/:id/outbox`. |
 | `deliveries.total` | number | yes |  | Deliveries this event produced, across every status. |
 | `deliveries.succeeded` | number | yes |  |  |
 | `deliveries.failed` | number | yes |  | `failed` plus `exhausted`. |
@@ -133,7 +133,7 @@ The project, event or endpoint does not exist, or belongs to another tenant. One
 
 ### GET `/v1/projects/{projectId}/events/{eventId}/deliveries`
 
-**List the deliveries this event fanned out to**
+**List the deliveries this event routed to**
 
 The "did finance ever receive this?" route: one row per endpoint the event was materialised for, each with its own status, attempt count and next attempt. Accepts the same filters as the deliveries listing (the event is forced, so `event_id` in the query is ignored).
 
@@ -148,7 +148,7 @@ The "did finance ever receive this?" route: one row per endpoint the event was m
 | `status` | query | string | no | one of `pending`, `scheduled`, `queued`, `processing`, `succeeded`, `failed`, `retrying`, `exhausted`, `cancelled` | Exact status. INDEX-SUPPORTED: cheap at any volume, and with the default newest-first order it needs no sort step. |
 | `failing_now` | query | boolean | no |  | Everything that has failed and not recovered: `retrying`, `failed`, `exhausted`. INDEX-SUPPORTED (three scans of the same index). Cannot be combined with `status` - they would contradict each other and the API refuses rather than picking one. |
 | `endpoint_id` | query | string | no |  | Only deliveries to this endpoint. INDEX-SUPPORTED: cheap at any volume, and with the default newest-first order it needs no sort step. |
-| `event_id` | query | string | no |  | Only the deliveries fanned out from this event. INDEX-SUPPORTED: cheap at any volume. |
+| `event_id` | query | string | no |  | Only the deliveries routed from this event. INDEX-SUPPORTED: cheap at any volume. |
 | `event_type` | query | string | no |  | The event type of the event this delivery came from. **NOT INDEX-SUPPORTED**: it is a join to `events` on a column `deliveries` does not carry, so it filters rows the project/status/date predicate already selected. Always combine it with a date range or an endpoint on a busy project. |
 | `created_after` | query | string | no | format `date-time` | Inclusive lower bound on `created_at`. INDEX-SUPPORTED. |
 | `created_before` | query | string | no | format `date-time` | Exclusive upper bound on `created_at`. INDEX-SUPPORTED. |
@@ -222,7 +222,7 @@ The project, event or endpoint does not exist, or belongs to another tenant. One
 | Property | Type | Required | Constraints | Description |
 |---|---|---|---|---|
 | `reason` | string | no | max 500 chars | Recorded on the audit entry for this replay. Not stored on the delivery. |
-| `endpoint_id` | string | no |  | One of the endpoints this event was originally fanned out to. Omit to replay to all of them. An endpoint that never received this event is refused: sending it there for the first time is a new delivery, not a replay. |
+| `endpoint_id` | string | no |  | One of the endpoints this event was originally routed to. Omit to replay to all of them. An endpoint that never received this event is refused: sending it there for the first time is a new delivery, not a replay. |
 
 #### Responses
 
@@ -270,6 +270,6 @@ The project, event or endpoint does not exist, or belongs to another tenant. One
 
 **409 Conflict** - [ApiErrorResponse](./schemas.md#apierrorresponse)
 
-The event reached no endpoints, the named endpoint never received it, an endpoint is deleted or disabled, or the fan-out exceeds 50 deliveries.
+The event reached no endpoints, the named endpoint never received it, an endpoint is deleted or disabled, or the routing exceeds 50 deliveries.
 
 `error.code`: [`conflict`](./errors.md#conflict), [`limit_exceeded`](./errors.md#limit-exceeded), [`idempotency_key_reused`](./errors.md#idempotency-key-reused)

@@ -171,7 +171,7 @@ func TestStageRootLinksInsteadOfParenting(t *testing.T) {
 	stored := remoteContext(t, true)
 	upstream := Decode(stored)
 
-	_, span := StartStage(context.Background(), "webhook.fan_out", StageOptions{
+	_, span := StartStage(context.Background(), "webhook.routing", StageOptions{
 		Upstream: stored,
 		Kind:     trace.SpanKindConsumer,
 	})
@@ -189,7 +189,7 @@ func TestStageRootLinksInsteadOfParenting(t *testing.T) {
 			got.Parent().SpanID())
 	}
 	if got.SpanContext().TraceID() == upstream.TraceID() {
-		t.Fatal("the stage root reused the upstream trace id; a fan-out of 2000 " +
+		t.Fatal("the stage root reused the upstream trace id; a routing of 2000 " +
 			"deliveries with their retries would then be one trace no backend assembles")
 	}
 	if len(got.Links()) != 1 {

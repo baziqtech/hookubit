@@ -18,7 +18,7 @@ function entry(overrides: Partial<OutboxEntry> = {}): OutboxEntry {
     unaccounted_attempts: 0,
     last_error: 'retry_duration_exceeded: failing since 2026-03-03T10:00:00Z (1h2m0s, bound 1h0m0s)',
     failing_since: '2026-03-03T10:00:00.000Z',
-    fan_out_cursor: null,
+    routing_cursor: null,
     available_at: '2026-03-03T11:02:00.000Z',
     locked_by: null,
     locked_until: null,
@@ -107,8 +107,8 @@ describe('explainParked', () => {
     );
   });
 
-  it('flags a partial fan-out from fan_out_cursor', () => {
-    expect(explainParked(entry({ fan_out_cursor: 'sub_01HALFWAY' })).partial).toBe(true);
+  it('flags a partial routing from routing_cursor', () => {
+    expect(explainParked(entry({ routing_cursor: 'sub_01HALFWAY' })).partial).toBe(true);
     expect(explainParked(entry()).partial).toBe(false);
   });
 

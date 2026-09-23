@@ -38,7 +38,7 @@ export class ReplayDeliveryDto {
 export class ReplayEventDto extends ReplayDeliveryDto {
   @ApiPropertyOptional({
     description:
-      'One of the endpoints this event was originally fanned out to. Omit to replay to all of ' +
+      'One of the endpoints this event was originally routed to. Omit to replay to all of ' +
       'them. An endpoint that never received this event is refused: sending it there for the ' +
       'first time is a new delivery, not a replay.',
   })

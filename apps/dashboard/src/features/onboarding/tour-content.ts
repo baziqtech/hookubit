@@ -10,7 +10,7 @@
  * Four ideas, because these four are what make the product make sense and
  * everything else is detail:
  *
- *   1. fan-out       one event → N deliveries → each with its own attempts
+ *   1. routing       one event → N deliveries → each with its own attempts
  *   2. signing       the consumer can prove it was really you
  *   3. retries       a flaky endpoint recovers without anyone being paged
  *   4. the ledger    which is the answer to "what happened to this event?"
@@ -41,8 +41,8 @@ export const TOUR_STEPS: TourStep[] = [
     ],
   },
   {
-    id: 'fan-out',
-    label: 'Fan-out',
+    id: 'routing',
+    label: 'Routing',
     title: 'One event becomes many deliveries',
     body: [
       'You publish one event. We create one delivery per matching subscription — up front, before anything is sent — so the table is the record of what should arrive.',

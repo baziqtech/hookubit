@@ -764,7 +764,7 @@
       "id": 13,
       "type": "stat",
       "title": "Deliveries created /s",
-      "description": "Rows materialised by the router: one per matching subscription, each with its own retry chain. Compare with events accepted - the ratio is the fan-out.",
+      "description": "Rows materialised by the router: one per matching subscription, each with its own retry chain. Compare with events accepted - the ratio is the routing.",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -1531,8 +1531,8 @@
     {
       "id": 26,
       "type": "timeseries",
-      "title": "Fan-out size (deliveries per event)",
-      "description": "What turns materialised fan-out from cheap into expensive. At 10 subscribers this is free; at 10,000 it is the dominant write on the system.",
+      "title": "Routing size (deliveries per event)",
+      "description": "What turns materialised routing from cheap into expensive. At 10 subscribers this is free; at 10,000 it is the dominant write on the system.",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -1550,7 +1550,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "histogram_quantile(0.99, sum by (le) (rate(router_fan_out_size_bucket[$__rate_interval])))",
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(router_deliveries_per_event_bucket[$__rate_interval])))",
           "legendFormat": "p99",
           "range": true,
           "instant": false,
@@ -1562,7 +1562,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "histogram_quantile(0.5, sum by (le) (rate(router_fan_out_size_bucket[$__rate_interval])))",
+          "expr": "histogram_quantile(0.5, sum by (le) (rate(router_deliveries_per_event_bucket[$__rate_interval])))",
           "legendFormat": "p50",
           "range": true,
           "instant": false,

@@ -31,7 +31,7 @@ import { BulkRequeueDialog, EventLink, RequeueButton, RequeueEntryDialog } from 
  * The status filter as it lives in the URL.
  *
  * ABSENT MEANS PARKED. This page exists for the rows the platform answered
- * 202 to and then could not fan out, so the default is the set that needs a
+ * 202 to and then could not route, so the default is the set that needs a
  * person, and `?status=all` is the explicit way to widen it. A default of
  * "everything" would open on a wall of `processed` rows — every event that
  * ever went through — with the three that matter somewhere on page 40.
@@ -49,8 +49,8 @@ export function readStatusChoice(param: string | null): StatusChoice {
 const STATUS_OPTIONS: { value: StatusChoice; label: string }[] = [
   { value: 'failed', label: 'Parked — needs a person' },
   { value: 'pending', label: 'Queued' },
-  { value: 'processing', label: 'Fanning out' },
-  { value: 'processed', label: 'Fanned out' },
+  { value: 'processing', label: 'Routing' },
+  { value: 'processed', label: 'Routed' },
   { value: 'all', label: 'Any status' },
 ];
 
@@ -162,7 +162,7 @@ export function OutboxPage() {
                 description={
                   filters.event_id
                     ? 'This event has no parked outbox row. If its status still reads failed, a requeue is already in flight — or widen the status filter to see its row.'
-                    : 'Every accepted event has either fanned out or is still in the queue. Widen the status filter to see the rest of the outbox.'
+                    : 'Every accepted event has either routed or is still in the queue. Widen the status filter to see the rest of the outbox.'
                 }
               />
             ) : (
@@ -237,9 +237,9 @@ function ParkedPrimer() {
         longer than the retry window.
       </p>
       <p className="mt-1.5 text-2xs text-ink-subtle">
-        Requeueing runs the fan-out that never happened. It is bounded to the subscriptions that
+        Requeueing runs the routing that never happened. It is bounded to the subscriptions that
         existed when the event was accepted, it preserves the claim history, and a partly-done
-        fan-out resumes where it stopped.
+        routing resumes where it stopped.
       </p>
     </section>
   );
@@ -344,10 +344,10 @@ function LiveRow({ entry }: { entry: OutboxEntry }) {
       {entry.status === 'processed' && entry.processed_at && (
         <span>completed {formatRelativeTime(entry.processed_at)}</span>
       )}
-      {entry.fan_out_cursor && entry.status !== 'processed' && (
+      {entry.routing_cursor && entry.status !== 'processed' && (
         <span>
-          fan-out partly done · resumes after{' '}
-          <span className="font-mono">{entry.fan_out_cursor}</span>
+          routing partly done · resumes after{' '}
+          <span className="font-mono">{entry.routing_cursor}</span>
         </span>
       )}
       {entry.last_error && (

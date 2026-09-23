@@ -6,7 +6,7 @@
 // separated by a database write and an arbitrary amount of time:
 //
 //	ingest  (COMMIT event + outbox row, return 202)
-//	  ->  router  (claim the outbox row, materialise the fan-out)
+//	  ->  router  (claim the outbox row, materialise the routing)
 //	        ->  worker  (claim the delivery, sign, POST)
 //
 // Nothing in-process survives those boundaries. There is no goroutine, no

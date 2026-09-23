@@ -26,7 +26,7 @@
     "load:sink": "node tests/load/sink/sink.mjs",
     "load:seed": "node tests/load/scripts/seed.mjs",
     "load:verify": "node tests/load/scripts/verify.mjs",
-    "load:fanout": "node tests/load/scripts/run.mjs fanout",
+    "load:wide": "node tests/load/scripts/run.mjs wide",
     "load:slow": "node tests/load/scripts/run.mjs slow-endpoints",
     "load:failing": "node tests/load/scripts/run.mjs failing-endpoints",
     "load:tenants": "node tests/load/scripts/run.mjs many-tenants",

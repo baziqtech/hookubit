@@ -219,7 +219,7 @@ describe('mock control API', () => {
     expect(db.events.some((event) => event.payload.source === 'object_storage')).toBe(true);
   });
 
-  it('materialises fan-out: one event, one delivery per matching subscription', async () => {
+  it('materialises routing: one event, one delivery per matching subscription', async () => {
     const event = db.events.find((candidate) => candidate.event_type === 'payment.settled');
     expect(event).toBeDefined();
 

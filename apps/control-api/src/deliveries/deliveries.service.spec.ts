@@ -468,7 +468,7 @@ describe('replaying one delivery', () => {
 
   /**
    * `deliveries.trace_context` is what the worker links each attempt's trace
-   * to. On a fan-out row the router writes its own span; on a replay the cause
+   * to. On a routing row the router writes its own span; on a replay the cause
    * is the operator's request, and nothing else - not the original's context
    * (a request from weeks ago), and not a trace invented for the occasion.
    */
@@ -518,7 +518,7 @@ describe('replaying one delivery', () => {
       expect(rawDelivery(harness.db, result.deliveries[0].id).traceContext).toBeNull();
     });
 
-    it('one fan-out, one cause: every row of a replay-to-all carries the same context', async () => {
+    it('one routing, one cause: every row of a replay-to-all carries the same context', async () => {
       tracing = startInMemoryTracing();
       const harness = await ledgerHarness();
 

@@ -80,7 +80,7 @@ export class ListDeliveriesQueryDto {
   endpoint_id?: string;
 
   @ApiPropertyOptional({
-    description: 'Only the deliveries fanned out from this event. INDEX-SUPPORTED: cheap at any volume.',
+    description: 'Only the deliveries routed from this event. INDEX-SUPPORTED: cheap at any volume.',
   })
   @IsOptional()
   @IsString()

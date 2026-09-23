@@ -229,7 +229,7 @@ func TestScenario01_IngestCrashesBeforeCommit(t *testing.T) {
 // Recovery strategy asserted: the outbox row IS the notification. The ingest
 // process is killed outright (its pool is closed and never used again) and the
 // router, running on its own connections, still claims the row and materialises
-// the fan-out. Nothing in the delivery path needs ingest to be alive.
+// the routing. Nothing in the delivery path needs ingest to be alive.
 //
 // What a regression looks like in production: publish to the queue from ingest
 // after COMMIT - "the outbox poll is slow, let's push directly" - and every

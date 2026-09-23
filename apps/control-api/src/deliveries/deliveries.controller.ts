@@ -23,7 +23,7 @@ import {
 import { Authorized, RequestContext, Tenant } from '../authz';
 import { Throttle, ThrottleGuard } from '../common/throttle.guard';
 import { DeliveriesService } from './deliveries.service';
-import { MAX_REPLAY_FAN_OUT } from './delivery-limits';
+import { MAX_REPLAY_DELIVERIES } from './delivery-limits';
 import {
   DeliveryAttemptListDto,
   DeliveryDetailDto,
@@ -130,7 +130,7 @@ export class DeliveriesController {
   // request here becomes a real HTTP call to a customer's own infrastructure,
   // so an unbounded loop over this route is a way to use this platform to
   // hammer a third party. `viewer` cannot reach it at all (the permission
-  // matrix), `MAX_REPLAY_FAN_OUT` bounds one request, and this bounds the rate.
+  // matrix), `MAX_REPLAY_DELIVERIES` bounds one request, and this bounds the rate.
   @Throttle({ name: 'deliveries.replay', limit: 30, windowMs: 5 * MINUTE })
   @ApiOperation({
     summary: 'Replay one delivery',
@@ -143,7 +143,7 @@ export class DeliveriesController {
   })
   @ApiCreatedResponse({ type: ReplayResultDto })
   @ApiConflictResponse({
-    description: `The endpoint is deleted or disabled, or the replay would exceed ${MAX_REPLAY_FAN_OUT} deliveries.`,
+    description: `The endpoint is deleted or disabled, or the replay would exceed ${MAX_REPLAY_DELIVERIES} deliveries.`,
   })
   replay(
     @Tenant() context: RequestContext,

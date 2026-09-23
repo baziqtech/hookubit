@@ -84,7 +84,7 @@ export function useEvent(projectId: string, eventId: string) {
 }
 
 /**
- * The materialised fan-out for one event: one row per matching subscription,
+ * The materialised routing for one event: one row per matching subscription,
  * each with its own retry chain. This is the query that answers "did finance
  * ever receive this?".
  */

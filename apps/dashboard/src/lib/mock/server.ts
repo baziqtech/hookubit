@@ -217,7 +217,7 @@ const THROTTLE_LIMITS: Record<string, number> = {
   // the real API enforces per IP AND per address. Same number as the server.
   'auth.resend': 5,
   // As tight as event replay, and for the same reason: one call can put a
-  // hundred fan-outs into the queue, each of which becomes real HTTP to
+  // hundred events into the router's queue, each of which becomes real HTTP to
   // endpoints that were, very often, already failing. `OutboxController`
   // declares 10 per five minutes on BOTH requeue routes, sharing one bucket.
   'outbox.requeue': 10,
@@ -475,7 +475,7 @@ function withoutPayload(event: EventDetail): WebhookEvent {
  * routes serve — mirroring `EventsService.rollUpDeliveries` and
  * `delivery-rollup.ts`.
  *
- * `dropped` is the state that only exists here: fan-out COMPLETED (`status:
+ * `dropped` is the state that only exists here: routing COMPLETED (`status:
  * processed`) and produced no deliveries, because no subscription matched. It
  * is invisible in every other column because there is no delivery row to be
  * absent from.
@@ -757,8 +757,8 @@ function readRequeueBody(
  * The two BUDGETS reset — `unaccounted_attempts` and `failing_since` — because
  * the operator has looked at the row. `attempts` is NOT reset: it is monotonic,
  * and zeroing it would erase the number that separates "requeued four times
- * and keeps dying" from "first time". `last_error` and `fan_out_cursor` are
- * untouched — the evidence survives the recovery and a partial fan-out
+ * and keeps dying" from "first time". `last_error` and `routing_cursor` are
+ * untouched — the evidence survives the recovery and a partial routing
  * resumes. `processed_at` clears because the row is no longer finished. The
  * event goes `failed → received`, guarded on `failed`.
  */
@@ -2764,7 +2764,7 @@ const handlers: Handler[] = [
       // Operator intent, recorded and attributed. What the data plane does
       // next: a delivery already queued for this endpoint is finished
       // `cancelled` when a worker claims it (`worker/deliver.go`), and the
-      // router skips the endpoint at fan-out (`router/plan.go` `gate()`), so
+      // router skips the endpoint at routing (`router/plan.go` `gate()`), so
       // new events produce no rows for it. Nothing waits.
       endpoint.disabled_reason = reason
         ? `Paused by ${db.user.email}: ${reason}`
@@ -2981,13 +2981,13 @@ const handlers: Handler[] = [
       if (!entry) fail(404, 'not_found', CROSS_TENANT_MESSAGE);
       if (entry.status !== 'failed') {
         // The CURRENT status in `details`, so the caller can tell "a router
-        // already has it" from "the fan-out already completed" without a
+        // already has it" from "the routing already completed" without a
         // second request.
         fail(
           409,
           'conflict',
           entry.status === 'processed'
-            ? 'This entry already fanned out. To send the event again, replay it.'
+            ? 'This entry already routed. To send the event again, replay it.'
             : 'This entry is not parked: a router is already working on it.',
           { outbox_id: entry.id, outbox_status: entry.status },
         );

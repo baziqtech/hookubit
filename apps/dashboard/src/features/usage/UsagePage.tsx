@@ -6,7 +6,7 @@ import { formatCount } from '../../lib/format';
 import type { Project } from '../../types/api';
 import { MAX_WINDOW_HOURS } from '../../types/api';
 import { deliveryOutcomesQuery, eventVolumeQuery } from '../analytics/api';
-import { fanOutRatio, formatRatio } from '../analytics/derive';
+import { deliveriesPerEvent, formatRatio } from '../analytics/derive';
 import { describeFailure } from '../analytics/tiles';
 import { useProjects } from '../projects/api';
 
@@ -18,7 +18,7 @@ import { useProjects } from '../projects/api';
  * ceiling. So this page is the organization's projects, one row each, with
  * events published and deliveries created over the last 30 days read from
  * `analytics/events` and `analytics/deliveries` at `window_hours=720`, and
- * the fan-out ratio between them. Each row is its own pair of requests and
+ * the routing ratio between them. Each row is its own pair of requests and
  * lands on its own.
  *
  * What it is NOT is said on the page: these are rolling windows ending at the
@@ -121,7 +121,7 @@ function UsageTable({ orgId, projects }: { orgId: string; projects: Project[] })
             <Th>Project</Th>
             <Th align="right">Events published</Th>
             <Th align="right">Deliveries created</Th>
-            <Th align="right">Fan-out</Th>
+            <Th align="right">Routing</Th>
             <Th align="right">Window ends</Th>
           </tr>
         </thead>
@@ -153,7 +153,7 @@ function UsageTable({ orgId, projects }: { orgId: string; projects: Project[] })
                   {formatCount(totals.deliveries)}
                 </Td>
                 <Td align="right" className="text-ink-muted">
-                  {formatRatio(fanOutRatio(totals.deliveries, totals.events))}
+                  {formatRatio(deliveriesPerEvent(totals.deliveries, totals.events))}
                 </Td>
                 <Td align="right" className="text-ink-subtle">
                   —
@@ -185,7 +185,7 @@ function UsageRow({
   events: RowQuery<{ total: number; window: { to: string } }>;
   deliveries: RowQuery<{ current: { total: number } }>;
 }) {
-  const ratio = fanOutRatio(deliveries.data?.current.total, events.data?.total);
+  const ratio = deliveriesPerEvent(deliveries.data?.current.total, events.data?.total);
 
   return (
     <tr className="border-b border-line last:border-0">

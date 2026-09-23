@@ -24,7 +24,7 @@ function entry(overrides: Partial<OutboxEntry> = {}): OutboxEntry {
     unaccounted_attempts: 0,
     last_error: 'retry_duration_exceeded: failing since 2026-03-03T10:00:00Z (1h2m0s, bound 1h0m0s)',
     failing_since: '2026-03-03T10:00:00.000Z',
-    fan_out_cursor: null,
+    routing_cursor: null,
     available_at: '2026-03-03T11:02:00.000Z',
     locked_by: null,
     locked_until: null,
@@ -48,7 +48,7 @@ const PARTIAL = entry({
   event_id: 'evt_partial',
   attempts: 14,
   unaccounted_attempts: 11,
-  fan_out_cursor: 'sub_01HALFWAY',
+  routing_cursor: 'sub_01HALFWAY',
   last_error: 'attempts_exhausted: claimed 14 times (11 of them leaving no recorded outcome, bound 10)',
 });
 
@@ -145,7 +145,7 @@ describe('OutboxPage', () => {
     expect(html).toContain('11 claims in total, 11 of them ending with nothing recorded');
     expect(html).toContain('requeue may park it again');
 
-    expect(html).toContain('fan-out partly done');
+    expect(html).toContain('routing partly done');
     expect(html).toContain('data-park-reason="attempts_exhausted"');
     expect(html).toContain('data-park-reason="retry_duration_exceeded"');
 
@@ -223,7 +223,7 @@ describe('OutboxPage', () => {
       search: '?status=processed',
       filters: { status: 'processed', event_id: '' },
     });
-    expect(html).toContain('Fanned out');
+    expect(html).toContain('Routed');
     expect(html).not.toContain('data-testid="requeue-button"');
     expect(html).not.toContain('Parked means accepted and undelivered');
     expect(html).toContain('only parked rows can be requeued');
@@ -283,7 +283,7 @@ describe('ParkedEventPanel — the link in from the event page', () => {
   it('explains the parked state, why replay cannot help, and offers the requeue in place', () => {
     const html = render([entry()]);
     expect(html).toContain('data-testid="parked-event-notice"');
-    expect(html).toContain('parked before it fanned out');
+    expect(html).toContain('parked before it routed');
     expect(html).toContain('there is nothing to replay');
     expect(html).toContain('Kept failing for longer than the retry window');
     expect(html).toContain('data-testid="requeue-button"');

@@ -59,7 +59,7 @@ export function SubscriptionsPage() {
     <div className="flex flex-col gap-4">
       <PageHeader
         title="Subscriptions"
-        description="A subscription binds an endpoint to the event types it should receive. Fan-out is materialised per subscription."
+        description="A subscription binds an endpoint to the event types it should receive. Routing is materialised per subscription."
         actions={
           <GatedButton
             variant="primary"

@@ -15,27 +15,27 @@ import (
 
 const ingestTraceparent = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"
 
-func fanOutSpan(t *testing.T, rec *tracetest.SpanRecorder) sdktrace.ReadOnlySpan {
+func routingSpan(t *testing.T, rec *tracetest.SpanRecorder) sdktrace.ReadOnlySpan {
 	t.Helper()
 	for _, s := range rec.Ended() {
-		if s.Name() == "webhook.fan_out" {
+		if s.Name() == "webhook.routing" {
 			return s
 		}
 	}
-	t.Fatalf("no webhook.fan_out span was recorded (%d spans)", len(rec.Ended()))
+	t.Fatalf("no webhook.routing span was recorded (%d spans)", len(rec.Ended()))
 	return nil
 }
 
-// TestFanOutStampsItsOwnContextOnEveryDeliveryItCreates is the second link of
+// TestRoutingStampsItsOwnContextOnEveryDeliveryItCreates is the second link of
 // the chain.
 //
-// The value stored on the delivery rows must be the ROUTER's fan-out span, not
+// The value stored on the delivery rows must be the ROUTER's routing span, not
 // the ingest context it was handed. A delivery is a separate retry chain from
-// its event: the worker's question is "which fan-out produced this row", and
+// its event: the worker's question is "which routing produced this row", and
 // forwarding the ingest context instead would make every delivery of every
 // event point at an HTTP request rather than at the work that created it - and
-// would leave the fan-out itself unreachable from any delivery.
-func TestFanOutStampsItsOwnContextOnEveryDeliveryItCreates(t *testing.T) {
+// would leave the routing itself unreachable from any delivery.
+func TestRoutingStampsItsOwnContextOnEveryDeliveryItCreates(t *testing.T) {
 	rec := tracingtest.Record(t)
 
 	var seen RouteRequest
@@ -55,29 +55,29 @@ func TestFanOutStampsItsOwnContextOnEveryDeliveryItCreates(t *testing.T) {
 		t.Fatalf("RunOnce: %v", err)
 	}
 
-	span := fanOutSpan(t, rec)
+	span := routingSpan(t, rec)
 	want := tracing.EncodeSpanContext(span.SpanContext())
 	if seen.TraceContext == "" {
-		t.Fatal("the fan-out wrote no trace context onto its deliveries; the worker " +
+		t.Fatal("the routing wrote no trace context onto its deliveries; the worker " +
 			"then has nothing to link to and the chain stops at the router")
 	}
 	if seen.TraceContext != want {
-		t.Fatalf("stamped %q, want the fan-out span's own context %q", seen.TraceContext, want)
+		t.Fatalf("stamped %q, want the routing span's own context %q", seen.TraceContext, want)
 	}
 	if seen.TraceContext == ingestTraceparent {
-		t.Fatal("the fan-out forwarded the INGEST context to its deliveries: every " +
-			"delivery would then point at an HTTP request and the fan-out itself " +
+		t.Fatal("the routing forwarded the INGEST context to its deliveries: every " +
+			"delivery would then point at an HTTP request and the routing itself " +
 			"would be unreachable from any of them")
 	}
 }
 
-// TestFanOutLinksToIngestRatherThanParentingUnderIt.
+// TestRoutingLinksToIngestRatherThanParentingUnderIt.
 //
 // A production regression here is invisible until somebody opens a dashboard:
 // under parent-child, the ingest trace's duration becomes "until the last retry
-// of the widest fan-out finished", and every latency percentile derived from
+// of the widest routing finished", and every latency percentile derived from
 // trace duration is destroyed.
-func TestFanOutLinksToIngestRatherThanParentingUnderIt(t *testing.T) {
+func TestRoutingLinksToIngestRatherThanParentingUnderIt(t *testing.T) {
 	rec := tracingtest.Record(t)
 	upstream := tracing.Decode(ingestTraceparent)
 
@@ -90,25 +90,25 @@ func TestFanOutLinksToIngestRatherThanParentingUnderIt(t *testing.T) {
 		t.Fatalf("RunOnce: %v", err)
 	}
 
-	span := fanOutSpan(t, rec)
+	span := routingSpan(t, rec)
 	if span.Parent().IsValid() {
-		t.Fatalf("the fan-out span has parent %s; it must be a new root", span.Parent().SpanID())
+		t.Fatalf("the routing span has parent %s; it must be a new root", span.Parent().SpanID())
 	}
 	if span.SpanContext().TraceID() == upstream.TraceID() {
-		t.Fatal("the fan-out reused the ingest trace id")
+		t.Fatal("the routing reused the ingest trace id")
 	}
 	if len(span.Links()) != 1 || span.Links()[0].SpanContext.SpanID() != upstream.SpanID() {
-		t.Fatalf("the fan-out does not link to the ingest span (%d links)", len(span.Links()))
+		t.Fatalf("the routing does not link to the ingest span (%d links)", len(span.Links()))
 	}
 	if span.SpanKind() != trace.SpanKindConsumer {
 		t.Fatalf("span kind = %v, want consumer", span.SpanKind())
 	}
 }
 
-// TestOutboxRowWithNoStoredContextStillFansOut: rows written before the
-// migration, and every row in a deployment with tracing off, carry NULL. Fan-out
+// TestOutboxRowWithNoStoredContextStillRoutes: rows written before the
+// migration, and every row in a deployment with tracing off, carry NULL. Routing
 // must not care.
-func TestOutboxRowWithNoStoredContextStillFansOut(t *testing.T) {
+func TestOutboxRowWithNoStoredContextStillRoutes(t *testing.T) {
 	rec := tracingtest.Record(t)
 	store := &fakeStore{claim: []OutboxRow{{
 		ID: "obx_1", EventID: "evt_1", Type: OutboxTypeEventCreated,
@@ -121,14 +121,14 @@ func TestOutboxRowWithNoStoredContextStillFansOut(t *testing.T) {
 	if len(store.routed) != 1 {
 		t.Fatalf("routed %d rows, want 1", len(store.routed))
 	}
-	if n := len(fanOutSpan(t, rec).Links()); n != 0 {
+	if n := len(routingSpan(t, rec).Links()); n != 0 {
 		t.Fatalf("recorded %d links for a row with no stored context, want 0", n)
 	}
 }
 
 // TestOneSpanPerEventNotPerDelivery.
 //
-// The unit an operator asks about is one event's fan-out. Emitting a span per
+// The unit an operator asks about is one event's routing. Emitting a span per
 // DELIVERY would mean up to ROUTER_MAX_SUBSCRIPTIONS_PER_EVENT spans per
 // transaction - 2000 at the shipped default - for an event that has not been
 // delivered anywhere yet, and emitting one per POLL would mix unrelated tenants
@@ -149,14 +149,14 @@ func TestOneSpanPerEventNotPerDelivery(t *testing.T) {
 		t.Fatalf("RunOnce: %v", err)
 	}
 
-	var fanOuts int
+	var routings int
 	for _, s := range rec.Ended() {
-		if s.Name() == "webhook.fan_out" {
-			fanOuts++
+		if s.Name() == "webhook.routing" {
+			routings++
 		}
 	}
-	if fanOuts != 2 {
-		t.Fatalf("recorded %d fan-out spans for 2 outbox rows creating 1000 deliveries, want 2", fanOuts)
+	if routings != 2 {
+		t.Fatalf("recorded %d routing spans for 2 outbox rows creating 1000 deliveries, want 2", routings)
 	}
 }
 
@@ -178,7 +178,7 @@ func TestParkedRowIsAnErrorSpanAndAReleasedOneIsNot(t *testing.T) {
 		if _, err := r.RunOnce(context.Background()); err != nil {
 			t.Fatal(err)
 		}
-		span := fanOutSpan(t, rec)
+		span := routingSpan(t, rec)
 		if span.Status().Code.String() != "Error" {
 			t.Fatalf("a parked row produced status %s; an event that will never be "+
 				"delivered without an operator is exactly what an error span is for",
@@ -198,7 +198,7 @@ func TestParkedRowIsAnErrorSpanAndAReleasedOneIsNot(t *testing.T) {
 		if _, err := r.RunOnce(context.Background()); err != nil {
 			t.Fatal(err)
 		}
-		span := fanOutSpan(t, rec)
+		span := routingSpan(t, rec)
 		if span.Status().Code.String() == "Error" {
 			t.Fatal("a released row was marked as an error span; it is going to be " +
 				"retried and a transient database fault is not an incident")
@@ -239,9 +239,9 @@ func TestReclaimedRowIsSampledIn(t *testing.T) {
 	}
 }
 
-// TestFanOutSpanCarriesNoPayload guards the attribute set, for the same reason
+// TestRoutingSpanCarriesNoPayload guards the attribute set, for the same reason
 // the ingest test does: an attribute added here leaves the process.
-func TestFanOutSpanCarriesNoPayload(t *testing.T) {
+func TestRoutingSpanCarriesNoPayload(t *testing.T) {
 	rec := tracingtest.Record(t)
 	store := &fakeStore{
 		claim: []OutboxRow{{ID: "obx_1", EventID: "evt_1", Type: OutboxTypeEventCreated, Attempts: 1}},
@@ -264,14 +264,14 @@ func TestFanOutSpanCarriesNoPayload(t *testing.T) {
 	allowed := map[string]bool{
 		"webhook.outbox.id": true, "webhook.event.id": true,
 		"webhook.delivery.attempt": true, "webhook.outcome": true,
-		"webhook.fan_out.deliveries_created": true, "webhook.fan_out.planned": true,
+		"webhook.routing.deliveries_created": true, "webhook.routing.planned": true,
 		"webhook.project.id": true, "webhook.organization.id": true,
 		"webhook.event.type": true, "webhook.delivery.reason": true,
 		"webhook.trace.sample_in": true,
 	}
-	for _, a := range fanOutSpan(t, rec).Attributes() {
+	for _, a := range routingSpan(t, rec).Attributes() {
 		if !allowed[string(a.Key)] {
-			t.Fatalf("the fan-out span carries the unreviewed attribute %q=%q", a.Key, a.Value.Emit())
+			t.Fatalf("the routing span carries the unreviewed attribute %q=%q", a.Key, a.Value.Emit())
 		}
 	}
 }

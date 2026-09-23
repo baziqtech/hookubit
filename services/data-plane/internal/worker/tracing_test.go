@@ -54,13 +54,13 @@ func attrValue(s sdktrace.ReadOnlySpan, key string) (string, bool) {
 	return "", false
 }
 
-// TestAttemptIsANewTraceLinkedToTheFanOut is the third and last link of the
+// TestAttemptIsANewTraceLinkedToTheRouting is the third and last link of the
 // chain, and the one that decides whether the operator surface is readable.
 //
 // Under parent-child, an event with 2000 subscriptions and a retry chain each
 // is a single trace of a hundred thousand spans arriving over 24 hours. Nothing
 // assembles it. This pins the alternative: a new root per attempt, linked back.
-func TestAttemptIsANewTraceLinkedToTheFanOut(t *testing.T) {
+func TestAttemptIsANewTraceLinkedToTheRouting(t *testing.T) {
 	rec := tracingtest.Record(t)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
@@ -75,14 +75,14 @@ func TestAttemptIsANewTraceLinkedToTheFanOut(t *testing.T) {
 
 	if span.Parent().IsValid() {
 		t.Fatalf("the attempt span has parent %s; a delivery attempted six hours "+
-			"after the fan-out must not be a child of it", span.Parent().SpanID())
+			"after the routing must not be a child of it", span.Parent().SpanID())
 	}
 	if span.SpanContext().TraceID() == upstream.TraceID() {
-		t.Fatal("the attempt reused the fan-out's trace id; every delivery of a wide " +
-			"fan-out, times every retry, would land in one trace")
+		t.Fatal("the attempt reused the routing's trace id; every delivery of a wide " +
+			"routing, times every retry, would land in one trace")
 	}
 	if len(span.Links()) != 1 || span.Links()[0].SpanContext.SpanID() != upstream.SpanID() {
-		t.Fatalf("the attempt does not link back to the fan-out (%d links)", len(span.Links()))
+		t.Fatalf("the attempt does not link back to the routing (%d links)", len(span.Links()))
 	}
 	if span.SpanKind() != trace.SpanKindConsumer {
 		t.Fatalf("span kind = %v, want consumer", span.SpanKind())
@@ -276,11 +276,11 @@ func TestRetriesAreSampledInAtFullRate(t *testing.T) {
 	}
 }
 
-// TestASampledFanOutKeepsItsDeliveries: if the router's span was kept, the
+// TestASampledRoutingKeepsItsDeliveries: if the router's span was kept, the
 // deliveries it produced are kept too. Three independent 5% decisions give the
 // complete story one time in eight thousand, which is another way of spelling
 // "never".
-func TestASampledFanOutKeepsItsDeliveries(t *testing.T) {
+func TestASampledRoutingKeepsItsDeliveries(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	}))
@@ -292,7 +292,7 @@ func TestASampledFanOutKeepsItsDeliveries(t *testing.T) {
 	h.worker.handle(context.Background(), tracedLease(h, sampledUpstream, 0))
 
 	if len(rec.Ended()) == 0 {
-		t.Fatal("a delivery from a SAMPLED fan-out was dropped; the kept trace is a " +
+		t.Fatal("a delivery from a SAMPLED routing was dropped; the kept trace is a " +
 			"fragment that links to work nobody recorded")
 	}
 }

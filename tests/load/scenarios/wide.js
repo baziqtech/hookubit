@@ -1,8 +1,8 @@
 /**
- * SCENARIO 1 - HIGH FAN-OUT
+ * SCENARIO 1 - WIDE ROUTING
  *
  * What it proves: one published event becomes N independent delivery rows, and
- * what that multiplication costs. Fan-out is materialised - one row per
+ * what that multiplication costs. Routing is materialised - one row per
  * matching subscription, each with its own retry chain - which is what makes
  * per-endpoint replay possible and is also the most expensive design decision
  * in the system. This scenario prices it.
@@ -10,7 +10,7 @@
  * Every endpoint here is fast on purpose. The only variable is N.
  *
  * How to read a failure:
- *   ingest_latency_ms   The accept path is doing too much work. Fan-out happens
+ *   ingest_latency_ms   The accept path is doing too much work. Routing happens
  *                       AFTER the 202, so this should barely move as N grows.
  *                       If it tracks N, something in accept is not O(1) in
  *                       subscriptions.
@@ -27,9 +27,9 @@ import { drainSink, resetSink } from '../lib/collector.js';
 import { baseThresholds, collector, env, publisher } from '../lib/options.js';
 import { summary } from '../lib/summary.js';
 
-const RATE = env.int('LOAD_FANOUT_RATE', 10);
-const project = projectsByKey.fanout;
-const FANOUT = manifest.groups.fanout ? manifest.groups.fanout.count : 0;
+const RATE = env.int('LOAD_WIDE_RATE', 10);
+const project = projectsByKey.wide;
+const ROUTING = manifest.groups.wide ? manifest.groups.wide.count : 0;
 
 export const options = {
   scenarios: {
@@ -37,12 +37,12 @@ export const options = {
     collect: collector('collect'),
   },
   thresholds: baseThresholds({
-    // Fan-out is the cost being measured; give delivery a wide but finite
-    // budget. A p95 above this means the pool is not draining the fan-out.
-    'delivery_latency_ms{group:fanout}': ['p(95)<15000'],
+    // Routing is the cost being measured; give delivery a wide but finite
+    // budget. A p95 above this means the pool is not draining the wide.
+    'delivery_latency_ms{group:wide}': ['p(95)<15000'],
     // The suite's dead-man switch: fast ingest with nothing delivered is a
     // failed run, not a fast one.
-    'deliveries_received{group:fanout}': ['count>0'],
+    'deliveries_received{group:wide}': ['count>0'],
   }),
   summaryTrendStats: ['avg', 'min', 'med', 'p(50)', 'p(95)', 'p(99)', 'max', 'count'],
 };
@@ -52,7 +52,7 @@ export function setup() {
 }
 
 export function publishEvent() {
-  publish(project, manifest.event_types.fanout, { fanout: FANOUT });
+  publish(project, manifest.event_types.wide, { wide: ROUTING });
 }
 
 export function collect() {
@@ -60,5 +60,5 @@ export function collect() {
 }
 
 export function handleSummary(data) {
-  return summary(data, `HIGH FAN-OUT - one event to ${FANOUT} endpoints at ${RATE}/s`);
+  return summary(data, `WIDE ROUTING - one event to ${ROUTING} endpoints at ${RATE}/s`);
 }

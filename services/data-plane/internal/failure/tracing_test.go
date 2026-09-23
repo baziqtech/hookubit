@@ -24,7 +24,7 @@ import (
 // and an arbitrary amount of time apart, on pods that never share memory:
 //
 //	ingest (COMMIT event + outbox row, 202)
-//	  -> router (claim the outbox row, materialise the fan-out)
+//	  -> router (claim the outbox row, materialise the routing)
 //	       -> worker (claim the delivery, sign, POST)
 //
 // Every unit test above can pass while the chain is broken, because each one
@@ -91,18 +91,18 @@ func TestTraceContextSurvivesTheThreeProcessBoundaries(t *testing.T) {
 		t.Fatalf("router RunOnce: %v", err)
 	}
 
-	fanOut := spanByName(t, rec, "webhook.fan_out")
+	routing := spanByName(t, rec, "webhook.routing")
 
-	// The fan-out is a LINKED ROOT, not a child. This is the assertion that
+	// The routing is a LINKED ROOT, not a child. This is the assertion that
 	// stops an ingest span's duration becoming "until the last retry gave up".
-	if fanOut.Parent().IsValid() {
-		t.Fatalf("the fan-out span has parent %s; it must be a new root", fanOut.Parent().SpanID())
+	if routing.Parent().IsValid() {
+		t.Fatalf("the routing span has parent %s; it must be a new root", routing.Parent().SpanID())
 	}
-	if fanOut.SpanContext().TraceID() == ingestSpan.SpanContext().TraceID() {
-		t.Fatal("the fan-out joined the ingest trace")
+	if routing.SpanContext().TraceID() == ingestSpan.SpanContext().TraceID() {
+		t.Fatal("the routing joined the ingest trace")
 	}
-	if !linksTo(fanOut, ingestSpan.SpanContext()) {
-		t.Fatal("the fan-out span does not link back to the ingest span, so nothing " +
+	if !linksTo(routing, ingestSpan.SpanContext()) {
+		t.Fatal("the routing span does not link back to the ingest span, so nothing " +
 			"connects the 202 to the work it caused")
 	}
 
@@ -113,16 +113,16 @@ func TestTraceContextSurvivesTheThreeProcessBoundaries(t *testing.T) {
 		t.Fatalf("read deliveries.trace_context: %v", err)
 	}
 	if storedRouter == "" {
-		t.Fatal("deliveries.trace_context is NULL after a traced fan-out: the chain is " +
+		t.Fatal("deliveries.trace_context is NULL after a traced routing: the chain is " +
 			"broken at the second boundary and the worker has nothing to link to")
 	}
-	if want := tracing.EncodeSpanContext(fanOut.SpanContext()); storedRouter != want {
-		t.Fatalf("deliveries.trace_context = %q, want the fan-out span's own context %q",
+	if want := tracing.EncodeSpanContext(routing.SpanContext()); storedRouter != want {
+		t.Fatalf("deliveries.trace_context = %q, want the routing span's own context %q",
 			storedRouter, want)
 	}
 	if storedRouter == storedIngest {
 		t.Fatal("the router forwarded the ingest context to its deliveries instead of " +
-			"its own; the fan-out is then unreachable from any delivery it created")
+			"its own; the routing is then unreachable from any delivery it created")
 	}
 
 	// --- boundary 3: the worker claims the delivery and picks the context up
@@ -143,14 +143,14 @@ func TestTraceContextSurvivesTheThreeProcessBoundaries(t *testing.T) {
 	attempt := spanByName(t, rec, "webhook.delivery.attempt")
 	if attempt.Parent().IsValid() {
 		t.Fatalf("the attempt span has parent %s; a delivery is a separate retry chain "+
-			"and must not be a child of the fan-out", attempt.Parent().SpanID())
+			"and must not be a child of the routing", attempt.Parent().SpanID())
 	}
-	if attempt.SpanContext().TraceID() == fanOut.SpanContext().TraceID() {
-		t.Fatal("the attempt joined the fan-out's trace; a wide fan-out with retries " +
+	if attempt.SpanContext().TraceID() == routing.SpanContext().TraceID() {
+		t.Fatal("the attempt joined the routing's trace; a wide routing with retries " +
 			"would then be one trace nothing can assemble")
 	}
-	if !linksTo(attempt, fanOut.SpanContext()) {
-		t.Fatalf("the attempt span does not link back to the fan-out span; the chain " +
+	if !linksTo(attempt, routing.SpanContext()) {
+		t.Fatalf("the attempt span does not link back to the routing span; the chain " +
 			"is broken at the third boundary")
 	}
 
@@ -219,7 +219,7 @@ func TestTheWholeChainWorksWithTracingOff(t *testing.T) {
 	var deliveryID string
 	if err := pool.QueryRow(context.Background(),
 		`SELECT id FROM deliveries WHERE project_id = $1`, f.projectID).Scan(&deliveryID); err != nil {
-		t.Fatalf("the fan-out created no delivery with tracing off: %v", err)
+		t.Fatalf("the routing created no delivery with tracing off: %v", err)
 	}
 
 	rig := newRig(t, pool, rigOpts{concurrency: 1})

@@ -48,12 +48,12 @@ export function rateTone(rate: number | null): 'default' | 'ok' | 'warn' | 'dang
 
 /**
  * Deliveries per event. One publish becomes one delivery per matching
- * subscription, so `deliveries.total / events.total` is the project's fan-out.
+ * subscription, so `deliveries.total / events.total` is the project's routing.
  * Null when there were no events: a ratio over zero is not a number, and the
  * two totals also come from two different responses that may not both be in
  * hand yet.
  */
-export function fanOutRatio(
+export function deliveriesPerEvent(
   deliveriesTotal: number | undefined,
   eventsTotal: number | undefined,
 ): number | null {

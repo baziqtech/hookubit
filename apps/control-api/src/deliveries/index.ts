@@ -5,7 +5,7 @@ export {
   FAILING_NOW_STATUSES,
   HEADER_REDACTED,
   MAX_INLINE_ATTEMPTS,
-  MAX_REPLAY_FAN_OUT,
+  MAX_REPLAY_DELIVERIES,
   isRedactedRequestHeader,
 } from './delivery-limits';
 export { crossTenantNotFound, withCrossTenantNotFound } from './not-found';

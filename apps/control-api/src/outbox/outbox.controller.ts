@@ -78,7 +78,7 @@ export class OutboxController {
       'the event will never be delivered until someone requeues it, even though the publisher was ' +
       'told `202 Accepted`. `last_error` says why, `attempts` versus `unaccounted_attempts` says ' +
       'whether the row was killing the router or the database was failing under it, and a ' +
-      'non-null `fan_out_cursor` says the fan-out is partly done. Ordered newest first.',
+      'non-null `routing_cursor` says the routing is partly done. Ordered newest first.',
   })
   @ApiOkResponse({ type: OutboxEntryListDto })
   list(
@@ -98,26 +98,26 @@ export class OutboxController {
   // so a role that may put events back but is not trusted with the delivery
   // ledger is not a role this product has. It is deliberately NOT gated on a
   // permission of its own: this is the same power as replay-to-all, applied to
-  // an event that never fanned out, and owner/admin/developer is exactly the set
+  // an event that never routed, and owner/admin/developer is exactly the set
   // that should hold it.
   @Authorized('events.replay', 'deliveries.replay')
   @HttpCode(HttpStatus.OK)
   // As tight as event replay, and for the same reason: one request here can put
-  // MAX_REQUEUE_BATCH fan-outs into the queue, each of which becomes real HTTP
+  // MAX_REQUEUE_BATCH events into the router's queue, each of which becomes real HTTP
   // calls to endpoints that were, very often, already failing.
   @Throttle({ name: 'outbox.requeue', limit: 10, windowMs: 5 * MINUTE })
   @ApiOperation({
     summary: 'Requeue parked outbox entries',
     description:
       `Returns up to ${MAX_REQUEUE_BATCH} PARKED entries to the router's queue, oldest first, ` +
-      'so the fan-out that never ran gets to run. Read `has_more` and call again until it is ' +
+      'so the routing that never ran gets to run. Read `has_more` and call again until it is ' +
       'false; the bound is per request, not per incident. ' +
       '**This is not a replay.** A parked event has no delivery rows for a replay to work from, ' +
       'so the router runs the subscription match it never got to run. That match is bounded to ' +
       'the subscriptions that existed when the event was ACCEPTED - an endpoint subscribed after ' +
       'that will not receive it - but their current configuration applies, and a subscription ' +
       'deleted since is gone. The router\'s `last_error` is preserved, `attempts` keeps counting ' +
-      'from where it was, and a partly-completed fan-out resumes from its cursor rather than ' +
+      'from where it was, and a partly-completed routing resumes from its cursor rather than ' +
       're-sending to endpoints it already reached.',
   })
   @ApiOkResponse({ type: RequeueResultDto })
@@ -160,7 +160,7 @@ export class OutboxController {
   @ApiConflictResponse({
     description:
       'The entry is not parked: `pending`/`processing` means a router is already working on it, ' +
-      '`processed` means the fan-out completed and the route you want is event replay.',
+      '`processed` means the routing completed and the route you want is event replay.',
   })
   requeue(
     @Tenant() context: RequestContext,

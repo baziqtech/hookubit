@@ -13,7 +13,7 @@ export const OUTBOX_STATUSES = ['pending', 'processing', 'processed', 'failed'] 
  *
  * This resource exists because of a gap, and the gap is worth stating on the
  * type. An event that has been answered `202 Accepted` is durable, but the
- * fan-out that turns it into deliveries can fail - and when the router gives up,
+ * routing that turns it into deliveries can fail - and when the router gives up,
  * it PARKS the row (`status: failed`) and marks the event `failed`. Until this
  * module existed, `event_outbox` had no reference anywhere in the control plane:
  * a parked row was invisible to the API and to the dashboard, and the only way
@@ -26,7 +26,7 @@ export class OutboxEntryDto {
   @ApiProperty({ description: 'Outbox row id (`obx_...`).' })
   id!: string;
 
-  @ApiProperty({ description: 'The event this row fans out.' })
+  @ApiProperty({ description: 'The event this row routes.' })
   event_id!: string;
 
   @ApiProperty({
@@ -39,7 +39,7 @@ export class OutboxEntryDto {
   @ApiProperty({
     enum: OUTBOX_STATUSES,
     description:
-      '`pending` is queued (possibly mid-fan-out, see `fan_out_cursor`); `processing` is leased ' +
+      '`pending` is queued (possibly mid-routing, see `routing_cursor`); `processing` is leased ' +
       'by a router right now; `processed` is done; **`failed` is PARKED** - the router gave up, ' +
       'the event will never be delivered, and it stays that way until someone requeues it.',
   })
@@ -88,12 +88,12 @@ export class OutboxEntryDto {
     type: String,
     nullable: true,
     description:
-      'Resume point for a fan-out too wide for one transaction: the subscription id the last ' +
-      'committed batch stopped at. Non-null on a `pending` row means the fan-out is PARTLY done - ' +
+      'Resume point for a routing too wide for one transaction: the subscription id the last ' +
+      'committed batch stopped at. Non-null on a `pending` row means the routing is PARTLY done - ' +
       'some endpoints already have their delivery, the rest are still owed one. It is kept through ' +
       'a requeue, so recovery resumes rather than re-walking work that already committed.',
   })
-  fan_out_cursor!: string | null;
+  routing_cursor!: string | null;
 
   @ApiProperty({
     type: String,
@@ -134,7 +134,7 @@ export function toOutboxEntryDto(row: EventOutbox): OutboxEntryDto {
     unaccounted_attempts: row.unaccountedAttempts,
     last_error: row.lastError ?? null,
     failing_since: iso(row.failingSince),
-    fan_out_cursor: row.fanOutCursor ?? null,
+    routing_cursor: row.routingCursor ?? null,
     available_at: new Date(row.availableAt).toISOString(),
     locked_by: row.lockedBy ?? null,
     locked_until: iso(row.lockedUntil),

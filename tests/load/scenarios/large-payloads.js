@@ -8,7 +8,7 @@
  * What it proves: the offload boundary holds under load, in both directions.
  * The interesting risk is not the write - it is that every delivery of an
  * offloaded event now costs an object-store round trip on the delivery path,
- * multiplied by the fan-out. A run that succeeds here with a delivery p95 close
+ * multiplied by the routing. A run that succeeds here with a delivery p95 close
  * to the inline case means the fetch is not on the critical path in a way that
  * matters; a large gap is the number to take to a capacity conversation.
  *

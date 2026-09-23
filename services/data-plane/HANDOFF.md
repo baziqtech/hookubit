@@ -43,7 +43,7 @@ how much they will hurt if they are missing.
 
 3. **`events` wants an `ordering_key` column.** `Delivery` has one, `Event` does
    not, so the router has nowhere to read it from when it materialises the
-   fan-out. Until it exists, ingest stores it in `events.headers` as
+   routing. Until it exists, ingest stores it in `events.headers` as
    `{"ordering_key": "..."}` (see `requestMetadata` in `internal/ingest`). That
    works, but it is a JSON lookup on a hot path and it hides a routing input
    inside a column named for something else. Requested:
@@ -147,7 +147,7 @@ how much they will hurt if they are missing.
    next_attempt_at, created_at, id` against the NULLS FIRST index planned as
    Index Scan -> **Sort** -> LockRows -> Limit; and `id` appended so the
    tiebreaker the claim statements gained the same day is served by the index
-   instead of an Incremental Sort that has to read a whole fan-out's tie group
+   instead of an Incremental Sort that has to read a whole routing's tie group
    before emitting the first row. `TestClaimStatementsCanUseTheReadySetIndexes`
    in `internal/queue` pins all three claim-path statements to their index with
    no sort node, under real statistics (400 ready rows, ANALYZEd inside the
@@ -408,7 +408,7 @@ Two things that are not optional:
   rows. `runAll` already threads an `instanceID` through to `runWorker`; pass
   the same one here (or `instanceID + "-router"`). `router.New` refuses an empty
   id rather than defaulting to something plausible.
-- **`Concurrency` consumes pooled connections.** Each in-flight fan-out holds
+- **`Concurrency` consumes pooled connections.** Each in-flight routing holds
   one connection for the length of its transaction. Keep
   `RouterConcurrency + WorkerConcurrency` comfortably below
   `DATABASE_MAX_CONNECTIONS`, or a busy router starves the delivery loop of
@@ -427,8 +427,8 @@ knobs have package defaults today and should become environment variables:
 
 | Env var | Default | What it bounds |
 | --- | --- | --- |
-| `ROUTER_CONCURRENCY` | 4 | Events fanned out at once. One pooled connection each. |
-| `ROUTER_LEASE_SECONDS` | 60 | How long a claimed outbox row is unavailable after a router dies. Must exceed the worst-case fan-out transaction, not the poll interval. |
+| `ROUTER_CONCURRENCY` | 4 | Events routed at once. One pooled connection each. |
+| `ROUTER_LEASE_SECONDS` | 60 | How long a claimed outbox row is unavailable after a router dies. Must exceed the worst-case routing transaction, not the poll interval. |
 | `MAX_SUBSCRIPTIONS_PER_EVENT` | 2000 | Subscriptions examined **and** deliveries created for one event. |
 | `MAX_OUTBOX_ATTEMPTS` | 5 | The poison bound. Claims before a row is parked. |
 
@@ -451,7 +451,7 @@ registry, so `/metrics` is already correct. **Please move them into
 of the merge, not a design:
 
 `router_outbox_claimed_total`, `router_events_routed_total{outcome}`,
-`router_fan_out_size`, `router_subscriptions_skipped_total{reason}`,
+`router_deliveries_per_event`, `router_subscriptions_skipped_total{reason}`,
 `router_outbox_parked_total{reason}`, `router_route_duration_seconds`.
 
 The existing `deliveries_created_total` and `outbox_pending_age_seconds` are
@@ -459,8 +459,8 @@ driven by the router as specified; nothing about them changed.
 
 **The two to alert on.** `router_outbox_parked_total` at any non-zero rate is an
 event that will never be delivered without a human replaying it.
-`router_subscriptions_skipped_total{reason="fan_out_cap_exceeded"}` means
-endpoints were silently left out of a fan-out.
+`router_subscriptions_skipped_total{reason="routing_cap_exceeded"}` means
+endpoints were silently left out of a routing.
 
 ## 4. Schema and index requests (owned by `apps/control-api/prisma`)
 
@@ -484,7 +484,7 @@ endpoints were silently left out of a fan-out.
 2. **`deliveries_event_endpoint_original_key` must not be "cleaned up".**
    `prisma migrate diff` reports the partial unique index as drift because
    schema.prisma cannot express a partial index. It is the ON CONFLICT arbiter
-   for the entire fan-out. Regenerating the migration without it does not
+   for the entire routing. Regenerating the migration without it does not
    produce an error — it produces duplicate deliveries after any router restart.
    The migration file already says so; repeating it here because that is the
    file someone will "fix".
@@ -531,7 +531,7 @@ avoid.
   deduplicates explicitly (lowest subscription id wins, so the oldest
   subscription is recorded) rather than letting `ON CONFLICT DO NOTHING` swallow
   the second row, so the created count means what it says.
-- **The fan-out cap truncates rather than fails.** Over the cap, the oldest
+- **The routing cap truncates rather than fails.** Over the cap, the oldest
   subscriptions are served and the rest are dropped with an `ERROR` log naming
   the project and the remedy. Partial delivery beats none; silence would be the
   bug.
@@ -548,7 +548,7 @@ avoid.
 | Subscription pointing across a tenant boundary | Skipped as `tenant_mismatch`, checked before every other gate. The tenant columns come from the endpoint's own project/organisation, never from the event. |
 | Outbox row whose event was deleted | Parked with reason `event_missing`. Unreachable through the FK (it cascades), handled because a retention job that bypasses it would otherwise wedge the queue. |
 | Poisoned row | `attempts` is incremented by the **committed claim**, not on the failure path, so a row that kills the process still counts. Over `MAX_OUTBOX_ATTEMPTS` it is parked as `failed` with a recorded reason and never claimed again. |
-| Transient database failure mid-fan-out | Row released back to `pending` with an exponential backoff (1s → 60s) and `last_error` recorded. |
+| Transient database failure mid-routing | Row released back to `pending` with an exponential backoff (1s → 60s) and `last_error` recorded. |
 | Zero matching subscriptions | Normal. Event `processed`, outbox row `processed`, logged at INFO with the skip breakdown, `router_events_routed_total{outcome="no_subscriptions"}`. |
 
 ## 8. Tests, and what was not run

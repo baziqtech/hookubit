@@ -447,9 +447,9 @@ test.describe.serial('a project, end to end', () => {
     // It earns no permanent slot: the condition is absent almost always.
     await expect(page.getByRole('link', { name: 'Stuck events' })).toHaveCount(0);
     // And with nothing stuck, the notice says nothing either.
-    await expect(page.getByRole('status').filter({ hasText: /never fanned out/i })).toHaveCount(0);
+    await expect(page.getByRole('status').filter({ hasText: /never routed/i })).toHaveCount(0);
     await page.goto(`${projectBase()}/overview`);
-    await expect(page.getByRole('status').filter({ hasText: /never fanned out/i })).toHaveCount(0);
+    await expect(page.getByRole('status').filter({ hasText: /never routed/i })).toHaveCount(0);
 
     // The page is still a page: reachable by address, and it tells you where
     // you are even though nothing in the rail pointed here.

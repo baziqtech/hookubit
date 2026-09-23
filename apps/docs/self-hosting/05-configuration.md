@@ -113,7 +113,7 @@ which plane's configuration loader reads the key.
 | `WORKER_CLAIM_BATCH_SIZE` | `100` | data plane | Deliveries claimed per poll. |
 | `DELIVERY_LEASE_SECONDS` | `120` | data plane | Lease on a claimed delivery; lapsed leases are reclaimable. Keep above `EGRESS_TOTAL_TIMEOUT_MS`. |
 | `OUTBOX_POLL_INTERVAL_MS` | `250` | data plane | Router poll interval for unrouted events. |
-| `ROUTER_MAX_OUTBOX_RETRY_DURATION_MS` | `3600000` | data plane | Elapsed time a failing fan-out is retried before the event is parked. |
+| `ROUTER_MAX_OUTBOX_RETRY_DURATION_MS` | `3600000` | data plane | Elapsed time a failing routing is retried before the event is parked. |
 | `MAX_CONCURRENCY_GLOBAL` | `512` | data plane | In-flight attempts per process across all tenants. |
 | `MAX_CONCURRENCY_PER_ORG` | `128` | data plane | Per organization. |
 | `MAX_CONCURRENCY_PER_PROJECT` | `64` | data plane | Per project. |
@@ -175,10 +175,10 @@ contains keys and belongs in a Secret.
 | `PAYLOAD_UPLOAD_TIMEOUT_MS` | `10000` | data plane | Bound on one payload upload (ingest hot path). Must be positive. |
 | `REDIS_TIMEOUT_MS` | `50` | data plane | Bound on one rate-limiter round trip. Deliberately tiny. |
 | `ROUTER_BATCH_SIZE` | `100` | data plane | Outbox rows claimed per router poll. |
-| `ROUTER_CONCURRENCY` | `8` | data plane | Parallel fan-outs per router process. |
+| `ROUTER_CONCURRENCY` | `8` | data plane | Events routed in parallel per router process. |
 | `ROUTER_LEASE_SECONDS` | `60` | data plane | Lease on a claimed outbox row. |
 | `ROUTER_MAX_OUTBOX_ATTEMPTS` | `10` | data plane | Attempt count before an outbox row is parked. |
-| `ROUTER_MAX_SUBSCRIPTIONS_PER_EVENT` | `1000` | data plane | Subscriptions materialised per fan-out transaction; wider events take several. |
+| `ROUTER_MAX_SUBSCRIPTIONS_PER_EVENT` | `1000` | data plane | Subscriptions materialised per routing transaction; wider events take several. |
 | `S3_PREFIX` | `events` | data plane | Key namespace inside the bucket. Must not be empty when a bucket is set. |
 | `SHUTDOWN_READINESS_DELAY_MS` | `5000` | data plane | How long a role keeps accepting after readiness flips to `draining` on SIGTERM. 0..10000. |
 

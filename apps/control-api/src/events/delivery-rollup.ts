@@ -3,9 +3,9 @@ import { DeliveryStatus, EventStatus } from '@prisma/client';
 /**
  * What became of an event, as opposed to what became of one of its deliveries.
  *
- * `Event.status` is the INGEST/fan-out state and has four values. It answers
+ * `Event.status` is the INGEST/routing state and has four values. It answers
  * "did we store it and work out who wanted it?" and stops there — `processed`
- * means the fan-out committed, and says nothing at all about whether anybody
+ * means the routing committed, and says nothing at all about whether anybody
  * received anything. An events list built on it reports a project as healthy
  * while every delivery it produced is failing.
  *
@@ -43,7 +43,7 @@ const IN_FLIGHT: readonly DeliveryStatus[] = [
  *
  * ## `dropped` is the one that matters
  *
- * Fan-out COMPLETED and produced nothing, because no subscription matched. The
+ * Routing COMPLETED and produced nothing, because no subscription matched. The
  * publisher was answered 202 and the event went nowhere, which is the single
  * most confusing thing this product can do to a newcomer — and it is invisible
  * in every other column, because there is no delivery row to be absent from.
@@ -53,7 +53,7 @@ const IN_FLIGHT: readonly DeliveryStatus[] = [
  *
  * ## A stuck event reads as `received`, deliberately
  *
- * An event whose fan-out parked has no deliveries and has not been processed,
+ * An event whose routing parked has no deliveries and has not been processed,
  * so it lands here as `received` — indistinguishable, from this table alone,
  * from one published a second ago. Telling them apart needs `event_outbox`,
  * which is a different table and a different screen. That screen exists, and

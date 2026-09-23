@@ -137,7 +137,7 @@ func (f *fixture) insertDelivery(t *testing.T, projectID, status, lockedBy strin
 // _original_key is UNIQUE on (event_id, endpoint_id) WHERE replay_of_delivery_id
 // IS NULL, so a second original delivery for the same pair is a 23505. That
 // index is the router's ON CONFLICT arbiter and the reason a re-run cannot
-// double-fan-out, so the constraint is right and the old fixture was modelling
+// double-routing, so the constraint is right and the old fixture was modelling
 // a row production cannot produce.
 func (f *fixture) newEvent(t *testing.T, projectID string) string {
 	t.Helper()

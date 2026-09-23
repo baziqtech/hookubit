@@ -98,26 +98,26 @@ export function plan(scenario) {
 
   switch (scenario) {
     /**
-     * HIGH FAN-OUT - what one published event costs when it becomes N delivery
+     * WIDE ROUTING - what one published event costs when it becomes N delivery
      * rows. The endpoints are all fast on purpose: the only variable is the
      * multiplication.
      */
-    case 'fanout':
+    case 'wide':
       return {
         scenario,
-        event_types: { fanout: 'load.fanout' },
+        event_types: { wide: 'load.wide' },
         projects: [
           {
-            key: 'fanout',
-            name: 'Load - fan-out',
-            slug: 'load-fanout',
+            key: 'wide',
+            name: 'Load - wide',
+            slug: 'load-wide',
             ingest_limit: 5000,
-            endpoints: range(s.fanoutEndpoints).map((i) =>
-              endpoint(`fanout-${i}`, 'fast', 'fanout', { timeout_ms: 5000 }),
+            endpoints: range(s.wideEndpoints).map((i) =>
+              endpoint(`wide-${i}`, 'fast', 'wide', { timeout_ms: 5000 }),
             ),
-            subscriptions: range(s.fanoutEndpoints).map((i) => ({
-              endpoint_key: `fanout-${i}`,
-              event_types: ['load.fanout'],
+            subscriptions: range(s.wideEndpoints).map((i) => ({
+              endpoint_key: `wide-${i}`,
+              event_types: ['load.wide'],
             })),
           },
         ],

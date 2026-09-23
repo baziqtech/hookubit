@@ -50,7 +50,7 @@ X-Request-Id: req_01M24GHG1AB10B91Z0210MA66J
 {"id":"evt_01J…","status":"accepted"}
 ```
 
-**`accepted` means durably persisted, not delivered.** The response is written only after the event and its fan-out instruction are committed in one database transaction. From that point the event will be delivered whether or not the ingest process, the network between you and it, or your own process survives the next moment.
+**`accepted` means durably persisted, not delivered.** The response is written only after the event and its routing instruction are committed in one database transaction. From that point the event will be delivered whether or not the ingest process, the network between you and it, or your own process survives the next moment.
 
 Conversely, if you did not get a 202 - a timeout, a dropped connection, a `5xx` - nothing was accepted. Retry with the same `Idempotency-Key`.
 
@@ -63,7 +63,7 @@ Send an `Idempotency-Key` that is unique per logical event - `order_123_created`
 | You send | HookuBit answers |
 |---|---|
 | A key it has not seen | Creates the event. `202` with a new `id`. |
-| The same key with **the same body** | Returns the **original** event's `id` with `202`. No second event, no second fan-out. |
+| The same key with **the same body** | Returns the **original** event's `id` with `202`. No second event, no second routing. |
 | The same key with **a different body** | `409` `idempotency_key_reused`. The first request is not silently aliased and the second is not accepted: this is a client bug - a key reused across two distinct operations - and it is reported as one. |
 | The same key while the first request is still in flight | `409` `conflict` with a message saying so. Retry after a moment. |
 
@@ -72,7 +72,7 @@ Send an `Idempotency-Key` that is unique per logical event - `order_123_created`
 Keys are remembered for **24 hours by default**, scoped to the project. After that a key may be reused and produces a new event.
 
 ::: warning Without the header, a retry is a second event
-If you retry a publish without an `Idempotency-Key`, HookuBit has no way to know it is a retry. It creates a second event, which fans out to the same endpoints as a second set of deliveries. This is the most common source of "unexpected duplicates" and it is not a retry-engine defect.
+If you retry a publish without an `Idempotency-Key`, HookuBit has no way to know it is a retry. It creates a second event, which routes to the same endpoints as a second set of deliveries. This is the most common source of "unexpected duplicates" and it is not a retry-engine defect.
 :::
 
 ## Order of checks
@@ -85,7 +85,7 @@ The acceptance pipeline runs in a fixed order, which explains which error you ge
 4. Request validation: `Content-Type`, `Idempotency-Key`, body size and shape (`400`, `413`).
 5. Rate limiting by API key, project and organization (`429`).
 6. Idempotency lookup (`202` replay, or `409`).
-7. One transaction: event plus fan-out instruction. `202`.
+7. One transaction: event plus routing instruction. `202`.
 
 ## Payload limits
 

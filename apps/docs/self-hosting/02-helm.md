@@ -482,7 +482,7 @@ environment reference is in [Configuration](/self-hosting/05-configuration).
 | `dataPlane.ingest.resources.limits.memory` | `256Mi` | Memory limit. |
 | `dataPlane.ingest.podDisruptionBudget.enabled` | `true` | Create a PDB. Ingest is the one role a node drain must never fully evict. |
 | `dataPlane.ingest.podDisruptionBudget.minAvailable` | `1` | PDB `minAvailable`. |
-| `dataPlane.router.replicaCount` | `2` | Router replicas. Safe above 1: fan-out inserts are keyed on `(event, endpoint)`. |
+| `dataPlane.router.replicaCount` | `2` | Router replicas. Safe above 1: routing inserts are keyed on `(event, endpoint)`. |
 | `dataPlane.router.resources.requests.cpu` | `100m` | CPU request. |
 | `dataPlane.router.resources.requests.memory` | `64Mi` | Memory request. |
 | `dataPlane.router.resources.limits.cpu` | `500m` | CPU limit. |
@@ -530,7 +530,7 @@ environment reference is in [Configuration](/self-hosting/05-configuration).
 | `dataPlane.retention.maxDeletesPerRun` | `50000` | Cap per pass, so a first sweep of a never-pruned table drains over hours rather than causing replication lag. |
 | `dataPlane.retention.batchTimeoutMs` | `30000` | Deadline for one delete batch. |
 | `dataPlane.outbox.pollIntervalMs` | `250` | `OUTBOX_POLL_INTERVAL_MS`: router poll interval for unrouted events. |
-| `dataPlane.outbox.maxRetryDurationMs` | `3600000` | `ROUTER_MAX_OUTBOX_RETRY_DURATION_MS`: how long an event that keeps failing to fan out is retried before being parked for an operator. |
+| `dataPlane.outbox.maxRetryDurationMs` | `3600000` | `ROUTER_MAX_OUTBOX_RETRY_DURATION_MS`: how long an event that keeps failing to route is retried before being parked for an operator. |
 
 ### Ingress
 

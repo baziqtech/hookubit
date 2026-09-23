@@ -44,7 +44,7 @@ import { endpointControls } from './breaker';
  *
  * The dialog used to say queued deliveries "are not discarded — they wait".
  * They do not wait. `router/plan.go` `gate()` SKIPS a non-active endpoint at
- * fan-out, so an event published while the endpoint is paused produces no
+ * routing, so an event published while the endpoint is paused produces no
  * delivery row for it at all; and `worker/deliver.go` finishes any delivery
  * already queued for a paused endpoint as `cancelled` the moment a worker
  * claims it (`Endpoint.Deliverable()` in `worker/store.go`), because the retry

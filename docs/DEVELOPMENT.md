@@ -29,7 +29,7 @@ per-app `HANDOFF.md` files.
   offline (`pnpm openapi`) and the dashboard client is generated from it.
 - **Data plane** (`services/data-plane`) — ingest with pre-auth and policy rate
   limits, idempotency and the transactional outbox; router with batched,
-  resumable, publish-time-pinned fan-out; scheduler; bounded worker pool with
+  resumable, publish-time-pinned routing; scheduler; bounded worker pool with
   per-endpoint/project/org gates, leases, retries, circuit breakers, HMAC
   signing, SSRF refusal at dial time, payload offload, retention sweeps,
   Prometheus metrics, OpenTelemetry traces carried through PostgreSQL.

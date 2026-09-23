@@ -14,16 +14,16 @@ import (
 
 // startAttemptSpan opens the stage root for ONE delivery attempt.
 //
-// # One trace per ATTEMPT, linked to the fan-out that created the delivery
+// # One trace per ATTEMPT, linked to the routing that created the delivery
 //
 // This is the decision that most shapes what an operator sees, so it is worth
 // being explicit about the three options and why the other two are worse.
 //
-//   - A child of the router's fan-out span. Rejected: an event can fan out to
+//   - A child of the router's routing span. Rejected: an event can route to
 //     ROUTER_MAX_SUBSCRIPTIONS_PER_EVENT deliveries, each retried up to
 //     max_attempts times over max_retry_duration. That is one trace of a hundred
 //     thousand spans arriving over 24 hours. No backend assembles it, no UI
-//     renders it, and the fan-out's own duration becomes "until the last retry
+//     renders it, and the routing's own duration becomes "until the last retry
 //     of the slowest endpoint gave up".
 //
 //   - Children of one long-lived "delivery" span. Rejected for a simpler
@@ -31,7 +31,7 @@ import (
 //     rolling deploy and a lease being reclaimed by a different process. A span
 //     that is closed and re-opened is two spans.
 //
-//   - A new root per attempt, linked to the fan-out. Chosen. Each span's
+//   - A new root per attempt, linked to the routing. Chosen. Each span's
 //     duration is the truth about one attempt, which is what every latency
 //     percentile in a backend is computed from. The retry CHAIN is reassembled
 //     by the index rather than by the tree: every attempt of one delivery

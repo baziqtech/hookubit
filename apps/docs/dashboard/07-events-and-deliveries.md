@@ -29,26 +29,26 @@ Filters, all carried in the URL:
 | Idempotency key contains | Case-insensitive substring of the producer's key, **3 characters minimum**. This is the "the producer says they sent order 41f9, did we get it?" search. | A scan of everything the other filters left. Pair it with a date range on a busy project (the API accepts `created_after`/`created_before`). |
 | Status | `received`, `processing`, `processed`, `failed`. | A scan. |
 
-There is no free-text search, and no fan-out column: the list cannot say how
+There is no free-text search, and no routing column: the list cannot say how
 many deliveries an event produced without one request per row. The detail
 page has it.
 
 ### Event status
 
-An event's status is its **ingest and fan-out** state, not a delivery
+An event's status is its **ingest and routing** state, not a delivery
 outcome:
 
 | Status | Meaning |
 |---|---|
-| `received` | Accepted and stored; the router has not fanned it out yet. |
+| `received` | Accepted and stored; the router has not routed it yet. |
 | `processing` | A router holds it and is writing delivery rows. |
-| `processed` | The fan-out committed. This says nothing about whether any endpoint accepted it - that is what the deliveries are for. An event that matched no subscription is also `processed`, with zero deliveries. |
-| `failed` | **Parked.** The router gave up before writing any delivery rows. See [Stuck events](#stuck-events-parked-before-fan-out). |
+| `processed` | The routing committed. This says nothing about whether any endpoint accepted it - that is what the deliveries are for. An event that matched no subscription is also `processed`, with zero deliveries. |
+| `failed` | **Parked.** The router gave up before writing any delivery rows. See [Stuck events](#stuck-events-parked-before-routing). |
 
 ### Event detail
 
-`/orgs/:orgId/projects/:projectId/events/:eventId` leads with the fan-out,
-stated as a sentence: "Published once, fanned out to *N* deliveries - one per
+`/orgs/:orgId/projects/:projectId/events/:eventId` leads with the routing,
+stated as a sentence: "Published once, routed to *N* deliveries - one per
 matching subscription", with counts of succeeded, still going, failing and
 exhausted derived from the rows beneath (so the summary cannot disagree with
 the table). A `failed` event shows the parked notice instead, with its
@@ -123,7 +123,7 @@ these statuses mean?", above the filters):
 
 ```mermaid
 stateDiagram-v2
-    [*] --> pending: fan-out writes the row
+    [*] --> pending: routing writes the row
     pending --> queued
     queued --> processing: a worker claims it
     processing --> succeeded: 2xx
@@ -182,7 +182,7 @@ backend. Null means no trace was kept, not that tracing is broken.
 The attempt history is embedded in the page. A delivery with more than 100
 attempts says so and loads the rest.
 
-**Same event** - the sibling deliveries the same event fanned out to, with
+**Same event** - the sibling deliveries the same event routed to, with
 "You are here" on this one. This is where "did finance get it?" is answered.
 
 **Request** - the headers sent on the latest attempt. The signature is
@@ -240,7 +240,7 @@ Refused:
 Event replay is rate limited to 10 per five minutes, delivery replay to 30,
 per address. See [Replay](/guide/07-replay) for the consumer-side view.
 
-## Stuck events (parked before fan-out)
+## Stuck events (parked before routing)
 
 **This screen is not in the navigation.** Most projects have nothing stuck most
 of the time, so it is reached the two ways that matter: a notice on Deliveries
@@ -264,9 +264,9 @@ it, an event the publisher was told was accepted will never be delivered.
 
 | Status | Label | Meaning |
 |---|---|---|
-| `pending` | Queued | Waiting for a router to claim it - possibly in a backoff (shown with "failing since"), possibly mid-fan-out (shown with its resume point). |
-| `processing` | Fanning out | A router holds the lease and is writing delivery rows. The row shows which replica. |
-| `processed` | Fanned out | Every matching subscription has its delivery row. |
+| `pending` | Queued | Waiting for a router to claim it - possibly in a backoff (shown with "failing since"), possibly mid-routing (shown with its resume point). |
+| `processing` | Routing | A router holds the lease and is writing delivery rows. The row shows which replica. |
+| `processed` | Routed | Every matching subscription has its delivery row. |
 | `failed` | **Parked** | The router gave up. Nothing will be delivered until it is requeued. |
 
 The status filter defaults to Parked; "Any status" widens it. Filtering by
@@ -287,9 +287,9 @@ counters beside it are the diagnosis:
 | `attempts_exhausted` | The router kept dying on this event | Every unaccounted claim ended without an outcome. That is the signature of an event the router cannot survive, not of an outage. Look at the payload first; put back unchanged it will most likely park again. | caution |
 | `retry_duration_exceeded` | Kept failing for longer than the retry window | Every failure was recorded - the database or a subscription lookup was erroring under the router for more than an hour (the default window), not the event itself. Once the cause is fixed, requeueing is the whole recovery. | safe |
 | `unknown_outbox_type` | The router does not handle this row type | Parked on sight. Requeueing changes nothing until a router that understands the type is deployed. | futile |
-| `event_missing` | The event this row points at no longer exists | Nothing to fan out; evidence of a deleted or lost event, not work to recover. | futile |
+| `event_missing` | The event this row points at no longer exists | Nothing to route; evidence of a deleted or lost event, not work to recover. | futile |
 
-"Fan-out partly done" on a row means some endpoints already have their
+"Routing partly done" on a row means some endpoints already have their
 delivery for this event and the rest are still owed one; a requeue resumes
 from the recorded subscription rather than re-sending to endpoints it already
 reached.
@@ -298,7 +298,7 @@ reached.
 
 Requeue is **not replay**. It does not create deliveries; it puts the outbox
 row back to Queued and the event back to `received`, and lets the router run
-the fan-out it never got to run. That fan-out is bounded to the subscriptions
+the routing it never got to run. That routing is bounded to the subscriptions
 that existed when the event was accepted, using their configuration as of
 now: a subscription disabled since applies, one deleted since is gone. The
 router's `last_error` and the claim count are preserved so the history
@@ -326,7 +326,7 @@ with the reason when your role cannot press it.
   passes before it; they committed. Requeueing when nothing is parked
   requeues zero and records that in the audit log.
 
-After a requeue the delivery rows appear on the event page as the fan-out
+After a requeue the delivery rows appear on the event page as the routing
 writes them.
 
 ---
@@ -344,7 +344,7 @@ writes them.
 `dto/list-events.query.dto.ts`, `event-payload.ts`),
 `apps/control-api/src/deliveries/*` (`deliveries.controller.ts`, `dto/delivery-response.dto.ts`,
 `dto/list-deliveries.query.dto.ts`, `dto/replay.dto.ts`, `delivery-limits.ts`
-(`MAX_REPLAY_FAN_OUT`, `MAX_INLINE_ATTEMPTS`, redacted headers), `delivery-replay.service.ts`),
+(`MAX_REPLAY_DELIVERIES`, `MAX_INLINE_ATTEMPTS`, redacted headers), `delivery-replay.service.ts`),
 `apps/control-api/src/outbox/*` (`outbox.controller.ts`, `outbox.service.ts`,
 `dto/outbox-response.dto.ts`, `dto/requeue-outbox.dto.ts`, `outbox-limits.ts`),
 `services/data-plane/internal/router/router.go` (`DefaultMaxOutboxAttempts`,

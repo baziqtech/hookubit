@@ -65,7 +65,7 @@ var noopSpan trace.Span = noop.Span{}
 //     someone asks about at 2am. Links break that coupling: each stage decides
 //     for itself. See sampler.go for the decision that replaces it.
 //
-//  3. Size. One event can fan out to ROUTER_MAX_SUBSCRIPTIONS_PER_EVENT
+//  3. Size. One event can route to ROUTER_MAX_SUBSCRIPTIONS_PER_EVENT
 //     endpoints, each with its own retry chain of up to max_attempts. Under
 //     parent-child that is a single trace of a hundred thousand spans, arriving
 //     over 24 hours. No backend assembles it and no human reads it.
@@ -75,7 +75,7 @@ var noopSpan trace.Span = noop.Span{}
 //
 // # Retries
 //
-// Attempt N is a NEW TRACE, linked to the fan-out - not a child of attempt 1
+// Attempt N is a NEW TRACE, linked to the routing - not a child of attempt 1
 // and not a sibling under a long-lived delivery span.
 //
 //   - Not a child of the previous attempt: attempts are up to an hour apart and

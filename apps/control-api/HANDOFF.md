@@ -29,7 +29,7 @@ consumer. Section 32 mentions jsonb; **section 28 governs**.
 `docs/API.md` documents the ingest API accepting `ordering_key` and
 `deliveries.ordering_key` already existed; `events` had nowhere to put it. It is
 now `events.ordering_key TEXT`. Carry it from the event onto each delivery the
-fan-out creates. Enforcement stays deferred (ADR-0004).
+routing creates. Enforcement stays deferred (ADR-0004).
 
 **3. API key convention — confirmed against your code, unchanged.**
 
@@ -47,7 +47,7 @@ Generated secrets are 32 characters over `[A-Za-z0-9]` (~190 bits), so no key
 contains `-` or `_` in its secret half and `strings.Cut` splits it correctly.
 `apikey.go` was not modified.
 
-### Fan-out router — the ON CONFLICT arbiter now exists
+### Router — the ON CONFLICT arbiter now exists
 
 ```sql
 CREATE UNIQUE INDEX deliveries_event_endpoint_original_key
@@ -612,7 +612,7 @@ denormalised `organization_id`/`project_id` columns, because that is what the
 disagreed with its endpoint's real owner would therefore appear in a *listing*.
 Id-addressed access does not have this weakness: `@ResolveTenantFrom('delivery',
 …)` walks the real chain and refuses on any mismatch, logging it at error level.
-The columns are written by the fan-out router from the endpoint's own project, so
+The columns are written by the router from the endpoint's own project, so
 a mismatch is a data-integrity bug, not an attack path — but if that ever becomes
 untrue, switch the two predicates to relation filters and accept the index loss.
 
@@ -1937,7 +1937,7 @@ depth 5, 64 conditions, 8 path segments, 200-char paths, 50 `$in` values,
 ### Config
 
 `MAX_SUBSCRIPTIONS_PER_PROJECT` (default 500, clamped to [1, 10000], warns and
-falls back rather than refusing to boot). Subscriptions are the fan-out
+falls back rather than refusing to boot). Subscriptions are the routing
 multiplier — one event becomes one `deliveries` row per matching subscription —
 so the ceiling is enforced INSIDE the create's SERIALIZABLE transaction, not
 advisorily beside it like the endpoint and API-key ceilings.
@@ -2578,7 +2578,7 @@ Every route is `@Authorized(...)` + `@Tenant()`, every read goes through
 `TenantScopeFactory`/`ScopedRepository`, every list returns
 `{ data, has_more, next_offset }` from `findPage()`, and both replay routes carry
 a `@Throttle` (events 10/5min, deliveries 30/5min — the event route is tighter
-because one request there can create up to `MAX_REPLAY_FAN_OUT` real HTTP calls
+because one request there can create up to `MAX_REPLAY_DELIVERIES` real HTTP calls
 rather than one). `PrismaService` is not imported anywhere in either module.
 
 ### Replay — the invariant, and the index that carries half of it
@@ -2587,7 +2587,7 @@ rather than one). `PrismaService` is not imported anywhere in either module.
 replay is an INSERT and only an INSERT: `replay_of_delivery_id` names the row
 being replayed, `replayed_by` names the actor, `attempt_count` restarts at 0 with
 the ORIGINAL's `max_attempts`, and `status = 'pending'` with
-`next_attempt_at = now()` — which is exactly what the fan-out router writes and
+`next_attempt_at = now()` — which is exactly what the router writes and
 what `queue/postgres.go`'s ready predicate claims, so **the insert is the
 enqueue**. No UPDATE and no DELETE is issued against `deliveries` or
 `delivery_attempts` on any path.
@@ -2616,14 +2616,14 @@ Four more decisions worth arguing with:
 - **A deleted, disabled or paused endpoint is refused with its current status in
   `details`.** The worker would abandon such a delivery with `endpoint_deleted` /
   `endpoint_disabled`, so accepting it would turn a 201 into a second failure.
-  All-or-nothing across a fan-out: one dead endpoint refuses the whole request.
+  All-or-nothing across a routing: one dead endpoint refuses the whole request.
 - **`subscription_id` is carried over only if that subscription still exists.**
   `webhook_subscriptions` rows are hard-deletable while the ledger is not, and
   `ScopedRepository` proves every declared FK before writing — blindly copying
   the id would fail a months-old replay with a 404 about a resource the operator
   never mentioned. `replay_of_delivery_id` is the provenance that cannot vanish.
 
-`MAX_REPLAY_FAN_OUT = 50` bounds one request, for egress and because each insert
+`MAX_REPLAY_DELIVERIES = 50` bounds one request, for egress and because each insert
 is five statements (four FK proofs) inside a SERIALIZABLE transaction. Over the
 cap is `limit_exceeded` with `{ limit, current, resource }`, and `current` is a
 real COUNT so an operator can plan the split.
@@ -2704,8 +2704,8 @@ here:
 - `events/events.service.spec.ts` — filters, the case-insensitive idempotency
   search still fenced by the tenant, page-boundary exactness, the three payload
   situations, and the replay rules: **historical endpoints not a re-match**
-  (subscriptions are mutated between the fan-out and the replay, in both
-  directions), originals-only so replaying twice does not compound, the fan-out
+  (subscriptions are mutated between the routing and the replay, in both
+  directions), originals-only so replaying twice does not compound, the routing
   cap with a real count, and all-or-nothing when one endpoint is deleted.
 - `deliveries/deliveries.service.spec.ts` — isolation across four shapes
   (another org, another project, the deliberately corrupt fixture row, absent)
@@ -2739,7 +2739,7 @@ here:
   of two colliding replays" is argued, not executed;
   `SerializableTransactionRunner` models it as a serial schedule and never
   aborts, so the runner's retry loop is unexercised here too.
-- `MAX_REPLAY_FAN_OUT` (50) and `MAX_INLINE_ATTEMPTS` (100) are compile-time
+- `MAX_REPLAY_DELIVERIES` (50) and `MAX_INLINE_ATTEMPTS` (100) are compile-time
   constants, not `ConfigService`-driven. Worth aligning with
   `MAX_PROJECTS_PER_ORGANIZATION` if an operator ever needs to raise one without
   a deploy.

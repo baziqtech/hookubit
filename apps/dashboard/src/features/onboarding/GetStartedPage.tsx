@@ -22,7 +22,7 @@ import {
 /**
  * Signup to first delivered webhook, without reading the docs.
  *
- * The ordering here is the argument: the mental model first (one event fans out
+ * The ordering here is the argument: the mental model first (one event routes
  * to N deliveries, each retrying independently), then the checklist, then the
  * exact request to run. Someone who reads only the first panel still
  * understands what the other screens are showing them, which is the thing that
@@ -129,7 +129,7 @@ export function GetStartedPage() {
               <strong className="font-semibold text-ink">
                 &quot;Accepted&quot; means stored, not delivered.
               </strong>{' '}
-              The response returns as soon as the event is durably written; fan-out happens after
+              The response returns as soon as the event is durably written; routing happens after
               that. Watch it land on{' '}
               <Link
                 to={`/orgs/${orgId}/projects/${projectId}/events`}

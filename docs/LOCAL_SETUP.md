@@ -1,7 +1,7 @@
 # Running locally, without Docker
 
 Everything except Redis runs as a native process. This is the path to a real
-end-to-end delivery: publish an event, watch it fan out, watch it get signed and
+end-to-end delivery: publish an event, watch it route, watch it get signed and
 sent.
 
 ## 0. Prerequisites — check these first

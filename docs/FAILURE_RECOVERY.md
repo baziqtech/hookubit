@@ -38,7 +38,7 @@ document:
   cannot be recovered through any API.
 
 As of this revision **nothing in the twenty scenarios lands in the third
-category.** The two that did — a parked outbox row and a fan-out truncated by
+category.** The two that did — a parked outbox row and a routing truncated by
 the subscription cap — are now recoverable through an API and structurally
 impossible respectively.
 
@@ -53,15 +53,15 @@ went out (scenario 4 — the attempt is no longer *charged*, but the endpoint ma
 still have received it). Consumers must be idempotent. `Webhook-Delivery-Id` is
 stable across the retries of one delivery; `Webhook-Attempt` increments.
 
-**Exactly-once fan-out**, by contrast, is genuinely enforced: one event becomes
+**Exactly-once routing**, by contrast, is genuinely enforced: one event becomes
 at most one *original* delivery row per endpoint, arbitrated by the partial
 unique index `deliveries_event_endpoint_original_key`
 (`apps/control-api/prisma/migrations/20260906010000_review_fixes/migration.sql:41`),
 which the router names verbatim in its `ON CONFLICT`. That index is what makes
-the new batched fan-out safe: a crash between batches re-runs at worst one batch
+the new batched routing safe: a crash between batches re-runs at worst one batch
 and creates nothing twice
 (`services/data-plane/internal/router/store.go:513-517`, proven by
-`TestPostgresReplayingAFanOutBatchCreatesNoDuplicates`,
+`TestPostgresReplayingARoutingBatchCreatesNoDuplicates`,
 `internal/router/store_postgres_test.go:1076`).
 
 ## A note on the tests
@@ -118,7 +118,7 @@ says so.
 | 16 | DNS changes after validation (rebinding) | The check runs after resolution and before connect, per address — including through the bounded dialer | No | One endpoint | Implemented |
 | 17 | Two workers attempt the same delivery | `FOR UPDATE SKIP LOCKED` inside a materialized CTE + lease + `locked_by` guard on every write | No | One delivery | Implemented |
 | 18 | Connection pool exhausted | Bounded pool, per-call deadlines, server-side `statement_timeout`, pre-auth ceiling, readiness sheds load | No | One pod, then its tenants | Partial — the worker still borrows `INGEST_DB_TIMEOUT_MS` (G15) |
-| 19 | Tenant creates a huge burst | Pre-auth + policy limits on ingest, batched fan-out with a durable cursor, four concurrency ceilings in the worker | No | One project, then its neighbours | **Partial — isolation is a ceiling, not a reservation (G13); fairness off by default** |
+| 19 | Tenant creates a huge burst | Pre-auth + policy limits on ingest, batched routing with a durable cursor, four concurrency ceilings in the worker | No | One project, then its neighbours | **Partial — isolation is a ceiling, not a reservation (G13); fairness off by default** |
 | 20 | Endpoint permanently unhealthy | Breaker opens, cooldown doubles to a 10-minute ceiling, one probe per cycle; deferred deliveries age out; an endpoint open past `ENDPOINT_AUTO_DISABLE_AFTER_HOURS` is auto-disabled and stops having delivery rows created | No | One endpoint | Implemented |
 
 ---
@@ -316,18 +316,18 @@ what broke, and what the fix was.
 | ID | Was | Fixed by |
 |---|---|---|
 | G1 | A parked outbox row was unrecoverable through any API: an event that returned 202 could end permanently undelivered, recoverable only by hand-written SQL. | `attempts` split into a monotonic operator-facing counter and `unaccounted_attempts`, the poison bound, which is refunded by any write the lease holder commits — so a Postgres brownout no longer spends the budget of rows that were never at fault. Recorded failure is bounded by elapsed time instead (`failing_since` + `ROUTER_MAX_OUTBOX_RETRY_DURATION_MS`). A control-plane API lists and requeues parked rows, single and bulk (`apps/control-api/src/outbox/`). Scenario 8, scenario 18. |
-| G2 | The fan-out cap bounded the **event**: a project with more subscriptions than `ROUTER_MAX_SUBSCRIPTIONS_PER_EVENT` silently dropped the surplus forever, and replay could not reach them because they had no delivery rows. | The cap now bounds a **batch**. The router walks subscriptions by keyset, stores the resume point in `event_outbox.fan_out_cursor`, and marks the event `processed` only on the final batch. Additionally pinned to publish time so a subscription created mid-walk cannot receive an event accepted before it existed. Scenario 19. |
+| G2 | The routing cap bounded the **event**: a project with more subscriptions than `ROUTER_MAX_SUBSCRIPTIONS_PER_EVENT` silently dropped the surplus forever, and replay could not reach them because they had no delivery rows. | The cap now bounds a **batch**. The router walks subscriptions by keyset, stores the resume point in `event_outbox.routing_cursor`, and marks the event `processed` only on the final batch. Additionally pinned to publish time so a subscription created mid-walk cannot receive an event accepted before it existed. Scenario 19. |
 | G3 | Deliveries behind a permanently open breaker never reached a terminal state: `Policy.Exhausted` was reachable only from `Decide`, which runs only when an attempt completes. The backlog grew without bound and sorted ahead of live traffic under FIFO. | The wall-clock budget is evaluated on the **deferral** path. An out-of-budget deferred delivery goes `exhausted` / `retry_duration_exhausted`, with no attempt row and no `attempt_count` charged. Scenario 20. Residue in G14. |
 | G4 | A PostgreSQL outage at boot became CrashLoopBackOff across the whole data plane, and fleet recovery was then gated on kubelet's five-minute backoff rather than on the database. | `cmd/webhookd` binds the probe server **before** opening the pool and waits for PostgreSQL with capped backoff (`db.OpenWithRetry`). Readiness distinguishes `starting` from `draining`. Startup probes added across the chart and the manifests. Scenario 8. |
 | G5 | A drain-window expiry cancelled attempts with a bare `context.Canceled`, which classifies as a retryable transport fault — so our restart wrote `context canceled` into the customer's ledger, advanced `attempt_count` and moved their breaker one failure closer to open. | `ErrWorkerShutdown` is the cancellation cause; a cut-short attempt is deferred, writes no attempt row and charges no budget. A related race was fixed with it: `LeaseKeeper.Run` used to cancel tracked attempts with a hard-coded `context.Canceled`, racing the worker on the same children — first-writer-wins, so a fraction of drains still charged the endpoint. It now inherits the parent's cause. Scenario 4. |
 | G6 | Per-endpoint delivery rate limits were per-process; N workers delivered at N x the configured rate, and the fleet-wide implementation was written but wired to nothing. | The distributed limiter is wired. Endpoint limits are fleet-wide when `REDIS_URL` is set, falling back to the in-process bucket otherwise. Residue in G17. Scenarios 12 and 19. |
 | G7 | `EGRESS_DNS_TIMEOUT_MS` was read, passed, stored on the struct and applied by nothing. An operator tuning DNS behaviour under an incident changed nothing at all. | `internal/egress/dial.go`. Resolution has its own deadline, and each address gets a *share* of the connect budget (`partialDeadline`, mirroring `net/dial.go`) so a black-holed first address cannot starve the rest. Scenarios 10 and 13. |
-| G14 | A permanently dead endpoint was never disabled, so every new event kept fanning out to the corpse forever — delivery rows created, refused by the open breaker, deferred, re-claimed, expired, at ingest rate. And nothing pruned terminal deliveries or attempts, so the ledger grew without bound. | Auto-disable in `apps/control-api/src/maintenance/`, written by the **control plane** so the data plane still issues no write against `endpoints` — one writer means one definition of "disabled", and the audit row *is* the feature. One sweep per pass under `pg_try_advisory_xact_lock`, so a horizontally scaled API needs no leader election. Re-enabling goes through the existing enable route and arms **one** breaker probe rather than resetting health, because a reset releases the whole accumulated backlog at an endpoint whose recovery is still only the customer's assertion. Retention in `internal/retention/` uses two horizons — attempts carry the bytes and go at 60 days, the summary row that answers "what happened to this event?" survives to 90 — batched under `FOR UPDATE SKIP LOCKED` so a pass never queues behind live traffic. Scenario 20. |
+| G14 | A permanently dead endpoint was never disabled, so every new event kept routing to the corpse forever — delivery rows created, refused by the open breaker, deferred, re-claimed, expired, at ingest rate. And nothing pruned terminal deliveries or attempts, so the ledger grew without bound. | Auto-disable in `apps/control-api/src/maintenance/`, written by the **control plane** so the data plane still issues no write against `endpoints` — one writer means one definition of "disabled", and the audit row *is* the feature. One sweep per pass under `pg_try_advisory_xact_lock`, so a horizontally scaled API needs no leader election. Re-enabling goes through the existing enable route and arms **one** breaker probe rather than resetting health, because a reset releases the whole accumulated backlog at an endpoint whose recovery is still only the customer's assertion. Retention in `internal/retention/` uses two horizons — attempts carry the bytes and go at 60 days, the summary row that answers "what happened to this event?" survives to 90 — batched under `FOR UPDATE SKIP LOCKED` so a pass never queues behind live traffic. Scenario 20. |
 | G18 | A comment in the router described wiring that no longer existed and told the reader a landed fix was still outstanding — the specific kind of staleness this document exists to remove. | Rewritten to describe what the code does, keeping the reasoning about why the outbox needs its own backoff schedule. |
 | G15 | The worker borrowed `INGEST_DB_TIMEOUT_MS` for its own database deadline, so tuning ingest silently retuned delivery. | `WORKER_DB_TIMEOUT_MS`, validated against `DATABASE_STATEMENT_TIMEOUT_MS` so the server-side backstop cannot fire first and mask it. |
 | G16 | A delivery refused by the org or project concurrency gate deferred with an unknown budget, so the wall-clock termination added for the breaker path did not apply there — the same never-terminating delivery, surviving on one path, and compounding with G13 because what keeps a delivery losing at that gate is a project saturated by slow endpoints. | A bounded consecutive-refusal tracker triggers one narrow budget read on the third refusal of the same delivery — no secrets join, no payload — so the common case still pays nothing. A failed read defers rather than terminating: a database blip must not end a delivery. |
 | G17 | Endpoint delivery rate limits degraded to per-replica whenever `REDIS_URL` was unset, multiplying a customer's configured limit by the worker replica count, logged once at WARN and refused by nothing. | The **configuration** refuses it in production unless explicitly acknowledged, mirroring `EGRESS_ALLOW_PRIVATE_NETWORKS`. The runtime is untouched: delivery still never depends on Redis and still imports no client. |
-| G19 | A claim could return every ready row regardless of its LIMIT. `UPDATE ... WHERE id IN (SELECT ... FOR UPDATE SKIP LOCKED LIMIT $n)` is planned, under bloated-table statistics (high relpages, near-zero reltuples - what autovacuum leaves after a burst drains or a retention sweep empties the table), as a nested-loop semi join with the subquery re-executed per outer row; LockRows then skips rows the same UPDATE already modified, so each turn's LIMIT winner is the next tied row and every outer row matches. A fan-out batch always ties. Measured 5 of 5 for LIMIT 1, ten times in ten, and reproduced inside the failure suite at relpages=6 reltuples=0. It surfaced as one flaky test in thirteen runs. | Every SKIP LOCKED claim - FIFO, tenant-fair, outbox - fixes its batch in a `MATERIALIZED` CTE before the UPDATE joins to it, so the bound holds by construction; the retention sweeps' CTEs are materialized explicitly for the same reason. `TestScenario06` still logs `pg_class` statistics on its failure path. Scenarios 17 and 19. |
+| G19 | A claim could return every ready row regardless of its LIMIT. `UPDATE ... WHERE id IN (SELECT ... FOR UPDATE SKIP LOCKED LIMIT $n)` is planned, under bloated-table statistics (high relpages, near-zero reltuples - what autovacuum leaves after a burst drains or a retention sweep empties the table), as a nested-loop semi join with the subquery re-executed per outer row; LockRows then skips rows the same UPDATE already modified, so each turn's LIMIT winner is the next tied row and every outer row matches. A routing batch always ties. Measured 5 of 5 for LIMIT 1, ten times in ten, and reproduced inside the failure suite at relpages=6 reltuples=0. It surfaced as one flaky test in thirteen runs. | Every SKIP LOCKED claim - FIFO, tenant-fair, outbox - fixes its batch in a `MATERIALIZED` CTE before the UPDATE joins to it, so the bound holds by construction; the retention sweeps' CTEs are materialized explicitly for the same reason. `TestScenario06` still logs `pg_class` statistics on its failure path. Scenarios 17 and 19. |
 | G8 | A 429's `Retry-After` was ignored: an endpoint that asked for an hour was retried at 5s, 10s and 20s, spending three attempts inside the first 35 seconds of a window it had explicitly closed. | Honoured on 429 and 503, both RFC 9110 forms, clamped by a one-second floor, the policy's `MaxDelay`, and the remaining wall-clock budget. Scenario 12. |
 | G9 | `queue_depth` and `egress_blocked_total` were declared and never written, so any dashboard built on them read a steady zero. | Both populated. `egress_blocked_total` is incremented at the two decision boundaries, labelled by a bounded code and never by customer-supplied text. `queue_depth` is refreshed every 15s by a collector on the scheduler role. Scenarios 14 and 20. |
 | G10 | The worker's DB timeout was `INGEST_DB_TIMEOUT_MS` and it also capped the object-storage fetch, so any `PAYLOAD_DOWNLOAD_TIMEOUT_MS` above 5s was silently truncated. | The payload fetch has its own budget. The database half is still open as G15. |
@@ -409,7 +409,7 @@ finished gets one event.
 **Guarantee.** With an `Idempotency-Key`: exactly one event per key, and the
 delivery proceeds regardless of the client's confusion. **Only time.**
 
-Without one: the retry creates a **second event**, which fans out to the same
+Without one: the retry creates a **second event**, which routes to the same
 endpoints as a second set of deliveries. That is not a platform defect — it is
 the documented consequence of omitting the header — but it is the most common
 way a consumer sees an unexpected duplicate, and it is worth saying out loud in
@@ -748,7 +748,7 @@ retry. An offloaded payload object is deliberately leaked rather than deleted
 failing and Kubernetes takes the pod out of the Service.
 
 **Router** logs and retries on the next tick — the outbox is durable, so falling
-behind costs time, not data. A row whose fan-out transaction fails is released
+behind costs time, not data. A row whose routing transaction fails is released
 with backoff (`internal/router/router.go:430-455`); if the release write itself
 fails, the row stays leased and comes back when the lease lapses (`:451-454`).
 
@@ -768,17 +768,17 @@ so the backstop cannot fire first and mask the request deadline.
 **A degraded window no longer parks accepted events.** This is the other half of
 the G1 fix and it belongs here rather than in the gaps list, because it is the
 recovery strategy. The old chain was: the router claims an outbox row and the
-claim increments `attempts`; the fan-out then fails on `Acquire` or
+claim increments `attempts`; the routing then fails on `Acquire` or
 `statement_timeout`; repeat past `ROUTER_MAX_OUTBOX_ATTEMPTS` and the row is
 parked, permanently, with no API able to reach it. A twenty-minute brownout could
-burn all ten attempts on rows whose fan-out was never even tried.
+burn all ten attempts on rows whose routing was never even tried.
 
 The claim now increments **two** counters (`internal/router/store.go:190-210`,
 reasoning at `:165-189`). `attempts` is monotonic and is what an operator reads.
 `unaccounted_attempts` is the poison bound, and **every write the lease holder
 commits gives one back** — a recorded release
-(`store.go:800-803`), a fan-out batch that made progress (`store.go:496-503`), a
-completed fan-out (`store.go:450-459`). What survives is exactly "claims that
+(`store.go:800-803`), a routing batch that made progress (`store.go:496-503`), a
+completed routing (`store.go:450-459`). What survives is exactly "claims that
 ended with the router writing nothing at all": a crash, an OOM, a lease left to
 lapse. That is the poison signal, and it is the only thing the count-based bound
 now fires on (`router.go:288-306`).
@@ -1315,7 +1315,7 @@ exhausted pool makes readiness fail within its 3s budget
 (`internal/httpx/health.go:60-61`) and Kubernetes removes the pod from the
 Service until it recovers.
 
-**Bounded concurrency upstream.** Router fan-out concurrency is capped
+**Bounded concurrency upstream.** Router routing concurrency is capped
 (`internal/router/router.go:26-29` — each holds one pooled connection for the
 length of its transaction, so it must stay well under
 `DATABASE_MAX_CONNECTIONS`); the worker claims only as many rows as it has free
@@ -1344,7 +1344,7 @@ other half of the G1 fix (`apps/control-api/src/outbox/`):
 
 | Route | Permission | Does |
 |---|---|---|
-| `GET /v1/projects/:projectId/outbox?status=failed` | `events.read` | Lists parked entries, newest first, with `last_error`, `attempts` vs `unaccounted_attempts`, and `fan_out_cursor`. |
+| `GET /v1/projects/:projectId/outbox?status=failed` | `events.read` | Lists parked entries, newest first, with `last_error`, `attempts` vs `unaccounted_attempts`, and `routing_cursor`. |
 | `GET /v1/projects/:projectId/outbox/:outboxId` | `events.read` | The full router-side state of one entry. |
 | `POST /v1/projects/:projectId/outbox/:outboxId/requeue` | `events.replay` **and** `deliveries.replay` | Returns one parked entry to the queue. |
 | `POST /v1/projects/:projectId/outbox/requeue` | `events.replay` **and** `deliveries.replay` | Bulk: up to `MAX_REQUEUE_BATCH` (100) entries, oldest first, with `has_more`. |
@@ -1362,7 +1362,7 @@ API description (`apps/control-api/src/outbox/outbox.controller.ts:95-127`):
   `attempts` is deliberately preserved
   (`apps/control-api/src/outbox/outbox.service.ts:258-283`), so the number that
   separates "requeued four times and keeps dying" from "first time" survives.
-- **A partly-completed fan-out resumes from its cursor** rather than re-sending
+- **A partly-completed routing resumes from its cursor** rather than re-sending
   to endpoints it already reached.
 - Both routes are throttled to 10 requests per 5 minutes and audited as
   `event_outbox.requeued` (`outbox.service.ts:129`, `:194`) — including a zero-row
@@ -1379,7 +1379,7 @@ API description (`apps/control-api/src/outbox/outbox.controller.ts:95-127`):
 requeue path has its own suite in
 `apps/control-api/src/outbox/outbox.service.spec.ts` — including "does NOT reset
 attempts - two docblocks call that column monotonic" (`:141`), "preserves
-fan_out_cursor, so a partial fan-out resumes rather than restarts" (`:170`) and
+routing_cursor, so a partial routing resumes rather than restarts" (`:170`) and
 "un-fails the event, because the router only promotes `received`" (`:178`).
 
 ---
@@ -1400,7 +1400,7 @@ an attacker inside one project cannot shelter the rest of the organisation's
 budget from accounting. Refusals are 429 with `Retry-After`
 (`internal/ingest/limiter.go:20-21`).
 
-**At fan-out — and this is where the G2 fix lives.**
+**At routing — and this is where the G2 fix lives.**
 `ROUTER_MAX_SUBSCRIPTIONS_PER_EVENT` (1000,
 `internal/config/config.go:270`) now bounds **one transaction**, not one event
 (`internal/router/router.go:34-45`, `internal/router/store.go:104-119`). The
@@ -1412,14 +1412,14 @@ The router walks the project's subscriptions by **keyset**, not `OFFSET`
 (`store.go:340-369`): `s.id > $2` is the resume point, ids are ULIDs so the walk
 is oldest-first and deterministic, and a subscription deleted mid-walk cannot
 shift the window and skip its neighbour. The cursor is committed onto
-`event_outbox.fan_out_cursor` by `advanceFanOutSQL` (`store.go:495-503`), the row
+`event_outbox.routing_cursor` by `advanceRoutingSQL` (`store.go:495-503`), the row
 goes straight back to the ready set, and the event stays `processing` — **not
-`processed`** — until the final batch. So an event mid-fan-out is observable as
+`processed`** — until the final batch. So an event mid-routing is observable as
 such, and a crash between batches re-runs at worst one batch and creates nothing
 twice, arbitrated by the partial unique index.
 
 The walk is additionally **pinned to publish time**: `s.created_at <= $3`
-(`store.go:367`, reasoning at `:309-337`). A batched fan-out spans several
+(`store.go:367`, reasoning at `:309-337`). A batched routing spans several
 transactions and therefore several snapshots; without the pin, an event accepted
 at 09:59 whose batch 1 committed could hand a delivery to a subscription created
 at 10:00 whose ULID sorted after the cursor. The observable rule would have been
@@ -1430,14 +1430,14 @@ every project and every width: **an event reaches the subscriptions that existed
 when it was accepted.** The boundary is deliberately forgiving — both columns are
 `timestamp(3)`, so a subscription created in the same millisecond is included.
 
-`ErrFanOutTruncated` still exists (`store.go:34`) and is unreachable under
-batched fan-out, and it **fails the transaction** rather than committing if it
+`ErrRoutingTruncated` still exists (`store.go:34`) and is unreachable under
+batched routing, and it **fails the transaction** rather than committing if it
 ever does fire. A loud release is recoverable; a silent commit is not. That
 sentence is the whole lesson of G2.
 
 The signal changed with the behaviour: `router_subscriptions_skipped_total`
-`{reason="fan_out_cap_exceeded"}` no longer exists. A wide event now increments
-`router_fan_out_batches_total` (`internal/router/metrics.go:44-47`), which is a
+`{reason="routing_cap_exceeded"}` no longer exists. A wide event now increments
+`router_batch_continuations_total` (`internal/router/metrics.go:44-47`), which is a
 **capacity** signal — some events take several transactions and the outbox
 carries them for a few extra polls — not a data-loss one.
 
@@ -1462,7 +1462,7 @@ and the load suite has now made it non-hypothetical: 49.6 s single-host, 6.5 s
 multi-host, against 0.3 s when nothing is slow (`docs/LOAD_TESTING.md:373-378`).
 
 **Guarantee.** **Only time.** A burst is absorbed by the outbox and drains at the
-fleet's delivery rate. There is no longer a width at which fan-out loses
+fleet's delivery rate. There is no longer a width at which routing loses
 subscribers.
 
 **Blast radius.** The bursting project first. With `CLAIM_STRATEGY=fifo` (the
@@ -1502,11 +1502,11 @@ already due — but the head-of-line delay is real and is the thing to watch.
 *Proven by* `TestScenario19_TenantBurstDrainsUnderTheDefaultClaim`
 (`internal/failure/burst_test.go:104`),
 `TestScenario19_TenantFairClaimProtectsTheNeighbour` (`:164`),
-`TestPostgresFanOutWiderThanOneBatchReachesEveryEndpoint`
+`TestPostgresRoutingWiderThanOneBatchReachesEveryEndpoint`
 (`internal/router/store_postgres_test.go:978`),
-`TestPostgresAnUnfinishedFanOutIsNotMarkedProcessed` (`:1026`),
-`TestPostgresReplayingAFanOutBatchCreatesNoDuplicates` (`:1076`),
-`TestPostgresFanOutIsPinnedToTheSubscriptionsThatExistedAtPublishTime`
+`TestPostgresAnUnfinishedRoutingIsNotMarkedProcessed` (`:1026`),
+`TestPostgresReplayingARoutingBatchCreatesNoDuplicates` (`:1076`),
+`TestPostgresRoutingIsPinnedToTheSubscriptionsThatExistedAtPublishTime`
 (`:1203`) and `TestEgressLimitsCarryTheConfiguredPerHostCeiling`
 (`cmd/webhookd/roles_test.go:206`).
 
@@ -1600,7 +1600,7 @@ claim — is bounded by the retry duration rather than unbounded.
 **Gaps.**
 
 - **G14 (Medium): no auto-disable and no retention.** The breaker removes
-  *request* pressure; nothing removes *row* pressure. New events keep fanning out
+  *request* pressure; nothing removes *row* pressure. New events keep routing
   to a dead endpoint forever, each producing a delivery that will be claimed,
   refused, deferred and exhausted 24 hours later. `disabled_reason` is only ever
   set to `null` by the control plane
@@ -1623,7 +1623,7 @@ and `TestPayloadOutageDoesNotSpendTheHalfOpenProbe` (`defer_test.go:250`).
 ## Appendix A — first five minutes
 
 ```bash
-# Is anything stuck before the fan-out?
+# Is anything stuck before the routing?
 psql "$DATABASE_URL" -c "
   SELECT status, count(*), min(available_at) AS oldest
   FROM event_outbox GROUP BY status ORDER BY 2 DESC;"
@@ -1635,14 +1635,14 @@ psql "$DATABASE_URL" -c "
 # was failing under it.
 psql "$DATABASE_URL" -c "
   SELECT o.id, o.event_id, o.attempts, o.unaccounted_attempts, o.failing_since,
-         o.fan_out_cursor, o.last_error, e.project_id, e.event_type
+         o.routing_cursor, o.last_error, e.project_id, e.event_type
   FROM event_outbox o JOIN events e ON e.id = o.event_id
   WHERE o.status = 'failed' ORDER BY o.created_at DESC LIMIT 50;"
 
-# Events mid-fan-out. `processing` with a fan_out_cursor is normal for a wide
+# Events mid-routing. `processing` with a routing_cursor is normal for a wide
 # event; `processing` that is not advancing is not.
 psql "$DATABASE_URL" -c "
-  SELECT id, event_id, fan_out_cursor, available_at, locked_by, locked_until
+  SELECT id, event_id, routing_cursor, available_at, locked_by, locked_until
   FROM event_outbox WHERE status = 'processing' ORDER BY available_at LIMIT 20;"
 
 # Deliveries that are not moving, and why.
@@ -1678,7 +1678,7 @@ hundred with `POST /v1/projects/:projectId/outbox/requeue`. Both requeue routes
 need `events.replay` **and** `deliveries.replay`, are throttled to 10 requests
 per 5 minutes, and write an `event_outbox.requeued` audit entry. Read `has_more`
 and call again until it is false. Requeue in bounded passes rather than all at
-once: every requeued row becomes a fan-out and every fan-out becomes real
+once: every requeued row becomes a routing and every routing becomes real
 outbound HTTP to endpoints that were, very often, already failing when the
 incident started.
 
@@ -1689,10 +1689,10 @@ this table reads a constant zero.
 
 | Metric | Where set | Says |
 |---|---|---|
-| `outbox_pending_age_seconds` | `internal/router/router.go:491` | Fan-out is falling behind. Measures the oldest **due** row, so a backoff window is not counted as lag. |
+| `outbox_pending_age_seconds` | `internal/router/router.go:491` | Routing is falling behind. Measures the oldest **due** row, so a backoff window is not counted as lag. |
 | `router_outbox_parked_total` | `internal/router/metrics.go:74` | An event will not be delivered until an operator requeues it. Any non-zero value is an incident. Labelled by reason: `attempts_exhausted`, `retry_duration_exceeded`, `unknown_outbox_type`, `event_missing`. |
-| `router_fan_out_batches_total` | `internal/router/metrics.go:44` | Some events are wider than one fan-out transaction. A **capacity** signal — raise `ROUTER_MAX_SUBSCRIPTIONS_PER_EVENT` or accept a few extra polls per event. Not a correctness alert; it replaced one. |
-| `router_subscriptions_skipped_total` | `internal/router/router.go:468` | A subscription was considered and not delivered to. Answers "we configured it, why is nothing arriving" without a database session. `fan_out_cap_exceeded` is no longer one of the reasons. |
+| `router_batch_continuations_total` | `internal/router/metrics.go:44` | Some events are wider than one routing transaction. A **capacity** signal — raise `ROUTER_MAX_SUBSCRIPTIONS_PER_EVENT` or accept a few extra polls per event. Not a correctness alert; it replaced one. |
+| `router_subscriptions_skipped_total` | `internal/router/router.go:468` | A subscription was considered and not delivered to. Answers "we configured it, why is nothing arriving" without a database session. `routing_cap_exceeded` is no longer one of the reasons. |
 | `queue_depth{state}` | `internal/metrics/queuedepth.go:186`, refreshed every 15s by the **scheduler** (`cmd/webhookd/roles.go:152-154`) | Work that is not happening. `ready` growing means workers cannot keep up; `delayed` growing means backoff; `in_flight` pinned at the pool size means saturation. The only instrument that can see a backlog of deliveries deferred by a breaker or a rate limit, because those move no counter at all. **Goes stale, not zero, if the scheduler is down** — check `up` first. |
 | `egress_blocked_total{reason}` | `internal/egress/ssrf.go:90` | SSRF policy refusals, by a bounded code (`metadata`, `transition`, `private`, `loopback`, `redirect`, …). A customer probing egress policy, or an internal misconfiguration pointing at private space. Never labelled by customer-supplied text. |
 | `queue_leases_reclaimed_total` | `internal/queue/postgres.go:514` | Workers are dying mid-attempt. |

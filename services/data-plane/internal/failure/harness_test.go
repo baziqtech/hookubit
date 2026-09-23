@@ -268,7 +268,7 @@ func (f *fixture) newSubscription(t *testing.T, endpointID string, eventTypes []
 // One event per delivery, always: deliveries_event_endpoint_original_key is a
 // partial UNIQUE index on (event_id, endpoint_id) WHERE replay_of_delivery_id
 // IS NULL. It is the router's ON CONFLICT arbiter - the thing that stops a
-// re-run double-fanning-out - so a fixture that shares one event across two
+// re-run double-routing - so a fixture that shares one event across two
 // original deliveries is modelling a row production cannot create.
 func (f *fixture) newEvent(t *testing.T) string {
 	t.Helper()

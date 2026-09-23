@@ -39,7 +39,7 @@ type DeliveryJob struct {
 	Attempt        int       `json:"attempt"`
 	ScheduledAt    time.Time `json:"scheduled_at"`
 	OrderingKey    string    `json:"ordering_key,omitempty"`
-	// TraceContext is the W3C `traceparent` of the ROUTER's fan-out span,
+	// TraceContext is the W3C `traceparent` of the ROUTER's routing span,
 	// stored on the delivery row (ARCHITECTURE.md 44). It travels with the
 	// claim rather than being read later by worker.Store.Load, because the
 	// operator questions that need a span - "why has this delivery not moved?"

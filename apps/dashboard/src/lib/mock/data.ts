@@ -798,9 +798,9 @@ for (const endpoint of fillerEndpoints) {
  *
  * There is NO `endpoint_name`: a subscription carries `endpoint_id` and nothing
  * else identifying, so the screens that show a name join against the endpoint
- * list. The filter field is `payload_filter`, and the fan-out below deliberately
+ * list. The filter field is `payload_filter`, and the routing below deliberately
  * IGNORES it, because the data plane does: a subscription with a payload filter
- * currently behaves as if it had none. Materialising a filtered fan-out here
+ * currently behaves as if it had none. Materialising a filtered routing here
  * would show an operator deliveries the platform does not actually suppress.
  */
 export const subscriptions: Subscription[] = [
@@ -1056,15 +1056,15 @@ const INLINE_PAYLOAD_LIMIT = 262_144;
 const OFFLOADED_EVENT = 11;
 /** The event whose raw bytes are past the retention window and simply gone. */
 const AGED_OUT_EVENT = 29;
-/** Ingested moments ago; the fan-out has not run, so it has no deliveries yet. */
+/** Ingested moments ago; the routing has not run, so it has no deliveries yet. */
 const JUST_RECEIVED_EVENT = 47;
-/** The fan-out itself failed. Also no deliveries — and NOT a delivery outcome. */
-const FANOUT_FAILED_EVENT = 53;
+/** The routing itself failed. Also no deliveries — and NOT a delivery outcome. */
+const ROUTING_FAILED_EVENT = 53;
 
 /**
  * THE INCIDENT. Indices from here up are events accepted during a database
  * failover that outlasted the router's retry window, so every one of them is
- * PARKED: answered 202, never fanned out, no delivery rows. There are more of
+ * PARKED: answered 202, never routed, no delivery rows. There are more of
  * them than one bulk requeue may return (`MAX_REQUEUE_BATCH`, 100), which is
  * the only way the `has_more` loop on the outbox page is reachable in the
  * mock — a loop that only ever runs once is a loop the UI never exercised.
@@ -1185,30 +1185,30 @@ interface Fixture {
  * The INGEST state of an event, which is not a delivery outcome.
  *
  * The fixtures used to set `status: 'failed'` whenever one of an event's
- * deliveries was exhausted. `EventDto.status` is the fan-out state — `processed`
- * means the fan-out committed and says nothing about whether any endpoint
+ * deliveries was exhausted. `EventDto.status` is the routing state — `processed`
+ * means the routing committed and says nothing about whether any endpoint
  * accepted anything — so that row could not occur, and it taught the events
- * list to report a healthy ingest as a failure. Failure here means the fan-out
+ * list to report a healthy ingest as a failure. Failure here means the routing
  * itself failed, and such an event has no deliveries at all.
  */
 function ingestStateFor(index: number): {
   status: EventStatus;
   processed: boolean;
-  fansOut: boolean;
+  routes: boolean;
 } {
-  if (index === JUST_RECEIVED_EVENT) return { status: 'received', processed: false, fansOut: false };
-  if (index === FANOUT_FAILED_EVENT) return { status: 'failed', processed: false, fansOut: false };
-  if (index >= INCIDENT_START) return { status: 'failed', processed: false, fansOut: false };
-  // Fan-out in flight: some rows are written, `processed_at` is not set yet.
-  if (index === 2) return { status: 'processing', processed: false, fansOut: true };
-  return { status: 'processed', processed: true, fansOut: true };
+  if (index === JUST_RECEIVED_EVENT) return { status: 'received', processed: false, routes: false };
+  if (index === ROUTING_FAILED_EVENT) return { status: 'failed', processed: false, routes: false };
+  if (index >= INCIDENT_START) return { status: 'failed', processed: false, routes: false };
+  // Routing in flight: some rows are written, `processed_at` is not set yet.
+  if (index === 2) return { status: 'processing', processed: false, routes: true };
+  return { status: 'processed', processed: true, routes: true };
 }
 
 /**
  * The event types that are NOT left to the seeded RNG.
  *
  * `payment.settled` is the only type all three enabled subscriptions match, so
- * pinning it is what makes the interesting rows reachable at all: the fan-out
+ * pinning it is what makes the interesting rows reachable at all: the routing
  * of one event across three endpoints (index 0), the two replays of an
  * exhausted partner delivery (6 and 13), and a healthy in-flight attempt on the
  * ledger (14). Leaving them to chance meant those rows silently vanished
@@ -1222,7 +1222,7 @@ const FORCED_EVENT_TYPES: Record<number, string> = {
 };
 
 /**
- * Fan-out is materialised exactly as the platform does it: one event becomes
+ * Routing is materialised exactly as the platform does it: one event becomes
  * one delivery row per matching subscription, each with an independent retry
  * chain. That is what makes "did finance ever receive this?" answerable.
  */
@@ -1237,7 +1237,7 @@ function buildFixture(index: number): Fixture {
   const orderingKey = index % 4 === 0 ? `customer_${index}` : null;
   const ingest = ingestStateFor(index);
 
-  const matching = ingest.fansOut
+  const matching = ingest.routes
     ? subscriptions.filter(
         (subscription) =>
           subscription.enabled &&
@@ -1293,7 +1293,7 @@ function buildFixture(index: number): Fixture {
         status === 'retrying' || status === 'scheduled' ? minutesAhead(between(1, 24)) : null,
       last_attempt_at: last?.started_at ?? null,
       completed_at: completedAt,
-      // Carried from the event onto every delivery it fanned out to. Ordering
+      // Carried from the event onto every delivery it routed to. Ordering
       // is NOT enforced yet, so this promises nothing about delivery order.
       ordering_key: orderingKey,
       // The status code is NOT here. `last_error` is all a list row carries;
@@ -1520,8 +1520,8 @@ export const attempts: Record<string, DeliveryAttempt[]> = Object.assign(
  *
  * The parked rows are the point, and they are built to be told apart:
  *
- *   - `FANOUT_FAILED_EVENT` parked HALFWAY through a fan-out — 11 of 14 claims
- *     left nothing recorded and `fan_out_cursor` points at the subscription
+ *   - `ROUTING_FAILED_EVENT` parked HALFWAY through a routing — 11 of 14 claims
+ *     left nothing recorded and `routing_cursor` points at the subscription
  *     the last committed batch stopped at.
  *   - The first two incident rows are POISON: every claim ended with the router
  *     writing nothing at all, which is what an event that kills the process
@@ -1547,7 +1547,7 @@ function outboxRowFor(event: EventDetail, index: number): OutboxEntry {
     unaccounted_attempts: 0,
     last_error: null,
     failing_since: null,
-    fan_out_cursor: null,
+    routing_cursor: null,
     available_at: event.created_at,
     locked_by: null,
     locked_until: null,
@@ -1563,27 +1563,27 @@ function outboxRowFor(event: EventDetail, index: number): OutboxEntry {
   }
 
   if (index === 2) {
-    // Mid-fan-out, healthy: a router holds the lease and has committed one
+    // Mid-routing, healthy: a router holds the lease and has committed one
     // batch. `processing` with a cursor is NORMAL for a wide event.
     return {
       ...base,
       status: 'processing',
       attempts: 1,
       unaccounted_attempts: 1,
-      fan_out_cursor: subscriptions[0].id,
+      routing_cursor: subscriptions[0].id,
       locked_by: 'router-2',
       locked_until: minutesAhead(1),
       processed_at: null,
     };
   }
 
-  if (index === FANOUT_FAILED_EVENT) {
+  if (index === ROUTING_FAILED_EVENT) {
     return {
       ...base,
       status: 'failed',
       attempts: 14,
       unaccounted_attempts: 11,
-      fan_out_cursor: subscriptions[1].id,
+      routing_cursor: subscriptions[1].id,
       last_error: `attempts_exhausted: claimed 14 times (11 of them leaving no recorded outcome, bound ${ROUTER_MAX_OUTBOX_ATTEMPTS})`,
       available_at: after(31),
       processed_at: after(31),

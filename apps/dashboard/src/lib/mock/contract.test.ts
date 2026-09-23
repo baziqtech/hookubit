@@ -1008,7 +1008,7 @@ describe('events carry a delivery rollup, not just an ingest status', () => {
   });
 
   it('an event that matched no subscription reads DROPPED, not delivered', async () => {
-    // The state that exists nowhere else: fan-out completed and produced
+    // The state that exists nowhere else: routing completed and produced
     // nothing. `status: processed` alone makes this event look finished and
     // fine, and it reached nobody.
     const body = await mockRequest<{ data: WebhookEvent[] }>(

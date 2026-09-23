@@ -49,7 +49,7 @@ describe('OutboxService', () => {
       const ids = page.data.map((row) => row.id).sort();
 
       expect(ids).toEqual(
-        [OUTBOX.parkedMidFanOut, OUTBOX.parkedPoison, OUTBOX.parkedStale].sort(),
+        [OUTBOX.parkedMidRouting, OUTBOX.parkedPoison, OUTBOX.parkedStale].sort(),
       );
       // The neighbours were sitting in the same table.
       expect(ids).not.toContain(OUTBOX.parkedOtherProject);
@@ -70,10 +70,10 @@ describe('OutboxService', () => {
       expect(poison?.last_error).toContain('attempts_exhausted');
     });
 
-    it('reports a partly-completed fan-out as such', async () => {
+    it('reports a partly-completed routing as such', async () => {
       const page = await h.outbox.list(h.context, { status: 'failed' });
-      const partial = page.data.find((row) => row.id === OUTBOX.parkedMidFanOut);
-      expect(partial?.fan_out_cursor).toBe('sub_01HALFWAY');
+      const partial = page.data.find((row) => row.id === OUTBOX.parkedMidRouting);
+      expect(partial?.routing_cursor).toBe('sub_01HALFWAY');
     });
 
     it('filters to one event', async () => {
@@ -167,19 +167,19 @@ describe('OutboxService', () => {
       expect(row.last_error).toContain('attempts_exhausted');
     });
 
-    it('preserves fan_out_cursor, so a partial fan-out resumes rather than restarts', async () => {
+    it('preserves routing_cursor, so a partial routing resumes rather than restarts', async () => {
       // Restarting is SAFE - deliveries_event_endpoint_original_key makes every
       // insert idempotent per (event, endpoint) - but it would re-walk hundreds
       // of subscriptions that already have their delivery rows.
-      const row = await h.outbox.requeue(h.context, OUTBOX.parkedMidFanOut, {});
-      expect(row.fan_out_cursor).toBe('sub_01HALFWAY');
+      const row = await h.outbox.requeue(h.context, OUTBOX.parkedMidRouting, {});
+      expect(row.routing_cursor).toBe('sub_01HALFWAY');
     });
 
     it('un-fails the event, because the router only promotes `received`', async () => {
       expect(rawEvent(h.db, OUTBOX_EVENTS.parkedPoison).status).toBe('failed');
       await h.outbox.requeue(h.context, OUTBOX.parkedPoison, {});
       // Left as `failed`, the claim's `received -> processing` promotion would
-      // never match and the event would read `failed` right through a fan-out
+      // never match and the event would read `failed` right through a routing
       // that was working.
       expect(rawEvent(h.db, OUTBOX_EVENTS.parkedPoison).status).toBe('received');
     });
@@ -207,7 +207,7 @@ describe('OutboxService', () => {
       expect(metadata.parked_error).toContain('attempts_exhausted');
     });
 
-    it('refuses a row that already fanned out, and points at replay', async () => {
+    it('refuses a row that already routed, and points at replay', async () => {
       const err = await failure(h.outbox.requeue(h.context, OUTBOX.processed, {}));
       expect(err.code).toBe('conflict');
       expect(err.message).toContain('replay');
@@ -277,7 +277,7 @@ describe('OutboxService', () => {
       expect(result.data.map((row) => row.id)).toEqual([
         OUTBOX.parkedPoison,
         OUTBOX.parkedStale,
-        OUTBOX.parkedMidFanOut,
+        OUTBOX.parkedMidRouting,
       ]);
     });
 
@@ -391,7 +391,7 @@ describe('OutboxService', () => {
       expect(metadata.requeued_outbox_ids).toEqual([
         OUTBOX.parkedPoison,
         OUTBOX.parkedStale,
-        OUTBOX.parkedMidFanOut,
+        OUTBOX.parkedMidRouting,
       ]);
       expect(metadata.requeued_event_ids).toContain(OUTBOX_EVENTS.parkedPoison);
     });

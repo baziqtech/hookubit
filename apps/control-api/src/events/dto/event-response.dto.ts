@@ -58,7 +58,7 @@ export class EventDto {
     type: String,
     nullable: true,
     description:
-      'Opt-in serialisation key, carried onto every delivery this event fanned out to. It is ' +
+      'Opt-in serialisation key, carried onto every delivery this event routed to. It is ' +
       'accepted and stored today so it is already in place when per-key ordering is enforced, ' +
       'but per-key ordering is NOT yet enforced: this field currently guarantees nothing about ' +
       'delivery order.',
@@ -68,7 +68,7 @@ export class EventDto {
   @ApiProperty({
     enum: ['received', 'processing', 'processed', 'failed'],
     description:
-      'The INGEST/fan-out state, not a delivery outcome. `processed` means the fan-out ' +
+      'The INGEST/routing state, not a delivery outcome. `processed` means the routing ' +
       'committed, which says nothing about whether any endpoint accepted it - that is what the ' +
       'deliveries are for.',
   })
@@ -105,7 +105,7 @@ export class EventDto {
   @ApiProperty({
     type: String,
     nullable: true,
-    description: 'When the fan-out first committed. Null until it has.',
+    description: 'When the routing first committed. Null until it has.',
   })
   processed_at!: string | null;
 
@@ -132,11 +132,11 @@ export class EventDeliveryRollupDto {
   @ApiProperty({
     enum: ['received', 'in_progress', 'delivered', 'partly_delivered', 'all_failed', 'dropped'],
     description:
-      '`dropped` is the one worth reading twice: the fan-out COMPLETED and produced no ' +
+      '`dropped` is the one worth reading twice: the routing COMPLETED and produced no ' +
       'deliveries, because no subscription matched. The publisher was answered 202 and the ' +
-      'event went nowhere. `received` means the fan-out has not finished - which is also how an ' +
-      'event stuck BEFORE fan-out appears here, because it has no deliveries and no completed ' +
-      'fan-out. Telling those apart needs `event_outbox`; see `GET /projects/:id/outbox`.',
+      'event went nowhere. `received` means the routing has not finished - which is also how an ' +
+      'event stuck BEFORE routing appears here, because it has no deliveries and no completed ' +
+      'routing. Telling those apart needs `event_outbox`; see `GET /projects/:id/outbox`.',
   })
   state!: string;
 

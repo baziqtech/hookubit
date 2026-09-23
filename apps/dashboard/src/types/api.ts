@@ -472,7 +472,7 @@ export type EventStatus = S['EventDto']['status'];
  * `EventDto`.
  *
  * The size field is `payload_size`, not `payload_size_bytes`, and there is NO
- * `delivery_counts` — the fan-out roll-up an event row showed was invented.
+ * `delivery_counts` — the routing roll-up an event row showed was invented.
  */
 export type WebhookEvent = S['EventDto'];
 
@@ -545,7 +545,7 @@ export type OutboxStatus = S['OutboxEntryDto']['status'];
  * Two counters that look alike and are not: `attempts` is monotonic and
  * informational (a requeue preserves it); `unaccounted_attempts` is the poison
  * bound (a requeue resets it). `failing_since` is the time-based bound. A
- * non-null `fan_out_cursor` on a parked row means the fan-out is PARTLY done.
+ * non-null `routing_cursor` on a parked row means the routing is PARTLY done.
  */
 export type OutboxEntry = S['OutboxEntryDto'];
 
@@ -669,7 +669,7 @@ export type AttemptLatency = S['AttemptLatencyDto'];
  * `status: processed` means the router ran and committed, and says nothing
  * about whether anybody got anything.
  *
- * `dropped` is the one worth reading twice: fan-out COMPLETED and produced no
+ * `dropped` is the one worth reading twice: routing COMPLETED and produced no
  * deliveries, because no subscription matched.
  */
 export type EventDeliveryRollup = S['EventDeliveryRollupDto'];
@@ -714,7 +714,7 @@ export const DEFAULT_ANALYTICS_LIMIT = 10;
 
 /**
  * NOT a wire type. `summarizeDeliveries` in `src/lib/delivery-status.ts` folds
- * a page of `DeliveryDto` rows into this for the event detail's fan-out
+ * a page of `DeliveryDto` rows into this for the event detail's routing
  * summary. It lives here only because the roll-up is shared; nothing on the
  * API returns it, and it must never be read as though something did.
  */

@@ -16,8 +16,8 @@ import { OutboxEntryDto, OutboxEntryListDto, RequeueResultDto } from './dto';
  * Two things are being fenced here and both are load-bearing.
  *
  * **Requeue is privileged.** It is the one route in this module that
- * manufactures outbound traffic: every requeued row becomes a fan-out and every
- * fan-out becomes real HTTP to a customer's endpoints - very often the same
+ * manufactures outbound traffic: every requeued row becomes a routing and every
+ * routing becomes real HTTP to a customer's endpoints - very often the same
  * endpoints that were failing when the incident started. It carries
  * `events.replay` AND `deliveries.replay`, exactly as event replay does, so a
  * `viewer` can watch the incident and cannot act on it.
@@ -66,7 +66,7 @@ describe('outbox routes', () => {
       });
       expect(res.status).toBe(200);
       expect(res.body.data.map((row) => row.id).sort()).toEqual(
-        [OUTBOX.parkedMidFanOut, OUTBOX.parkedPoison, OUTBOX.parkedStale].sort(),
+        [OUTBOX.parkedMidRouting, OUTBOX.parkedPoison, OUTBOX.parkedStale].sort(),
       );
       expect(res.body).toHaveProperty('has_more');
       expect(res.body).toHaveProperty('next_offset');
@@ -145,7 +145,7 @@ describe('outbox routes', () => {
       expect(rawOutbox(h.db, OUTBOX.parkedPoison).status).toBe('failed');
     });
 
-    it('409s an entry that already fanned out', async () => {
+    it('409s an entry that already routed', async () => {
       const res = await h.call('POST', `${OUTBOX_PATH}/${OUTBOX.processed}/requeue`, {
         as: IDS.ownerA,
         body: {},

@@ -18,7 +18,7 @@ Five steps:
 | Step | What it says |
 |---|---|
 | What this is | Your system publishes an event once; HookuBit gets it to every consumer that asked, retrying, signing and keeping a permanent record of every attempt. The record is the product. |
-| Fan-out | One event becomes one delivery per matching subscription, created up front so the table is the record of what should arrive. Each delivery retries on its own, and either can be replayed alone. |
+| Routing | One event becomes one delivery per matching subscription, created up front so the table is the record of what should arrive. Each delivery retries on its own, and either can be replayed alone. |
 | Signing | Every request carries a `Webhook-Signature`, an HMAC over the timestamp and the exact body bytes. Rotating a secret emits both old and new signatures for an overlap window. |
 | Retries | Timeouts, 429s and 5xx are retried with backoff; other 4xx are permanent. An endpoint that fails consistently trips its circuit breaker and is set aside so it cannot starve the others. |
 | Your turn | Hands off to the Get started page. |
@@ -94,7 +94,7 @@ ends up in their codebase.
 
 Success is `202 Accepted` with the event id. **"Accepted" means stored, not
 delivered.** The response returns as soon as the event is durably written;
-fan-out happens after that. Watch it land on Events, then follow it into
+routing happens after that. Watch it land on Events, then follow it into
 Deliveries.
 
 The ingest API is a separate service from the control API the dashboard

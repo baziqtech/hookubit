@@ -1,7 +1,7 @@
 # HookuBit
 
 Multi-tenant webhook infrastructure: durable event ingestion, materialised
-fan-out to subscribed endpoints, retries with backoff, per-endpoint circuit
+routing to subscribed endpoints, retries with backoff, per-endpoint circuit
 breaking and auto-disable, HMAC signing with overlapping secret rotation, and a
 delivery ledger you can actually answer "what happened to this event?" from —
 without opening psql.
@@ -64,7 +64,7 @@ above the inline limit. Containers hold nothing.
 - **Ingest** — API-key auth, rate limiting (pre-auth per source, then per
   policy), idempotency keys, a transactional outbox: nothing is published
   before COMMIT, and the reply is 202 only for what is durable.
-- **Fan-out** — one event becomes N delivery rows, each with its own retry
+- **Routing** — one event becomes N delivery rows, each with its own retry
   chain, in batches bounded by a cap that resumes rather than truncates, pinned
   to the subscriptions that existed at publish time.
 - **Delivery** — a bounded worker pool with per-endpoint, per-project and
@@ -79,7 +79,7 @@ above the inline limit. Containers hold nothing.
 - **Operator surface** — the dashboard answers "what happened to this event?",
   replays a delivery or an event, shows why an event parked and requeues it,
   and renders the trace id of any sampled attempt. It reports what became of an
-  EVENT (six states rolled up from its deliveries, including `dropped` — fan-out
+  EVENT (six states rolled up from its deliveries, including `dropped` — routing
   completed and matched nobody) rather than only what became of the ingest, and
   keeps an endpoint's two facts apart: what you asked for, and what we are doing
   about it.

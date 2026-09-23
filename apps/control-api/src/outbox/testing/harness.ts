@@ -32,21 +32,21 @@ import { OutboxService } from '../outbox.service';
  * `seedWorld` gives two tenants; everything below is the set of states this
  * module has to be able to explain and act on: a row that completed, a row
  * parked because it kept killing the router, a row parked after failing for
- * longer than its retry duration, a row parked HALFWAY through a wide fan-out
+ * longer than its retry duration, a row parked HALFWAY through a wide routing
  * (cursor set, so a requeue must resume rather than restart), a row currently
  * leased by a router, a row waiting in its backoff - and parked rows belonging
  * to the neighbouring project and the neighbouring organization, so that a test
  * proving a listing returned A1's rows is worth something.
  */
 export const OUTBOX = {
-  /** Fanned out cleanly. Requeueing it is a 409 pointing at replay. */
+  /** Routed cleanly. Requeueing it is a 409 pointing at replay. */
   processed: 'obx_a_done',
   /** PARKED: claimed past ROUTER_MAX_OUTBOX_ATTEMPTS with no recorded outcome. */
   parkedPoison: 'obx_a_poison',
   /** PARKED: recorded failures for longer than MaxOutboxRetryDuration. */
   parkedStale: 'obx_a_stale',
-  /** PARKED mid-fan-out. `fan_out_cursor` is set; some endpoints already have deliveries. */
-  parkedMidFanOut: 'obx_a_partial',
+  /** PARKED mid-routing. `routing_cursor` is set; some endpoints already have deliveries. */
+  parkedMidRouting: 'obx_a_partial',
   /** Leased by a router right now. Requeueing it is a 409. */
   processing: 'obx_a_leased',
   /** Queued and backing off. Requeueing it is a 409. */
@@ -61,7 +61,7 @@ export const OUTBOX_EVENTS = {
   processed: 'evt_obx_done',
   parkedPoison: 'evt_obx_poison',
   parkedStale: 'evt_obx_stale',
-  parkedMidFanOut: 'evt_obx_partial',
+  parkedMidRouting: 'evt_obx_partial',
   processing: 'evt_obx_leased',
   pending: 'evt_obx_pending',
   parkedOtherProject: 'evt_obx_a2',
@@ -108,7 +108,7 @@ function outbox(db: FakeTenantPrisma, id: string, eventId: string, extra: Row): 
     attempts: 0,
     unaccountedAttempts: 0,
     failingSince: null,
-    fanOutCursor: null,
+    routingCursor: null,
     availableAt: T.done,
     lockedBy: null,
     lockedUntil: null,
@@ -162,16 +162,16 @@ export function seedOutbox(db: FakeTenantPrisma = seedWorld()): FakeTenantPrisma
     createdAt: T.stale,
   });
 
-  event(db, OUTBOX_EVENTS.parkedMidFanOut, IDS.orgA, IDS.projectA1, {
+  event(db, OUTBOX_EVENTS.parkedMidRouting, IDS.orgA, IDS.projectA1, {
     status: 'failed',
     createdAt: T.partial,
     processedAt: T.partial,
   });
-  outbox(db, OUTBOX.parkedMidFanOut, OUTBOX_EVENTS.parkedMidFanOut, {
+  outbox(db, OUTBOX.parkedMidRouting, OUTBOX_EVENTS.parkedMidRouting, {
     status: 'failed',
     attempts: 14,
     unaccountedAttempts: 11,
-    fanOutCursor: 'sub_01HALFWAY',
+    routingCursor: 'sub_01HALFWAY',
     lastError: 'attempts_exhausted: claimed 14 times (11 of them leaving no recorded outcome, bound 10)',
     processedAt: T.partial,
     createdAt: T.partial,

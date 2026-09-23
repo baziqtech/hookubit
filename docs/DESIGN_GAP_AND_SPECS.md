@@ -194,4 +194,4 @@ Build the design; do not let it delete these.
    inline.
 5. **`unaccounted_attempts`.** The design surfaces this well, as the `Pick-ups`
    column with its footnote. Keep both.
-6. **`fan_out_cursor`.** The design's "Deliveries created: 2 of 3" is exactly this.
+6. **`routing_cursor`.** The design's "Deliveries created: 2 of 3" is exactly this.

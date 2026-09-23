@@ -177,9 +177,9 @@ export class AnalyticsController {
   @ApiOperation({
     summary: 'Event volume over a window, with the busiest event types',
     description:
-      'Events PUBLISHED in the window - not deliveries. One event fans out to one delivery per ' +
+      'Events PUBLISHED in the window - not deliveries. One event routes to one delivery per ' +
       'matching subscription, so these two numbers are expected to differ and their ratio is ' +
-      'the project\'s fan-out. The preceding window of equal length is returned alongside.',
+      'the project\'s routing. The preceding window of equal length is returned alongside.',
   })
   @ApiOkResponse({ type: EventVolumeDto })
   events(

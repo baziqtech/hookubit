@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
-  fanOutRatio,
+  deliveriesPerEvent,
   formatCountDelta,
   formatRate,
   formatRateDelta,
@@ -62,21 +62,21 @@ describe('rateTone', () => {
   });
 });
 
-describe('fanOutRatio', () => {
+describe('deliveriesPerEvent', () => {
   it('is deliveries per event', () => {
-    expect(fanOutRatio(300, 100)).toBe(3);
-    expect(formatRatio(fanOutRatio(300, 100))).toBe('3.00×');
+    expect(deliveriesPerEvent(300, 100)).toBe(3);
+    expect(formatRatio(deliveriesPerEvent(300, 100))).toBe('3.00×');
   });
 
   it('is null with no events, and never divides by zero', () => {
-    expect(fanOutRatio(0, 0)).toBeNull();
-    expect(fanOutRatio(5, 0)).toBeNull();
+    expect(deliveriesPerEvent(0, 0)).toBeNull();
+    expect(deliveriesPerEvent(5, 0)).toBeNull();
     expect(formatRatio(null)).toBe('—');
   });
 
   it('is null until BOTH responses are in hand', () => {
-    expect(fanOutRatio(undefined, 100)).toBeNull();
-    expect(fanOutRatio(300, undefined)).toBeNull();
+    expect(deliveriesPerEvent(undefined, 100)).toBeNull();
+    expect(deliveriesPerEvent(300, undefined)).toBeNull();
   });
 });
 

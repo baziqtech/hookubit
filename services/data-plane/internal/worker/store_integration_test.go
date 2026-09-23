@@ -127,7 +127,7 @@ func (f *dbFixture) insertDelivery(t *testing.T, lockedBy string) string {
 // PostgreSQL does not: deliveries_event_endpoint_original_key is UNIQUE on
 // (event_id, endpoint_id) WHERE replay_of_delivery_id IS NULL. That index is
 // the router's ON CONFLICT arbiter - the thing that stops a re-run
-// double-fanning-out an event to every subscriber - so the constraint is
+// double-routing an event to every subscriber - so the constraint is
 // correct and the fixture was modelling a row the router cannot produce.
 func (f *dbFixture) newEvent(t *testing.T) string {
 	t.Helper()

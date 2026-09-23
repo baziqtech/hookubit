@@ -69,7 +69,7 @@ Every project with any retry policies has **exactly one default**:
 
 ### Which policy a delivery uses
 
-Resolved at fan-out time and **stamped onto the delivery row** as
+Resolved at routing time and **stamped onto the delivery row** as
 `max_attempts`, so editing a policy mid-incident does not change the budget of
 deliveries already created:
 

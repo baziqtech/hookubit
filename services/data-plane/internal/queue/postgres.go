@@ -79,7 +79,7 @@ const claimedColumns = `
 // re-locks the first sorted row; a row this same UPDATE already modified is
 // TM_SelfModified, which LockRows treats as deleted and skips, so the NEXT tied
 // row becomes that turn's LIMIT-1 winner and matches the next outer row. With
-// a fan-out batch every row ties on (next_attempt_at, created_at), so a claim
+// a routing batch every row ties on (next_attempt_at, created_at), so a claim
 // of LIMIT 1 returned every ready row: measured 5 of 5, ten times out of ten,
 // against relpages=14 reltuples=1, and reproduced inside the failure suite at
 // relpages=6 reltuples=0. Under any other statistics state the planner hashes
@@ -88,7 +88,7 @@ const claimedColumns = `
 // A MATERIALIZED CTE is evaluated exactly once into a tuplestore before the
 // UPDATE joins to it, so the batch is bounded by construction, whatever plan
 // the join takes. The id tiebreaker makes the order deterministic among rows
-// that tie, which a fan-out batch always does.
+// that tie, which a routing batch always does.
 //
 // The ORDER BY is, column for column, the key of deliveries_ready_fifo_idx
 // (next_attempt_at, created_at, id; no NULLS FIRST since 20260911000000), so

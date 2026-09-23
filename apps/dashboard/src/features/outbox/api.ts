@@ -24,7 +24,7 @@ export interface OutboxFilters {
 /**
  * `GET /v1/projects/:projectId/outbox` — offset paged like every other list,
  * newest first. `status=failed` is the parked set: rows the platform answered
- * 202 to and then could not fan out.
+ * 202 to and then could not route.
  */
 export function useOutboxEntries(projectId: string, filters: OutboxFilters, offset = 0) {
   return useQuery({
@@ -52,7 +52,7 @@ export function useOutboxEntry(projectId: string, outboxId: string) {
  *
  * The row goes back to `pending` and its event goes `failed → received`, so
  * the event page, the events list and every outbox page are stale the moment
- * the request returns. The delivery list is invalidated too: the fan-out that
+ * the request returns. The delivery list is invalidated too: the routing that
  * now runs writes delivery rows that did not exist a second ago.
  */
 function invalidateAfterRequeue(
@@ -75,7 +75,7 @@ function invalidateAfterRequeue(
  * Answers the row as it now stands. `attempts` and `last_error` are preserved
  * on purpose — the history is not erased by the recovery — and a 409 means the
  * row was not parked: `details.outbox_status` says whether a router already
- * has it or the fan-out already completed.
+ * has it or the routing already completed.
  */
 export function useRequeueOutboxEntry(projectId: string) {
   const queryClient = useQueryClient();

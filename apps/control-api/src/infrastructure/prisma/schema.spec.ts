@@ -33,6 +33,9 @@ const outboxRecovery = read(
   'migration.sql',
 );
 const flatOutboxRecovery = flatten(outboxRecovery);
+const flatRenameToRouting = flatten(
+  read('migrations', '20260923000000_rename_fan_out_to_routing', 'migration.sql'),
+);
 /**
  * The DDL with `--` comments removed. These migrations carry long rationale
  * comments that legitimately NAME the statements they are explaining ("what
@@ -45,7 +48,7 @@ function statementsOnly(sql: string): string {
 const flatFixes = flatten(fixes);
 const allMigrations = flatten(`${init}\n${fixes}`);
 
-describe('FIX 1 - fan-out cannot double-deliver', () => {
+describe('FIX 1 - routing cannot double-deliver', () => {
   it('has a unique index on (event_id, endpoint_id) for the router to name as an ON CONFLICT arbiter', () => {
     expect(flatFixes).toContain(
       'CREATE UNIQUE INDEX "deliveries_event_endpoint_original_key" ON "deliveries" ("event_id", "endpoint_id")',
@@ -175,20 +178,28 @@ describe('FIX 8 - sessions are revocable', () => {
   });
 });
 
-describe('the outbox can resume a fan-out, and a parked row can be recovered', () => {
-  it('adds the resume cursor that turns the fan-out cap into a BATCH bound', () => {
+describe('the outbox can resume a routing, and a parked row can be recovered', () => {
+  it('adds the resume cursor that turns the routing cap into a BATCH bound', () => {
     // Without this column the router took the first `cap` subscriptions
     // ORDER BY s.id, dropped the rest and COMMITTED - marking the event
     // `processed` while the newest endpoints (ULIDs sort by creation) held no
     // delivery row, permanently, with replay unable to reach them.
+    // The column was ADDED as `fan_out_cursor` and RENAMED by
+    // 20260923000000_rename_fan_out_to_routing. Applied migrations are
+    // checksummed, so the original keeps the original name for ever; this
+    // asserts the pair, because either half alone would pass against a
+    // database whose column does not exist.
     expect(flatOutboxRecovery).toContain('ADD COLUMN IF NOT EXISTS "fan_out_cursor" TEXT');
-    expect(schema).toContain('fanOutCursor String?     @map("fan_out_cursor")');
+    expect(flatRenameToRouting).toContain(
+      'ALTER TABLE "event_outbox" RENAME COLUMN "fan_out_cursor" TO "routing_cursor"',
+    );
+    expect(schema).toContain('routingCursor String?     @map("routing_cursor")');
   });
 
   it('splits the poison bound off the monotonic claim count', () => {
     // `attempts` increments on CLAIM, which is right - a row that kills the
     // process never reaches a failure handler. But it meant a degraded-Postgres
-    // window burned the whole budget on rows whose fan-out was never attempted.
+    // window burned the whole budget on rows whose routing was never attempted.
     expect(flatOutboxRecovery).toContain(
       'ADD COLUMN IF NOT EXISTS "unaccounted_attempts" INTEGER NOT NULL DEFAULT 0',
     );

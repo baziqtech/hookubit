@@ -10,7 +10,7 @@
  *
  * So after every run this asks PostgreSQL:
  *   - did every accepted event get routed (outbox drained)?
- *   - did fan-out materialise the number of rows the subscriptions imply?
+ *   - did routing materialise the number of rows the subscriptions imply?
  *   - did those rows reach a terminal state, and which one?
  *   - what did delivery actually cost, per endpoint group?
  *   - is anything wedged - leased by a worker that never came back, or retrying
@@ -38,11 +38,11 @@ const ID = /^[a-z]+_[0-9A-HJKMNP-TV-Z]{26}$/;
  * own protections.
  */
 const EXPECTATIONS = {
-  fanout: {
+  wide: {
     groups: {
-      fanout: { minTerminal: 0.99, minSucceeded: 0.99, maxLatencyP95Ms: 15000 },
+      wide: { minTerminal: 0.99, minSucceeded: 0.99, maxLatencyP95Ms: 15000 },
     },
-    exactFanout: true,
+    exactDeliveryCount: true,
   },
   'slow-endpoints': {
     groups: {
@@ -50,7 +50,7 @@ const EXPECTATIONS = {
       fast: { minTerminal: 0.99, minSucceeded: 0.99, maxLatencyP95Ms: 5000 },
       slow: { minTerminal: 0.2, minSucceeded: 0.2 },
     },
-    exactFanout: true,
+    exactDeliveryCount: true,
   },
   'failing-endpoints': {
     groups: {
@@ -59,20 +59,20 @@ const EXPECTATIONS = {
       throttled: { minAttemptsPerDelivery: 1 },
       timeout: { minAttemptsPerDelivery: 1 },
     },
-    exactFanout: true,
+    exactDeliveryCount: true,
   },
   'many-tenants': {
     groups: {
       quiet: { minTerminal: 0.99, minSucceeded: 0.99, maxLatencyP95Ms: 5000 },
       noisy: { minTerminal: 0.2 },
     },
-    exactFanout: true,
+    exactDeliveryCount: true,
   },
   'large-payloads': {
     groups: {
       large: { minTerminal: 0.99, minSucceeded: 0.99, maxLatencyP95Ms: 20000 },
     },
-    exactFanout: true,
+    exactDeliveryCount: true,
     requireOffload: true,
   },
 };
@@ -246,12 +246,12 @@ function rollUp(data) {
 /**
  * How many delivery rows the subscriptions imply for the events published.
  *
- * PER PROJECT. An event published to tenant 3 fans out to tenant 3's
+ * PER PROJECT. An event published to tenant 3 routes to tenant 3's
  * subscriptions and to nobody else's - counting event types globally across a
  * multi-tenant scenario would expect every tenant to receive every other
  * tenant's events, which is the opposite of the property being tested.
  */
-function expectedFanOut(manifest, eventsByProjectType) {
+function expectedDeliveryCount(manifest, eventsByProjectType) {
   let expected = 0;
   for (const p of manifest.projects) {
     for (const sub of p.subscriptions) {
@@ -329,7 +329,7 @@ async function main() {
   const totalDeliveries = [...groups.values()].reduce((n, g) => n + g.deliveries, 0);
   console.log(`  delivery rows created      ${totalDeliveries}`);
 
-  if (expectations.exactFanout && totalEvents > 0) {
+  if (expectations.exactDeliveryCount && totalEvents > 0) {
     const db = prisma();
     const perType = await db.$queryRawUnsafe(
       `SELECT project_id, event_type, count(*)::int AS n
@@ -342,12 +342,12 @@ async function main() {
     const eventsByProjectType = new Map(
       perType.map((r) => [`${r.project_id}\u0000${r.event_type}`, r.n]),
     );
-    const expected = expectedFanOut(data.manifest, eventsByProjectType);
-    console.log(`  fan-out expected           ${expected}`);
+    const expected = expectedDeliveryCount(data.manifest, eventsByProjectType);
+    console.log(`  deliveries expected        ${expected}`);
     if (totalDeliveries !== expected) {
       failures.push(
-        `fan-out is wrong: ${totalDeliveries} delivery rows for ${expected} implied by the ` +
-          'subscriptions. Materialised fan-out must produce exactly one row per matching ' +
+        `routing is wrong: ${totalDeliveries} delivery rows for ${expected} implied by the ` +
+          'subscriptions. Materialised routing must produce exactly one row per matching ' +
           'subscription.',
       );
     }

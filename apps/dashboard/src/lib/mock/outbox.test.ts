@@ -33,9 +33,9 @@ describe('GET /outbox', () => {
   it('has one row per event, and more parked rows than one bulk pass may return', () => {
     expect(db.outbox).toHaveLength(db.events.length);
     expect(parkedRows().length).toBeGreaterThan(MAX_REQUEUE_BATCH);
-    // The fan-out-failed event is parked with its cursor set, so the "partly
+    // The routing-failed event is parked with its cursor set, so the "partly
     // done" branch of the UI is reachable.
-    expect(parkedRows().some((entry) => entry.fan_out_cursor !== null)).toBe(true);
+    expect(parkedRows().some((entry) => entry.routing_cursor !== null)).toBe(true);
     // Both park reasons are represented, as the router writes them.
     expect(parkedRows().some((entry) => entry.last_error?.startsWith('attempts_exhausted:'))).toBe(true);
     expect(
@@ -103,7 +103,7 @@ describe('GET /outbox/:id', () => {
 
 describe('POST /outbox/:id/requeue', () => {
   it('returns the row to the queue: budgets reset, history preserved, event un-failed', async () => {
-    const parked = parkedRows().find((entry) => entry.fan_out_cursor !== null)!;
+    const parked = parkedRows().find((entry) => entry.routing_cursor !== null)!;
     const before = { ...parked };
     const event = db.events.find((candidate) => candidate.id === parked.event_id)!;
     expect(event.status).toBe('failed');
@@ -121,7 +121,7 @@ describe('POST /outbox/:id/requeue', () => {
     expect(row.attempts).toBe(before.attempts);
     // The evidence survives too.
     expect(row.last_error).toBe(before.last_error);
-    expect(row.fan_out_cursor).toBe(before.fan_out_cursor);
+    expect(row.routing_cursor).toBe(before.routing_cursor);
 
     const after = await mockRequest<EventDetail>(
       'GET',

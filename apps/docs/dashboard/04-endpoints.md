@@ -204,7 +204,7 @@ policy the dashboard chose:
 | Delivery | On pause |
 |---|---|
 | Already queued, scheduled or retrying for this endpoint | Finished as `cancelled` ("we stopped on purpose") the moment a worker claims it - not retried, not failed. A retry that is not due yet is cancelled when it comes due. |
-| Published while the endpoint is paused | **No delivery row is created for this endpoint at all.** The router skips a non-active endpoint at fan-out rather than buffering rows that every worker poll would claim and put back. |
+| Published while the endpoint is paused | **No delivery row is created for this endpoint at all.** The router skips a non-active endpoint at routing rather than buffering rows that every worker poll would claim and put back. |
 | Already recorded in the ledger | Untouched. Nothing is erased. |
 
 So resuming an endpoint does not send anything from the gap. The resume
@@ -326,7 +326,7 @@ stops receiving deliveries, its status becomes `deleted`, every later change
 is refused, its signing secrets go with it, and the row is kept forever so
 every delivery and attempt that pointed at its URL keeps pointing at it.
 Subscriptions bound to it stop matching (a non-active endpoint is skipped at
-fan-out); delete or re-point them separately. The same operation through the
+routing); delete or re-point them separately. The same operation through the
 API is `DELETE /v1/projects/:projectId/endpoints/:endpointId`.
 
 ## Limits
@@ -355,7 +355,7 @@ overlap copy and the last-active rule), `EndpointEditDialog.tsx`, `breaker.ts`,
 `apps/control-api/src/deliveries/delivery-limits.ts` (redacted request headers),
 `services/data-plane/internal/worker/breaker.go` (`DefaultBreakerConfig`),
 `services/data-plane/internal/egress/ssrf.go`, `services/data-plane/internal/router/plan.go`
-(`gate()`: a non-active endpoint is skipped at fan-out),
+(`gate()`: a non-active endpoint is skipped at routing),
 `services/data-plane/internal/worker/store.go` (`Endpoint.Deliverable()`) and
 `worker/deliver.go` (a claimed delivery for a paused endpoint is finished
 `cancelled`). "What pausing does to the queue" was verified against those

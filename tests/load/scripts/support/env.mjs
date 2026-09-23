@@ -88,7 +88,7 @@ export const config = {
   /** Sizing. Every one of these is a knob because the right value is the one
    *  that saturates YOUR machine, not the one that saturated ours. */
   sizes: {
-    fanoutEndpoints: int('LOAD_FANOUT_ENDPOINTS', 25),
+    wideEndpoints: int('LOAD_WIDE_ENDPOINTS', 25),
     slowEndpoints: int('LOAD_SLOW_ENDPOINTS', 6),
     /**
      * The per-endpoint concurrency ceiling given to SLOW endpoints.
@@ -121,7 +121,7 @@ export const config = {
 };
 
 export const SCENARIOS = [
-  'fanout',
+  'wide',
   'slow-endpoints',
   'failing-endpoints',
   'many-tenants',

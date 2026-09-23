@@ -24,7 +24,7 @@ them rewritten to `host.docker.internal` before anything is reachable:
 
 ```bash
 docker run --rm -i --add-host=host.docker.internal:host-gateway \
-  -v "$PWD/tests/load:/load" grafana/k6 run /load/scenarios/fanout.js
+  -v "$PWD/tests/load:/load" grafana/k6 run /load/scenarios/wide.js
 ```
 
 Installing k6 natively is much less trouble.
@@ -41,7 +41,7 @@ names whichever one is missing.
 ## 1. Run one
 
 ```bash
-pnpm load:fanout        # high fan-out
+pnpm load:wide          # wide routing
 pnpm load:slow          # slow endpoints  <- the one that matters
 pnpm load:failing       # 500s, 429s, dead sockets
 pnpm load:tenants       # tenant fairness
@@ -65,7 +65,7 @@ pnpm load:verify slow-endpoints --since 2026-09-09T10:00:00Z
 
 Everything lives under one organization, **HookuBit Load Tests**, created
 through the real REST API by an operator account the seed owns
-(`load-test@hookubit.invalid`). One project per scenario — `load-fanout`,
+(`load-test@hookubit.invalid`). One project per scenario — `load-wide`,
 `load-slow-endpoints`, `load-failing-endpoints`, `load-tenant-1..5`,
 `load-large-payloads` — each with its own endpoints, subscriptions, retry
 policies and API key.
@@ -190,15 +190,15 @@ the result honestly when you do.
 
 ## 4. The scenarios, and what each one proves
 
-### `fanout` — high fan-out
+### `wide` — wide routing
 
 One event, N endpoints (default 25). Every endpoint is fast; the only variable
-is the multiplication. Prices materialised fan-out: one delivery row per
+is the multiplication. Prices materialised routing: one delivery row per
 matching subscription, each with its own retry chain.
 
 Thresholds: ingest p95 < 300 ms, ingest errors < 1%, delivery p95 < 15 s,
 deliveries received > 0. The ledger check additionally asserts **exact**
-fan-out — delivery rows must equal what the subscriptions imply, per project.
+routing — delivery rows must equal what the subscriptions imply, per project.
 
 ### `slow-endpoints` — per-endpoint isolation
 
@@ -327,7 +327,7 @@ Measured on a 16-core macOS box, single data-plane process (`webhookd all`),
 
 | scenario            | verdict | headline                                          |
 | ------------------- | ------- | ------------------------------------------------- |
-| `fanout`            | PASS    | 300 events -> 7,500 deliveries, 100% ok, p95 812 ms |
+| `wide`              | PASS    | 300 events -> 7,500 deliveries, 100% ok, p95 812 ms |
 | `slow-endpoints`    | FAIL*   | at DEFAULT caps; PASSES at 1.8 s once caps are provisioned under the pool — see section 7 |
 | `failing-endpoints` | PASS    | control group 100% ok at p95 721 ms; 16 breakers opened |
 | `many-tenants`      | FAIL    | quiet tenants 100% delivered, but p95 10.5 s      |
@@ -509,7 +509,7 @@ Sizing (seed-time; re-seed after changing):
 
 | variable | default | what it does |
 | --- | --- | --- |
-| `LOAD_FANOUT_ENDPOINTS` | 25 | endpoints one event fans out to |
+| `LOAD_WIDE_ENDPOINTS` | 25 | endpoints one event routes to |
 | `LOAD_SLOW_ENDPOINTS` | 6 | slow endpoints in the isolation scenario |
 | `LOAD_SLOW_CONTROL_ENDPOINTS` | 4 | fast endpoints alongside them |
 | `LOAD_SLOW_MS` | 5000 | how long a slow endpoint takes |
@@ -524,7 +524,7 @@ Run shape (run-time; no re-seed needed):
 | --- | --- | --- |
 | `LOAD_DURATION` | 45 | seconds of publishing |
 | `LOAD_DRAIN` | 90 | seconds the collector keeps draining afterwards |
-| `LOAD_FANOUT_RATE` | 10 | events/s |
+| `LOAD_WIDE_RATE` | 10 | events/s |
 | `LOAD_FAST_RATE` | 20 | events/s to fast endpoints |
 | `LOAD_SLOW_RATE` | 2 | events/s to slow endpoints |
 | `LOAD_NOISY_RATE` | 15 | events/s from the noisy tenant |

@@ -242,7 +242,7 @@ describe('summarizeDeliveries', () => {
     expect(summary).toEqual({ total: 6, succeeded: 2, failed: 2, pending: 1, exhausted: 1 });
   });
 
-  it('handles an empty fan-out', () => {
+  it('handles an empty routing', () => {
     expect(summarizeDeliveries([])).toEqual({
       total: 0,
       succeeded: 0,

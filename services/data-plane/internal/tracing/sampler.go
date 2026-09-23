@@ -11,7 +11,7 @@ import (
 //
 // # Why not just sample everything
 //
-// At the throughput this platform is built for, one event fans out to N
+// At the throughput this platform is built for, one event routes to N
 // deliveries, each of which may be attempted up to max_attempts times, and each
 // attempt is several spans. Head-sampling everything means the span volume is a
 // multiple of the delivery volume, which is a multiple of the event volume.
@@ -36,7 +36,7 @@ import (
 // and the stages set AttrSampleIn when:
 //
 //   - the upstream stage was sampled. That makes a kept trace COMPLETE rather
-//     than a fragment: if the ingest was kept, its fan-out and its deliveries
+//     than a fragment: if the ingest was kept, its routing and its deliveries
 //     are kept too. Without it, a ratio applied independently three times means
 //     the probability of having the whole story is ratio^3 - one in eight
 //     thousand at the shipped 5%, which is another way of spelling "never".

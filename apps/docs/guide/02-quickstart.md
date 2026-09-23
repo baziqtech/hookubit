@@ -30,7 +30,7 @@ If you registered yourself, an organization was created for you and you are its 
 The response shows the endpoint's **version 1 signing secret** (`whsec_…`) **once**. Copy it into your receiver's configuration now; there is no route that returns it again. If you lose it, [rotate](./06-secrets-and-rotation.md) and use the new one.
 
 ::: warning If you are a `developer`, the secret is withheld and the endpoint starts paused
-Reading signing secrets is an owner/admin permission. An endpoint created by a developer comes back with `secret: null` and `secret_pending: true`, in status `paused`, so it does not sign deliveries with a key nobody holds. An owner or admin then rotates the secret (which returns the new plaintext to them), hands it to whoever runs the receiver, and enables the endpoint. Events published while an endpoint is paused are **not** queued for it - fan-out skips a paused endpoint - so do this before you publish anything you care about.
+Reading signing secrets is an owner/admin permission. An endpoint created by a developer comes back with `secret: null` and `secret_pending: true`, in status `paused`, so it does not sign deliveries with a key nobody holds. An owner or admin then rotates the secret (which returns the new plaintext to them), hands it to whoever runs the receiver, and enables the endpoint. Events published while an endpoint is paused are **not** queued for it - routing skips a paused endpoint - so do this before you publish anything you care about.
 :::
 
 Defaults you can leave alone for now: `timeout_ms` 30000, `max_concurrency` 16, no rate limit, the project's default retry policy.
@@ -67,7 +67,7 @@ X-Request-Id: req_01M24GHG1AB10B91Z0210MA66J
 {"id":"evt_01J…","status":"accepted"}
 ```
 
-`accepted` means the event is committed and will be fanned out. It does not mean delivered. Keep the `id`: it is the `Webhook-Id` your receiver is about to see.
+`accepted` means the event is committed and will be routed. It does not mean delivered. Keep the `id`: it is the `Webhook-Id` your receiver is about to see.
 
 If you get a `401`, the key is wrong or belongs to a different environment; a `404` means the project id in the path does not match the key's project. Every error carries a `request_id` - see [Publishing events](./03-publishing-events.md#errors).
 
@@ -91,7 +91,7 @@ Webhook-Signature: t=1757155200,v1=7f10b704e963699398001b1b5031d34050f97358cae72
 
 The body is the exact bytes you published. Respond with any `2xx`.
 
-In the dashboard, *Project → Deliveries* shows one row per endpoint the event reached; open it for the attempt, its HTTP status and the response your receiver sent. *Project → Events* shows the event itself, with its fan-out state.
+In the dashboard, *Project → Deliveries* shows one row per endpoint the event reached; open it for the attempt, its HTTP status and the response your receiver sent. *Project → Events* shows the event itself, with its routing state.
 
 If nothing arrives, start at [Troubleshooting](./08-troubleshooting.md#nothing-arrived).
 

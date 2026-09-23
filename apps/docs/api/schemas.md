@@ -875,7 +875,7 @@ string enum: `test`, `live`
 
 | Property | Type | Required | Constraints | Description |
 |---|---|---|---|---|
-| `state` | string | yes | one of `received`, `in_progress`, `delivered`, `partly_delivered`, `all_failed`, `dropped` | `dropped` is the one worth reading twice: the fan-out COMPLETED and produced no deliveries, because no subscription matched. The publisher was answered 202 and the event went nowhere. `received` means the fan-out has not finished - which is also how an event stuck BEFORE fan-out appears here, because it has no deliveries and no completed fan-out. Telling those apart needs `event_outbox`; see `GET /projects/:id/outbox`. |
+| `state` | string | yes | one of `received`, `in_progress`, `delivered`, `partly_delivered`, `all_failed`, `dropped` | `dropped` is the one worth reading twice: the routing COMPLETED and produced no deliveries, because no subscription matched. The publisher was answered 202 and the event went nowhere. `received` means the routing has not finished - which is also how an event stuck BEFORE routing appears here, because it has no deliveries and no completed routing. Telling those apart needs `event_outbox`; see `GET /projects/:id/outbox`. |
 | `total` | number | yes |  | Deliveries this event produced, across every status. |
 | `succeeded` | number | yes |  |  |
 | `failed` | number | yes |  | `failed` plus `exhausted`. |
@@ -890,17 +890,17 @@ string enum: `test`, `live`
 | `project_id` | string | yes |  |  |
 | `event_type` | string | yes |  |  |
 | `idempotency_key` | string \| null | yes |  | The idempotency key the producer published this event with, if any. Publishing again with the same key in the same project resolves to this event instead of creating another. |
-| `ordering_key` | string \| null | yes |  | Opt-in serialisation key, carried onto every delivery this event fanned out to. It is accepted and stored today so it is already in place when per-key ordering is enforced, but per-key ordering is NOT yet enforced: this field currently guarantees nothing about delivery order. |
-| `status` | string | yes | one of `received`, `processing`, `processed`, `failed` | The INGEST/fan-out state, not a delivery outcome. `processed` means the fan-out committed, which says nothing about whether any endpoint accepted it - that is what the deliveries are for. |
+| `ordering_key` | string \| null | yes |  | Opt-in serialisation key, carried onto every delivery this event routed to. It is accepted and stored today so it is already in place when per-key ordering is enforced, but per-key ordering is NOT yet enforced: this field currently guarantees nothing about delivery order. |
+| `status` | string | yes | one of `received`, `processing`, `processed`, `failed` | The INGEST/routing state, not a delivery outcome. `processed` means the routing committed, which says nothing about whether any endpoint accepted it - that is what the deliveries are for. |
 | `payload_size` | number | yes |  | Bytes of the authoritative payload as received. |
 | `payload_hash` | string | yes |  | SHA-256 of the authoritative raw bytes, lowercase hex. |
 | `payload_inline` | boolean | yes |  | False when the raw bytes are not in the database (offloaded, or aged out). |
 | `payload_location` | string \| null | yes |  | `s3://bucket/key` when the payload was too large to store inline. |
 | `headers` | object<string, string> \| null | yes |  | Ingest request headers. Credential-shaped values are `[redacted]`. |
 | `created_at` | string | yes |  |  |
-| `processed_at` | string \| null | yes |  | When the fan-out first committed. Null until it has. |
+| `processed_at` | string \| null | yes |  | When the routing first committed. Null until it has. |
 | `deliveries` | [EventDeliveryRollupDto](./schemas.md#eventdeliveryrollupdto) \| null | yes |  | What became of this event, rolled up from its DELIVERIES rather than from `status`. Read this, not `status`, to answer "did anyone receive it?" - `status: processed` means the router ran and committed, and says nothing about whether anybody got anything. Null on routes that do not compute it. |
-| `deliveries.state` | string | yes | one of `received`, `in_progress`, `delivered`, `partly_delivered`, `all_failed`, `dropped` | `dropped` is the one worth reading twice: the fan-out COMPLETED and produced no deliveries, because no subscription matched. The publisher was answered 202 and the event went nowhere. `received` means the fan-out has not finished - which is also how an event stuck BEFORE fan-out appears here, because it has no deliveries and no completed fan-out. Telling those apart needs `event_outbox`; see `GET /projects/:id/outbox`. |
+| `deliveries.state` | string | yes | one of `received`, `in_progress`, `delivered`, `partly_delivered`, `all_failed`, `dropped` | `dropped` is the one worth reading twice: the routing COMPLETED and produced no deliveries, because no subscription matched. The publisher was answered 202 and the event went nowhere. `received` means the routing has not finished - which is also how an event stuck BEFORE routing appears here, because it has no deliveries and no completed routing. Telling those apart needs `event_outbox`; see `GET /projects/:id/outbox`. |
 | `deliveries.total` | number | yes |  | Deliveries this event produced, across every status. |
 | `deliveries.succeeded` | number | yes |  |  |
 | `deliveries.failed` | number | yes |  | `failed` plus `exhausted`. |
@@ -924,17 +924,17 @@ string enum: `test`, `live`
 | `project_id` | string | yes |  |  |
 | `event_type` | string | yes |  |  |
 | `idempotency_key` | string \| null | yes |  | The idempotency key the producer published this event with, if any. Publishing again with the same key in the same project resolves to this event instead of creating another. |
-| `ordering_key` | string \| null | yes |  | Opt-in serialisation key, carried onto every delivery this event fanned out to. It is accepted and stored today so it is already in place when per-key ordering is enforced, but per-key ordering is NOT yet enforced: this field currently guarantees nothing about delivery order. |
-| `status` | string | yes | one of `received`, `processing`, `processed`, `failed` | The INGEST/fan-out state, not a delivery outcome. `processed` means the fan-out committed, which says nothing about whether any endpoint accepted it - that is what the deliveries are for. |
+| `ordering_key` | string \| null | yes |  | Opt-in serialisation key, carried onto every delivery this event routed to. It is accepted and stored today so it is already in place when per-key ordering is enforced, but per-key ordering is NOT yet enforced: this field currently guarantees nothing about delivery order. |
+| `status` | string | yes | one of `received`, `processing`, `processed`, `failed` | The INGEST/routing state, not a delivery outcome. `processed` means the routing committed, which says nothing about whether any endpoint accepted it - that is what the deliveries are for. |
 | `payload_size` | number | yes |  | Bytes of the authoritative payload as received. |
 | `payload_hash` | string | yes |  | SHA-256 of the authoritative raw bytes, lowercase hex. |
 | `payload_inline` | boolean | yes |  | False when the raw bytes are not in the database (offloaded, or aged out). |
 | `payload_location` | string \| null | yes |  | `s3://bucket/key` when the payload was too large to store inline. |
 | `headers` | object<string, string> \| null | yes |  | Ingest request headers. Credential-shaped values are `[redacted]`. |
 | `created_at` | string | yes |  |  |
-| `processed_at` | string \| null | yes |  | When the fan-out first committed. Null until it has. |
+| `processed_at` | string \| null | yes |  | When the routing first committed. Null until it has. |
 | `deliveries` | [EventDeliveryRollupDto](./schemas.md#eventdeliveryrollupdto) \| null | yes |  | What became of this event, rolled up from its DELIVERIES rather than from `status`. Read this, not `status`, to answer "did anyone receive it?" - `status: processed` means the router ran and committed, and says nothing about whether anybody got anything. Null on routes that do not compute it. |
-| `deliveries.state` | string | yes | one of `received`, `in_progress`, `delivered`, `partly_delivered`, `all_failed`, `dropped` | `dropped` is the one worth reading twice: the fan-out COMPLETED and produced no deliveries, because no subscription matched. The publisher was answered 202 and the event went nowhere. `received` means the fan-out has not finished - which is also how an event stuck BEFORE fan-out appears here, because it has no deliveries and no completed fan-out. Telling those apart needs `event_outbox`; see `GET /projects/:id/outbox`. |
+| `deliveries.state` | string | yes | one of `received`, `in_progress`, `delivered`, `partly_delivered`, `all_failed`, `dropped` | `dropped` is the one worth reading twice: the routing COMPLETED and produced no deliveries, because no subscription matched. The publisher was answered 202 and the event went nowhere. `received` means the routing has not finished - which is also how an event stuck BEFORE routing appears here, because it has no deliveries and no completed routing. Telling those apart needs `event_outbox`; see `GET /projects/:id/outbox`. |
 | `deliveries.total` | number | yes |  | Deliveries this event produced, across every status. |
 | `deliveries.succeeded` | number | yes |  |  |
 | `deliveries.failed` | number | yes |  | `failed` plus `exhausted`. |
@@ -950,15 +950,15 @@ string enum: `test`, `live`
 | `data[].project_id` | string | yes |  |  |
 | `data[].event_type` | string | yes |  |  |
 | `data[].idempotency_key` | string \| null | yes |  | The idempotency key the producer published this event with, if any. Publishing again with the same key in the same project resolves to this event instead of creating another. |
-| `data[].ordering_key` | string \| null | yes |  | Opt-in serialisation key, carried onto every delivery this event fanned out to. It is accepted and stored today so it is already in place when per-key ordering is enforced, but per-key ordering is NOT yet enforced: this field currently guarantees nothing about delivery order. |
-| `data[].status` | string | yes | one of `received`, `processing`, `processed`, `failed` | The INGEST/fan-out state, not a delivery outcome. `processed` means the fan-out committed, which says nothing about whether any endpoint accepted it - that is what the deliveries are for. |
+| `data[].ordering_key` | string \| null | yes |  | Opt-in serialisation key, carried onto every delivery this event routed to. It is accepted and stored today so it is already in place when per-key ordering is enforced, but per-key ordering is NOT yet enforced: this field currently guarantees nothing about delivery order. |
+| `data[].status` | string | yes | one of `received`, `processing`, `processed`, `failed` | The INGEST/routing state, not a delivery outcome. `processed` means the routing committed, which says nothing about whether any endpoint accepted it - that is what the deliveries are for. |
 | `data[].payload_size` | number | yes |  | Bytes of the authoritative payload as received. |
 | `data[].payload_hash` | string | yes |  | SHA-256 of the authoritative raw bytes, lowercase hex. |
 | `data[].payload_inline` | boolean | yes |  | False when the raw bytes are not in the database (offloaded, or aged out). |
 | `data[].payload_location` | string \| null | yes |  | `s3://bucket/key` when the payload was too large to store inline. |
 | `data[].headers` | object<string, string> \| null | yes |  | Ingest request headers. Credential-shaped values are `[redacted]`. |
 | `data[].created_at` | string | yes |  |  |
-| `data[].processed_at` | string \| null | yes |  | When the fan-out first committed. Null until it has. |
+| `data[].processed_at` | string \| null | yes |  | When the routing first committed. Null until it has. |
 | `data[].deliveries` | [EventDeliveryRollupDto](./schemas.md#eventdeliveryrollupdto) \| null | yes |  | What became of this event, rolled up from its DELIVERIES rather than from `status`. Read this, not `status`, to answer "did anyone receive it?" - `status: processed` means the router ran and committed, and says nothing about whether anybody got anything. Null on routes that do not compute it. |
 | `has_more` | boolean | yes |  |  |
 | `next_offset` | number \| null | yes |  |  |
@@ -1130,14 +1130,14 @@ string enum: `owner`, `admin`, `developer`, `viewer`, `billing`
 | Property | Type | Required | Constraints | Description |
 |---|---|---|---|---|
 | `id` | string | yes |  | Outbox row id (`obx_...`). |
-| `event_id` | string | yes |  | The event this row fans out. |
+| `event_id` | string | yes |  | The event this row routes. |
 | `type` | string | yes |  | What the row asks the router to do. `event.created` is the only type the router handles; anything else is parked on sight rather than re-claimed forever. |
-| `status` | string | yes | one of `pending`, `processing`, `processed`, `failed` | `pending` is queued (possibly mid-fan-out, see `fan_out_cursor`); `processing` is leased by a router right now; `processed` is done; **`failed` is PARKED** - the router gave up, the event will never be delivered, and it stays that way until someone requeues it. |
+| `status` | string | yes | one of `pending`, `processing`, `processed`, `failed` | `pending` is queued (possibly mid-routing, see `routing_cursor`); `processing` is leased by a router right now; `processed` is done; **`failed` is PARKED** - the router gave up, the event will never be delivered, and it stays that way until someone requeues it. |
 | `attempts` | number | yes |  | Total times a router has picked this row up. Monotonic, and NOT the bound that parks it - see `unaccounted_attempts`. A high number here with a low one there is a row that keeps failing in ways the router understood and recorded, which is a database or configuration problem rather than a poisoned event. |
 | `unaccounted_attempts` | number | yes |  | Claims that ended with the router writing nothing at all - a crash, an OOM, a lease left to lapse. THIS is the bound that parks a row (`ROUTER_MAX_OUTBOX_ATTEMPTS`), because it is the only counter that means "this row keeps killing the process". A failure the router observed and recorded hands its increment back. |
 | `last_error` | string \| null | yes |  | The last error the router recorded, verbatim and truncated to 1000 characters. On a parked row this is why it was parked, and it is preserved through a requeue so the history is not erased by the recovery. |
 | `failing_since` | string \| null | yes | format `date-time` | When the current run of recorded failures began; null when the row is not failing. Recorded failures are bounded by elapsed TIME rather than by a count, because no count distinguishes "the database was unavailable for twenty minutes" from "this row errors every time". |
-| `fan_out_cursor` | string \| null | yes |  | Resume point for a fan-out too wide for one transaction: the subscription id the last committed batch stopped at. Non-null on a `pending` row means the fan-out is PARTLY done - some endpoints already have their delivery, the rest are still owed one. It is kept through a requeue, so recovery resumes rather than re-walking work that already committed. |
+| `routing_cursor` | string \| null | yes |  | Resume point for a routing too wide for one transaction: the subscription id the last committed batch stopped at. Non-null on a `pending` row means the routing is PARTLY done - some endpoints already have their delivery, the rest are still owed one. It is kept through a requeue, so recovery resumes rather than re-walking work that already committed. |
 | `available_at` | string | yes | format `date-time` | When this row next becomes claimable. In the future while it is backing off. |
 | `locked_by` | string \| null | yes |  | The router replica holding the lease, if any. Useful when one replica misbehaves. |
 | `locked_until` | string \| null | yes | format `date-time` |  |
@@ -1150,14 +1150,14 @@ string enum: `owner`, `admin`, `developer`, `viewer`, `billing`
 |---|---|---|---|---|
 | `data` | [OutboxEntryDto](./schemas.md#outboxentrydto)[] | yes |  |  |
 | `data[].id` | string | yes |  | Outbox row id (`obx_...`). |
-| `data[].event_id` | string | yes |  | The event this row fans out. |
+| `data[].event_id` | string | yes |  | The event this row routes. |
 | `data[].type` | string | yes |  | What the row asks the router to do. `event.created` is the only type the router handles; anything else is parked on sight rather than re-claimed forever. |
-| `data[].status` | string | yes | one of `pending`, `processing`, `processed`, `failed` | `pending` is queued (possibly mid-fan-out, see `fan_out_cursor`); `processing` is leased by a router right now; `processed` is done; **`failed` is PARKED** - the router gave up, the event will never be delivered, and it stays that way until someone requeues it. |
+| `data[].status` | string | yes | one of `pending`, `processing`, `processed`, `failed` | `pending` is queued (possibly mid-routing, see `routing_cursor`); `processing` is leased by a router right now; `processed` is done; **`failed` is PARKED** - the router gave up, the event will never be delivered, and it stays that way until someone requeues it. |
 | `data[].attempts` | number | yes |  | Total times a router has picked this row up. Monotonic, and NOT the bound that parks it - see `unaccounted_attempts`. A high number here with a low one there is a row that keeps failing in ways the router understood and recorded, which is a database or configuration problem rather than a poisoned event. |
 | `data[].unaccounted_attempts` | number | yes |  | Claims that ended with the router writing nothing at all - a crash, an OOM, a lease left to lapse. THIS is the bound that parks a row (`ROUTER_MAX_OUTBOX_ATTEMPTS`), because it is the only counter that means "this row keeps killing the process". A failure the router observed and recorded hands its increment back. |
 | `data[].last_error` | string \| null | yes |  | The last error the router recorded, verbatim and truncated to 1000 characters. On a parked row this is why it was parked, and it is preserved through a requeue so the history is not erased by the recovery. |
 | `data[].failing_since` | string \| null | yes | format `date-time` | When the current run of recorded failures began; null when the row is not failing. Recorded failures are bounded by elapsed TIME rather than by a count, because no count distinguishes "the database was unavailable for twenty minutes" from "this row errors every time". |
-| `data[].fan_out_cursor` | string \| null | yes |  | Resume point for a fan-out too wide for one transaction: the subscription id the last committed batch stopped at. Non-null on a `pending` row means the fan-out is PARTLY done - some endpoints already have their delivery, the rest are still owed one. It is kept through a requeue, so recovery resumes rather than re-walking work that already committed. |
+| `data[].routing_cursor` | string \| null | yes |  | Resume point for a routing too wide for one transaction: the subscription id the last committed batch stopped at. Non-null on a `pending` row means the routing is PARTLY done - some endpoints already have their delivery, the rest are still owed one. It is kept through a requeue, so recovery resumes rather than re-walking work that already committed. |
 | `data[].available_at` | string | yes | format `date-time` | When this row next becomes claimable. In the future while it is backing off. |
 | `data[].locked_by` | string \| null | yes |  | The router replica holding the lease, if any. Useful when one replica misbehaves. |
 | `data[].locked_until` | string \| null | yes | format `date-time` |  |
@@ -1265,7 +1265,7 @@ string enum: `active`, `suspended`, `deleted`
 | Property | Type | Required | Constraints | Description |
 |---|---|---|---|---|
 | `reason` | string | no | max 500 chars | Recorded on the audit entry for this replay. Not stored on the delivery. |
-| `endpoint_id` | string | no |  | One of the endpoints this event was originally fanned out to. Omit to replay to all of them. An endpoint that never received this event is refused: sending it there for the first time is a new delivery, not a replay. |
+| `endpoint_id` | string | no |  | One of the endpoints this event was originally routed to. Omit to replay to all of them. An endpoint that never received this event is refused: sending it there for the first time is a new delivery, not a replay. |
 
 ### ReplayResultDto
 
@@ -1318,14 +1318,14 @@ string enum: `active`, `suspended`, `deleted`
 | `has_more` | boolean | yes |  | More parked rows matched than this request was allowed to requeue. Call again until it is false; the bound is per request, not per incident. |
 | `data` | [OutboxEntryDto](./schemas.md#outboxentrydto)[] | yes |  | The rows as they now stand, back in the queue. |
 | `data[].id` | string | yes |  | Outbox row id (`obx_...`). |
-| `data[].event_id` | string | yes |  | The event this row fans out. |
+| `data[].event_id` | string | yes |  | The event this row routes. |
 | `data[].type` | string | yes |  | What the row asks the router to do. `event.created` is the only type the router handles; anything else is parked on sight rather than re-claimed forever. |
-| `data[].status` | string | yes | one of `pending`, `processing`, `processed`, `failed` | `pending` is queued (possibly mid-fan-out, see `fan_out_cursor`); `processing` is leased by a router right now; `processed` is done; **`failed` is PARKED** - the router gave up, the event will never be delivered, and it stays that way until someone requeues it. |
+| `data[].status` | string | yes | one of `pending`, `processing`, `processed`, `failed` | `pending` is queued (possibly mid-routing, see `routing_cursor`); `processing` is leased by a router right now; `processed` is done; **`failed` is PARKED** - the router gave up, the event will never be delivered, and it stays that way until someone requeues it. |
 | `data[].attempts` | number | yes |  | Total times a router has picked this row up. Monotonic, and NOT the bound that parks it - see `unaccounted_attempts`. A high number here with a low one there is a row that keeps failing in ways the router understood and recorded, which is a database or configuration problem rather than a poisoned event. |
 | `data[].unaccounted_attempts` | number | yes |  | Claims that ended with the router writing nothing at all - a crash, an OOM, a lease left to lapse. THIS is the bound that parks a row (`ROUTER_MAX_OUTBOX_ATTEMPTS`), because it is the only counter that means "this row keeps killing the process". A failure the router observed and recorded hands its increment back. |
 | `data[].last_error` | string \| null | yes |  | The last error the router recorded, verbatim and truncated to 1000 characters. On a parked row this is why it was parked, and it is preserved through a requeue so the history is not erased by the recovery. |
 | `data[].failing_since` | string \| null | yes | format `date-time` | When the current run of recorded failures began; null when the row is not failing. Recorded failures are bounded by elapsed TIME rather than by a count, because no count distinguishes "the database was unavailable for twenty minutes" from "this row errors every time". |
-| `data[].fan_out_cursor` | string \| null | yes |  | Resume point for a fan-out too wide for one transaction: the subscription id the last committed batch stopped at. Non-null on a `pending` row means the fan-out is PARTLY done - some endpoints already have their delivery, the rest are still owed one. It is kept through a requeue, so recovery resumes rather than re-walking work that already committed. |
+| `data[].routing_cursor` | string \| null | yes |  | Resume point for a routing too wide for one transaction: the subscription id the last committed batch stopped at. Non-null on a `pending` row means the routing is PARTLY done - some endpoints already have their delivery, the rest are still owed one. It is kept through a requeue, so recovery resumes rather than re-walking work that already committed. |
 | `data[].available_at` | string | yes | format `date-time` | When this row next becomes claimable. In the future while it is backing off. |
 | `data[].locked_by` | string \| null | yes |  | The router replica holding the lease, if any. Useful when one replica misbehaves. |
 | `data[].locked_until` | string \| null | yes | format `date-time` |  |

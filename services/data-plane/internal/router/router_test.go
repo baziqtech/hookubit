@@ -184,7 +184,7 @@ func TestRunOnceParksAPoisonedRow(t *testing.T) {
 
 // The FALSE-PARKING regression, stated directly.
 //
-// A degraded-Postgres window claims a row, fails before fan-out is attempted,
+// A degraded-Postgres window claims a row, fails before routing is attempted,
 // records the failure and releases - over and over. Every one of those claims
 // increments `attempts`, so under the old single-counter bound the row parked
 // and its event was marked `failed`, having already been answered 202 Accepted.

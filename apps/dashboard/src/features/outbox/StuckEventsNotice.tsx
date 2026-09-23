@@ -8,7 +8,7 @@ import { stuckEventsState } from './stuck-summary';
  *
  * ## Why this exists
  *
- * Publishing has two stages and each fails on its own. Fan-out turns one event
+ * Publishing has two stages and each fails on its own. Routing turns one event
  * into one delivery per matching subscription; sending attempts each of those.
  * The delivery history is stage two, and it is where everyone looks.
  *
@@ -29,7 +29,7 @@ import { stuckEventsState } from './stuck-summary';
  * panel is better than a wrong one, and an empty one is just furniture.
  *
  * `status: 'failed'` is the parked set specifically: rows the platform
- * accepted and then could not fan out. A row that is merely `pending` is work
+ * accepted and then could not route. A row that is merely `pending` is work
  * in flight and nobody needs telling about it.
  */
 export function StuckEventsNotice({
@@ -60,7 +60,7 @@ export function StuckEventsNotice({
           className,
         )}
       >
-        <span>Could not check whether any events are stuck before fan-out.</span>
+        <span>Could not check whether any events are stuck before routing.</span>
         <Link to={to} className="font-medium text-accent underline-offset-2 hover:underline">
           Open stuck events
         </Link>
@@ -79,7 +79,7 @@ export function StuckEventsNotice({
     >
       <span className="font-semibold">
         {state.atLeast ? 'At least ' : ''}
-        {state.count} {state.noun} {state.verb} accepted but never fanned out.
+        {state.count} {state.noun} {state.verb} accepted but never routed.
       </span>
       <span className="text-ink-muted">
         {state.pronoun} no deliveries to show here, or only some of them.

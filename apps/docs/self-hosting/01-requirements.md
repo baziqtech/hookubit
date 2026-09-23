@@ -64,7 +64,7 @@ to reason, then measure.
 
 | Scenario | Measured |
 |---|---|
-| Fan-out: 300 events to 25 endpoints each | 7,500 deliveries, 100% delivered, end-to-end p95 812 ms |
+| Routing: 300 events to 25 endpoints each | 7,500 deliveries, 100% delivered, end-to-end p95 812 ms |
 | Large payloads: 96 KiB events (above the 64 KiB inline limit) | 150/150 offloaded to object storage, delivery p95 611 ms |
 | Ingest | Threshold p95 < 300 ms, held in every passing scenario |
 | Per-source ingest ceiling | 300 requests/s per source address before authentication, burst 600 (`INGEST_SOURCE_RATE_LIMIT`) |
@@ -78,7 +78,7 @@ delivery side is what needs capacity.
 |---|---|---|
 | Control API | 2 replicas, 200m/256Mi requests, 1 CPU/768Mi limits | Never in the delivery path. Scale for operator traffic only. |
 | Ingest | 2 replicas, 100m/64Mi | The public write path; keep at least two. |
-| Router | 2 replicas, 100m/64Mi | Safe above one; fan-out inserts are keyed on `(event, endpoint)`. |
+| Router | 2 replicas, 100m/64Mi | Safe above one; routing inserts are keyed on `(event, endpoint)`. |
 | Scheduler | 1 replica, 50m/64Mi | Singleton by design. A second one only duplicates polling. |
 | Worker | 2 to 8 replicas (HPA), 250m/128Mi requests, 1 CPU/512Mi limits, 64 in-flight deliveries each | The throughput dial. Total in-flight is roughly replicas x 64, bounded by the concurrency ceilings and the database. |
 

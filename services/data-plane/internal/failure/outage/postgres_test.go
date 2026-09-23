@@ -111,7 +111,7 @@ func TestScenario08_PostgresUnavailable_NeverReturnsAFalseAccept(t *testing.T) {
 		t.Fatalf("events rows for the recovered accept = %d, want 1", n)
 	}
 	// The outbox row is the half that makes the accept deliverable. An event
-	// committed without one is an event that is stored and never fanned out.
+	// committed without one is an event that is stored and never routed.
 	if n := countOutbox(t, truth, accepted); n != 1 {
 		t.Fatalf("event_outbox rows for the recovered accept = %d, want 1: the event would never be routed", n)
 	}

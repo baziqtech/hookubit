@@ -902,7 +902,7 @@ export interface paths {
             cookie?: never;
         };
         /**
-         * List the deliveries this event fanned out to
+         * List the deliveries this event routed to
          * @description The "did finance ever receive this?" route: one row per endpoint the event was materialised for, each with its own status, attempt count and next attempt. Accepts the same filters as the deliveries listing (the event is forced, so `event_id` in the query is ignored).
          */
         get: operations["EventsController_deliveries"];
@@ -1023,7 +1023,7 @@ export interface paths {
         };
         /**
          * List outbox entries, including PARKED ones
-         * @description The outbox is the router's record of what it still owes an accepted event. Filter by `status=failed` for the entries that matter: those are PARKED - the router gave up, and the event will never be delivered until someone requeues it, even though the publisher was told `202 Accepted`. `last_error` says why, `attempts` versus `unaccounted_attempts` says whether the row was killing the router or the database was failing under it, and a non-null `fan_out_cursor` says the fan-out is partly done. Ordered newest first.
+         * @description The outbox is the router's record of what it still owes an accepted event. Filter by `status=failed` for the entries that matter: those are PARKED - the router gave up, and the event will never be delivered until someone requeues it, even though the publisher was told `202 Accepted`. `last_error` says why, `attempts` versus `unaccounted_attempts` says whether the row was killing the router or the database was failing under it, and a non-null `routing_cursor` says the routing is partly done. Ordered newest first.
          */
         get: operations["OutboxController_list"];
         put?: never;
@@ -1045,7 +1045,7 @@ export interface paths {
         put?: never;
         /**
          * Requeue parked outbox entries
-         * @description Returns up to 100 PARKED entries to the router's queue, oldest first, so the fan-out that never ran gets to run. Read `has_more` and call again until it is false; the bound is per request, not per incident. **This is not a replay.** A parked event has no delivery rows for a replay to work from, so the router runs the subscription match it never got to run. That match is bounded to the subscriptions that existed when the event was ACCEPTED - an endpoint subscribed after that will not receive it - but their current configuration applies, and a subscription deleted since is gone. The router's `last_error` is preserved, `attempts` keeps counting from where it was, and a partly-completed fan-out resumes from its cursor rather than re-sending to endpoints it already reached.
+         * @description Returns up to 100 PARKED entries to the router's queue, oldest first, so the routing that never ran gets to run. Read `has_more` and call again until it is false; the bound is per request, not per incident. **This is not a replay.** A parked event has no delivery rows for a replay to work from, so the router runs the subscription match it never got to run. That match is bounded to the subscriptions that existed when the event was ACCEPTED - an endpoint subscribed after that will not receive it - but their current configuration applies, and a subscription deleted since is gone. The router's `last_error` is preserved, `attempts` keeps counting from where it was, and a partly-completed routing resumes from its cursor rather than re-sending to endpoints it already reached.
          */
         post: operations["OutboxController_requeueParked"];
         delete?: never;
@@ -1223,7 +1223,7 @@ export interface paths {
         };
         /**
          * Event volume over a window, with the busiest event types
-         * @description Events PUBLISHED in the window - not deliveries. One event fans out to one delivery per matching subscription, so these two numbers are expected to differ and their ratio is the project's fan-out. The preceding window of equal length is returned alongside.
+         * @description Events PUBLISHED in the window - not deliveries. One event routes to one delivery per matching subscription, so these two numbers are expected to differ and their ratio is the project's routing. The preceding window of equal length is returned alongside.
          */
         get: operations["AnalyticsController_events"];
         put?: never;
@@ -2199,7 +2199,7 @@ export interface components {
         };
         EventDeliveryRollupDto: {
             /**
-             * @description `dropped` is the one worth reading twice: the fan-out COMPLETED and produced no deliveries, because no subscription matched. The publisher was answered 202 and the event went nowhere. `received` means the fan-out has not finished - which is also how an event stuck BEFORE fan-out appears here, because it has no deliveries and no completed fan-out. Telling those apart needs `event_outbox`; see `GET /projects/:id/outbox`.
+             * @description `dropped` is the one worth reading twice: the routing COMPLETED and produced no deliveries, because no subscription matched. The publisher was answered 202 and the event went nowhere. `received` means the routing has not finished - which is also how an event stuck BEFORE routing appears here, because it has no deliveries and no completed routing. Telling those apart needs `event_outbox`; see `GET /projects/:id/outbox`.
              * @enum {string}
              */
             state: "received" | "in_progress" | "delivered" | "partly_delivered" | "all_failed" | "dropped";
@@ -2219,10 +2219,10 @@ export interface components {
             event_type: string;
             /** @description The idempotency key the producer published this event with, if any. Publishing again with the same key in the same project resolves to this event instead of creating another. */
             idempotency_key: string | null;
-            /** @description Opt-in serialisation key, carried onto every delivery this event fanned out to. It is accepted and stored today so it is already in place when per-key ordering is enforced, but per-key ordering is NOT yet enforced: this field currently guarantees nothing about delivery order. */
+            /** @description Opt-in serialisation key, carried onto every delivery this event routed to. It is accepted and stored today so it is already in place when per-key ordering is enforced, but per-key ordering is NOT yet enforced: this field currently guarantees nothing about delivery order. */
             ordering_key: string | null;
             /**
-             * @description The INGEST/fan-out state, not a delivery outcome. `processed` means the fan-out committed, which says nothing about whether any endpoint accepted it - that is what the deliveries are for.
+             * @description The INGEST/routing state, not a delivery outcome. `processed` means the routing committed, which says nothing about whether any endpoint accepted it - that is what the deliveries are for.
              * @enum {string}
              */
             status: "received" | "processing" | "processed" | "failed";
@@ -2239,7 +2239,7 @@ export interface components {
                 [key: string]: string;
             } | null;
             created_at: string;
-            /** @description When the fan-out first committed. Null until it has. */
+            /** @description When the routing first committed. Null until it has. */
             processed_at: string | null;
             /** @description What became of this event, rolled up from its DELIVERIES rather than from `status`. Read this, not `status`, to answer "did anyone receive it?" - `status: processed` means the router ran and committed, and says nothing about whether anybody got anything. Null on routes that do not compute it. */
             deliveries: components["schemas"]["EventDeliveryRollupDto"] | null;
@@ -2280,10 +2280,10 @@ export interface components {
             event_type: string;
             /** @description The idempotency key the producer published this event with, if any. Publishing again with the same key in the same project resolves to this event instead of creating another. */
             idempotency_key: string | null;
-            /** @description Opt-in serialisation key, carried onto every delivery this event fanned out to. It is accepted and stored today so it is already in place when per-key ordering is enforced, but per-key ordering is NOT yet enforced: this field currently guarantees nothing about delivery order. */
+            /** @description Opt-in serialisation key, carried onto every delivery this event routed to. It is accepted and stored today so it is already in place when per-key ordering is enforced, but per-key ordering is NOT yet enforced: this field currently guarantees nothing about delivery order. */
             ordering_key: string | null;
             /**
-             * @description The INGEST/fan-out state, not a delivery outcome. `processed` means the fan-out committed, which says nothing about whether any endpoint accepted it - that is what the deliveries are for.
+             * @description The INGEST/routing state, not a delivery outcome. `processed` means the routing committed, which says nothing about whether any endpoint accepted it - that is what the deliveries are for.
              * @enum {string}
              */
             status: "received" | "processing" | "processed" | "failed";
@@ -2300,7 +2300,7 @@ export interface components {
                 [key: string]: string;
             } | null;
             created_at: string;
-            /** @description When the fan-out first committed. Null until it has. */
+            /** @description When the routing first committed. Null until it has. */
             processed_at: string | null;
             /** @description What became of this event, rolled up from its DELIVERIES rather than from `status`. Read this, not `status`, to answer "did anyone receive it?" - `status: processed` means the router ran and committed, and says nothing about whether anybody got anything. Null on routes that do not compute it. */
             deliveries: components["schemas"]["EventDeliveryRollupDto"] | null;
@@ -2352,7 +2352,7 @@ export interface components {
         ReplayEventDto: {
             /** @description Recorded on the audit entry for this replay. Not stored on the delivery. */
             reason?: string;
-            /** @description One of the endpoints this event was originally fanned out to. Omit to replay to all of them. An endpoint that never received this event is refused: sending it there for the first time is a new delivery, not a replay. */
+            /** @description One of the endpoints this event was originally routed to. Omit to replay to all of them. An endpoint that never received this event is refused: sending it there for the first time is a new delivery, not a replay. */
             endpoint_id?: string;
         };
         ReplayResultDto: {
@@ -2471,12 +2471,12 @@ export interface components {
         OutboxEntryDto: {
             /** @description Outbox row id (`obx_...`). */
             id: string;
-            /** @description The event this row fans out. */
+            /** @description The event this row routes. */
             event_id: string;
             /** @description What the row asks the router to do. `event.created` is the only type the router handles; anything else is parked on sight rather than re-claimed forever. */
             type: string;
             /**
-             * @description `pending` is queued (possibly mid-fan-out, see `fan_out_cursor`); `processing` is leased by a router right now; `processed` is done; **`failed` is PARKED** - the router gave up, the event will never be delivered, and it stays that way until someone requeues it.
+             * @description `pending` is queued (possibly mid-routing, see `routing_cursor`); `processing` is leased by a router right now; `processed` is done; **`failed` is PARKED** - the router gave up, the event will never be delivered, and it stays that way until someone requeues it.
              * @enum {string}
              */
             status: "pending" | "processing" | "processed" | "failed";
@@ -2491,8 +2491,8 @@ export interface components {
              * @description When the current run of recorded failures began; null when the row is not failing. Recorded failures are bounded by elapsed TIME rather than by a count, because no count distinguishes "the database was unavailable for twenty minutes" from "this row errors every time".
              */
             failing_since: string | null;
-            /** @description Resume point for a fan-out too wide for one transaction: the subscription id the last committed batch stopped at. Non-null on a `pending` row means the fan-out is PARTLY done - some endpoints already have their delivery, the rest are still owed one. It is kept through a requeue, so recovery resumes rather than re-walking work that already committed. */
-            fan_out_cursor: string | null;
+            /** @description Resume point for a routing too wide for one transaction: the subscription id the last committed batch stopped at. Non-null on a `pending` row means the routing is PARTLY done - some endpoints already have their delivery, the rest are still owed one. It is kept through a requeue, so recovery resumes rather than re-walking work that already committed. */
+            routing_cursor: string | null;
             /**
              * Format: date-time
              * @description When this row next becomes claimable. In the future while it is backing off.
@@ -5486,7 +5486,7 @@ export interface operations {
             query?: {
                 /** @description Exact event type, e.g. `payment.settled`. INDEX-SUPPORTED: cheap at any volume, and with the default newest-first order it needs no sort step. No wildcards or prefixes - a partial type never matches. */
                 event_type?: string;
-                /** @description Ingest/fan-out state, NOT a delivery outcome. **NOT INDEX-SUPPORTED**: a filter applied to whatever the project and date predicates selected. Pair it with a date range. */
+                /** @description Ingest/routing state, NOT a delivery outcome. **NOT INDEX-SUPPORTED**: a filter applied to whatever the project and date predicates selected. Pair it with a date range. */
                 status?: "received" | "processing" | "processed" | "failed";
                 /** @description Inclusive lower bound on `created_at`. INDEX-SUPPORTED. */
                 created_after?: string;
@@ -5584,7 +5584,7 @@ export interface operations {
                 failing_now?: boolean;
                 /** @description Only deliveries to this endpoint. INDEX-SUPPORTED: cheap at any volume, and with the default newest-first order it needs no sort step. */
                 endpoint_id?: string;
-                /** @description Only the deliveries fanned out from this event. INDEX-SUPPORTED: cheap at any volume. */
+                /** @description Only the deliveries routed from this event. INDEX-SUPPORTED: cheap at any volume. */
                 event_id?: string;
                 /** @description The event type of the event this delivery came from. **NOT INDEX-SUPPORTED**: it is a join to `events` on a column `deliveries` does not carry, so it filters rows the project/status/date predicate already selected. Always combine it with a date range or an endpoint on a busy project. */
                 event_type?: string;
@@ -5678,7 +5678,7 @@ export interface operations {
                     "application/json": components["schemas"]["ApiErrorResponse"];
                 };
             };
-            /** @description The event reached no endpoints, the named endpoint never received it, an endpoint is deleted or disabled, or the fan-out exceeds 50 deliveries. (error.code: `conflict`, `limit_exceeded`, `idempotency_key_reused`) */
+            /** @description The event reached no endpoints, the named endpoint never received it, an endpoint is deleted or disabled, or the routing exceeds 50 deliveries. (error.code: `conflict`, `limit_exceeded`, `idempotency_key_reused`) */
             409: {
                 headers: {
                     [name: string]: unknown;
@@ -5698,7 +5698,7 @@ export interface operations {
                 failing_now?: boolean;
                 /** @description Only deliveries to this endpoint. INDEX-SUPPORTED: cheap at any volume, and with the default newest-first order it needs no sort step. */
                 endpoint_id?: string;
-                /** @description Only the deliveries fanned out from this event. INDEX-SUPPORTED: cheap at any volume. */
+                /** @description Only the deliveries routed from this event. INDEX-SUPPORTED: cheap at any volume. */
                 event_id?: string;
                 /** @description The event type of the event this delivery came from. **NOT INDEX-SUPPORTED**: it is a join to `events` on a column `deliveries` does not carry, so it filters rows the project/status/date predicate already selected. Always combine it with a date range or an endpoint on a busy project. */
                 event_type?: string;
@@ -6062,7 +6062,7 @@ export interface operations {
                     "application/json": components["schemas"]["ApiErrorResponse"];
                 };
             };
-            /** @description The entry is not parked: `pending`/`processing` means a router is already working on it, `processed` means the fan-out completed and the route you want is event replay. (error.code: `conflict`, `limit_exceeded`, `idempotency_key_reused`) */
+            /** @description The entry is not parked: `pending`/`processing` means a router is already working on it, `processed` means the routing completed and the route you want is event replay. (error.code: `conflict`, `limit_exceeded`, `idempotency_key_reused`) */
             409: {
                 headers: {
                     [name: string]: unknown;

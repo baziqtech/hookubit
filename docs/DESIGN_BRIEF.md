@@ -58,7 +58,7 @@ because they are the information architecture.
 | **Delivery** | One event's journey to one endpoint. An event matching three subscriptions creates three deliveries, made up front, each retrying independently. |
 | **Attempt** | One HTTP request within a delivery, with its response status, body, duration and timestamp. |
 
-The fan-out is the concept people most often misunderstand: **one event becomes
+The routing is the concept people most often misunderstand: **one event becomes
 many deliveries, created before anything is sent**, so the list is the record of
 what *should* arrive, not just what did.
 
@@ -88,7 +88,7 @@ action, and — once done — evidence of it.
 5. **Subscription** — "The routing rule: which event types an endpoint should
    receive. Without one, events are accepted and nothing is delivered." ·
    Evidence: how many active subscriptions exist.
-6. **First event** — "You publish an event once. It fans out to one delivery
+6. **First event** — "You publish an event once. It routes to one delivery
    per matching subscription, and each delivery retries on its own." Action:
    publish a test event using a ready-to-run request the product supplies,
    already filled in with this project's real identifiers. · Evidence: how many
@@ -168,7 +168,7 @@ almost always an accident.
 ### Events
 Every event the customer's system published, with its type, its de-duplication
 key, its status and when it arrived. Opening one shows the payload it carried
-and every delivery it produced, and offers to replay the whole fan-out.
+and every delivery it produced, and offers to replay the whole routing.
 
 ### Outbox
 The recovery screen. Between "event accepted" and "deliveries created" there is
@@ -263,7 +263,7 @@ resource type and specific resource.
 
 ### Usage
 Volume per project over a rolling window — events published and deliveries
-created, and the ratio between them, which is the project's fan-out.
+created, and the ratio between them, which is the project's routing.
 
 ## 7. State vocabularies that must be legible
 

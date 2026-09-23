@@ -28,26 +28,26 @@ var ErrLeaseLost = errors.New("router: outbox lease is no longer held by this ro
 const (
 	// DefaultBatchSize is how many outbox rows one poll leases.
 	DefaultBatchSize = 200
-	// DefaultConcurrency is how many events are fanned out at once. Each holds
+	// DefaultConcurrency is how many events are routed at once. Each holds
 	// one pooled connection for the length of its transaction, so this must
 	// stay well under DATABASE_MAX_CONNECTIONS.
 	DefaultConcurrency = 4
 	// DefaultLease is how long a claimed row is ours. It bounds how long a
 	// crashed router's rows are stuck, so it should be a small multiple of the
-	// worst-case fan-out transaction, not of the poll interval.
+	// worst-case routing transaction, not of the poll interval.
 	DefaultLease = 60 * time.Second
-	// DefaultFanOutBatch bounds ONE FAN-OUT TRANSACTION: the subscriptions
+	// DefaultRoutingBatch bounds ONE ROUTING TRANSACTION: the subscriptions
 	// examined and the deliveries created by a single Route call. Materialised
-	// fan-out is cheap at 10 subscribers and expensive at 10,000; this is the
+	// routing is cheap at 10 subscribers and expensive at 10,000; this is the
 	// ceiling that keeps one misconfigured project from writing an unbounded
 	// batch inside a single transaction.
 	//
 	// It does NOT bound the event. An event with more subscriptions than this
-	// is fanned out over several batches, resuming from a durable cursor, and
+	// is routed over several batches, resuming from a durable cursor, and
 	// is only marked `processed` once the last one commits. It used to bound
 	// the total, and everything past it was dropped, committed as `processed`
-	// and unreachable by replay - see the comment on RouteRequest.FanOutBatch.
-	DefaultFanOutBatch = 2000
+	// and unreachable by replay - see the comment on RouteRequest.RoutingBatch.
+	DefaultRoutingBatch = 2000
 	// DefaultMaxOutboxAttempts is the poison bound, and it is counted against
 	// UNACCOUNTED claims - claims that ended with this router writing nothing at
 	// all. A row that kills the process this many times is parked rather than
@@ -83,10 +83,10 @@ type Options struct {
 	BatchSize   int
 	Concurrency int
 	Lease       time.Duration
-	// MaxSubscriptionsPerEvent is the fan-out BATCH size. The name is kept
+	// MaxSubscriptionsPerEvent is the routing BATCH size. The name is kept
 	// because ROUTER_MAX_SUBSCRIPTIONS_PER_EVENT configures it; what changed is
 	// that it now bounds one transaction rather than one event. See
-	// DefaultFanOutBatch.
+	// DefaultRoutingBatch.
 	MaxSubscriptionsPerEvent int
 	// MaxOutboxAttempts bounds UNACCOUNTED claims. See DefaultMaxOutboxAttempts.
 	MaxOutboxAttempts int
@@ -102,7 +102,7 @@ type Options struct {
 	RetryBackoff retry.Policy
 }
 
-// Router drains event_outbox and materialises the fan-out (ARCHITECTURE.md 18).
+// Router drains event_outbox and materialises the routing (ARCHITECTURE.md 18).
 //
 // It is safe to run many of these concurrently, in one process or across
 // several: rows are leased with FOR UPDATE SKIP LOCKED, and every write is
@@ -139,7 +139,7 @@ func New(opts Options) (*Router, error) {
 		opts.Lease = DefaultLease
 	}
 	if opts.MaxSubscriptionsPerEvent <= 0 {
-		opts.MaxSubscriptionsPerEvent = DefaultFanOutBatch
+		opts.MaxSubscriptionsPerEvent = DefaultRoutingBatch
 	}
 	if opts.MaxOutboxAttempts <= 0 {
 		opts.MaxOutboxAttempts = DefaultMaxOutboxAttempts
@@ -220,7 +220,7 @@ func (r *Router) Run(ctx context.Context, interval time.Duration) error {
 		"batch_size", r.opts.BatchSize,
 		"concurrency", r.opts.Concurrency,
 		"lease", r.opts.Lease.String(),
-		"fan_out_batch", r.opts.MaxSubscriptionsPerEvent,
+		"routing_batch", r.opts.MaxSubscriptionsPerEvent,
 		"max_outbox_attempts", r.opts.MaxOutboxAttempts,
 		"max_outbox_retry_duration", r.opts.MaxOutboxRetryDuration.String())
 
@@ -276,15 +276,15 @@ func (r *Router) RunOnce(ctx context.Context) (int, error) {
 
 // process resolves one claimed outbox row.
 //
-// # The fan-out is a NEW TRACE, linked to the ingest that caused it
+// # The routing is a NEW TRACE, linked to the ingest that caused it
 //
 // The span opened here is a stage ROOT with a link to
 // event_outbox.trace_context, never a child of it. The reasoning is in
-// internal/tracing/context.go and comes down to three things: the fan-out
+// internal/tracing/context.go and comes down to three things: the routing
 // happens an arbitrary time after the 202 - so a parent-child edge reports
 // hour-long ingest latencies to every backend that derives one; the ingest's
-// sampling decision would otherwise silently decide whether the fan-out is
-// recorded at all; and one event can fan out to thousands of deliveries, each
+// sampling decision would otherwise silently decide whether the routing is
+// recorded at all; and one event can route to thousands of deliveries, each
 // with its own retry chain, which under parent-child is a single trace no
 // backend assembles.
 //
@@ -292,12 +292,12 @@ func (r *Router) RunOnce(ctx context.Context) (int, error) {
 // poll claims a BATCH of unrelated events belonging to different tenants;
 // making that batch a span would produce a trace that mixes tenants and whose
 // duration is "how long the slowest unrelated event took". The unit an operator
-// asks about is one event's fan-out, so that is the unit that gets a span. The
+// asks about is one event's routing, so that is the unit that gets a span. The
 // claim itself is left untraced deliberately: it runs four times a second per
 // replica and is empty almost every time, and its two real questions - depth
 // and lag - are already gauges (outbox_lag_seconds, queue_depth).
 func (r *Router) process(ctx context.Context, row OutboxRow) {
-	ctx, span := tracing.StartStage(ctx, "webhook.fan_out", tracing.StageOptions{
+	ctx, span := tracing.StartStage(ctx, "webhook.routing", tracing.StageOptions{
 		Upstream: row.TraceContext,
 		// Consumer: this work was produced by another process and picked up
 		// here, which is exactly what the kind means.
@@ -338,7 +338,7 @@ func (r *Router) process(ctx context.Context, row OutboxRow) {
 	// Both counters are incremented by the committed claim, so this still fires
 	// for a row that crashes the process before any failure handler runs - that
 	// is what the increment-on-claim is for and it is unchanged. What no longer
-	// fires is the other case: a degraded-Postgres window in which fan-out was
+	// fires is the other case: a degraded-Postgres window in which routing was
 	// never even attempted burned the whole budget on rows that were never at
 	// fault, and parked events that had already been answered 202 Accepted. A
 	// claim that observes and records its failure hands the increment back
@@ -380,10 +380,10 @@ func (r *Router) process(ctx context.Context, row OutboxRow) {
 	res, err := r.opts.Store.Route(ctx, RouteRequest{
 		RouterID:    r.opts.RouterID,
 		Row:         row,
-		FanOutBatch: r.opts.MaxSubscriptionsPerEvent,
+		RoutingBatch: r.opts.MaxSubscriptionsPerEvent,
 		// THIS span's context, stamped onto every delivery row the transaction
 		// creates. It is written inside that transaction, so a rolled-back
-		// fan-out leaves no delivery pointing at a span that describes work
+		// routing leaves no delivery pointing at a span that describes work
 		// which never committed.
 		TraceContext: tracing.Encode(ctx),
 	})
@@ -396,7 +396,7 @@ func (r *Router) process(ctx context.Context, row OutboxRow) {
 			return
 		}
 		tracing.RecordError(span, err)
-		markOutcome(span, "released", "fan_out_failed")
+		markOutcome(span, "released", "routing_failed")
 		r.release(ctx, row, err, log)
 		return
 	}
@@ -404,7 +404,7 @@ func (r *Router) process(ctx context.Context, row OutboxRow) {
 	span.SetAttributes(
 		tracing.AttrOutcome.String(string(res.Outcome)),
 		tracing.AttrDeliveriesMade.Int(res.Created),
-		tracing.AttrFanOutPlanned.Int(len(res.Plan.Targets)),
+		tracing.AttrRoutingPlanned.Int(len(res.Plan.Targets)),
 	)
 	if res.Event.ProjectID != "" {
 		span.SetAttributes(
@@ -433,7 +433,7 @@ func (r *Router) process(ctx context.Context, row OutboxRow) {
 
 	case OutcomeNoSubscriptions:
 		EventsRouted.WithLabelValues(string(OutcomeNoSubscriptions)).Inc()
-		FanOutSize.Observe(0)
+		DeliveriesPerEvent.Observe(0)
 		r.recordSkips(res.Plan)
 		// Not an error, but never silent: "we published it and nothing
 		// happened" is a configuration question an operator must be able to
@@ -444,45 +444,45 @@ func (r *Router) process(ctx context.Context, row OutboxRow) {
 			"candidates_considered", candidateCount(res.Plan),
 			"skipped", res.Plan.Skipped)
 
-	case OutcomeFanOutContinued:
-		// A wide fan-out, mid-walk. Not an error and not a failure: this batch
+	case OutcomeRoutingContinued:
+		// A wide routing, mid-walk. Not an error and not a failure: this batch
 		// committed, the cursor advanced, and the row is already back in the
 		// ready set. The event stays `processing` until the last batch lands,
 		// which is why it is honest to say nothing was lost here.
-		EventsRouted.WithLabelValues(string(OutcomeFanOutContinued)).Inc()
-		FanOutBatches.Inc()
+		EventsRouted.WithLabelValues(string(OutcomeRoutingContinued)).Inc()
+		BatchContinuations.Inc()
 		metrics.DeliveriesCreated.Add(float64(res.Created))
-		FanOutSize.Observe(float64(res.Created))
+		DeliveriesPerEvent.Observe(float64(res.Created))
 		r.recordSkips(res.Plan)
-		log.Info("fan-out batch committed; more subscriptions remain",
+		log.Info("routing batch committed; more subscriptions remain",
 			"event_type", res.Event.EventType,
 			"project_id", res.Event.ProjectID,
 			"deliveries_created", res.Created,
 			"batch_size", r.opts.MaxSubscriptionsPerEvent,
-			"resume_after_subscription_id", res.FanOutCursor)
+			"resume_after_subscription_id", res.RoutingCursor)
 
 	case OutcomeRouted:
 		EventsRouted.WithLabelValues(string(OutcomeRouted)).Inc()
 		metrics.DeliveriesCreated.Add(float64(res.Created))
-		FanOutSize.Observe(float64(res.Created))
+		DeliveriesPerEvent.Observe(float64(res.Created))
 		r.recordSkips(res.Plan)
 
 		if res.Created < len(res.Plan.Targets) {
 			// The idempotency guarantee doing its job: this row had already
-			// been fanned out by a run that died before retiring the outbox
+			// been routed by a run that died before retiring the outbox
 			// row. Informational, not an error.
-			log.Info("fan-out was already materialised; no duplicate deliveries created",
+			log.Info("routing was already materialised; no duplicate deliveries created",
 				"planned", len(res.Plan.Targets), "created", res.Created)
 		}
 		log.Debug("event routed",
 			"event_type", res.Event.EventType,
 			"deliveries_created", res.Created,
 			"planned", len(res.Plan.Targets),
-			"resumed_from_subscription_id", row.FanOutCursor)
+			"resumed_from_subscription_id", row.RoutingCursor)
 	}
 }
 
-// markOutcome records a non-routed resolution on the fan-out span.
+// markOutcome records a non-routed resolution on the routing span.
 //
 // A parked row is an ERROR in the span sense: an event that returned 202 and
 // will not be delivered without a human. A released one is not - it is going to
@@ -529,7 +529,7 @@ func (r *Router) release(ctx context.Context, row OutboxRow, cause error, log *s
 	if row.FailingSince != nil {
 		deadline = row.FailingSince.Add(r.opts.MaxOutboxRetryDuration).UTC().Format(time.RFC3339)
 	}
-	log.Warn("fan-out failed; returning outbox row to the queue",
+	log.Warn("routing failed; returning outbox row to the queue",
 		"error", cause,
 		"retry_in", backoff.String(),
 		"parks_after", deadline)

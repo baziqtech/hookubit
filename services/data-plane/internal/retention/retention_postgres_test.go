@@ -91,7 +91,7 @@ func seedLedger(t *testing.T, pool *pgxpool.Pool) *ledger {
 //
 // Each delivery gets its OWN event. `deliveries_event_endpoint_original_key` is
 // a partial unique index on (event_id, endpoint_id) WHERE replay_of_delivery_id
-// IS NULL - the fan-out idempotency arbiter - so one endpoint may hold exactly
+// IS NULL - the routing idempotency arbiter - so one endpoint may hold exactly
 // one original delivery per event. A fixture that reused the event would be
 // modelling a state the router cannot produce.
 func (l *ledger) addDelivery(t *testing.T, status string, age time.Duration, attempts int) string {

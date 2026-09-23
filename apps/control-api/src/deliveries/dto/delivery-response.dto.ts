@@ -159,7 +159,7 @@ export function toAttemptDto(attempt: DeliveryAttempt): DeliveryAttemptDto {
 /**
  * One delivery: one event, one endpoint, one retry chain of its own.
  *
- * The materialised fan-out is what makes this row exist - a published event
+ * The materialised routing is what makes this row exist - a published event
  * becomes N of these, each with an independent lifecycle - and it is what makes
  * "did finance ever receive this?" answerable at all.
  */

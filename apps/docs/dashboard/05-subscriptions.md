@@ -3,7 +3,7 @@
 A subscription is the routing rule: it binds an endpoint to the event types it
 should receive. Without one, events are accepted, stored, and delivered
 nowhere. With several, one published event becomes one delivery per matching
-subscription - the fan-out is materialised as rows, each with its own retry
+subscription - the routing is materialised as rows, each with its own retry
 chain.
 
 ## The list
@@ -151,7 +151,7 @@ when you disable are not discarded.
 In the dashboard each is a button on the row with its own confirmation. The
 disable dialog asks for the reason; the enable dialog notes that events
 accepted while the subscription was disabled were not routed to it and will
-not be routed retroactively, because fan-out is pinned to the subscriptions
+not be routed retroactively, because routing is pinned to the subscriptions
 that existed when each event arrived.
 
 Nothing automatic disables a subscription; it has one flag and you are its
@@ -178,9 +178,9 @@ on the way out. A historical delivery whose subscription is gone shows a null
 
 ## What a change means for events already accepted
 
-Fan-out happens once, shortly after an event is accepted, and it is **pinned
+Routing happens once, shortly after an event is accepted, and it is **pinned
 to the subscriptions that existed at that moment**: a subscription created
-after an event was accepted does not receive it, however wide the fan-out.
+after an event was accepted does not receive it, however wide the routing.
 Once the delivery rows exist, the subscription that produced them can be
 edited, disabled or deleted without touching them - each row already carries
 its endpoint and its attempt budget.
@@ -190,11 +190,11 @@ Two consequences:
 - **Replay** re-sends to the endpoints an event *actually reached*, read off
   its existing delivery rows. It never re-runs the subscription match against
   today's subscriptions. See [Events and deliveries](./07-events-and-deliveries.md#replay).
-- **Requeueing a parked event** (one that never fanned out) runs the match
+- **Requeueing a parked event** (one that never routed) runs the match
   the router never got to run, against the subscriptions that existed when
   the event was accepted, using their configuration *as of now* - so a
   subscription disabled or narrowed since applies, and one deleted since is
-  gone. See [Stuck events](./07-events-and-deliveries.md#stuck-events-parked-before-fan-out).
+  gone. See [Stuck events](./07-events-and-deliveries.md#stuck-events-parked-before-routing).
 
 Two enabled subscriptions pointing at the same endpoint produce **one**
 delivery for that endpoint, not two; the oldest subscription is the one

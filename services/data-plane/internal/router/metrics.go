@@ -31,28 +31,28 @@ var (
 	EventsRouted = promauto.NewCounterVec(prometheus.CounterOpts{
 		Name: "router_events_routed_total",
 		Help: "Outbox rows resolved by the router, by outcome.",
-	}, []string{"outcome"}) // routed | fan_out_continued | no_subscriptions | event_missing | lease_lost | parked | retried
+	}, []string{"outcome"}) // routed | routing_continued | no_subscriptions | event_missing | lease_lost | parked | retried
 
-	// FanOutBatches counts fan-out batches that committed with subscriptions
+	// BatchContinuations counts routing batches that committed with subscriptions
 	// still to walk - i.e. events wider than ROUTER_MAX_SUBSCRIPTIONS_PER_EVENT.
 	//
 	// This is the metric that used to be an ERROR log saying endpoints had been
 	// dropped. Nothing is dropped now; a non-zero rate simply means some events
-	// take several transactions to fan out, which is a capacity signal (raise
+	// take several transactions to route, which is a capacity signal (raise
 	// the batch, or expect the outbox to carry those events for a few extra
 	// polls), not a data-loss one.
-	FanOutBatches = promauto.NewCounter(prometheus.CounterOpts{
-		Name: "router_fan_out_batches_total",
-		Help: "Fan-out batches that committed with more subscriptions still to walk.",
+	BatchContinuations = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "router_batch_continuations_total",
+		Help: "Routing batches that committed with more subscriptions still to walk.",
 	})
 
-	// FanOutSize is deliveries created per fan-out BATCH - which for any event
+	// DeliveriesPerEvent is deliveries created per routing BATCH - which for any event
 	// within the batch size is the same thing as per event. The p99 is what
-	// turns materialised fan-out from cheap into expensive: at 10 subscribers
+	// turns materialised routing from cheap into expensive: at 10 subscribers
 	// this is free, at 10,000 it is the dominant write on the system.
-	FanOutSize = promauto.NewHistogram(prometheus.HistogramOpts{
-		Name:    "router_fan_out_size",
-		Help:    "Delivery rows created by one fan-out batch.",
+	DeliveriesPerEvent = promauto.NewHistogram(prometheus.HistogramOpts{
+		Name:    "router_deliveries_per_event",
+		Help:    "Delivery rows created by one routing batch.",
 		Buckets: []float64{0, 1, 2, 5, 10, 25, 50, 100, 250, 500, 1000, 2500},
 	})
 
@@ -78,11 +78,11 @@ var (
 		// event_missing
 	}, []string{"reason"})
 
-	// RouteDuration is the cost of one event's fan-out transaction: load,
+	// RouteDuration is the cost of one event's routing transaction: load,
 	// match, insert N deliveries, mark the event and the outbox row, commit.
 	RouteDuration = promauto.NewHistogram(prometheus.HistogramOpts{
 		Name:    "router_route_duration_seconds",
-		Help:    "Duration of one event's fan-out transaction.",
+		Help:    "Duration of one event's routing transaction.",
 		Buckets: prometheus.ExponentialBuckets(0.001, 2, 14), // 1ms .. ~8s
 	})
 )

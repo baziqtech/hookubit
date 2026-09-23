@@ -36,7 +36,7 @@ without opening psql. That is the feature people pay for, not the retry loop.
 
 ## Phase 6 — Production hardening
 
-Done: Prometheus and Grafana dashboards · k6 load tests (high fan-out, slow
+Done: Prometheus and Grafana dashboards · k6 load tests (wide routing, slow
 endpoints, failing endpoints, many tenants, large payloads) · failure-injection
 tests for all 20 scenarios in ARCHITECTURE.md 57, with the recovery strategy for
 each written down in docs/FAILURE_RECOVERY.md · Kubernetes manifests and Helm

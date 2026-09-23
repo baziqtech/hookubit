@@ -12,15 +12,15 @@ import type { OutboxStatus } from '../../types/api';
  */
 const META: Record<OutboxStatus, { label: string; tone: StatusTone; pulse?: boolean }> = {
   pending: { label: 'Queued', tone: 'neutral' },
-  processing: { label: 'Fanning out', tone: 'info', pulse: true },
-  processed: { label: 'Fanned out', tone: 'ok' },
+  processing: { label: 'Routing', tone: 'info', pulse: true },
+  processed: { label: 'Routed', tone: 'ok' },
   failed: { label: 'Parked', tone: 'danger' },
 };
 
 export const OUTBOX_STATUS_SENTENCE: Record<OutboxStatus, string> = {
-  pending: 'Waiting for a router to claim it — possibly in a backoff, possibly mid-fan-out.',
+  pending: 'Waiting for a router to claim it — possibly in a backoff, possibly mid-routing.',
   processing: 'A router holds the lease and is writing delivery rows right now.',
-  processed: 'Fan-out completed. Every matching subscription has its delivery row.',
+  processed: 'Routing completed. Every matching subscription has its delivery row.',
   failed:
     'Parked. The router gave up; the publisher was told 202 and nothing will be delivered until someone requeues it.',
 };

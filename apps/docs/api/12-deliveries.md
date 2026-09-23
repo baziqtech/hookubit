@@ -27,7 +27,7 @@ Filter by status, endpoint, event, event type and date range, or by `failing_now
 | `status` | query | string | no | one of `pending`, `scheduled`, `queued`, `processing`, `succeeded`, `failed`, `retrying`, `exhausted`, `cancelled` | Exact status. INDEX-SUPPORTED: cheap at any volume, and with the default newest-first order it needs no sort step. |
 | `failing_now` | query | boolean | no |  | Everything that has failed and not recovered: `retrying`, `failed`, `exhausted`. INDEX-SUPPORTED (three scans of the same index). Cannot be combined with `status` - they would contradict each other and the API refuses rather than picking one. |
 | `endpoint_id` | query | string | no |  | Only deliveries to this endpoint. INDEX-SUPPORTED: cheap at any volume, and with the default newest-first order it needs no sort step. |
-| `event_id` | query | string | no |  | Only the deliveries fanned out from this event. INDEX-SUPPORTED: cheap at any volume. |
+| `event_id` | query | string | no |  | Only the deliveries routed from this event. INDEX-SUPPORTED: cheap at any volume. |
 | `event_type` | query | string | no |  | The event type of the event this delivery came from. **NOT INDEX-SUPPORTED**: it is a join to `events` on a column `deliveries` does not carry, so it filters rows the project/status/date predicate already selected. Always combine it with a date range or an endpoint on a busy project. |
 | `created_after` | query | string | no | format `date-time` | Inclusive lower bound on `created_at`. INDEX-SUPPORTED. |
 | `created_before` | query | string | no | format `date-time` | Exclusive upper bound on `created_at`. INDEX-SUPPORTED. |

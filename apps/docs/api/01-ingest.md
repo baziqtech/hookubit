@@ -10,7 +10,7 @@ event types, what `accepted` buys you) read
 ## `POST /v1/projects/{project_id}/events`
 
 Publish one event into a project. The response returns only after the event
-and its fan-out instruction are committed to the database; everything after
+and its routing instruction are committed to the database; everything after
 that - matching subscriptions, materialising deliveries, the HTTP calls to your
 endpoints - happens asynchronously.
 
@@ -104,7 +104,7 @@ tells you the ceiling that applied.
 | `status` | Always `accepted`. |
 
 **`accepted` means durably persisted, not delivered.** The event row and its
-fan-out instruction are committed, together, before this response is written;
+routing instruction are committed, together, before this response is written;
 a crash, deploy or failover after that costs latency, never the event. It says
 nothing about whether any endpoint has received it - that is what
 [Deliveries](./12-deliveries.md) answer. Delivery is at-least-once, so your
@@ -144,7 +144,7 @@ see.
 | `429` | `rate_limited` | A **policy ceiling** was hit: per API key, per project or per organization. See [Rate limiting](#rate-limiting). |
 | `409` | `idempotency_key_reused` | This `Idempotency-Key` was used in the last 24 hours with a **different body**. Nothing was created. |
 | `409` | `conflict` | Two requests with the same `Idempotency-Key` are racing: the first has not committed yet ("A request with this idempotency key is still in progress"), or it committed while this one was in flight and the record could not be re-read ("Concurrent request with the same idempotency key; retry"). Safe to retry after a moment. |
-| `500` | `internal_error` | The database or object store failed. Nothing was half-written: the event and its fan-out instruction commit together or not at all, so retrying is safe - with the same `Idempotency-Key` if you sent one. |
+| `500` | `internal_error` | The database or object store failed. Nothing was half-written: the event and its routing instruction commit together or not at all, so retrying is safe - with the same `Idempotency-Key` if you sent one. |
 
 ### Idempotency
 
@@ -228,4 +228,4 @@ endpoint's live [signing secret](./07-endpoint-secrets.md) and sent to the
 endpoint. An event that matched no subscription is stored and visible in
 [Events](./11-events.md) with no deliveries - it is not an error, and a later
 subscription does not pick it up retroactively (use replay). An event whose
-fan-out could not run sits in the [outbox](./13-outbox.md) until it is requeued.
+routing could not run sits in the [outbox](./13-outbox.md) until it is requeued.

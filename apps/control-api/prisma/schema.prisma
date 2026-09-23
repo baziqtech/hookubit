@@ -474,7 +474,7 @@ model Event {
   /// SHA-256 of payloadRaw (the exact raw request bytes).
   payloadHash    String      @map("payload_hash")
   /// Opt-in serialisation key carried from the ingest API (docs/API.md) onto
-  /// every delivery this event fans out to. Null means unordered.
+  /// every delivery this event routes to. Null means unordered.
   orderingKey    String?     @map("ordering_key")
   headers        Json?
   status         EventStatus @default(received)
@@ -544,10 +544,10 @@ model EventOutbox {
   /// Incremented by the same claim - a row whose event kills the process never
   /// reaches a failure handler, so an increment on the failure path would let it
   /// be reclaimed and re-run forever - but DECREMENTED by every write the lease
-  /// holder commits: a recorded release, or a fan-out batch that made progress.
+  /// holder commits: a recorded release, or a routing batch that made progress.
   /// What survives is exactly "claims that ended with the router writing nothing
   /// at all", which is the crash signal and nothing else. Before the split, a
-  /// degraded-Postgres window burned the whole budget on rows whose fan-out was
+  /// degraded-Postgres window burned the whole budget on rows whose routing was
   /// never attempted and parked events that had already been answered 202.
   unaccountedAttempts Int   @default(0) @map("unaccounted_attempts")
   /// When this row's first RECORDED failure since the last progress happened;
@@ -556,9 +556,9 @@ model EventOutbox {
   /// no count distinguishes "the database was unavailable for twenty minutes"
   /// from "this row errors every time" - and time does.
   failingSince DateTime?   @map("failing_since")
-  /// Resume point for a fan-out wider than one transaction: the
+  /// Resume point for a routing wider than one transaction: the
   /// `webhook_subscriptions.id` the last committed batch stopped at. Null means
-  /// the fan-out has not started.
+  /// the routing has not started.
   ///
   /// This column is what makes `ROUTER_MAX_SUBSCRIPTIONS_PER_EVENT` a BATCH
   /// bound rather than a ceiling on the event. It used to be a ceiling: every
@@ -566,7 +566,7 @@ model EventOutbox {
   /// and - because ids are ULIDs and the walk is `ORDER BY s.id` - the endpoints
   /// dropped were always the newest, permanently, with no replay path (replay is
   /// built on delivery rows and they had none).
-  fanOutCursor String?     @map("fan_out_cursor")
+  routingCursor String?     @map("routing_cursor")
   availableAt DateTime     @default(now()) @map("available_at")
   lockedBy    String?      @map("locked_by")
   lockedUntil DateTime?    @map("locked_until")
@@ -575,8 +575,8 @@ model EventOutbox {
   createdAt   DateTime     @default(now()) @map("created_at")
   /// W3C `traceparent` of the INGEST request that committed this row, written
   /// inside that same transaction (ARCHITECTURE.md 44). The router reads it and
-  /// LINKS its fan-out span to it - it does not become a child of it, because
-  /// the fan-out happens an arbitrary time later on a different pod and a
+  /// LINKS its routing span to it - it does not become a child of it, because
+  /// the routing happens an arbitrary time later on a different pod and a
   /// parent-child edge across that gap reports six-hour ingest latencies.
   ///
   /// A fixed 55 characters; `tracestate` is deliberately not stored. Null means
@@ -626,7 +626,7 @@ enum DeliveryStatus {
   cancelled
 }
 
-/// Materialised fan-out: one row per (event, endpoint) match, each with its own
+/// Materialised routing: one row per (event, endpoint) match, each with its own
 /// independent retry chain. Written BEFORE any delivery is attempted, so this
 /// table is the record of what should be delivered - which is what makes replay
 /// and "did finance ever receive this?" answerable.
@@ -678,7 +678,7 @@ model Delivery {
   /// `attempt_count: 5` with an empty attempt list is indistinguishable from
   /// "we never tried" unless something says the detail was pruned.
   attemptsPrunedAt DateTime?    @map("attempts_pruned_at")
-  /// W3C `traceparent` of the ROUTER's fan-out span, written in the same
+  /// W3C `traceparent` of the ROUTER's routing span, written in the same
   /// transaction that materialised this row. The worker reads it and links each
   /// attempt to it.
   ///
@@ -703,8 +703,8 @@ model Delivery {
   /// (event_id, endpoint_id) WHERE replay_of_delivery_id IS NULL - is created by
   /// hand in migration 20260906010000_review_fixes. Prisma cannot express a
   /// partial unique index, so it is invisible here and to `migrate diff`.
-  /// It is the ON CONFLICT arbiter the fan-out router names; without it a
-  /// re-run router double-fans-out. Replays are exempt by design.
+  /// It is the ON CONFLICT arbiter the router names; without it a
+  /// re-run router double-routes. Replays are exempt by design.
   @@index([eventId])
   @@index([endpointId, createdAt(sort: Desc)])
   @@index([projectId, status, createdAt(sort: Desc)])
@@ -744,7 +744,7 @@ model Delivery {
   /// partial indexes over the TERMINAL set, ordered by created_at - are created
   /// by hand in 20260909100000_delivery_retention, for the same reason: Prisma
   /// has no partial-index syntax. They serve the two retention sweeps. Neither
-  /// is written on the fan-out INSERT (a delivery is inserted 'pending', so it
+  /// is written on the routing INSERT (a delivery is inserted 'pending', so it
   /// enters neither index there); both entries are made by the single UPDATE
   /// that takes the delivery terminal.
   @@map("deliveries")

@@ -12,7 +12,7 @@ import { RequeueButton, RequeueEntryDialog } from './RequeueDialogs';
  * The 2am path: event page → "why did this park?" → requeue.
  *
  * An event whose status is `failed` has NO delivery rows, so the event page's
- * fan-out summary honestly reads "0 deliveries" and its replay button has
+ * routing summary honestly reads "0 deliveries" and its replay button has
  * nothing to work from. Without this panel the operator is left to guess that
  * a menu called "Outbox" exists. With it, the row that parked the event is on
  * the event page, with its reason, and the requeue is one click from there.
@@ -73,12 +73,12 @@ export function ParkedEventPanel({
       className="rounded-lg border border-danger/40 bg-danger-soft/60 px-4 py-3"
     >
       <h2 className="text-xs font-semibold text-danger">
-        This event parked before it fanned out — nothing will deliver it until it is requeued
+        This event parked before it routed — nothing will deliver it until it is requeued
       </h2>
       <p className="mt-1 max-w-3xl text-xs leading-relaxed text-ink-muted">
         The publisher was told <strong className="text-ink">202 Accepted</strong>, then the router
         gave up before writing a single delivery row. That is why there are no deliveries below,
-        and why replay cannot help: there is nothing to replay. Requeue runs the fan-out that never
+        and why replay cannot help: there is nothing to replay. Requeue runs the routing that never
         happened.
       </p>
 

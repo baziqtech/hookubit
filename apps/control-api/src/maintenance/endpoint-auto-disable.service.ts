@@ -55,8 +55,8 @@ interface Candidate extends BreakerSnapshot {
  * ## The gap
  *
  * The breaker removes REQUEST pressure from a dead endpoint within five
- * failures. Nothing removed ROW pressure: every new matching event still fanned
- * out to the corpse, producing a delivery that would be claimed, refused by the
+ * failures. Nothing removed ROW pressure: every new matching event still routed
+ * to the corpse, producing a delivery that would be claimed, refused by the
  * open breaker, deferred, re-claimed, and finally expired 24 hours later - for
  * ever, at ingest rate. `disabled_reason` was only ever set to NULL.
  *

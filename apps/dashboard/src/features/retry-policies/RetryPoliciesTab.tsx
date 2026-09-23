@@ -168,7 +168,7 @@ export function RetryPoliciesTab({
       <Panel
         flush
         title="Retry policies"
-        description="Which policy a delivery uses is resolved at fan-out and stamped on the row: the endpoint’s own, else the project default, else the built-in one (8 attempts, exponential ×2 from 5s up to 1h, 24h budget)."
+        description="Which policy a delivery uses is resolved at routing and stamped on the row: the endpoint’s own, else the project default, else the built-in one (8 attempts, exponential ×2 from 5s up to 1h, 24h budget)."
         actions={
           <Button
             size="sm"
@@ -325,7 +325,7 @@ function SetDefaultDialog({
         <p>
           Endpoints that have not chosen a policy of their own start retrying as{' '}
           <strong className="text-ink">{describeRetryPolicy(policy)}</strong> for deliveries created
-          from now on. Deliveries already fanned out keep the attempt budget stamped on their row.
+          from now on. Deliveries already routed keep the attempt budget stamped on their row.
         </p>
         {previous && (
           <p>

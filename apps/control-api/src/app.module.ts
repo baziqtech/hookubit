@@ -102,7 +102,7 @@ import { WebhookSubscriptionsModule } from './webhook-subscriptions/webhook-subs
     // psql. It reads the rows the Go router and worker write.
     EventsModule,
     DeliveriesModule,
-    // The recovery surface for events the router could not fan out. Without it
+    // The recovery surface for events the router could not route. Without it
     // a parked outbox row - an event already answered 202 Accepted - is
     // invisible to this API and recoverable only by hand-written SQL.
     OutboxModule,
