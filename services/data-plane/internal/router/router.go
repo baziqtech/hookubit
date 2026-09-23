@@ -239,15 +239,28 @@ func (r *Router) Run(ctx context.Context, interval time.Duration) error {
 	}
 }
 
-// RunOnce claims one batch and fans it out. It returns the number of outbox
+// RunOnce claims one batch and routes it. It returns the number of outbox
 // rows processed, which lets a caller drain eagerly (keep calling while the
 // count equals the batch size) instead of waiting a tick per batch.
 func (r *Router) RunOnce(ctx context.Context) (int, error) {
+	// BEFORE the claim error is returned, not after it.
+	//
+	// OutboxLag is a Gauge, only ever Set on a successful measurement, so it
+	// holds its last value when nothing updates it. If this ran only on the
+	// success path, a router whose claim fails every tick - a schema the binary
+	// does not match, a permissions change, a statement timeout - would leave
+	// the gauge frozen at whatever it read while healthy, usually ~0, or at 0
+	// on a pod that never had a healthy tick. WebhookOutboxLagHigh
+	// (deployments/observability/prometheus/alerts.yaml) is the one alert
+	// written for "the router is not draining the outbox", and it would be the
+	// one alert that cannot fire during exactly that outage, while ingest keeps
+	// answering 202. The measurement is its own query and does not depend on
+	// the claim having succeeded, so it belongs on both paths.
 	rows, err := r.opts.Store.ClaimOutbox(ctx, r.opts.RouterID, r.opts.BatchSize, r.opts.Lease)
+	r.observeLag(ctx)
 	if err != nil {
 		return 0, err
 	}
-	r.observeLag(ctx)
 	if len(rows) == 0 {
 		return 0, nil
 	}
@@ -378,8 +391,8 @@ func (r *Router) process(ctx context.Context, row OutboxRow) {
 
 	started := time.Now()
 	res, err := r.opts.Store.Route(ctx, RouteRequest{
-		RouterID:    r.opts.RouterID,
-		Row:         row,
+		RouterID:     r.opts.RouterID,
+		Row:          row,
 		RoutingBatch: r.opts.MaxSubscriptionsPerEvent,
 		// THIS span's context, stamped onto every delivery row the transaction
 		// creates. It is written inside that transaction, so a rolled-back
@@ -433,7 +446,7 @@ func (r *Router) process(ctx context.Context, row OutboxRow) {
 
 	case OutcomeNoSubscriptions:
 		EventsRouted.WithLabelValues(string(OutcomeNoSubscriptions)).Inc()
-		DeliveriesPerEvent.Observe(0)
+		DeliveriesPerRoutingBatch.Observe(0)
 		r.recordSkips(res.Plan)
 		// Not an error, but never silent: "we published it and nothing
 		// happened" is a configuration question an operator must be able to
@@ -452,7 +465,7 @@ func (r *Router) process(ctx context.Context, row OutboxRow) {
 		EventsRouted.WithLabelValues(string(OutcomeRoutingContinued)).Inc()
 		BatchContinuations.Inc()
 		metrics.DeliveriesCreated.Add(float64(res.Created))
-		DeliveriesPerEvent.Observe(float64(res.Created))
+		DeliveriesPerRoutingBatch.Observe(float64(res.Created))
 		r.recordSkips(res.Plan)
 		log.Info("routing batch committed; more subscriptions remain",
 			"event_type", res.Event.EventType,
@@ -464,7 +477,7 @@ func (r *Router) process(ctx context.Context, row OutboxRow) {
 	case OutcomeRouted:
 		EventsRouted.WithLabelValues(string(OutcomeRouted)).Inc()
 		metrics.DeliveriesCreated.Add(float64(res.Created))
-		DeliveriesPerEvent.Observe(float64(res.Created))
+		DeliveriesPerRoutingBatch.Observe(float64(res.Created))
 		r.recordSkips(res.Plan)
 
 		if res.Created < len(res.Plan.Targets) {

@@ -192,6 +192,13 @@ the result honestly when you do.
 
 ### `wide` — wide routing
 
+> **If you ran this suite before 2026-09-23**, the scenario's project was
+> `load-fanout` and is now `load-wide`. `ensureProject` matches on slug and
+> there is no teardown, so the old project, its 25 endpoints and its 25
+> subscriptions are still there and will stay there, counting against the
+> organization's project ceiling. Delete `load-fanout` once, by hand.
+
+
 One event, N endpoints (default 25). Every endpoint is fast; the only variable
 is the multiplication. Prices materialised routing: one delivery row per
 matching subscription, each with its own retry chain.

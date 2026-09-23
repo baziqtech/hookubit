@@ -46,13 +46,20 @@ var (
 		Help: "Routing batches that committed with more subscriptions still to walk.",
 	})
 
-	// DeliveriesPerEvent is deliveries created per routing BATCH - which for any event
-	// within the batch size is the same thing as per event. The p99 is what
-	// turns materialised routing from cheap into expensive: at 10 subscribers
-	// this is free, at 10,000 it is the dominant write on the system.
-	DeliveriesPerEvent = promauto.NewHistogram(prometheus.HistogramOpts{
-		Name:    "router_deliveries_per_event",
-		Help:    "Delivery rows created by one routing batch.",
+	// DeliveriesPerRoutingBatch is deliveries created per routing BATCH, and the
+	// name says BATCH because the observation is per committed transaction, not
+	// per event: an event wider than ROUTER_MAX_SUBSCRIPTIONS_PER_EVENT
+	// contributes one observation per batch it takes. So this histogram CANNOT
+	// exceed the batch cap, and reading its p99 as "the widest event we have"
+	// is wrong by construction - pair it with router_batch_continuations_total,
+	// which is the signal that events are wider than one transaction.
+	//
+	// Within the cap the two are the same number, and that is the common case.
+	// The p99 is what turns materialised routing from cheap into expensive: at
+	// 10 subscribers this is free, at 10,000 it is the dominant write.
+	DeliveriesPerRoutingBatch = promauto.NewHistogram(prometheus.HistogramOpts{
+		Name:    "router_deliveries_per_routing_batch",
+		Help:    "Delivery rows created by one routing batch (not per event - see router_batch_continuations_total).",
 		Buckets: []float64{0, 1, 2, 5, 10, 25, 50, 100, 250, 500, 1000, 2500},
 	})
 

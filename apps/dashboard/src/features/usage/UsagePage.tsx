@@ -121,7 +121,7 @@ function UsageTable({ orgId, projects }: { orgId: string; projects: Project[] })
             <Th>Project</Th>
             <Th align="right">Events published</Th>
             <Th align="right">Deliveries created</Th>
-            <Th align="right">Routing</Th>
+            <Th align="right">Deliveries per event</Th>
             <Th align="right">Window ends</Th>
           </tr>
         </thead>

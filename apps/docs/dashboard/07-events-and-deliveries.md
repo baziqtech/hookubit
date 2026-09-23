@@ -220,7 +220,7 @@ traffic on a consumer.
 and did not succeed (`exhausted` or `cancelled`). The confirmation says only
 this endpoint is retried; the other deliveries for the event are untouched.
 
-**Replay event** on the event page fans the event out **again to every
+**Replay event** on the event page routes the event **again to every
 endpoint it originally reached**, read off its existing delivery rows - never
 by re-running the subscription match against today's subscriptions. The
 confirmation warns that consumers receive a duplicate, so it is safe only

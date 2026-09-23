@@ -6,12 +6,23 @@
 -- had to be explained as "the fan-out completed and produced no deliveries".
 -- One vocabulary now: the router routes, and this is where it got to.
 --
--- DEPLOY ORDERING MATTERS. The data plane reads this column in hand-written
--- SQL (internal/router/store.go), so the old binary knows only `fan_out_cursor`
--- and the new one knows only `routing_cursor`. Run this migration and then
--- restart the data plane. A router running against the other name fails its
--- claim query and parks nothing - it simply stops draining the outbox, which is
--- recoverable but looks like an outage.
+-- DEPLOY ORDERING MATTERS, AND GETTING IT WRONG IS SILENT.
+--
+-- This is a single-step RENAME COLUMN: there is no window in which both names
+-- exist, so this breaks the rule the rest of the history keeps (ADR-0002, and
+-- self-hosting/08) that the old code keeps working against the new schema for
+-- the length of a rollout. Apply this, then restart the data plane, promptly.
+--
+-- The data plane reads this column in hand-written SQL
+-- (internal/router/store.go), so an old binary's claim query fails at parse
+-- time and the router stops draining the outbox entirely. Nothing parks and
+-- nothing errors visibly: ingest does not name this column, so the platform
+-- keeps answering 202 Accepted while nothing is delivered. The control API is
+-- affected too - Prisma enumerates columns, so an old control-API pod 500s on
+-- the outbox page, which is the page an operator opens to find out why.
+--
+-- Rolling the data-plane image BACK across this migration has the same effect.
+-- Rename the column by hand first, or roll forward.
 --
 -- Data is preserved: RENAME COLUMN keeps every value, so a row parked halfway
 -- through a wide routing still resumes from where it stopped rather than

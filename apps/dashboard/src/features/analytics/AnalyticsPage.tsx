@@ -162,7 +162,7 @@ export function AnalyticsPage() {
 
       <Panel
         title="Event volume"
-        description={`Events published in the ${window.label.toLowerCase()} — not deliveries. One event routes to one delivery per matching subscription, so the two totals differ and their ratio is this project's routing.`}
+        description={`Events published in the ${window.label.toLowerCase()} — not deliveries. One event routes to one delivery per matching subscription, so the two totals differ and their ratio is this project's deliveries per event.`}
       >
         <Async
           query={events}
@@ -569,7 +569,7 @@ function Events({
           both are in hand and there were events; otherwise it says why.
         */}
         <Stat
-          label="Routing"
+          label="Deliveries per event"
           value={formatRatio(ratio)}
           hint={
             ratio !== null

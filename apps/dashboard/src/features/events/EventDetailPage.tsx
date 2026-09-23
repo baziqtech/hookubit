@@ -156,7 +156,7 @@ export function EventDetailPage() {
               open={confirming}
               onClose={() => setConfirming(false)}
               title="Replay this event?"
-              description="Every matching subscription is routed again."
+              description="The event is routed again to every matching subscription."
               footer={
                 <>
                   <Button onClick={() => setConfirming(false)}>Cancel</Button>

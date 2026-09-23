@@ -451,7 +451,7 @@ registry, so `/metrics` is already correct. **Please move them into
 of the merge, not a design:
 
 `router_outbox_claimed_total`, `router_events_routed_total{outcome}`,
-`router_deliveries_per_event`, `router_subscriptions_skipped_total{reason}`,
+`router_deliveries_per_routing_batch`, `router_subscriptions_skipped_total{reason}`,
 `router_outbox_parked_total{reason}`, `router_route_duration_seconds`.
 
 The existing `deliveries_created_total` and `outbox_pending_age_seconds` are

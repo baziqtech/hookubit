@@ -96,7 +96,7 @@ The fix is the same in every case: [deduplicate](./04-receiving-webhooks.md#be-i
 
 ## A parked event
 
-An event is **parked** when the router could not fan it out and gave up - a row that repeatedly kills the router, or a database outage longer than an hour. It shows as `status: failed` on the event and appears on *Project → Outbox* with `last_error`, its attempt counters and `failing_since`. Nothing was delivered, and nothing will be until it is requeued.
+An event is **parked** when the router could not route it and gave up - a row that repeatedly kills the router, or a database outage longer than an hour. It shows as `status: failed` on the event and appears on *Project → Outbox* with `last_error`, its attempt counters and `failing_since`. Nothing was delivered, and nothing will be until it is requeued.
 
 **Requeue** (`POST …/outbox/{outboxId}/requeue`, or the bulk route for up to 100 at a time, oldest first) returns the event to the queue and the router runs the routing it never got to run. What to know before pressing it:
 

@@ -22,7 +22,7 @@ right and this is stale.
 ## 1. The product, in one paragraph
 
 HookuBit delivers webhooks. A customer's system publishes an event once;
-HookuBit stores it durably, fans it out to every subscribed endpoint, signs each
+HookuBit stores it durably, routes it to every subscribed endpoint, signs each
 request, retries what fails with backoff, and keeps a permanent record of every
 attempt. **The record is the product.** The reason someone pays for this is not
 the retry loop — it is being able to answer "did finance ever receive that

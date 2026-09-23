@@ -391,7 +391,7 @@ reaches the client. The client sees a connection reset and does not know whether
 the event was accepted.
 
 **As implemented.** The event and its outbox row are in the same transaction
-(`internal/ingest/store.go:238-240`), so the router will fan it out whether or
+(`internal/ingest/store.go:238-240`), so the router will route it whether or
 not anyone got a 202: `claimOutboxSQL`
 (`internal/router/store.go:190-210`) polls `event_outbox` on its own schedule and
 knows nothing about HTTP. This is the whole point of the transactional outbox —
@@ -1436,7 +1436,9 @@ ever does fire. A loud release is recoverable; a silent commit is not. That
 sentence is the whole lesson of G2.
 
 The signal changed with the behaviour: `router_subscriptions_skipped_total`
-`{reason="routing_cap_exceeded"}` no longer exists. A wide event now increments
+`{reason="fan_out_cap_exceeded"}` no longer exists — that spelling, not the
+current `routing_` one, is what old series carry, because the label was renamed
+with the vocabulary in 20260923000000. A wide event now increments
 `router_batch_continuations_total` (`internal/router/metrics.go:44-47`), which is a
 **capacity** signal — some events take several transactions and the outbox
 carries them for a few extra polls — not a data-loss one.
@@ -1692,7 +1694,7 @@ this table reads a constant zero.
 | `outbox_pending_age_seconds` | `internal/router/router.go:491` | Routing is falling behind. Measures the oldest **due** row, so a backoff window is not counted as lag. |
 | `router_outbox_parked_total` | `internal/router/metrics.go:74` | An event will not be delivered until an operator requeues it. Any non-zero value is an incident. Labelled by reason: `attempts_exhausted`, `retry_duration_exceeded`, `unknown_outbox_type`, `event_missing`. |
 | `router_batch_continuations_total` | `internal/router/metrics.go:44` | Some events are wider than one routing transaction. A **capacity** signal — raise `ROUTER_MAX_SUBSCRIPTIONS_PER_EVENT` or accept a few extra polls per event. Not a correctness alert; it replaced one. |
-| `router_subscriptions_skipped_total` | `internal/router/router.go:468` | A subscription was considered and not delivered to. Answers "we configured it, why is nothing arriving" without a database session. `routing_cap_exceeded` is no longer one of the reasons. |
+| `router_subscriptions_skipped_total` | `internal/router/router.go:468` | A subscription was considered and not delivered to. Answers "we configured it, why is nothing arriving" without a database session. Neither `routing_cap_exceeded` nor its pre-rename spelling `fan_out_cap_exceeded` is one of the reasons any more. |
 | `queue_depth{state}` | `internal/metrics/queuedepth.go:186`, refreshed every 15s by the **scheduler** (`cmd/webhookd/roles.go:152-154`) | Work that is not happening. `ready` growing means workers cannot keep up; `delayed` growing means backoff; `in_flight` pinned at the pool size means saturation. The only instrument that can see a backlog of deliveries deferred by a breaker or a rate limit, because those move no counter at all. **Goes stale, not zero, if the scheduler is down** — check `up` first. |
 | `egress_blocked_total{reason}` | `internal/egress/ssrf.go:90` | SSRF policy refusals, by a bounded code (`metadata`, `transition`, `private`, `loopback`, `redirect`, …). A customer probing egress policy, or an internal misconfiguration pointing at private space. Never labelled by customer-supplied text. |
 | `queue_leases_reclaimed_total` | `internal/queue/postgres.go:514` | Workers are dying mid-attempt. |

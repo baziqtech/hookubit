@@ -48,7 +48,8 @@ export function rateTone(rate: number | null): 'default' | 'ok' | 'warn' | 'dang
 
 /**
  * Deliveries per event. One publish becomes one delivery per matching
- * subscription, so `deliveries.total / events.total` is the project's routing.
+ * subscription, so `deliveries.total / events.total` is how many deliveries an average publish
+ * creates here.
  * Null when there were no events: a ratio over zero is not a number, and the
  * two totals also come from two different responses that may not both be in
  * hand yet.

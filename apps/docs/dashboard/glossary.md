@@ -16,8 +16,6 @@ The words the dashboard uses, in the sense it uses them.
 | **Event type** | A dot-separated name such as `payment.settled`. Subscriptions match on it exactly, by prefix (`payment.*`), or with `*`. |
 | **Exhausted** | A delivery that used every attempt (or its whole time budget) and never succeeded. Final; only a replay revisits it. |
 | **Failing now** | The deliveries filter for `retrying`, `failed` and `exhausted` together. |
-| **Routing** | Turning one accepted event into one delivery row per matching subscription. Pinned to the subscriptions that existed when the event was accepted. |
-| **Routing cursor** | On an outbox row, the point a wide routing reached before it stopped. A requeue resumes from it. |
 | **Has live secret** | Whether an endpoint has at least one signing secret that is active and unexpired. False means Resume will be refused. |
 | **Idempotency key** | A key the producer sends with an event so that re-publishing returns the same event instead of creating another. |
 | **Invitation** | A single-use, 7-day token emailed to an address, redeemed while signed in as that address. Consumed before its checks run, so accepting from the wrong account uses it up. |
@@ -35,6 +33,8 @@ The words the dashboard uses, in the sense it uses them.
 | **Requeue** | Putting a parked outbox row back so the router runs the routing it never ran. Not a replay. |
 | **Retry policy** | The backoff curve for an endpoint: strategy, attempts, delays, jitter and time budget. One per project is the default. |
 | **Role** | Owner, admin, developer, viewer or billing, held per organization. |
+| **Routing** | Turning one accepted event into one delivery row per matching subscription. Pinned to the subscriptions that existed when the event was accepted. |
+| **Routing cursor** | On an outbox row, the point a wide routing reached before it stopped. A requeue resumes from it. |
 | **Scopes** | The control-plane permissions an API key was minted with. A snapshot; see effective scopes. |
 | **Signing secret** | The `whsec_` HMAC key an endpoint's deliveries are signed with. Shown once when minted or rotated; several can overlap during rotation. Owner and admin only. |
 | **Slug** | A URL-safe identifier for an organization (unique platform-wide, up to 48 characters) or a project (unique within its organization, up to 64). |

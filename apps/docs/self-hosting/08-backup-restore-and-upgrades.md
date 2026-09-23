@@ -143,7 +143,10 @@ Migrations are written to be applied ahead of the code that needs them, on a
 populated table, without a full-table lock. The old data plane keeps working
 against the new schema for the length of the rollout.
 
-### The exception: `next_attempt_at` becomes NOT NULL
+**Two migrations break that rule**, and each says so in its own header. Read
+both before upgrading across either.
+
+### Exception 1: `next_attempt_at` becomes NOT NULL
 
 One migration in the history inverts the order, and its header says so in
 capitals. The migration that makes `deliveries.next_attempt_at` NOT NULL
@@ -182,6 +185,33 @@ newer version, it applies every pending migration in order, this one included,
 with whatever data plane is running at the time. Do not do that across this
 migration.
 
+### Exception 2: `fan_out_cursor` becomes `routing_cursor`
+
+`20260923000000_rename_fan_out_to_routing` is a single-step `RENAME COLUMN` on
+`event_outbox`. There is no window in which both names exist, so the old data
+plane does **not** keep working against the new schema — step 3 of the default
+order must follow step 2 promptly, and the data plane specifically.
+
+What it looks like when you get the order wrong is the reason it is written
+here rather than left to the release note. The router's claim query names the
+column, so every claim fails at parse time and **the router stops draining the
+outbox entirely**. Ingest does not name the column, so the platform keeps
+answering `202 Accepted` the whole time: publishers see success, nothing is
+delivered, and the backlog is invisible on the events page. The control API is
+affected too — Prisma enumerates columns, so an old control-API pod 500s on
+*Project → Outbox*, which is the page an operator opens to find out what is
+wrong.
+
+Requeue is not needed afterwards. Nothing is parked by this; the rows stay
+`pending` and the router drains them as soon as a binary that knows the new
+name is running. Cursor values are preserved by `RENAME COLUMN`, so a row
+parked halfway through a wide routing still resumes instead of re-walking
+subscriptions that already have delivery rows.
+
+On Helm, note that `migration-job.yaml` is deliberately not a hook, so a single
+`helm upgrade` rolls the Job and the Deployments concurrently with no ordering
+guarantee. Run the migration job as its own step and wait for it, then upgrade.
+
 ### Configuration rules that bite on upgrade
 
 | Rule | Symptom if missed |
@@ -215,8 +245,12 @@ If a note is missing any of these, ask before upgrading.
 
 ### Rollback
 
-Images roll back freely except across the `next_attempt_at` migration (drop
-the constraint first). Migrations do not roll back on their own; the platform
+Images roll back freely except across two migrations. Across
+`next_attempt_at` (drop the constraint first). And across
+`20260923000000_rename_fan_out_to_routing`: rolling the data-plane image back
+past it reproduces the silent stall described above, because the old binary
+looks for `fan_out_cursor` and the column is now `routing_cursor` — rename it
+back by hand before rolling the image back, or roll forward instead. Migrations do not roll back on their own; the platform
 does not ship down-migrations. Restore from backup if a migration must be
 undone, and read the restore section above about duplicates.
 

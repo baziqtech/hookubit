@@ -227,7 +227,7 @@ index and two `NULLS NOT DISTINCT` indexes that Prisma's datamodel cannot
 express, so `migrate diff --exit-code` returned 2 by construction on every
 commit. The natural response — `prisma migrate dev` — generates a migration that
 DROPS `deliveries_event_endpoint_original_key`, the `ON CONFLICT` arbiter that
-stops a re-run router from fanning every event out to every subscriber twice.
+stops a re-run router from routing every event to every subscriber twice.
 
 The job now diffs to a `--script` and fails only on identifiers **not** in
 `deployments/ci/expected-schema-drift.txt`, a committed fixture whose header

@@ -703,8 +703,8 @@ func TestPostgresRouteReportsAMissingEvent(t *testing.T) {
 	store := NewPostgresStore(pool)
 
 	res, err := store.Route(context.Background(), RouteRequest{
-		RouterID:    "rtr_a",
-		Row:         OutboxRow{ID: ids.New(ids.Outbox), EventID: ids.New(ids.Event), Type: OutboxTypeEventCreated, Attempts: 1},
+		RouterID:     "rtr_a",
+		Row:          OutboxRow{ID: ids.New(ids.Outbox), EventID: ids.New(ids.Event), Type: OutboxTypeEventCreated, Attempts: 1},
 		RoutingBatch: 10,
 	})
 	if err != nil {

@@ -81,7 +81,7 @@ const (
 	SkipEndpointDisabled      = "endpoint_disabled"
 	SkipEventTypeUnmatched    = "event_type_unmatched"
 	SkipDuplicateEndpoint     = "duplicate_endpoint"
-	SkipRoutingCapExceeded     = "routing_cap_exceeded"
+	SkipRoutingCapExceeded    = "routing_cap_exceeded"
 )
 
 // statusActive is the only project/endpoint/organisation status that receives

@@ -130,6 +130,20 @@ jobs:
         run: |
           go mod tidy
           git diff --exit-code go.mod go.sum
+      # gofmt is not cosmetic here: nothing else in this job catches it, and an
+      # unformatted file means the next contributor whose editor formats on
+      # save ships a diff touching lines they did not change. A rename that
+      # alters identifier length silently breaks struct-literal alignment,
+      # which is exactly how four files landed unformatted once.
+      - name: Format
+        working-directory: services/data-plane
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "These files are not gofmt-clean; run 'gofmt -w services/data-plane/':"
+            echo "$unformatted"
+            exit 1
+          fi
       - name: Vet
         working-directory: services/data-plane
         run: go vet ./...

@@ -38,7 +38,7 @@ export const options = {
   },
   thresholds: baseThresholds({
     // Routing is the cost being measured; give delivery a wide but finite
-    // budget. A p95 above this means the pool is not draining the wide.
+    // budget. A p95 above this means the pool is not draining the deliveries.
     'delivery_latency_ms{group:wide}': ['p(95)<15000'],
     // The suite's dead-man switch: fast ingest with nothing delivered is a
     // failed run, not a fast one.

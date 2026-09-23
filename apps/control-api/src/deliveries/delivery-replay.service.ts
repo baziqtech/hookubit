@@ -50,7 +50,7 @@ export interface ReplayPlan {
  *       ON deliveries (event_id, endpoint_id) WHERE replay_of_delivery_id IS NULL;
  *
  * which is the arbiter the router names in its `ON CONFLICT` so a
- * re-run router cannot double-routing. It is PARTIAL precisely so replay can
+ * re-run router cannot double-route. It is PARTIAL precisely so replay can
  * legitimately create a second row for the same `(event, endpoint)` pair. An
  * insert here that forgot `replay_of_delivery_id` would therefore collide with
  * the ORIGINAL row - and the natural "fix" for that collision is an upsert,

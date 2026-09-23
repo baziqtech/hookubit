@@ -102,7 +102,7 @@ export function useEventDeliveries(projectId: string, eventId: string) {
 }
 
 /**
- * Replay fans the event out AGAIN, creating new delivery rows rather than
+ * Replay routes the event AGAIN, creating new delivery rows rather than
  * resetting the old ones — `ReplayResultDto` returns them, with `replayed_count`
  * and the `replay_of` ids. `endpoint_id` narrows it to one endpoint, which is
  * usually what you want: replaying to every subscriber to fix one broken

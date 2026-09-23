@@ -45,7 +45,7 @@ const (
 	AttrErrorCode      = attribute.Key("webhook.delivery.error_code")
 	AttrOutcome        = attribute.Key("webhook.outcome")
 	AttrDeliveriesMade = attribute.Key("webhook.routing.deliveries_created")
-	AttrRoutingPlanned  = attribute.Key("webhook.routing.planned")
+	AttrRoutingPlanned = attribute.Key("webhook.routing.planned")
 	AttrPayloadBytes   = attribute.Key("webhook.payload.bytes")
 	AttrPayloadStored  = attribute.Key("webhook.payload.offloaded")
 	AttrEventAgeMS     = attribute.Key("webhook.event.age_ms")
