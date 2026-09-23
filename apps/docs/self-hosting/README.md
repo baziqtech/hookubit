@@ -54,7 +54,7 @@ Details, sizing and the traps for each are in [Requirements](/self-hosting/01-re
 | **Helm chart** | You run Kubernetes and want guard rails: the chart refuses to install without a database URL, the three secrets and an SMTP URL, renders NetworkPolicies by default, and carries the migration job and HPA. Recommended. | [Helm](/self-hosting/02-helm) |
 | **Raw manifests** | You run Kubernetes and your platform team owns the YAML (GitOps, Kustomize overlays, no Helm). Same workloads, same probes, same policies, nothing templated. | [Kubernetes manifests](/self-hosting/03-kubernetes-manifests) |
 | **Docker Compose** | One host, a small installation or a staging environment. Every process, no orchestration. | [Docker Compose](/self-hosting/04-docker-compose) |
-| **Bare metal** | One Ubuntu box and no appetite for containers. systemd units, the four data-plane roles in one process, an existing PostgreSQL on your network. | [Bare metal on Ubuntu](/self-hosting/09-bare-metal-ubuntu) |
+| **Bare metal** | No appetite for containers. systemd units, nginx in front, Cloudflare serving the dashboard, PostgreSQL and Redis on their own machines, SES for mail, Prometheus and Grafana. | [Bare metal on Ubuntu](/self-hosting/09-bare-metal-ubuntu) |
 
 The first three deploy the same images with the same environment variables; the
 fourth builds the same artefacts from source and sets the same keys. The
