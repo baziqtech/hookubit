@@ -196,6 +196,15 @@ process — a customer's limit of N silently becoming N × replicas. There is an
 escape hatch (`DELIVERY_RATE_LIMIT_ALLOW_PER_REPLICA=true`) for a single-worker
 box, but Redis also gives the control API a shared throttle store.
 
+That refusal gates **configuration, not the runtime**, and the difference
+matters when you are putting Redis on a machine of its own. A Redis that was
+never configured is refused at startup; a Redis that was configured and then
+dies costs you the fleet-wide limiter scope and nothing else. Delivery cannot
+depend on it — the limiter fails open to an in-process bucket, and there is an
+import guard asserting the delivery path cannot even reach a Redis client. So
+this host is not a single point of failure for deliveries, only for the
+accuracy of rate limits while it is down.
+
 ---
 
 ## 3. The app host
@@ -589,8 +598,9 @@ server {
 ```
 
 `client_max_body_size 2m` must stay **above** the platform's own payload
-ceiling. If nginx refuses first, the publisher gets an nginx HTML error page
-instead of the platform's JSON explaining which limit it hit.
+ceiling, which is `PAYLOAD_MAX_BYTES` and defaults to 1 MiB. If nginx refuses
+first, the publisher gets an nginx HTML error page instead of the platform's
+JSON naming the limit it hit. Raise this whenever you raise that.
 
 Note what is *not* exposed: `9090` is probes and metrics, and it stays on
 localhost. Prometheus reaches it over the private network or an SSH tunnel —
