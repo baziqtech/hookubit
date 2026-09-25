@@ -29,7 +29,8 @@ import { cn } from '../../lib/cn';
 import type { Delivery, DeliveryAttempt, DeliveryDetail, Endpoint } from '../../types/api';
 import { useEndpoint, useEndpoints } from '../endpoints/api';
 import { EndpointActions } from '../endpoints/EndpointActions';
-import { useEventDeliveries } from '../events/api';
+import { useEvent, useEventDeliveries } from '../events/api';
+import { EventPayloadView } from '../events/EventPayloadView';
 import { useDelivery, useDeliveryAttempts, useReplayDelivery } from './api';
 import { attemptHistoryState, attemptsWerePruned } from './pruned';
 
@@ -764,9 +765,13 @@ export function PrunedAttempts({
  * page used to render `delivery.request_headers` and `delivery.payload`, and
  * both were the mock's invention. What does exist is per-ATTEMPT
  * `request_headers` (the signature changes every attempt, so this is the more
- * accurate place for them anyway) and the payload on the EVENT, one link away.
+ * accurate place for them anyway) and the payload on the EVENT, fetched here.
+ *
+ * Headers come FIRST and are rendered from the delivery in hand: they are what
+ * went on the wire for THIS delivery, and a slow or failed payload fetch must
+ * never be able to withhold them.
  */
-function RequestTab({
+export function RequestTab({
   delivery,
   orgId,
   projectId,
@@ -801,20 +806,62 @@ function RequestTab({
         </p>
       )}
 
-      <div className="rounded-md border border-line bg-raised px-3 py-2.5">
-        <h3 className="text-xs font-semibold text-ink">The body is on the event</h3>
-        <p className="mt-1 text-xs leading-relaxed text-ink-muted">
-          A delivery does not carry the payload — it is published once on the event and every
-          delivery for that event sends the same bytes, so it is stored once.{' '}
-          <Link
-            to={`/orgs/${orgId}/projects/${projectId}/events/${delivery.event.id}`}
-            className="font-medium text-accent hover:underline"
-          >
-            Open {delivery.event.event_type} →
-          </Link>
-        </p>
-      </div>
+      <RequestBody delivery={delivery} orgId={orgId} projectId={projectId} />
     </div>
+  );
+}
+
+/**
+ * The body — shown here, but owned by the event.
+ *
+ * The bytes are worth having on this tab: "what did we actually POST" is half
+ * of the 2am question. What must not be implied is that this delivery stored
+ * them. One publish is stored once and every delivery for that event sends the
+ * same bytes, which is why the sentence stays and the link to the event stays
+ * with it.
+ *
+ * The fetch is lazy BY MOUNT — `RequestTab` is rendered only while the Request
+ * tab is open, so opening a delivery does not pull a payload nobody asked to
+ * see. Payloads here are real customer traffic and occasionally megabytes. The
+ * cache key is the one the event page uses, so arriving from there costs
+ * nothing.
+ */
+function RequestBody({
+  delivery,
+  orgId,
+  projectId,
+}: {
+  delivery: DeliveryDetail;
+  orgId: string;
+  projectId: string;
+}) {
+  const event = useEvent(projectId, delivery.event.id);
+
+  return (
+    <section
+      aria-label="Request body"
+      className="rounded-md border border-line bg-raised px-3 py-2.5"
+    >
+      <h3 className="text-xs font-semibold text-ink">The body, published once on the event</h3>
+      <p className="mt-1 text-xs leading-relaxed text-ink-muted">
+        A delivery does not carry its own copy of the payload — every delivery for this event
+        sends the bytes below, and they are stored once, on the event.{' '}
+        <Link
+          to={`/orgs/${orgId}/projects/${projectId}/events/${delivery.event.id}`}
+          className="font-medium text-accent hover:underline"
+        >
+          Open {delivery.event.event_type} →
+        </Link>
+      </p>
+      {/*
+        Scoped `Async`: loading, error (with `request_id` and a retry) and an
+        offloaded or reclaimed payload each get their own words, and none of
+        them can render as an empty code block — see `EventPayloadView`.
+      */}
+      <div className="mt-2.5">
+        <Async query={event}>{(data) => <EventPayloadView payload={data.payload} />}</Async>
+      </div>
+    </section>
   );
 }
 

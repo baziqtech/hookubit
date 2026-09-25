@@ -21,11 +21,12 @@ import {
   summarizeDeliveries,
 } from '../../lib/delivery-status';
 import { formatBytes, formatTimestamp, truncateId } from '../../lib/format';
-import type { Delivery, DeliveryCounts, EventPayload } from '../../types/api';
+import type { Delivery, DeliveryCounts } from '../../types/api';
 import { nextAttemptLabel } from '../deliveries/next-attempt';
 import { useEndpoints } from '../endpoints/api';
 import { ParkedEventNotice } from '../outbox/ParkedEventNotice';
 import { useEvent, useEventDeliveries, useReplayEvent } from './api';
+import { EventPayloadView } from './EventPayloadView';
 
 export function EventDetailPage() {
   const { orgId = '', projectId = '', eventId = '' } = useParams();
@@ -145,7 +146,7 @@ export function EventDetailPage() {
                     </Async>
                   </Panel>
                 )}
-                {tab === 'payload' && <PayloadTab payload={data.payload} />}
+                {tab === 'payload' && <EventPayloadView payload={data.payload} />}
                 {tab === 'headers' && (
                   <CodeBlock value={data.headers ?? {}} label="ingest headers" />
                 )}
@@ -272,50 +273,6 @@ function Meta({
       <dt className="text-2xs font-medium uppercase tracking-wider text-ink-subtle">{label}</dt>
       <dd className={`mt-1 truncate text-xs text-ink ${mono ? 'font-mono' : ''}`}>{value}</dd>
       {hint && <dd className="mt-0.5 text-2xs text-ink-subtle">{hint}</dd>}
-    </div>
-  );
-}
-
-/**
- * The payload, as the API actually returns it.
- *
- * `EventDetailDto.payload` is an ENVELOPE, not the raw body: it says where the
- * bytes came from and carries a `notice` explaining the case. An event whose
- * payload was offloaded to object storage — or is simply gone — must not render
- * as an empty code block, which is what reading `data.payload` as the body
- * would have produced.
- */
-function PayloadTab({ payload }: { payload: EventPayload }) {
-  const body =
-    payload.normalised_json ??
-    (payload.encoding === 'base64' ? payload.body : (payload.body ?? null));
-
-  return (
-    <div className="flex flex-col gap-2">
-      <p className="flex flex-wrap items-center gap-2 text-2xs text-ink-subtle">
-        <Badge tone={payload.source === 'inline' ? 'neutral' : 'warn'}>{payload.source}</Badge>
-        <span>{formatBytes(payload.size_bytes)}</span>
-        <span className="font-mono">sha256:{truncateId(payload.sha256, 12)}</span>
-      </p>
-      {payload.notice && (
-        <p className="rounded-md border border-line bg-raised px-3 py-2 text-xs leading-relaxed text-ink-muted">
-          {payload.notice}
-        </p>
-      )}
-      {body === null ? (
-        <p className="rounded-md border border-warn/40 bg-warn-soft px-3 py-2 text-xs text-warn">
-          The payload is not available to read here
-          {payload.location ? ` — it is held at ${payload.location}.` : '.'}
-        </p>
-      ) : (
-        <CodeBlock
-          value={body}
-          language={payload.encoding === 'base64' ? 'text' : undefined}
-          label="payload"
-          showLineNumbers
-          maxHeight="34rem"
-        />
-      )}
     </div>
   );
 }
