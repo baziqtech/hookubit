@@ -393,6 +393,13 @@ func (w *Worker) attempt(ctx context.Context, job *Job, verdict Verdict, log *sl
 		Status:         decision.AttemptStatus,
 		HTTPStatus:     status,
 		RequestHeaders: RedactHeaders(headers),
+		// Beside the headers, and for the same reason they are here: this row is
+		// the record of what THIS attempt sent. It is recorded after the call
+		// rather than before because that is where the attempt row is built -
+		// the bytes are the ones w.client.Do was handed above and cannot have
+		// changed since; resolvePayload has already verified them against
+		// events.payload_hash.
+		RequestPayload: w.storablePayload(job.Payload),
 		ErrorCode:      decision.ErrorCode,
 		Duration:       finished.Sub(started),
 		WorkerID:       w.workerID,
@@ -762,23 +769,59 @@ func (w *Worker) dbContext(parent context.Context) (context.Context, context.Can
 	return context.WithTimeout(parent, w.dbTimeout)
 }
 
-// storableBody bounds and sanitises a response body for the ledger.
-//
-// Two hazards, both real: PostgreSQL text cannot hold a NUL byte, and a 64 KB
+// storableBody bounds and sanitises a response body for the ledger. A 64 KB
 // body on every attempt of every delivery is a table that grows faster than the
-// deliveries themselves. Truncation is marked so nobody debugs a JSON parse
-// error against a body we cut in half.
+// deliveries themselves; the hazards it is made safe against are in
+// storableText.
 func (w *Worker) storableBody(resp *egress.Response) string {
 	if resp == nil || len(resp.Body) == 0 {
 		return ""
 	}
-	body := resp.Body
-	truncated := resp.Truncated
-	if len(body) > w.maxStoredBody {
-		body = body[:w.maxStoredBody]
+	// resp.Truncated carries in: the egress client may already have stopped
+	// reading at its own ceiling, and the marker belongs on the row either way.
+	return storableText(resp.Body, w.maxStoredBody, resp.Truncated)
+}
+
+// storablePayload bounds and sanitises the REQUEST body for the ledger.
+//
+// Same treatment as a response body, for the same two hazards, plus one
+// argument of its own: these bytes are not unique to the attempt (the signature
+// covers them, so they are identical across a delivery's retries) and they are
+// already stored whole on the event. A bounded prefix is evidence of what this
+// attempt sent; the exact bytes are served by GET /events/:id/payload.
+//
+// Empty in, empty out - which writes NULL. An attempt that sent nothing must not
+// claim it sent "".
+func (w *Worker) storablePayload(payload []byte) string {
+	if len(payload) == 0 {
+		return ""
+	}
+	return storableText(payload, w.maxStoredPayload, false)
+}
+
+// storableText is the one place bytes are made safe for a text column of the
+// ledger, so request and response bodies cannot drift apart in their treatment.
+//
+// Three hazards, all of them real and all of them survivable only here:
+//
+//   - PostgreSQL text cannot hold a NUL byte, and `jsonb` rejects \u0000. A
+//     publisher's or an endpoint's bytes are arbitrary, and failing the INSERT
+//     that records an attempt loses the ledger row, which is far worse than
+//     losing some bytes.
+//   - The bytes need not be valid UTF-8 (a gzipped or binary body, or a cut that
+//     lands mid-rune), and an invalid string is not storable text. Repaired
+//     rather than rejected: Go's own ToValidUTF8, not a regex - the equivalent
+//     trap in the sibling PHP code is a /u-flagged preg_replace returning null on
+//     malformed input, which turns a body into nothing at all.
+//   - Length. Kept forever, on the largest table in the system.
+//
+// Truncation is MARKED so nobody debugs a JSON parse error against a prefix.
+func storableText(b []byte, max int, truncated bool) string {
+	if max > 0 && len(b) > max {
+		b = b[:max]
 		truncated = true
 	}
-	s := strings.ReplaceAll(string(body), "\x00", "")
+	s := strings.ReplaceAll(string(b), "\x00", "")
 	if !utf8.ValidString(s) {
 		s = strings.ToValidUTF8(s, "�")
 	}

@@ -215,6 +215,9 @@ function attempt(db: FakeTenantPrisma, id: string, deliveryId: string, number: n
     status: 'failure',
     httpStatus: 500,
     requestHeaders: null,
+    // The default attempt has no recorded body, which is the honest shape for a
+    // row written before `request_payload` existed or pruned since.
+    requestPayload: null,
     responseHeaders: null,
     responseBody: null,
     responseBodyLocation: null,
@@ -474,6 +477,9 @@ export function seedLedger(db: FakeTenantPrisma = seedWorld()): FakeTenantPrisma
       'x-webhook-signature': 'v1,abc123',
       authorization: 'Bearer customer-token-do-not-leak',
     },
+    // What the worker stored: a BOUNDED copy of what this attempt sent, marked
+    // where it was cut. The exact bytes are on the event.
+    requestPayload: '{"order_id":"ord_9","tot\n…[truncated]',
     responseHeaders: { 'retry-after': '30' },
     responseBody: 'service unavailable',
     responseSize: 19,
@@ -486,6 +492,9 @@ export function seedLedger(db: FakeTenantPrisma = seedWorld()): FakeTenantPrisma
   attempt(db, 'att_a1_2', LEDGER.deliveryOrderA1, 2, {
     status: 'success',
     httpStatus: 200,
+    // Small enough to be stored whole, and byte-identical to attempt 1's body:
+    // the signature covers the raw bytes, so a retry cannot send anything else.
+    requestPayload: '{"order_id":"ord_9","total":1200}',
     errorCode: null,
     errorMessage: null,
     responseBody: 'ok',

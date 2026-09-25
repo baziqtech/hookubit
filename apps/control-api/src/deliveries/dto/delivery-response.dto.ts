@@ -73,6 +73,30 @@ export class DeliveryAttemptDto {
   request_headers!: Record<string, string> | null;
 
   @ApiProperty({
+    type: String,
+    nullable: true,
+    description:
+      'The body THIS attempt put on the wire, bounded by the worker to ' +
+      '`MAX_STORED_REQUEST_PAYLOAD_BYTES` (4 KiB by default). Three things follow.\n\n' +
+      '**It is very often a PREFIX, not the whole body.** A cut value ends in ' +
+      '`…[truncated]`, and because the cut is by byte count it lands wherever it lands - ' +
+      'usually mid-string or mid-object, so the value is usually not valid JSON. Render it as ' +
+      'text. `event.id` plus `GET /events/:id/payload` serves the exact bytes; ' +
+      '`payload_size` on a delivery list row is the real size.\n\n' +
+      '**Do not hash it.** The signature in `request_headers` is an HMAC over ' +
+      '`{timestamp}.{whole raw body}`; hashing this string will not reproduce it even when ' +
+      'nothing was cut, because NUL bytes are stripped and invalid UTF-8 is repaired before ' +
+      'storage - a text column can hold neither.\n\n' +
+      '**Null is not "empty body".** It means no record of what this attempt sent: the attempt ' +
+      'never reached the network (`error_code` is `signing_failed`, `payload_unavailable`, ' +
+      '`payload_object_missing` or `payload_hash_mismatch`), the row predates this column, or ' +
+      'retention ' +
+      'reclaimed the attempt detail - which happens 30 days before the delivery summary goes, ' +
+      'so read `attempts_pruned_at` on the delivery first.',
+  })
+  request_payload!: string | null;
+
+  @ApiProperty({
     type: 'object',
     additionalProperties: { type: 'string' },
     nullable: true,
@@ -145,6 +169,7 @@ export function toAttemptDto(attempt: DeliveryAttempt): DeliveryAttemptDto {
     completed_at: iso(attempt.completedAt),
     duration_ms: attempt.durationMs ?? null,
     request_headers: headerMap(attempt.requestHeaders, true),
+    request_payload: attempt.requestPayload ?? null,
     response_headers: headerMap(attempt.responseHeaders, false),
     response_body: attempt.responseBody ?? null,
     response_body_location: attempt.responseBodyLocation ?? null,

@@ -3,12 +3,14 @@ package worker
 import (
 	"context"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"sync"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/shaq/hookubit/services/data-plane/internal/egress"
 	"github.com/shaq/hookubit/services/data-plane/internal/queue"
@@ -509,5 +511,218 @@ func TestTransientLoadFailureDefersRatherThanSpins(t *testing.T) {
 	got := h.store.lastDefer(t)
 	if got.Delay <= 0 {
 		t.Fatal("a delivery deferred after a database fault must carry a delay, or the next poll re-claims it immediately")
+	}
+}
+
+// --- request_payload ------------------------------------------------------
+//
+// delivery_attempts.request_payload is the evidence of what one attempt sent.
+// Four properties are load-bearing and each has cost somebody a night:
+//
+//   - The BOUND is on what is STORED, never on what is SENT. A prefix in the
+//     ledger next to a truncated body on the wire would break every consumer's
+//     signature verification, silently, only for large payloads.
+//   - Bounded values are MARKED, because a prefix of a JSON document is not JSON.
+//   - Arbitrary publisher bytes must not be able to fail the INSERT that records
+//     the attempt. Losing the ledger row is strictly worse than losing bytes.
+//   - Empty is NULL, not "". An attempt that never reached the network must not
+//     claim it sent an empty body.
+
+// echoServer records the exact bytes it received.
+func echoServer(t *testing.T, got *[]byte, mu *sync.Mutex) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Errorf("read request body: %v", err)
+		}
+		mu.Lock()
+		*got = body
+		mu.Unlock()
+		w.WriteHeader(http.StatusOK)
+	}))
+}
+
+func TestAttemptStoresTheRequestPayloadWithinTheBound(t *testing.T) {
+	var (
+		mu   sync.Mutex
+		sent []byte
+	)
+	srv := echoServer(t, &sent, &mu)
+	defer srv.Close()
+
+	h := newHarness(t, srv.URL)
+	payload := []byte(`{"b":1,"a":2}`)
+	h.store.job.Payload = payload
+	h.worker.handle(context.Background(), h.lease())
+
+	got := h.store.lastCompletion(t)
+	if got.Attempt.RequestPayload != string(payload) {
+		t.Fatalf("request_payload = %q, want the whole body %q", got.Attempt.RequestPayload, payload)
+	}
+	if strings.Contains(got.Attempt.RequestPayload, "truncated") {
+		t.Fatal("a body that fits must not be marked truncated")
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if string(sent) != string(payload) {
+		t.Fatalf("endpoint received %q, want %q", sent, payload)
+	}
+}
+
+func TestAttemptBoundsAnOversizedRequestPayloadWithoutTruncatingTheDelivery(t *testing.T) {
+	var (
+		mu   sync.Mutex
+		sent []byte
+	)
+	srv := echoServer(t, &sent, &mu)
+	defer srv.Close()
+
+	const bound = 256
+	// 32 KiB: far past the bound, and past what any single prefix could hide.
+	payload := []byte(`{"pad":"` + strings.Repeat("A", 32<<10) + `"}`)
+
+	h := newHarness(t, srv.URL, func(o *Options) { o.MaxStoredRequestPayloadBytes = bound })
+	h.store.job.Payload = payload
+	h.worker.handle(context.Background(), h.lease())
+
+	got := h.store.lastCompletion(t)
+	stored := got.Attempt.RequestPayload
+	if len(stored) > bound+64 {
+		t.Fatalf("stored request payload is %d bytes for a bound of %d; the ledger must be bounded", len(stored), bound)
+	}
+	if !strings.HasPrefix(stored, string(payload[:bound])) {
+		t.Fatalf("stored request payload is not the head of what was sent: %q", stored)
+	}
+	if !strings.Contains(stored, "truncated") {
+		t.Fatal("a bounded payload must say so, or someone will debug a JSON parse error against a prefix")
+	}
+
+	// THE assertion. The bound is a storage decision; the signature covers the
+	// whole body, so sending a prefix would break verification for exactly the
+	// customers with the largest payloads.
+	mu.Lock()
+	defer mu.Unlock()
+	if len(sent) != len(payload) {
+		t.Fatalf("the endpoint received %d bytes of a %d-byte payload; the storage bound must never reach the wire",
+			len(sent), len(payload))
+	}
+	if err := signing.Verify(got.Attempt.RequestHeaders["Webhook-Signature"], h.secret, sent, time.Minute, time.Now()); err != nil {
+		t.Fatalf("a consumer could not verify the signature over the bytes we sent: %v", err)
+	}
+}
+
+func TestAttemptStoresAPayloadThatIsNotValidText(t *testing.T) {
+	var (
+		mu   sync.Mutex
+		sent []byte
+	)
+	srv := echoServer(t, &sent, &mu)
+	defer srv.Close()
+
+	// A NUL byte (PostgreSQL text cannot hold one) and a lone 0x80 (not valid
+	// UTF-8). Both are legal in a publisher's body: payload_raw is bytea.
+	payload := []byte{'{', '"', 'a', '"', ':', '"', 0x00, 0x80, 'z', '"', '}'}
+
+	h := newHarness(t, srv.URL)
+	h.store.job.Payload = payload
+	h.worker.handle(context.Background(), h.lease())
+
+	got := h.store.lastCompletion(t)
+	stored := got.Attempt.RequestPayload
+	if strings.ContainsRune(stored, 0) {
+		t.Fatalf("stored request payload still carries a NUL byte (%q); the INSERT would fail and the ledger would lose the row", stored)
+	}
+	if !utf8.ValidString(stored) {
+		t.Fatalf("stored request payload is not valid UTF-8: %q", stored)
+	}
+	if stored == "" {
+		t.Fatal("a body of arbitrary bytes must still leave evidence; sanitising must not empty the column")
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if string(sent) != string(payload) {
+		t.Fatalf("endpoint received %q, want the exact bytes %q; sanitising is for the LEDGER only", sent, payload)
+	}
+}
+
+func TestAttemptWithNoPayloadStoresNothing(t *testing.T) {
+	cases := []struct {
+		name   string
+		mutate func(*harness)
+		want   string
+	}{
+		{
+			// Nowhere for the bytes to come from: no attempt reaches the
+			// network, so there is nothing it can be said to have sent.
+			name: "payload unavailable",
+			mutate: func(h *harness) {
+				h.store.job.Payload = nil
+				h.store.job.PayloadLocation = ""
+			},
+			want: "payload_unavailable",
+		},
+		{
+			// The bytes existed; they were never signed, so they were never
+			// sent. NULL, not the payload.
+			name:   "unsignable",
+			mutate: func(h *harness) { h.store.job.Secrets = nil },
+			want:   "signing_failed",
+		},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				t.Error("a delivery that could not be signed or resolved was sent anyway")
+				w.WriteHeader(http.StatusOK)
+			}))
+			defer srv.Close()
+
+			h := newHarness(t, srv.URL)
+			tc.mutate(h)
+			h.worker.handle(context.Background(), h.lease())
+
+			got := h.store.lastCompletion(t)
+			if got.Attempt == nil {
+				t.Fatal("an unattemptable delivery must still leave an attempt row")
+			}
+			if got.Attempt.ErrorCode != tc.want {
+				t.Fatalf("error_code = %q, want %q", got.Attempt.ErrorCode, tc.want)
+			}
+			if got.Attempt.RequestPayload != "" {
+				t.Fatalf("request_payload = %q; nothing was sent, and NULL is the only honest value",
+					got.Attempt.RequestPayload)
+			}
+		})
+	}
+}
+
+// The sanitiser on its own, for the cases the delivery path cannot reach
+// conveniently - chiefly a bound that lands in the middle of a multi-byte rune.
+func TestStorableTextIsAlwaysStorable(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		max  int
+		want string
+	}{
+		{"fits", `{"a":1}`, 64, `{"a":1}`},
+		{"nul stripped", "a\x00b", 64, "ab"},
+		{"cut mid rune", "aaa€", 4, "aaa�\n…[truncated]"},
+		{"invalid utf8 repaired", "a\x80b", 64, "a�b"},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			got := storableText([]byte(tc.in), tc.max, false)
+			if got != tc.want {
+				t.Fatalf("storableText(%q, %d) = %q, want %q", tc.in, tc.max, got, tc.want)
+			}
+			if !utf8.ValidString(got) || strings.ContainsRune(got, 0) {
+				t.Fatalf("result is not storable text: %q", got)
+			}
+		})
 	}
 }

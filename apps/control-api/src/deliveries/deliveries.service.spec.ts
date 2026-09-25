@@ -276,6 +276,39 @@ describe('fetching one delivery', () => {
     expect(headers['x-webhook-signature']).toBe('v1,abc123');
   });
 
+  it('exposes the bytes each attempt sent, bounded and marked where it was cut', async () => {
+    const { deliveries, context } = await ledgerHarness();
+
+    const detail = await deliveries.get(context, LEDGER.deliveryOrderA1);
+    const [first, second] = detail.attempts;
+
+    // A body small enough to survive the worker's bound is exposed verbatim.
+    expect(second.request_payload).toBe('{"order_id":"ord_9","total":1200}');
+
+    // A bounded one says so. This is why the field is a plain string and not
+    // parsed JSON anywhere in the stack: a prefix of a JSON document is not
+    // JSON, and a client that called JSON.parse on it would throw on the row an
+    // operator most wants to read.
+    expect(first.request_payload).toContain('[truncated]');
+    expect(() => JSON.parse(first.request_payload as string)).toThrow();
+
+    // And it is not the same field as the signature's input - see the DTO.
+    expect(first.request_payload).not.toBe(second.request_payload);
+  });
+
+  it('reports null - not an empty body - when an attempt has no recorded payload', async () => {
+    const { deliveries, context } = await ledgerHarness();
+
+    const detail = await deliveries.get(context, LEDGER.deliveryOrderFinance);
+
+    // Null is the honest answer for a row older than the column, one whose
+    // detail retention reclaimed, and an attempt that never reached the network.
+    // The KEY must still be present: a client renders "no record" from null and
+    // nothing at all from a missing key.
+    expect(detail.attempts[0].request_payload).toBeNull();
+    expect('request_payload' in detail.attempts[0]).toBe(true);
+  });
+
   it('orders 12 attempts numerically, not lexicographically', async () => {
     const { deliveries, context } = await ledgerHarness();
 

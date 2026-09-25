@@ -2449,6 +2449,16 @@ export interface components {
             request_headers: {
                 [key: string]: string;
             } | null;
+            /**
+             * @description The body THIS attempt put on the wire, bounded by the worker to `MAX_STORED_REQUEST_PAYLOAD_BYTES` (4 KiB by default). Three things follow.
+             *
+             *     **It is very often a PREFIX, not the whole body.** A cut value ends in `…[truncated]`, and because the cut is by byte count it lands wherever it lands - usually mid-string or mid-object, so the value is usually not valid JSON. Render it as text. `event.id` plus `GET /events/:id/payload` serves the exact bytes; `payload_size` on a delivery list row is the real size.
+             *
+             *     **Do not hash it.** The signature in `request_headers` is an HMAC over `{timestamp}.{whole raw body}`; hashing this string will not reproduce it even when nothing was cut, because NUL bytes are stripped and invalid UTF-8 is repaired before storage - a text column can hold neither.
+             *
+             *     **Null is not "empty body".** It means no record of what this attempt sent: the attempt never reached the network (`error_code` is `signing_failed`, `payload_unavailable`, `payload_object_missing` or `payload_hash_mismatch`), the row predates this column, or retention reclaimed the attempt detail - which happens 30 days before the delivery summary goes, so read `attempts_pruned_at` on the delivery first.
+             */
+            request_payload: string | null;
             response_headers: {
                 [key: string]: string;
             } | null;

@@ -27,6 +27,20 @@ const DrainTimeout = 15 * time.Second
 // what is kept forever.
 const DefaultMaxStoredResponseBytes = 8 << 10
 
+// DefaultMaxStoredRequestPayloadBytes bounds what of the REQUEST body reaches
+// delivery_attempts.request_payload.
+//
+// Deliberately smaller than the response bound. A response body is unique
+// information per attempt; a request body is necessarily the same bytes on every
+// attempt of a delivery - the signature covers `{timestamp}.{raw body}`, so
+// changing them mid-chain would break every consumer's verification - and the
+// full bytes are already stored once on the event (events.payload_raw, or the
+// offloaded object). So this column is an identifying PREFIX, kept beside the
+// rest of the attempt's evidence, not a second copy of the payload: at
+// PAYLOAD_MAX_BYTES (1 MiB) and a default budget of 8 attempts, a full copy
+// would make it the largest thing in the ledger by an order of magnitude.
+const DefaultMaxStoredRequestPayloadBytes = 4 << 10
+
 // occupancySampleInterval is how often the concurrency gauges are refreshed.
 //
 // A constant rather than a knob, for the same reason queueDepthInterval is one:
@@ -87,6 +101,9 @@ type Options struct {
 	PayloadTimeout time.Duration
 
 	MaxStoredResponseBytes int
+	// MaxStoredRequestPayloadBytes bounds what of the request body is kept on
+	// the attempt row. Zero or less means DefaultMaxStoredRequestPayloadBytes.
+	MaxStoredRequestPayloadBytes int
 
 	Logger *slog.Logger
 	Now    func() time.Time
@@ -130,6 +147,9 @@ type Worker struct {
 	payloadTimeout  time.Duration
 	endpointCeiling int
 	maxStoredBody   int
+	// maxStoredPayload bounds request_payload. See
+	// DefaultMaxStoredRequestPayloadBytes.
+	maxStoredPayload int
 
 	// gateWatch decides when a delivery that keeps losing at the tenant
 	// concurrency gate has earned a budget read. See tenantGateWatch.
@@ -201,6 +221,10 @@ func New(opts Options) (*Worker, error) {
 	if maxBody <= 0 {
 		maxBody = DefaultMaxStoredResponseBytes
 	}
+	maxPayload := opts.MaxStoredRequestPayloadBytes
+	if maxPayload <= 0 {
+		maxPayload = DefaultMaxStoredRequestPayloadBytes
+	}
 
 	limits := opts.Limits
 	if limits.Global <= 0 {
@@ -221,28 +245,29 @@ func New(opts Options) (*Worker, error) {
 	rng := newLockedRand(opts.Seed)
 
 	return &Worker{
-		queue:           opts.Queue,
-		store:           opts.Store,
-		client:          opts.Client,
-		breaker:         NewBreaker(opts.Health, opts.Breaker, now, rng, log),
-		limiter:         limiter,
-		gate:            gate,
-		keyring:         opts.Keyring,
-		keeper:          keeper,
-		payloads:        opts.Payloads,
-		workerID:        opts.WorkerID,
-		concurrency:     concurrency,
-		claimBatch:      claimBatch,
-		pollInterval:    pollInterval,
-		lease:           lease,
-		dbTimeout:       dbTimeout,
-		payloadTimeout:  payloadTimeout,
-		endpointCeiling: limits.Endpoint,
-		maxStoredBody:   maxBody,
-		gateWatch:       newTenantGateWatch(tenantGateBudgetCheckAfter, tenantGateWatchCapacity),
-		log:             log,
-		now:             now,
-		rng:             rng,
+		queue:            opts.Queue,
+		store:            opts.Store,
+		client:           opts.Client,
+		breaker:          NewBreaker(opts.Health, opts.Breaker, now, rng, log),
+		limiter:          limiter,
+		gate:             gate,
+		keyring:          opts.Keyring,
+		keeper:           keeper,
+		payloads:         opts.Payloads,
+		workerID:         opts.WorkerID,
+		concurrency:      concurrency,
+		claimBatch:       claimBatch,
+		pollInterval:     pollInterval,
+		lease:            lease,
+		dbTimeout:        dbTimeout,
+		payloadTimeout:   payloadTimeout,
+		endpointCeiling:  limits.Endpoint,
+		maxStoredBody:    maxBody,
+		maxStoredPayload: maxPayload,
+		gateWatch:        newTenantGateWatch(tenantGateBudgetCheckAfter, tenantGateWatchCapacity),
+		log:              log,
+		now:              now,
+		rng:              rng,
 	}, nil
 }
 
