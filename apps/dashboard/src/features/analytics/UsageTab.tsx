@@ -38,13 +38,27 @@ import { DEFAULT_WINDOW_KEY } from './window';
  * would be the wrong kind of thorough. This is also why the tab is a tab: the
  * queries mount when someone asks for consumption, not on every reload of the
  * delivery panels during an incident.
+ *
+ * The cost of that page limit is that THIS PROJECT MAY HAVE NO ROW — an
+ * organization with more projects than a page can push it off the list, and the
+ * ratio for it is then nowhere on the screen. Rather than pin a row that would
+ * either sit outside the total that claims to be "the sum of the rows above" or
+ * be quietly added to it, the panel description says it plainly and points at
+ * the two figures the Delivery tab carries.
  */
 export function UsageTab({
   orgId,
+  projectId,
   windowKey,
   window,
 }: {
   orgId: string;
+  /**
+   * The project the PAGE is anchored to. The table is organization-wide and
+   * does not need it; the honesty about what the table is missing does — see
+   * the `hasMore` description below.
+   */
+  projectId: string;
   windowKey: AnalyticsWindowKey;
   window: AnalyticsWindowChoice;
 }) {
@@ -90,17 +104,13 @@ export function UsageTab({
           <Panel
             flush
             title={`By project over the ${window.label.toLowerCase()}`}
-            description={
-              page.hasMore
-                ? `Only the first ${page.rows.length} projects are shown — the organization has more, and their usage is not included below.`
-                : `${page.rows.length} ${page.rows.length === 1 ? 'project' : 'projects'}. Every project in the organization is listed.`
-            }
+            description={describeCoverage(page.hasMore, page.rows, projectId)}
           >
             <UsageTable
               orgId={orgId}
               projects={page.rows}
               windowKey={windowKey}
-              windowHours={window.hours}
+              window={window}
             />
             <div className="border-t border-line px-4 py-2.5">
               <p className="text-2xs leading-relaxed text-ink-subtle">
@@ -108,7 +118,9 @@ export function UsageTab({
                 an average publish reached in that project. It is the same division the{' '}
                 <span className="text-ink-muted">Delivery</span> tab’s event volume panel explains,
                 computed here for every project and for the organization, and it is “—” for a
-                project that published nothing in the window rather than a zero.
+                project that published nothing in the window rather than a zero. A row still
+                loading shows a placeholder and one whose figures failed shows “no figure”, so “—”
+                is never a row that has not answered yet.
               </p>
             </div>
           </Panel>
@@ -118,16 +130,33 @@ export function UsageTab({
   );
 }
 
+/**
+ * What the table covers, and — when it is a page rather than the whole set —
+ * whether the project this page is anchored to is one of the rows. "The
+ * organization has more" is useless to the operator whose own project is the
+ * one missing, so that case is named.
+ */
+function describeCoverage(hasMore: boolean, rows: Project[], projectId: string): string {
+  if (!hasMore) {
+    return `${rows.length} ${rows.length === 1 ? 'project' : 'projects'}. Every project in the organization is listed.`;
+  }
+  const listed = rows.some((row) => row.id === projectId);
+  const shown = `Only the first ${rows.length} projects are shown — the organization has more, and their usage is not included below.`;
+  return listed
+    ? shown
+    : `${shown} This page’s own project is one of them: its events published and deliveries created are on the Delivery tab.`;
+}
+
 function UsageTable({
   orgId,
   projects,
   windowKey,
-  windowHours,
+  window,
 }: {
   orgId: string;
   projects: Project[];
   windowKey: AnalyticsWindowKey;
-  windowHours: number;
+  window: AnalyticsWindowChoice;
 }) {
   // One query per project per route, under exactly the keys the Delivery tab
   // uses — same window, same limit — so the project you are already looking at
@@ -137,11 +166,11 @@ function UsageTable({
   // legal here.
   const events = useQueries({
     queries: projects.map((project) =>
-      eventVolumeQuery(project.id, windowHours, DEFAULT_ANALYTICS_LIMIT),
+      eventVolumeQuery(project.id, window.hours, DEFAULT_ANALYTICS_LIMIT),
     ),
   });
   const deliveries = useQueries({
-    queries: projects.map((project) => deliveryOutcomesQuery(project.id, windowHours)),
+    queries: projects.map((project) => deliveryOutcomesQuery(project.id, window.hours)),
   });
 
   const everyRowLoaded = events.every((q) => q.isSuccess) && deliveries.every((q) => q.isSuccess);
@@ -156,7 +185,7 @@ function UsageTable({
     <div className="w-full overflow-x-auto scrollbar-thin">
       <table className="w-full border-collapse text-sm">
         <caption className="sr-only">
-          Events published and deliveries created per project over the window this page is set to
+          {`Events published and deliveries created per project over the ${window.label.toLowerCase()}`}
         </caption>
         <thead>
           <tr className="border-b border-line">
@@ -230,7 +259,6 @@ function UsageRow({
   events: RowQuery<{ total: number; window: { to: string } }>;
   deliveries: RowQuery<{ current: { total: number } }>;
 }) {
-  const ratio = deliveriesPerEvent(deliveries.data?.current.total, events.data?.total);
   // The window travels with the link, so the project you open answers the same
   // question these rows were asked. The default is left out of the address.
   const search = windowKey === DEFAULT_WINDOW_KEY ? '' : `?window=${windowKey}`;
@@ -257,9 +285,7 @@ function UsageRow({
         render={(data) => formatCount(data.current.total)}
         label="deliveries"
       />
-      <Td align="right" className="text-ink-muted">
-        {formatRatio(ratio)}
-      </Td>
+      <RatioCell events={events} deliveries={deliveries} />
       <Cell
         query={events}
         render={(data) => (
@@ -270,6 +296,50 @@ function UsageRow({
         label="window"
       />
     </tr>
+  );
+}
+
+/**
+ * Deliveries per event, gated on BOTH of the requests it divides.
+ *
+ * `deliveriesPerEvent` returns null for "no events" and for "no data yet", and
+ * `formatRatio` renders null as "—" — which the footnote below the table defines
+ * as a project that published nothing. So a bare cell claimed a row had
+ * published nothing while the row beside it still said "Loading events", and
+ * claimed it again next to "Could not load". A pending pair renders the same
+ * placeholder as the counts; a failed pair says the figure is missing rather
+ * than naming a cause the cells beside it already name, with the retry that
+ * would fix both. Only a loaded pair is allowed to say "—", and then it means
+ * what the footnote says it means.
+ */
+function RatioCell({
+  events,
+  deliveries,
+}: {
+  events: RowQuery<{ total: number }>;
+  deliveries: RowQuery<{ current: { total: number } }>;
+}) {
+  if (events.isPending || deliveries.isPending) {
+    return (
+      <Td align="right">
+        <span className="sr-only" role="status">
+          Loading deliveries per event
+        </span>
+        <Skeleton className="ml-auto h-3 w-12" />
+      </Td>
+    );
+  }
+  if (events.isError || deliveries.isError) {
+    return (
+      <Td align="right" className="text-ink-subtle">
+        <span className="text-2xs">no figure</span>
+      </Td>
+    );
+  }
+  return (
+    <Td align="right" className="text-ink-muted">
+      {formatRatio(deliveriesPerEvent(deliveries.data?.current.total, events.data?.total))}
+    </Td>
   );
 }
 

@@ -22,6 +22,7 @@ import type {
   FailingEndpoint,
 } from '../../types/api';
 import { DEFAULT_ANALYTICS_LIMIT } from '../../types/api';
+import { useProject } from '../projects/api';
 import {
   useAttemptLatency,
   useDeliveryOutcomes,
@@ -39,6 +40,7 @@ import {
 } from './derive';
 import { WindowCaption } from './tiles';
 import { OutcomeChart, OutcomeLegend } from './OutcomeChart';
+import { ANCHOR_PARAM, anchorWasChosenForVisitor } from './UsageRedirect';
 import { UsageTab } from './UsageTab';
 import { WindowSelector, useAnalyticsWindow } from './WindowSelector';
 import type { AnalyticsWindowChoice } from './window';
@@ -109,14 +111,17 @@ export function AnalyticsPage() {
   const { key: windowKey, window, setKey: setWindow } = useAnalyticsWindow();
   const [searchParams, setSearchParams] = useSearchParams();
   const tab = readAnalyticsTab(searchParams.get('tab'));
+  const anchoredForVisitor = anchorWasChosenForVisitor(searchParams.get(ANCHOR_PARAM));
 
   return (
     <div className="flex flex-col gap-4">
       <PageHeader
         title="Analytics"
-        description={`How delivery is going, and what each project consumed — both over the ${window.label.toLowerCase()}, beside ${window.previous}. One window governs both tabs.`}
+        description={`How delivery is going over the ${window.label.toLowerCase()}, beside ${window.previous} — and what each project consumed over the same window. One window governs both tabs.`}
         actions={<WindowSelector value={windowKey} onChange={setWindow} />}
       />
+
+      {anchoredForVisitor && <AnchorNotice orgId={orgId} projectId={projectId} />}
 
       <Tabs
         aria-label="Analytics view"
@@ -137,9 +142,58 @@ export function AnalyticsPage() {
         {tab === 'delivery' ? (
           <DeliveryTab orgId={orgId} projectId={projectId} window={window} />
         ) : (
-          <UsageTab orgId={orgId} windowKey={windowKey} window={window} />
+          <UsageTab
+            orgId={orgId}
+            projectId={projectId}
+            windowKey={windowKey}
+            window={window}
+          />
         )}
       </Tabs>
+    </div>
+  );
+}
+
+/**
+ * "You are not where you chose to be."
+ *
+ * `/orgs/:orgId/usage` has no project in it and this page does, so
+ * `UsageRedirect` picks one — and the whole left rail is built from the
+ * `:projectId` it picked. Being moved to another project's Deliveries, Events
+ * and Endpoints without being told is the failure this notice exists to prevent;
+ * it is rendered above the tabs rather than inside the Usage tab because it
+ * describes the PAGE's anchor, which outlives the tab someone landed on.
+ *
+ * Only on `anchor=auto` — the flag the redirect sets when it, rather than the
+ * visitor, chose. A visitor who came from the rail, a project-scoped link or
+ * `/orgs/:orgId/usage?project=<id>` chose their own project and needs no notice.
+ *
+ * The name comes from the same `useProject` the shell already reads for the
+ * project card, so it is a cache hit and not a sixth request. Before it lands
+ * the notice still states the important half — that a project was chosen for
+ * you — rather than waiting for a name to say anything at all.
+ */
+function AnchorNotice({ orgId, projectId }: { orgId: string; projectId: string }) {
+  const project = useProject(orgId, projectId);
+  const name = project.data?.name;
+
+  return (
+    <div
+      role="status"
+      className="rounded-[0.625rem] border border-warn/30 bg-warn-soft px-3.5 py-2.5 text-xs leading-relaxed text-warn"
+    >
+      <strong className="font-semibold">
+        {name ? `This page is anchored to ${name}.` : 'A project was chosen for this page.'}
+      </strong>{' '}
+      You followed{' '}
+      <code className="rounded border border-warn/30 px-1 py-0.5 font-mono text-2xs">
+        /orgs/{orgId}/usage
+      </code>
+      , which names no project, so the organization’s first one was used. The Usage table below is
+      organization-wide and reads the same whichever project that is — but the Delivery tab, the
+      project card and every project-scoped item in the navigation now describe{' '}
+      {name ?? 'that project'}. Switch project from the card at the top of the navigation if it is
+      not the one you were working in.
     </div>
   );
 }
@@ -248,7 +302,7 @@ function DeliveryTab({
 
       <Panel
         title="Event volume"
-        description={`Events published in the ${window.label.toLowerCase()} — not deliveries. One event routes to one delivery per matching subscription, so the two totals differ; the ratio between them is on the Usage tab, for this project beside every other.`}
+        description={`Events published in the ${window.label.toLowerCase()} — not deliveries. One event routes to one delivery per matching subscription, so the two totals differ. The ratio between them is a column on the Usage tab, project by project across the organization.`}
       >
         <Async
           query={events}
@@ -627,10 +681,15 @@ function Events({
       {/*
         Deliveries per event used to be a third tile here, divided out of the
         outcomes response beside this one. It is on the Usage tab now, where it
-        is computed for every project in the organization and for the
-        organization's total — the same division, in the one place it can be
-        compared. Two screens carrying the same ratio was how they could
-        disagree.
+        is computed for every project the tab lists and for their total — the
+        same division, in the one place it can be compared. Two screens carrying
+        the same ratio was how they could disagree.
+
+        The caveat, which the panel copy above no longer talks past: the Usage
+        tab lists the FIRST PAGE of projects, so on an organization with more
+        than a page of them the project you are looking at may not have a row
+        there. The tab says so when that happens, and the two totals it would
+        divide are both on this tab.
       */}
       <div className="grid gap-3 sm:grid-cols-2">
         <Stat
