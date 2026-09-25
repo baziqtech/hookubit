@@ -46,6 +46,28 @@ export default withMermaid(
     },
     vite: {
       server: { port: 4000, host: true },
+      // Pre-bundle mermaid, or `vitepress dev` serves a blank page.
+      //
+      // mermaid depends on packages that still ship only CommonJS - dayjs is
+      // the first one to bite: its `main` is a UMD bundle and it declares no
+      // `module` and no `exports`, so the browser's native ESM loader sees no
+      // default export and the whole app fails to boot before it mounts.
+      // Listing mermaid here makes Vite run it through esbuild, which bundles
+      // those deps and synthesises the interop. `vitepress build` was never
+      // affected - Rollup does the same interop on its own - which is why this
+      // could break while the build stayed green.
+      //
+      // vitepress-plugin-mermaid tries to do this itself, but it names the
+      // sub-dependencies as bare specifiers (`dayjs`, `cytoscape`, ...). Under
+      // pnpm's non-hoisted layout they are not resolvable from apps/docs, so
+      // Vite drops them with "Failed to resolve dependency" - expect those five
+      // warnings on a COLD dev start; once .vitepress/cache exists they are
+      // gone, and they are upstream's and harmless either way. Naming
+      // `mermaid` works because mermaid IS a direct devDependency here, and it
+      // keeps working when mermaid changes which CJS packages it pulls in.
+      optimizeDeps: {
+        include: ['mermaid'],
+      },
     },
     mermaid: { theme: 'default' },
   }),

@@ -113,13 +113,13 @@ CREATE DATABASE hookubit OWNER hookubit;
 On a dedicated box PostgreSQL still listens on localhost only by default. In
 `postgresql.conf`:
 
-```conf
+```ini
 listen_addresses = 'localhost,10.0.0.10'   # its LAN address, not 0.0.0.0
 ```
 
 and in `pg_hba.conf`, the app host and nothing wider:
 
-```conf
+```ini
 # TYPE  DATABASE   USER      ADDRESS          METHOD
 host    hookubit   hookubit  10.0.0.20/32     scram-sha-256
 ```
@@ -173,7 +173,7 @@ sudo apt install -y redis-server
 
 In `/etc/redis/redis.conf`:
 
-```conf
+```ini
 bind 127.0.0.1 10.0.0.11
 requirepass a-long-random-password
 # Rate-limiter buckets only. Nothing here is worth persisting, and an AOF
