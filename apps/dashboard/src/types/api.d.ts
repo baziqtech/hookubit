@@ -2306,6 +2306,69 @@ export interface components {
             deliveries: components["schemas"]["EventDeliveryRollupDto"] | null;
             payload: components["schemas"]["EventPayloadDto"];
         };
+        DeliveryListItemDto: {
+            id: string;
+            event_id: string;
+            endpoint_id: string;
+            /** @description The subscription that matched. Null on a replay whose subscription has since been deleted - the provenance of that replay is `replay_of_delivery_id`, which never goes away. */
+            subscription_id: string | null;
+            project_id: string;
+            /** @enum {string} */
+            status: "pending" | "scheduled" | "queued" | "processing" | "succeeded" | "failed" | "retrying" | "exhausted" | "cancelled";
+            /** @description Whether any further attempt will ever be made. */
+            terminal: boolean;
+            attempt_count: number;
+            max_attempts: number;
+            /** @description When the next attempt is due. Always set - the column is NOT NULL and defaults to the insert time, so a fresh delivery is due immediately. Read it together with `terminal`: a terminal delivery still carries the time of its last transition here and nothing will ever act on it. Nullable in the contract only so a client never has to change shape. */
+            next_attempt_at: string | null;
+            last_attempt_at: string | null;
+            completed_at: string | null;
+            ordering_key: string | null;
+            /** @description The last failure, as the worker phrased it. The full history is in `attempts`. */
+            last_error: string | null;
+            /** @description The worker holding this delivery, and until when. A row stuck in `processing` whose `locked_until` is in the past is a crashed worker; the scheduler reclaims it. */
+            locked_by: string | null;
+            locked_until: string | null;
+            /** @description The delivery this one replays. Set on every replay and never on an original, which is what the partial unique index `deliveries_event_endpoint_original_key` relies on. */
+            replay_of_delivery_id: string | null;
+            /** @description The user id that asked for the replay. Null on originals. */
+            replayed_by: string | null;
+            /** @description Shorthand for `replay_of_delivery_id !== null`. */
+            is_replay: boolean;
+            /**
+             * @description When retention deleted this delivery`s per-attempt detail. Null means the attempt history is still here.
+             *
+             *     Read it before you read `attempts`. Past the attempt horizon the platform reclaims the request/response headers and bodies - which is where the bytes are - while keeping this summary row for much longer. Without this field a pruned delivery reads `attempt_count: 5` next to an empty attempt list, which is indistinguishable from "the platform never tried"; with it, the answer is "we tried five times and the detail was reclaimed on this date".
+             */
+            attempts_pruned_at: string | null;
+            created_at: string;
+            updated_at: string;
+            /**
+             * @description The first 160 characters of the event body, decoded as UTF-8. A PREVIEW, and three things follow from that.
+             *
+             *     **It is not what was signed.** The signature a consumer verifies is an HMAC over the WHOLE body; hashing this string will not reproduce it, and a signature investigation belongs on `GET /events/:id/payload`, which serves the exact bytes.
+             *
+             *     **It is cut by character count, not at a structural boundary**, so it is very often invalid JSON - a truncated string literal, an unclosed brace. Render it as text. `payload_truncated` says whether anything was cut.
+             *
+             *     **Null is not "empty body".** It means no preview could be produced: the payload exceeded the inline threshold and lives in object storage (this API has no object-storage client and will not fetch 200 objects to draw a column), retention has reclaimed the bytes, or they are not valid UTF-8 - a gzipped or binary body, which would decode to replacement characters that look like data. `payload_size` is populated in all three cases; an empty body gives `""`, not null.
+             */
+            payload_preview: string | null;
+            /** @description Bytes of the WHOLE body (`events.payload_size`), not of `payload_preview`. Recorded at ingest, so it is the real size even when the preview is null. Null only when the event row itself could not be read. */
+            payload_size: number | null;
+            /** @description True when the body continues past `payload_preview`. FALSE whenever `payload_preview` is null - there is no preview for the body to be longer than, and a client that rendered an ellipsis after nothing would be inventing content. Read `payload_size` for how big the body is. */
+            payload_truncated: boolean;
+        };
+        DeliveryListDto: {
+            data: components["schemas"]["DeliveryListItemDto"][];
+            has_more: boolean;
+            next_offset: number | null;
+        };
+        ReplayEventDto: {
+            /** @description Recorded on the audit entry for this replay. Not stored on the delivery. */
+            reason?: string;
+            /** @description One of the endpoints this event was originally routed to. Omit to replay to all of them. An endpoint that never received this event is refused: sending it there for the first time is a new delivery, not a replay. */
+            endpoint_id?: string;
+        };
         DeliveryDto: {
             id: string;
             event_id: string;
@@ -2343,17 +2406,6 @@ export interface components {
             attempts_pruned_at: string | null;
             created_at: string;
             updated_at: string;
-        };
-        DeliveryListDto: {
-            data: components["schemas"]["DeliveryDto"][];
-            has_more: boolean;
-            next_offset: number | null;
-        };
-        ReplayEventDto: {
-            /** @description Recorded on the audit entry for this replay. Not stored on the delivery. */
-            reason?: string;
-            /** @description One of the endpoints this event was originally routed to. Omit to replay to all of them. An endpoint that never received this event is refused: sending it there for the first time is a new delivery, not a replay. */
-            endpoint_id?: string;
         };
         ReplayResultDto: {
             /** @description The NEW delivery rows. Every one carries `replay_of_delivery_id`; no original was touched. */

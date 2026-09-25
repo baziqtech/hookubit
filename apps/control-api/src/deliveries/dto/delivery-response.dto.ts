@@ -1,5 +1,6 @@
 import { ApiProperty } from '@nestjs/swagger';
 import { Delivery, DeliveryAttempt, DeliveryStatus, Endpoint, Event } from '@prisma/client';
+import { PAYLOAD_PREVIEW_MAX_CHARS, PayloadPreview } from '../../events/event-payload';
 import { HEADER_REDACTED, isRedactedRequestHeader } from '../delivery-limits';
 
 /** ISO-8601, or null. One helper so nine nullable timestamps read the same. */
@@ -317,6 +318,80 @@ export function toDeliveryDto(delivery: Delivery): DeliveryDto {
 }
 
 /**
+ * A delivery AS A LIST ROW: the delivery, plus a bounded look at the body.
+ *
+ * Separate from `DeliveryDto` on purpose. These three fields are only honest
+ * where they were actually read - `GET /deliveries`, `GET /events/:id/deliveries`
+ * - and a `payload_preview: null` on a response that never looked at
+ * `payload_raw` (a replay result, the detail route) would read as "this payload
+ * is unavailable", which is the one thing null is supposed to mean. The detail
+ * route serves the exact bytes under `GET /events/:id/payload` instead, and has
+ * no use for a truncated copy.
+ */
+export class DeliveryListItemDto extends DeliveryDto {
+  @ApiProperty({
+    type: String,
+    nullable: true,
+    description:
+      'The first ' +
+      String(PAYLOAD_PREVIEW_MAX_CHARS) +
+      ' characters of the event body, decoded as UTF-8. A PREVIEW, and three ' +
+      'things follow from that.\n\n' +
+      '**It is not what was signed.** The signature a consumer verifies is an HMAC over the ' +
+      'WHOLE body; hashing this string will not reproduce it, and a signature investigation ' +
+      'belongs on `GET /events/:id/payload`, which serves the exact bytes.\n\n' +
+      '**It is cut by character count, not at a structural boundary**, so it is very often ' +
+      'invalid JSON - a truncated string literal, an unclosed brace. Render it as text. ' +
+      '`payload_truncated` says whether anything was cut.\n\n' +
+      '**Null is not "empty body".** It means no preview could be produced: the payload ' +
+      'exceeded the inline threshold and lives in object storage (this API has no ' +
+      'object-storage client and will not fetch 200 objects to draw a column), retention has ' +
+      'reclaimed the bytes, or they are not valid UTF-8 - a gzipped or binary body, which would ' +
+      'decode to replacement characters that look like data. `payload_size` is populated in all ' +
+      'three cases; an empty body gives `""`, not null.',
+  })
+  payload_preview!: string | null;
+
+  @ApiProperty({
+    type: Number,
+    nullable: true,
+    description:
+      'Bytes of the WHOLE body (`events.payload_size`), not of `payload_preview`. Recorded at ' +
+      'ingest, so it is the real size even when the preview is null. Null only when the event ' +
+      'row itself could not be read.',
+  })
+  payload_size!: number | null;
+
+  @ApiProperty({
+    description:
+      'True when the body continues past `payload_preview`. FALSE whenever `payload_preview` is ' +
+      'null - there is no preview for the body to be longer than, and a client that rendered an ' +
+      'ellipsis after nothing would be inventing content. Read `payload_size` for how big the ' +
+      'body is.',
+  })
+  payload_truncated!: boolean;
+}
+
+/**
+ * A list row: the delivery, plus whatever preview the payload allowed.
+ *
+ * `preview` is passed in rather than read here: it comes from ONE companion
+ * query over the page's distinct event ids (see `DeliveriesService.list`), and a
+ * mapper that fetched per row would be the N+1 this design exists to avoid.
+ */
+export function toDeliveryListItemDto(
+  delivery: Delivery,
+  preview: PayloadPreview,
+): DeliveryListItemDto {
+  return {
+    ...toDeliveryDto(delivery),
+    payload_preview: preview.preview,
+    payload_size: preview.size,
+    payload_truncated: preview.truncated,
+  };
+}
+
+/**
  * Enough of the event and the endpoint to stop the reader opening two more
  * tabs. A delivery row on its own says "del_x failed against ep_y", which is
  * not an answer to any question a human has at 2am.
@@ -395,7 +470,7 @@ export function toEndpointRef(endpoint: Endpoint): DeliveryEndpointRefDto {
  * theoretical cost.
  */
 export class DeliveryListDto {
-  @ApiProperty({ type: [DeliveryDto] }) data!: DeliveryDto[];
+  @ApiProperty({ type: [DeliveryListItemDto] }) data!: DeliveryListItemDto[];
   @ApiProperty() has_more!: boolean;
   @ApiProperty({ type: Number, nullable: true }) next_offset!: number | null;
 }

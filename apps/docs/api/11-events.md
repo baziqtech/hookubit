@@ -162,7 +162,7 @@ The "did finance ever receive this?" route: one row per endpoint the event was m
 
 | Property | Type | Required | Constraints | Description |
 |---|---|---|---|---|
-| `data` | [DeliveryDto](./schemas.md#deliverydto)[] | yes |  |  |
+| `data` | [DeliveryListItemDto](./schemas.md#deliverylistitemdto)[] | yes |  |  |
 | `data[].id` | string | yes |  |  |
 | `data[].event_id` | string | yes |  |  |
 | `data[].endpoint_id` | string | yes |  |  |
@@ -185,6 +185,9 @@ The "did finance ever receive this?" route: one row per endpoint the event was m
 | `data[].attempts_pruned_at` | string \| null | yes |  | When retention deleted this delivery`s per-attempt detail. Null means the attempt history is still here.<br><br>Read it before you read `attempts`. Past the attempt horizon the platform reclaims the request/response headers and bodies - which is where the bytes are - while keeping this summary row for much longer. Without this field a pruned delivery reads `attempt_count: 5` next to an empty attempt list, which is indistinguishable from "the platform never tried"; with it, the answer is "we tried five times and the detail was reclaimed on this date". |
 | `data[].created_at` | string | yes |  |  |
 | `data[].updated_at` | string | yes |  |  |
+| `data[].payload_preview` | string \| null | yes |  | The first 160 characters of the event body, decoded as UTF-8. A PREVIEW, and three things follow from that.<br><br>**It is not what was signed.** The signature a consumer verifies is an HMAC over the WHOLE body; hashing this string will not reproduce it, and a signature investigation belongs on `GET /events/:id/payload`, which serves the exact bytes.<br><br>**It is cut by character count, not at a structural boundary**, so it is very often invalid JSON - a truncated string literal, an unclosed brace. Render it as text. `payload_truncated` says whether anything was cut.<br><br>**Null is not "empty body".** It means no preview could be produced: the payload exceeded the inline threshold and lives in object storage (this API has no object-storage client and will not fetch 200 objects to draw a column), retention has reclaimed the bytes, or they are not valid UTF-8 - a gzipped or binary body, which would decode to replacement characters that look like data. `payload_size` is populated in all three cases; an empty body gives `""`, not null. |
+| `data[].payload_size` | number \| null | yes |  | Bytes of the WHOLE body (`events.payload_size`), not of `payload_preview`. Recorded at ingest, so it is the real size even when the preview is null. Null only when the event row itself could not be read. |
+| `data[].payload_truncated` | boolean | yes |  | True when the body continues past `payload_preview`. FALSE whenever `payload_preview` is null - there is no preview for the body to be longer than, and a client that rendered an ellipsis after nothing would be inventing content. Read `payload_size` for how big the body is. |
 | `has_more` | boolean | yes |  |  |
 | `next_offset` | number \| null | yes |  |  |
 

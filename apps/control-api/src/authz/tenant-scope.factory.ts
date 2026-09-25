@@ -23,6 +23,7 @@ import {
 } from '@prisma/client';
 import { AppError } from '../common/errors';
 import { PrismaService } from '../infrastructure/prisma/prisma.service';
+import { EventPayloadHeadRow, readEventPayloadHeads } from './event-payload-head';
 import { RequestContext } from './tenant-context';
 import {
   ModelDelegate,
@@ -431,6 +432,24 @@ export class TenantScope implements OwnershipVerifier {
     return this.repo('deliveryAttempt', 'viaDelivery', 'Delivery attempt', {
       foreignKeys: { deliveryId: 'deliveries' },
     });
+  }
+
+  /**
+   * The first `maxBytes` bytes of these events' payloads, keyed by event id.
+   *
+   * The one read here that is not a `ScopedRepository`, and the docblock in
+   * `event-payload-head.ts` is the argument for why: Prisma cannot express a
+   * partial read of a `bytea`, and the deliveries list would otherwise pull up
+   * to 200 whole payloads per page to show 160 characters of each.
+   *
+   * Scoped like `events` (`projectAndOrganization`). An id outside the tenant is
+   * absent from the map rather than an error, so it cannot be used to probe.
+   */
+  async eventPayloadHeads(
+    eventIds: readonly string[],
+    maxBytes: number,
+  ): Promise<Map<string, EventPayloadHeadRow>> {
+    return readEventPayloadHeads(this.client, this.context, eventIds, maxBytes);
   }
 
   /**

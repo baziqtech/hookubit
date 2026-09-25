@@ -1,4 +1,5 @@
 import { PrismaService } from '../../infrastructure/prisma/prisma.service';
+import { EVENT_PAYLOAD_HEAD_TAG } from '../event-payload-head';
 
 /**
  * In-memory stand-in for the tenant-owned tables, in the spirit of
@@ -456,6 +457,83 @@ export class FakeTenantPrisma {
 
   async $transaction<T>(fn: (tx: FakeTenantPrisma) => Promise<T>): Promise<T> {
     return fn(this);
+  }
+
+  /**
+   * The ONE raw statement this layer issues: `eventPayloadHeadQuery`.
+   *
+   * Emulated rather than stubbed, because the interesting parts of that query
+   * are its tenant predicate and its byte slice, and a stub returning canned
+   * rows would make "a cross-tenant event id yields no preview" and "the slice
+   * is bounded" pass without being true.
+   *
+   * It reads the parameters POSITIONALLY - `$1` maxBytes, `$2` ids, `$3`
+   * organization id, optional `$4` project id - and refuses any other arity, so
+   * a production change that drops the organization conjunct fails here loudly
+   * instead of quietly widening the fence. Anything without the tag is refused
+   * outright: a second raw query added later must not be answered with payload
+   * heads.
+   */
+  async $queryRaw<T>(query: {
+    values?: unknown[];
+    text?: string;
+    sql?: string;
+    strings?: readonly string[];
+  }): Promise<T> {
+    const text = query?.text ?? query?.sql ?? (query?.strings ?? []).join('');
+    if (!text.includes(EVENT_PAYLOAD_HEAD_TAG)) {
+      throw new Error(
+        `FakeTenantPrisma.$queryRaw only implements the '${EVENT_PAYLOAD_HEAD_TAG}' statement; got: ${text.slice(0, 120)}`,
+      );
+    }
+
+    const values = query.values ?? [];
+    if (values.length !== 3 && values.length !== 4) {
+      throw new Error(
+        `${EVENT_PAYLOAD_HEAD_TAG} expects 3 or 4 parameters (maxBytes, ids, organizationId[, projectId]); got ${values.length}`,
+      );
+    }
+    const [maxBytes, ids, organizationId, projectId] = values as [
+      number,
+      string[],
+      string,
+      string | undefined,
+    ];
+    // The predicate has to be IN the statement, not merely applied below: a fake
+    // that filtered by an organization id the SQL never mentioned would make an
+    // unscoped raw query look isolated.
+    if (!text.includes('organization_id =')) {
+      throw new Error(`${EVENT_PAYLOAD_HEAD_TAG} has no organization predicate`);
+    }
+    if (values.length === 4 && !text.includes('project_id =')) {
+      throw new Error(`${EVENT_PAYLOAD_HEAD_TAG} passed a project id it does not filter on`);
+    }
+
+    this.queries.push({ table: 'event', op: 'payloadHead' });
+
+    const wanted = new Set(ids);
+    const rows = this.all('event').filter(
+      (row) =>
+        wanted.has(String(row.id)) &&
+        row.organizationId === organizationId &&
+        (projectId === undefined || row.projectId === projectId),
+    );
+
+    return rows.map((row) => {
+      const raw = row.payloadRaw as Uint8Array | null | undefined;
+      const buffer = raw === null || raw === undefined ? null : Buffer.from(raw);
+      return {
+        id: String(row.id),
+        // `substring(payload_raw from 1 for $1)` - a BYTE slice, so a multi-byte
+        // code point straddling the bound is handed over half-cut, exactly as
+        // PostgreSQL would.
+        head: buffer === null ? null : buffer.subarray(0, maxBytes),
+        // `octet_length(payload_raw)`: the whole column, not the slice.
+        inline_bytes: buffer === null ? null : buffer.byteLength,
+        payload_size: row.payloadSize ?? null,
+        payload_location: row.payloadLocation ?? null,
+      };
+    }) as unknown as T;
   }
 
   asPrisma(): PrismaService {

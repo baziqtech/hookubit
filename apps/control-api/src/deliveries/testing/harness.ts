@@ -66,6 +66,10 @@ export const LEDGER = {
   eventOffloaded: 'evt_a_big',
   /** payload_raw is not valid UTF-8. */
   eventBinary: 'evt_a_binary',
+  /** A body far longer than the preview bound, and longer than the read slice. */
+  eventLongBody: 'evt_a_long',
+  /** All 3-byte characters, so the byte slice lands INSIDE a code point. */
+  eventMultibyte: 'evt_a_multibyte',
   /** Matched no subscription. Nothing to replay. */
   eventOrphan: 'evt_a_orphan',
   /** Routed wider than MAX_REPLAY_DELIVERIES. */
@@ -86,6 +90,10 @@ export const LEDGER = {
   deliveryPaused: 'del_a_paused',
   /** eventBinary -> endpointFinance, with more attempts than fit inline. */
   deliveryNoisy: 'del_a_noisy',
+  /** eventLongBody -> endpointA1, succeeded. */
+  deliveryLongBody: 'del_a_long',
+  /** eventMultibyte -> endpointA1, succeeded. */
+  deliveryMultibyte: 'del_a_multibyte',
 } as const;
 
 /** Attempts on `deliveryOrderFinance`. Crosses the 9 -> 10 ordering boundary. */
@@ -102,12 +110,31 @@ export const T = {
   binary: new Date('2026-03-04T10:00:00.000Z'),
   orphan: new Date('2026-03-05T10:00:00.000Z'),
   wide: new Date('2026-03-06T10:00:00.000Z'),
+  long: new Date('2026-03-07T10:00:00.000Z'),
+  multibyte: new Date('2026-03-08T10:00:00.000Z'),
 } as const;
 
 const ORDER_BODY = '{"order_id":"41f9","amount":1250,"currency":"GHS"}';
 const SETTLED_BODY = '{ "b": 2,\n  "a": 1 }';
 /** 0xff 0xfe is not valid UTF-8; decoding it as UTF-8 would give U+FFFD soup. */
 export const BINARY_PAYLOAD = Uint8Array.from([0xff, 0xfe, 0x00, 0x01, 0x7f]);
+
+/**
+ * 2011 ASCII bytes: longer than `PAYLOAD_PREVIEW_MAX_CHARS` AND longer than
+ * `PAYLOAD_PREVIEW_READ_BYTES`, so the preview is capped by the character bound
+ * AND the database slice really cut something off.
+ */
+export const LONG_BODY = `{"note":"${'a'.repeat(2_000)}"}`;
+
+/**
+ * A body of nothing but U+20AC (3 bytes each), 900 bytes long.
+ *
+ * `PAYLOAD_PREVIEW_READ_BYTES` is 640, and 640 is not a multiple of 3: the slice
+ * ends one byte into the 214th character. That is the case a naive
+ * `Buffer.toString('utf8')` renders with a trailing U+FFFD.
+ */
+export const MULTIBYTE_CHAR = '€';
+export const MULTIBYTE_BODY = MULTIBYTE_CHAR.repeat(300);
 
 function endpoint(db: FakeTenantPrisma, id: string, projectId: string, extra: Row = {}): void {
   db.insert('endpoint', {
@@ -319,6 +346,20 @@ export function seedLedger(db: FakeTenantPrisma = seedWorld()): FakeTenantPrisma
     processedAt: T.binary,
   });
 
+  event(db, LEDGER.eventLongBody, IDS.projectA1, {
+    eventType: 'ledger.exported',
+    body: LONG_BODY,
+    createdAt: T.long,
+    processedAt: T.long,
+  });
+
+  event(db, LEDGER.eventMultibyte, IDS.projectA1, {
+    eventType: 'ledger.multibyte',
+    body: MULTIBYTE_BODY,
+    createdAt: T.multibyte,
+    processedAt: T.multibyte,
+  });
+
   event(db, LEDGER.eventOrphan, IDS.projectA1, {
     eventType: 'ghost.emitted',
     status: 'processed',
@@ -399,6 +440,26 @@ export function seedLedger(db: FakeTenantPrisma = seedWorld()): FakeTenantPrisma
     attemptCount: NOISY_ATTEMPTS,
     maxAttempts: 200,
     createdAt: T.binary,
+  });
+
+  delivery(db, LEDGER.deliveryLongBody, {
+    eventId: LEDGER.eventLongBody,
+    endpointId: LEDGER.endpointA1,
+    status: 'succeeded',
+    attemptCount: 1,
+    completedAt: T.long,
+    lastAttemptAt: T.long,
+    createdAt: T.long,
+  });
+
+  delivery(db, LEDGER.deliveryMultibyte, {
+    eventId: LEDGER.eventMultibyte,
+    endpointId: LEDGER.endpointA1,
+    status: 'succeeded',
+    attemptCount: 1,
+    completedAt: T.multibyte,
+    lastAttemptAt: T.multibyte,
+    createdAt: T.multibyte,
   });
 
   // --- attempts -----------------------------------------------------------
