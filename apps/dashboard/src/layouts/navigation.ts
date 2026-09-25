@@ -1,4 +1,5 @@
 /** The navigation model. Route paths live here once, not scattered through JSX. */
+import type { SetupAffordance } from '../features/onboarding/setup-visibility';
 import type { NavIconName } from './nav-icons';
 
 export interface NavItem {
@@ -51,8 +52,28 @@ export interface NavGroup {
  * holding a complaint — "the partner says they never got it" — which is a
  * question about a delivery. Events is where you go second, once the delivery
  * turns out not to exist.
+ *
+ * ## Setup is conditional, and defaults to present
+ *
+ * `setup` decides whether the Setup item is in the rail AT ALL. A fully set-up
+ * project has no use for a checklist that can never change again, and a green
+ * `6/6` in its place is the same noise with a tick on it — so the item goes,
+ * rather than changing colour. The decision itself is not this function's: see
+ * `features/onboarding/setup-visibility.ts` for why "we could not check" is a
+ * third value (`unknown`) rather than a falsy one, and why `unknown` renders the
+ * same nothing that `hide` does.
+ *
+ * The default is `'show'` because this model is also read for NAMING —
+ * `currentSectionLabel` derives the breadcrumb from it, and `/get-started` still
+ * resolves for every bookmark and docs link that points at it. A page that is
+ * no longer advertised must still be able to say where you are, so only the rail
+ * passes the derived value.
  */
-export function navigationGroups(orgId: string, projectId?: string): NavGroup[] {
+export function navigationGroups(
+  orgId: string,
+  projectId?: string,
+  setup: SetupAffordance = 'show',
+): NavGroup[] {
   const org = `/orgs/${orgId}`;
 
   if (!projectId) {
@@ -66,7 +87,9 @@ export function navigationGroups(orgId: string, projectId?: string): NavGroup[] 
 
   const base = `${org}/projects/${projectId}`;
   return [
-    { title: null, items: [{ to: `${base}/get-started`, label: 'Setup', icon: 'setup' }] },
+    ...(setup === 'show'
+      ? [{ title: null, items: [setupItem(base)] } satisfies NavGroup]
+      : []),
     {
       title: 'Record',
       items: [
@@ -100,6 +123,22 @@ export function navigationGroups(orgId: string, projectId?: string): NavGroup[] 
     },
     { title: 'Organization', items: organizationItems(org) },
   ];
+}
+
+/**
+ * The Setup item, named in one place.
+ *
+ * The route is `/get-started` and the label is `Setup`: the path is what docs
+ * and emails link to, the label is what the rail and the breadcrumb say. The
+ * rail may omit this item; nothing may rename or re-path it.
+ */
+function setupItem(base: string): NavItem {
+  return { to: `${base}/get-started`, label: 'Setup', icon: 'setup' };
+}
+
+/** The route the Setup item points at, for a caller that needs to key on it. */
+export function setupNavPath(orgId: string, projectId: string): string {
+  return setupItem(`/orgs/${orgId}/projects/${projectId}`).to;
 }
 
 function auditLog(org: string): NavItem {
@@ -141,6 +180,12 @@ export function unlistedProjectNav(orgId: string, projectId: string): NavItem[] 
  * `/orgs/x/projects/y/settings` resolving to "Project settings" rather than to
  * the organization's `/orgs/x/settings`, and `/events/:id` to Events rather
  * than to whichever prefix happened to be checked first.
+ *
+ * Naming is not advertising: the model is asked for every item it HAS, Setup
+ * included, so `/get-started` is still titled "Setup" on a project whose rail no
+ * longer offers it. Deriving the label from the rail's filtered model instead
+ * would leave that page's breadcrumb blank for exactly the operators who reached
+ * it from a bookmark.
  */
 export function currentSectionLabel(
   pathname: string,
@@ -148,7 +193,7 @@ export function currentSectionLabel(
   projectId?: string,
 ): string | null {
   const candidates = [
-    ...navigationGroups(orgId, projectId).flatMap((group) => group.items),
+    ...navigationGroups(orgId, projectId, 'show').flatMap((group) => group.items),
     // Unlisted routes are named here too: a page reached from a notice rather
     // than from the rail still has to tell you where you are.
     ...(projectId ? unlistedProjectNav(orgId, projectId) : []),

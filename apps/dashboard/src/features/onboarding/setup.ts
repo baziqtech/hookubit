@@ -36,6 +36,18 @@ export type SetupStepState = 'done' | 'attention' | 'current' | 'todo';
 export interface SetupStep {
   id: SetupStepId;
   title: string;
+  /**
+   * Whether this step's requirement is MET — a live resource exists, not merely
+   * a row.
+   *
+   * Separate from `state` because `attention` covers two genuinely different
+   * situations and one flag cannot: three endpoints delivering beside one paused
+   * one is amber and satisfied, while two endpoints that are both paused is
+   * amber and NOT satisfied — nothing can be delivered at all. Reading the state
+   * alone conflates them, which is how a checklist ends up reporting a project
+   * ready while every endpoint on it is switched off.
+   */
+  satisfied: boolean;
   /** One plain sentence answering "what IS this thing?". */
   concept: string;
   /** What the operator should do, when the step is not yet satisfied. */
@@ -83,6 +95,7 @@ export function deriveSetupSteps(inputs: SetupInputs): SetupStep[] {
       title: 'Organization',
       concept: 'The billing and people boundary. Everything else lives inside one.',
       action: 'Create an organization.',
+      satisfied: Boolean(inputs.organizationName),
       state: inputs.organizationName ? 'done' : 'todo',
       evidence: inputs.organizationName ?? undefined,
     },
@@ -92,6 +105,7 @@ export function deriveSetupSteps(inputs: SetupInputs): SetupStep[] {
       concept:
         'One environment of one system. It owns its own keys, endpoints and delivery history, and nothing crosses between projects.',
       action: 'Create a project inside this organization.',
+      satisfied: Boolean(inputs.projectName),
       state: inputs.projectName ? 'done' : 'todo',
       evidence: inputs.projectName
         ? `${inputs.projectName}${inputs.projectEnvironment ? ` · ${inputs.projectEnvironment}` : ''}`
@@ -102,6 +116,7 @@ export function deriveSetupSteps(inputs: SetupInputs): SetupStep[] {
       title: 'API key',
       concept: 'What your backend authenticates with when it publishes an event.',
       action: 'Create a key. The secret is shown once and cannot be recovered.',
+      satisfied: inputs.activeApiKeyCount > 0,
       state: inputs.activeApiKeyCount > 0 ? 'done' : 'todo',
       evidence:
         inputs.activeApiKeyCount > 0
@@ -116,6 +131,7 @@ export function deriveSetupSteps(inputs: SetupInputs): SetupStep[] {
       concept:
         'You publish an event once. It routes to one delivery per matching subscription, and each delivery retries on its own.',
       action: 'Publish a test event with the request below.',
+      satisfied: inputs.eventCount > 0,
       state: inputs.eventCount > 0 ? 'done' : 'todo',
       evidence: inputs.eventCount > 0 ? `${count(inputs.eventCount, 'event')} received` : undefined,
       /*
@@ -144,6 +160,9 @@ function endpointStep(inputs: SetupInputs): SetupStep {
       title: 'Endpoint',
       concept: 'The URL we POST to, plus its timeout, rate limit and signing secret.',
       action: 'Add the URL that should receive webhooks.',
+      // One endpoint delivering satisfies the step. A paused SECOND endpoint is
+      // worth an amber warning, not a permanent unfinished checklist.
+      satisfied: true,
       state: blocked > 0 ? 'attention' : 'done',
       evidence: `${count(live, 'endpoint')} delivering`,
       warning:
@@ -159,6 +178,9 @@ function endpointStep(inputs: SetupInputs): SetupStep {
       title: 'Endpoint',
       concept: 'The URL we POST to, plus its timeout, rate limit and signing secret.',
       action: 'Enable an endpoint, or give it a signing secret, so it can receive deliveries.',
+      // Rows exist; NOTHING can be delivered. The step is not satisfied, and the
+      // checklist stays on offer until one endpoint is actually live.
+      satisfied: false,
       state: 'attention',
       evidence: `${count(blocked, 'endpoint')}, none delivering`,
       warning:
@@ -171,6 +193,7 @@ function endpointStep(inputs: SetupInputs): SetupStep {
     title: 'Endpoint',
     concept: 'The URL we POST to, plus its timeout, rate limit and signing secret.',
     action: 'Add the URL that should receive webhooks.',
+    satisfied: false,
     state: 'todo',
   };
 }
@@ -187,6 +210,7 @@ function subscriptionStep(inputs: SetupInputs): SetupStep {
       title: 'Subscription',
       concept,
       action: 'Bind an endpoint to the event types it cares about.',
+      satisfied: true,
       state: 'done',
       evidence: `${count(enabled, 'active subscription')}`,
     };
@@ -198,6 +222,8 @@ function subscriptionStep(inputs: SetupInputs): SetupStep {
       title: 'Subscription',
       concept,
       action: 'Enable a subscription so events start routing to your endpoint.',
+      // Every subscription switched off routes nothing. Rows are not routing.
+      satisfied: false,
       state: 'attention',
       evidence: `${count(disabled, 'subscription')}, all disabled`,
       warning:
@@ -210,6 +236,7 @@ function subscriptionStep(inputs: SetupInputs): SetupStep {
     title: 'Subscription',
     concept,
     action: 'Bind an endpoint to the event types it cares about.',
+    satisfied: false,
     state: 'todo',
   };
 }
@@ -229,17 +256,27 @@ function markCurrent(steps: SetupStep[]): SetupStep[] {
   );
 }
 
-/** True once a webhook can actually flow end to end. */
+/**
+ * True once a webhook can actually flow end to end.
+ *
+ * Read from `satisfied` rather than from `state`, which is what makes the
+ * sentence above true rather than aspirational: an `attention` step used to
+ * count, so a project whose every endpoint was paused reported complete while
+ * being incapable of delivering anything. That is the shape of the failure this
+ * whole module is written against, and it was inside the module.
+ *
+ * `attention` still counts for SEQUENCING — the resource exists, so the next
+ * step is reachable — which is why the two questions have two answers. This one
+ * is what the nav item, the badge and the overview card are derived from, so
+ * losing the last live endpoint brings all three back automatically.
+ */
 export function isSetupComplete(steps: SetupStep[]): boolean {
-  return steps.every((step) => step.state === 'done' || step.state === 'attention');
+  return steps.every((step) => step.satisfied);
 }
 
-/** Steps satisfied, for a progress read-out. `attention` counts; it exists. */
+/** Steps satisfied, for a progress read-out. */
 export function setupProgress(steps: SetupStep[]): { done: number; total: number } {
-  return {
-    done: steps.filter((step) => step.state === 'done' || step.state === 'attention').length,
-    total: steps.length,
-  };
+  return { done: steps.filter((step) => step.satisfied).length, total: steps.length };
 }
 
 /**

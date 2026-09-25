@@ -10,12 +10,20 @@
  * TanStack Query under the keys those screens use, so navigating to Endpoints
  * or API keys afterwards is served from cache rather than refetched.
  */
+import { useEffect } from 'react';
 import { useApiKeys } from '../api-keys/api';
 import { useEndpoints, useSubscriptions } from '../endpoints/api';
 import { useEvents } from '../events/api';
 import { useOrganizations } from '../organizations/api';
 import { useProject } from '../projects/api';
-import { deriveSetupSteps, type SetupInputs, type SetupStep } from './setup';
+import { deriveSetupSteps, isSetupComplete, type SetupInputs, type SetupStep } from './setup';
+import {
+  rememberSetupCheckFailed,
+  rememberSetupCompleteness,
+  resolveSetupAffordance,
+  setupMemory,
+  type SetupAffordance,
+} from './setup-visibility';
 
 export interface SetupState {
   steps: SetupStep[];
@@ -91,4 +99,46 @@ export function useSetupState(orgId: string, projectId: string): SetupState {
   };
 
   return { steps: deriveSetupSteps(inputs), isPending, isError };
+}
+
+/**
+ * Setup state, plus the answer to "should a setup affordance be on screen".
+ *
+ * The rule lives in `setup-visibility.ts`; this is the React half of it — read
+ * the live check, record it once it resolves, and fall back to the recorded
+ * value while it is unresolved. Nothing is persisted: see that module for why a
+ * stored value would be a completion flag by another name.
+ */
+export function useSetupAffordance(
+  orgId: string,
+  projectId: string,
+): { affordance: SetupAffordance; setup: SetupState } {
+  const setup = useSetupState(orgId, projectId);
+  const complete = isSetupComplete(setup.steps);
+  const resolved = !setup.isPending && !setup.isError;
+
+  useEffect(() => {
+    if (resolved) rememberSetupCompleteness(projectId, complete);
+  }, [resolved, complete, projectId]);
+
+  // A failure is remembered as a failure, not as an answer. React Query
+  // refetches a failed query on the next mount, and an in-flight retry reports
+  // as pending with no data — so without this, walking between pages during an
+  // outage would drop the Setup item and bring it back on every navigation.
+  useEffect(() => {
+    if (setup.isError) rememberSetupCheckFailed(projectId);
+  }, [setup.isError, projectId]);
+
+  /*
+   * Read during render, which is safe here because the map only ever changes as
+   * a RESULT of a render that already had the live answer: every transition
+   * into pending or error comes from a query state change, and that re-renders
+   * on its own. The fallback is never the reason a render is needed.
+   */
+  const affordance = resolveSetupAffordance(
+    { isPending: setup.isPending, isError: setup.isError, isComplete: complete },
+    setupMemory(projectId),
+  );
+
+  return { affordance, setup };
 }

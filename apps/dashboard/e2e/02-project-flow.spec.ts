@@ -191,9 +191,21 @@ test.describe.serial('a project, end to end', () => {
     await d.getByRole('button', { name: 'Cancel' }).click();
   });
 
-  test('the setup checklist is complete and the overview becomes the health page', async ({ page }) => {
+  /*
+   * REWRITTEN. This used to assert the health page here, one step BEFORE the
+   * first event is published — which passed only on the pending flash the
+   * overview shows while its six inputs load, and would have failed the moment
+   * that race went the other way. At this point the project genuinely is five of
+   * six, so that is what is asserted.
+   */
+  test('one step short: the checklist, the badge and the overview card are all on', async ({ page }) => {
     await page.goto(`${projectBase()}/overview`);
-    await expect(page.getByText('Success rate (24h)')).toBeVisible();
+    await expect(page.getByRole('heading', { name: 'Setup' })).toBeVisible();
+    await expect(page.getByRole('link', { name: 'Open setup checklist' })).toBeVisible();
+
+    const rail = page.locator('nav[aria-label="Primary"]');
+    await expect(rail.locator('a[href$="/get-started"]')).toHaveCount(1);
+    await expect(rail).toContainText('5/6');
   });
 
   test('a published event is delivered to the receiver, signed with the endpoint secret', async ({ page, request }) => {
@@ -234,6 +246,30 @@ test.describe.serial('a project, end to end', () => {
     await expect.poll(() => rowsAfterReload(page, /^succeeded$/i), { timeout: 20_000 }).toBeGreaterThan(0);
     await page.goto(`${projectBase()}/events`);
     await expect(page.getByText('payment.settled').first()).toBeVisible();
+  });
+
+  test('six of six: every setup affordance goes, and /get-started still resolves', async ({ page }) => {
+    await page.goto(`${projectBase()}/overview`);
+
+    // The overview is the health page now, for good.
+    await expect(page.getByText('Success rate (24h)')).toBeVisible();
+    await expect(page.getByRole('link', { name: 'Open setup checklist' })).toHaveCount(0);
+    await expect(page.getByRole('heading', { name: 'Setup' })).toHaveCount(0);
+
+    // The rail drops the item rather than ticking it green: a checklist that can
+    // never change again is a slot spent on nothing.
+    const rail = page.locator('nav[aria-label="Primary"]');
+    await expect(rail.locator('a[href$="/get-started"]')).toHaveCount(0);
+    await expect(rail).not.toContainText(/\d\/6/);
+
+    // Still a page. Docs, emails and bookmarks point at it, and re-reading what
+    // you configured is a legitimate reason to be here — so it neither 404s nor
+    // bounces to the overview, and it still says where you are.
+    await page.goto(`${projectBase()}/get-started`);
+    await expect(page.getByRole('heading', { name: 'Get started' })).toBeVisible();
+    await expect(page.getByText('Setup complete')).toBeVisible();
+    await expect(page.getByText(/\d+ endpoints? delivering/)).toBeVisible();
+    await expect(page.getByRole('navigation', { name: 'Breadcrumb' })).toContainText('Setup');
   });
 
   test('the event detail explains the delivery, and replaying it delivers again', async ({ page }) => {

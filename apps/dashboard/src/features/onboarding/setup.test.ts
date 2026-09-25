@@ -120,10 +120,41 @@ describe('api key state', () => {
 });
 
 describe('progress and headline', () => {
-  it('counts attention steps as done for progress — they exist', () => {
+  /*
+   * CHANGED DELIBERATELY. This used to assert the opposite — that an `attention`
+   * step counted towards progress because the resource exists — and that made a
+   * project whose every endpoint was paused read 6/6 and "complete". The three
+   * affordances (nav item, badge, overview card) are all derived from that
+   * answer, so the checklist vanished from exactly the project that could not
+   * deliver a single webhook. `attention` still counts for SEQUENCING; it no
+   * longer counts as satisfied.
+   */
+  it('does NOT count a step towards progress when nothing under it can deliver', () => {
     const steps = deriveSetupSteps({ ...READY, deliverableEndpointCount: 0, blockedEndpointCount: 1 });
     const progress = setupProgress(steps);
-    expect(progress.done).toBe(progress.total);
+
+    expect(progress.done).toBe(progress.total - 1);
+    expect(isSetupComplete(steps)).toBe(false);
+  });
+
+  it('still counts a step whose resource IS delivering beside a blocked one', () => {
+    // Amber, and satisfied. A paused second endpoint is a warning worth making,
+    // not a reason to leave the checklist in the nav for ever.
+    const steps = deriveSetupSteps({ ...READY, blockedEndpointCount: 1 });
+
+    expect(setupProgress(steps).done).toBe(6);
+    expect(isSetupComplete(steps)).toBe(true);
+  });
+
+  it('does not count subscriptions that exist but are all switched off', () => {
+    const steps = deriveSetupSteps({
+      ...READY,
+      enabledSubscriptionCount: 0,
+      disabledSubscriptionCount: 3,
+    });
+
+    expect(setupProgress(steps).done).toBe(5);
+    expect(isSetupComplete(steps)).toBe(false);
   });
 
   it('leads the headline with the next action while one is outstanding', () => {

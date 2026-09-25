@@ -2,7 +2,7 @@ import { useEffect, useState, type ReactNode } from 'react';
 import { Link, NavLink, Outlet, useLocation, useNavigate, useParams } from 'react-router-dom';
 import { ThemeToggle } from '../components';
 import { useLogout, useSession } from '../features/auth/api';
-import { useSetupState } from '../features/onboarding/api';
+import { useSetupAffordance } from '../features/onboarding/api';
 import { ProductTour } from '../features/onboarding/ProductTour';
 import { setupProgress } from '../features/onboarding/setup';
 import { useTourStore } from '../features/onboarding/tour-store';
@@ -16,6 +16,7 @@ import {
   bottomNav,
   currentSectionLabel,
   navigationGroups,
+  setupNavPath,
   type NavGroup,
   type NavItem,
 } from './navigation';
@@ -335,25 +336,47 @@ function Sidebar({
 }
 
 /**
- * The groups, with a progress badge on Setup.
+ * The groups, with the Setup item conditional and a progress badge on it.
  *
- * The badge is the whole reason this is not a plain `.map`. A new project needs
- * six things before a webhook can flow, and an operator who does not know that
- * has no reason to click a nav item called Setup. "2/6" says there is
- * outstanding work and exactly how much, without a modal, a banner or a nag —
- * and it disappears of its own accord when the work is done, which is the
- * property a dismissible banner does not have.
+ * ## Why the ITEM goes, and not just the badge
+ *
+ * A new project needs six things before a webhook can flow, and an operator who
+ * does not know that has no reason to click a nav item called Setup. "2/6" says
+ * there is outstanding work and exactly how much, without a modal, a banner or a
+ * nag. Once all six are satisfied the checklist can never change again, and a
+ * permanent entry — with or without a green tick on it — is a slot in the
+ * primary nav spent on nothing. So the whole item disappears, and the operator
+ * is left with a rail that only names places worth going.
+ *
+ * ## Why visibility is `useSetupAffordance` and not `isSetupComplete`
+ *
+ * The moment the item's presence depends on completeness, "we could not find
+ * out" becomes a dangerous state: hiding it is indistinguishable from claiming
+ * the project is ready. `useSetupAffordance` answers in three values, and
+ * `unknown` renders the same nothing that `hide` does — which is what makes an
+ * operating project's cold load flicker-free (nothing, then nothing) while a
+ * failed check still leaves an incomplete project a way to its checklist.
+ *
+ * The BADGE keeps the stricter rule: it needs a number, and a number can only
+ * come from a resolved check. A badge reading "0/6" for a moment on every
+ * navigation would be alarming and wrong, so `show` from a remembered value
+ * carries the item without one.
+ *
+ * Exported for `setup-affordance.test.tsx`, which renders it through its real
+ * hooks against a seeded query cache — the same seam `OutboxPage` and
+ * `AnalyticsPage` expose for their tests.
  */
-function RailGroups({ orgId, projectId }: { orgId: string; projectId?: string }) {
-  const groups = navigationGroups(orgId, projectId);
-  const setup = useSetupState(orgId, projectId ?? '');
+export function RailGroups({ orgId, projectId }: { orgId: string; projectId?: string }) {
+  const { affordance, setup } = useSetupAffordance(orgId, projectId ?? '');
+  const groups = navigationGroups(orgId, projectId, affordance);
 
-  // Only once the inputs have actually loaded. A badge that reads "0/6" for a
-  // moment on every navigation would be alarming and wrong.
-  const progress = projectId && !setup.isPending && !setup.isError ? setupProgress(setup.steps) : null;
+  const progress =
+    projectId && affordance === 'show' && !setup.isPending && !setup.isError
+      ? setupProgress(setup.steps)
+      : null;
   const badges =
-    progress && progress.done < progress.total
-      ? { [`/orgs/${orgId}/projects/${projectId}/get-started`]: `${progress.done}/${progress.total}` }
+    progress && progress.done < progress.total && projectId
+      ? { [setupNavPath(orgId, projectId)]: `${progress.done}/${progress.total}` }
       : undefined;
 
   return (
