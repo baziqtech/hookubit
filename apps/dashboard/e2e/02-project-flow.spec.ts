@@ -59,17 +59,31 @@ test.describe.serial('a project, end to end', () => {
   const rowNamed = (page: Page, text: string | RegExp): Locator =>
     page.getByRole('row').filter({ hasText: text });
   /**
+   * Deliveries whose STATUS BADGE reads this - not rows whose text happens to
+   * contain it.
+   *
+   * The deliveries list now carries a payload preview, and `events.payload_raw`
+   * is the whole ingest request body, so every row of the failing event contains
+   * the literal text `"event_type":"payment.failed"`. A `hasText: /failed/`
+   * filter matches those rows whatever their status, which turns "something is
+   * retrying or failed" into an assertion that passes before anything has
+   * failed. The badge label is the status cell's entire text, so an anchored
+   * match is exact.
+   */
+  const rowWithStatus = (page: Page, status: RegExp): Locator =>
+    page.getByRole('row').filter({ has: page.getByText(status) });
+  /**
    * Reload and count matching rows once the list has actually rendered - a
    * count taken in the same tick as the reload sees an empty document.
    */
-  const rowsAfterReload = async (page: Page, text: RegExp): Promise<number> => {
+  const rowsAfterReload = async (page: Page, status: RegExp): Promise<number> => {
     await page.reload();
     await page
       .getByRole('table')
       .or(page.getByText(/^No deliveries/))
       .first()
       .waitFor({ state: 'visible', timeout: 10_000 });
-    return rowNamed(page, text).count();
+    return rowWithStatus(page, status).count();
   };
 
   /** Options carry more than the name ("name — url"), so match by text, select by value. */
@@ -217,7 +231,7 @@ test.describe.serial('a project, end to end', () => {
     expect(((await again.json()) as { id: string }).id).toBe(body.id);
 
     await page.goto(`${projectBase()}/deliveries`);
-    await expect.poll(() => rowsAfterReload(page, /succeeded/i), { timeout: 20_000 }).toBeGreaterThan(0);
+    await expect.poll(() => rowsAfterReload(page, /^succeeded$/i), { timeout: 20_000 }).toBeGreaterThan(0);
     await page.goto(`${projectBase()}/events`);
     await expect(page.getByText('payment.settled').first()).toBeVisible();
   });
@@ -241,7 +255,7 @@ test.describe.serial('a project, end to end', () => {
 
   test('a delivery detail page has the attempt history, and does not offer to replay a success', async ({ page }) => {
     await page.goto(`${projectBase()}/deliveries`);
-    await rowNamed(page, /succeeded/i).first().getByRole('link').first().click();
+    await rowWithStatus(page, /^succeeded$/i).first().getByRole('link').first().click();
     await expect(page).toHaveURL(/\/deliveries\/del_/);
     await expect(page.getByText(/attempt/i).first()).toBeVisible();
     // Replaying a success is almost always an accident; the button says why.
@@ -264,11 +278,11 @@ test.describe.serial('a project, end to end', () => {
     // after ~5s, so a second attempt follows.
     await waitForDeliveries(before + 2, 40_000);
     await page.goto(`${projectBase()}/deliveries`);
-    await expect.poll(() => rowsAfterReload(page, /retrying|failed/i), { timeout: 20_000 }).toBeGreaterThan(0);
+    await expect.poll(() => rowsAfterReload(page, /^(retrying|failed)$/i), { timeout: 20_000 }).toBeGreaterThan(0);
 
     // Back to healthy: the next retry succeeds.
     await setReceiverMode(200);
-    await expect.poll(() => rowsAfterReload(page, /succeeded/i), { timeout: 90_000 }).toBeGreaterThanOrEqual(3);
+    await expect.poll(() => rowsAfterReload(page, /^succeeded$/i), { timeout: 90_000 }).toBeGreaterThanOrEqual(3);
   });
 
   test('analytics reads the real routes: outcomes, latency, event volume', async ({ page }) => {
@@ -300,7 +314,7 @@ test.describe.serial('a project, end to end', () => {
     });
     expect(res.status()).toBe(202);
     await page.goto(`${projectBase()}/deliveries`);
-    await expect.poll(() => rowsAfterReload(page, /retrying/i), { timeout: 30_000 }).toBeGreaterThan(0);
+    await expect.poll(() => rowsAfterReload(page, /^retrying$/i), { timeout: 30_000 }).toBeGreaterThan(0);
     await setReceiverMode(200);
 
     await page.goto(`${projectBase()}/endpoints`);
@@ -319,7 +333,7 @@ test.describe.serial('a project, end to end', () => {
 
     // The worker reaches the queued retry and finishes it `cancelled`.
     await page.goto(`${projectBase()}/deliveries`);
-    await expect.poll(() => rowsAfterReload(page, /cancelled/i), { timeout: 60_000 }).toBeGreaterThan(0);
+    await expect.poll(() => rowsAfterReload(page, /^cancelled$/i), { timeout: 60_000 }).toBeGreaterThan(0);
 
     await page.goto(`${projectBase()}/endpoints`);
     await rowNamed(page, ENDPOINT).getByRole('button', { name: 'Resume deliveries' }).click();
@@ -329,7 +343,7 @@ test.describe.serial('a project, end to end', () => {
 
     // Replay is the path back for a cancelled delivery, and it is delivery-level.
     await page.goto(`${projectBase()}/deliveries`);
-    await rowNamed(page, /cancelled/i).first().getByRole('link').first().click();
+    await rowWithStatus(page, /^cancelled$/i).first().getByRole('link').first().click();
     await expect(page).toHaveURL(/\/deliveries\/del_/);
     const before = (await received()).length;
     await page.getByRole('button', { name: 'Replay delivery' }).click();
@@ -499,7 +513,7 @@ test.describe.serial('a project, end to end', () => {
 
     // The delivery history survives the endpoint.
     await page.goto(`${projectBase()}/deliveries`);
-    await expect(rowNamed(page, /succeeded/i).first()).toBeVisible();
+    await expect(rowWithStatus(page, /^succeeded$/i).first()).toBeVisible();
   });
 
   test('the project is deleted after typing its slug, and the organization is left with none', async ({ page }) => {

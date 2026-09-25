@@ -12,6 +12,7 @@ import type {
   CreatedEndpoint,
   Delivery,
   DeliveryDetail,
+  DeliveryListItem,
   Endpoint,
   EndpointSecret,
   Member,
@@ -21,6 +22,7 @@ import type {
   RetryPolicy,
   Subscription,
 } from '../../types/api';
+import { MAX_PAGE_SIZE, PAYLOAD_PREVIEW_MAX_CHARS } from '../../types/api';
 import * as db from './data';
 import { MockHttpError, mockRequest, resetMockState } from './server';
 
@@ -363,6 +365,55 @@ describe('modules that were speculative and are now real', () => {
     expect(row).not.toHaveProperty('last_status_code');
   });
 
+  /*
+   * The payload preview is LIST-ONLY, and that asymmetry is the point: a
+   * `payload_preview: null` on a response that never read the payload would be
+   * indistinguishable from "this payload is unavailable".
+   */
+  it('carries the bounded payload preview on the list, and not on the detail or a replay', async () => {
+    const page = await mockRequest<OffsetPage<DeliveryListItem>>(
+      'GET',
+      `/v1/projects/${PROJECT}/deliveries?limit=${MAX_PAGE_SIZE}`,
+    );
+    const rows = page.data;
+
+    // Present on every row — branching on `'payload_preview' in row` must be
+    // branching on something.
+    expect(rows.every((row) => 'payload_preview' in row)).toBe(true);
+    expect(rows.every((row) => 'payload_size' in row)).toBe(true);
+    expect(rows.every((row) => typeof row.payload_truncated === 'boolean')).toBe(true);
+    expect(
+      rows.every(
+        (row) =>
+          row.payload_preview === null ||
+          Array.from(row.payload_preview).length <= PAYLOAD_PREVIEW_MAX_CHARS,
+      ),
+    ).toBe(true);
+    // Both branches are reachable, or the UI's null case never renders.
+    expect(rows.some((row) => row.payload_preview !== null)).toBe(true);
+
+    // The offloaded and aged-out events keep their SIZE with no preview, and
+    // never claim truncation.
+    const absent = rows.filter((row) => row.payload_preview === null);
+    expect(absent.length).toBeGreaterThan(0);
+    expect(absent.every((row) => row.payload_size !== null)).toBe(true);
+    expect(absent.every((row) => row.payload_truncated === false)).toBe(true);
+
+    const detail = await mockRequest<DeliveryDetail>(
+      'GET',
+      `/v1/projects/${PROJECT}/deliveries/${rows[0].id}`,
+    );
+    expect(detail).not.toHaveProperty('payload_preview');
+    expect(detail).not.toHaveProperty('payload_size');
+
+    const replay = await mockRequest<Delivery>(
+      'POST',
+      `/v1/projects/${PROJECT}/deliveries/${rows[0].id}/replay`,
+      {},
+    );
+    expect(replay).not.toHaveProperty('payload_preview');
+  });
+
   it('refuses status and failing_now together, as the API does', async () => {
     await expect(
       mockRequest(
@@ -390,6 +441,10 @@ describe('modules that were speculative and are now real', () => {
     expect(detail).not.toHaveProperty('payload');
     expect(detail).not.toHaveProperty('request_headers');
     expect(detail.attempts[0]).toHaveProperty('request_headers');
+    // Same for the body: per attempt, bounded, and a prefix of what the event
+    // holds in full — not a field on the delivery.
+    expect(detail).not.toHaveProperty('request_payload');
+    expect(detail.attempts[0]).toHaveProperty('request_payload');
   });
 
   it('a replay creates a NEW delivery row that points back at the original', async () => {

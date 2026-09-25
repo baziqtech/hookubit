@@ -8,7 +8,7 @@ import { api, queryString } from '../../lib/api';
 import { offsetPage, pageParams, type Paged } from '../../lib/pagination';
 import { queryKeys } from '../../lib/query-keys';
 import type {
-  Delivery,
+  DeliveryListItem,
   EventDetail,
   EventStatus,
   OffsetPage,
@@ -87,13 +87,19 @@ export function useEvent(projectId: string, eventId: string) {
  * The materialised routing for one event: one row per matching subscription,
  * each with its own retry chain. This is the query that answers "did finance
  * ever receive this?".
+ *
+ * Rows are `DeliveryListItem`: this is the second route that carries the bounded
+ * payload preview. The event page deliberately does NOT render it — every row
+ * here is the SAME event, so a per-row preview would be the same 160 characters
+ * repeated down the table, and the Payload tab one click away has the whole body
+ * with its size, hash and source.
  */
 export function useEventDeliveries(projectId: string, eventId: string) {
   return useQuery({
     queryKey: queryKeys.eventDeliveries(projectId, eventId),
     queryFn: async () =>
       offsetPage(
-        await api.get<OffsetPage<Delivery>>(
+        await api.get<OffsetPage<DeliveryListItem>>(
           `/v1/projects/${projectId}/events/${eventId}/deliveries${queryString(pageParams(0))}`,
         ),
       ),

@@ -11,6 +11,7 @@ const attempt = (attempt_number: number): DeliveryAttempt => ({
   status: 'failure',
   http_status: 503,
   request_headers: null,
+  request_payload: null,
   response_headers: null,
   response_body: null,
   response_body_location: null,

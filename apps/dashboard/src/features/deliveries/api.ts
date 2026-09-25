@@ -6,6 +6,7 @@ import type {
   Delivery,
   DeliveryAttempt,
   DeliveryDetail,
+  DeliveryListItem,
   DeliveryStatus,
   OffsetPage,
 } from '../../types/api';
@@ -38,13 +39,17 @@ export interface DeliveryFilters {
  * `GET /v1/projects/:projectId/deliveries` — OFFSET paged, like everything
  * else. The dashboard modelled this as cursor paged (`{ has_more, next_cursor
  * }`); `next_cursor` does not exist anywhere in the document.
+ *
+ * Rows are `DeliveryListItem`, not `Delivery`: this route is one of the two that
+ * carry the bounded payload preview. The detail route and the replay result
+ * serve plain `DeliveryDto` and must keep doing so — see the type's comment.
  */
 export function useDeliveries(projectId: string, filters: DeliveryFilters, offset = 0) {
   return useQuery({
     queryKey: queryKeys.deliveries(projectId, filters as Record<string, string>, offset),
     queryFn: async () =>
       offsetPage(
-        await api.get<OffsetPage<Delivery>>(
+        await api.get<OffsetPage<DeliveryListItem>>(
           `/v1/projects/${projectId}/deliveries${queryString({
             ...filters,
             failing_now: filters.failing_now ? 'true' : undefined,

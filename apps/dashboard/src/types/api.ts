@@ -505,6 +505,42 @@ export type DeliveryStatus = S['DeliveryDto']['status'];
  */
 export type Delivery = S['DeliveryDto'];
 
+/**
+ * `DeliveryListItemDto` — a delivery AS A LIST ROW: everything on `Delivery`,
+ * plus the three payload fields the LIST routes read and nothing else does.
+ *
+ * `Delivery` is deliberately NOT widened to include them. `DeliveryDto` is also
+ * the replay result and the base of `DeliveryDetailDto`, and neither of those
+ * reads `payload_raw` at all — a `payload_preview: null` there would read as
+ * "this payload is unavailable", which is the one thing null is supposed to
+ * mean. Only `GET …/deliveries` and `GET …/events/:id/deliveries` serve these,
+ * so only their rows carry the type.
+ *
+ * `payload_preview` is bounded to 160 characters SERVER-SIDE, sliced from the
+ * first 640 bytes and decoded: it is a preview, not the bytes the signature was
+ * computed over, and it is cut by character count rather than at a structural
+ * boundary, so it is very often invalid JSON. Render it as text.
+ * `features/deliveries/payload-preview.ts` turns the three fields into the four
+ * cases a cell can honestly show.
+ */
+export type DeliveryListItem = S['DeliveryListItemDto'];
+
+/**
+ * `PAYLOAD_PREVIEW_MAX_CHARS` in control-api `src/events/event-payload.ts`.
+ * Mirrored because the preview's LENGTH is the thing the column has to explain
+ * ("the first 160 characters of a 2.4 KB body") and the number is not on the
+ * wire. Nothing here may raise it: the server is the only truncator.
+ */
+export const PAYLOAD_PREVIEW_MAX_CHARS = 160;
+
+/**
+ * `PAYLOAD_INLINE_MAX_BYTES` in the same file (64 KiB). At or above this the
+ * ingest writes `payload_raw` NULL and a `payload_location`, so this is the one
+ * thing that lets a client tell "too big to preview" — which it can then state
+ * with its exact size — from the other reasons a preview can be missing.
+ */
+export const PAYLOAD_INLINE_MAX_BYTES = 65_536;
+
 export type DeliveryEventRef = S['DeliveryEventRefDto'];
 export type DeliveryEndpointRef = S['DeliveryEndpointRefDto'];
 

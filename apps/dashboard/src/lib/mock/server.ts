@@ -18,6 +18,7 @@ import type {
   Delivery,
   DeliveryAttempt,
   DeliveryDetail,
+  DeliveryListItem,
   Endpoint,
   EndpointSecret,
   EventDetail,
@@ -42,6 +43,7 @@ import {
   ORGANIZATION_NAME_MAX_LENGTH,
   ORGANIZATION_NAME_MIN_LENGTH,
   ORGANIZATION_SLUG_MAX_LENGTH,
+  PAYLOAD_PREVIEW_MAX_CHARS,
   PROJECT_NAME_MAX_LENGTH,
   PROJECT_NAME_MIN_LENGTH,
   PROJECT_SLUG_MAX_LENGTH,
@@ -382,6 +384,44 @@ function replayOf(delivery: Delivery): Delivery {
     is_replay: true,
     created_at: now,
     updated_at: now,
+  };
+}
+
+/**
+ * A delivery AS A LIST ROW: the row, plus the bounded payload preview that ONLY
+ * the two list routes carry (`…/deliveries` and `…/events/:id/deliveries`).
+ *
+ * Derived from the EVENT's payload envelope every time rather than stored on the
+ * fixture, so the mock cannot disagree with `GET /events/:id` about whether a
+ * body is readable at all: the offloaded event and the aged-out one have no
+ * `body`, so their rows have no preview, and their SIZE is still served —
+ * exactly as the real ingest records it.
+ *
+ * The detail route and both replay routes keep serving plain `DeliveryDto`. A
+ * preview there would be a null that reads as "unavailable" on a response that
+ * never looked at the payload.
+ */
+function toListItem(delivery: Delivery): DeliveryListItem {
+  const event = db.events.find((candidate) => candidate.id === delivery.event_id);
+  const body = event?.payload.body ?? null;
+  const size = event?.payload_size ?? null;
+
+  // No readable bytes: offloaded, or past the retention window. `truncated` is
+  // FALSE here, as the DTO promises — there is no preview for the body to be
+  // longer than.
+  if (body === null) {
+    return { ...delivery, payload_preview: null, payload_size: size, payload_truncated: false };
+  }
+
+  // Sliced by CODE POINT, like the server: `String.prototype.slice` counts
+  // UTF-16 code units and would cut a surrogate pair in half.
+  const points = Array.from(body);
+  const truncated = points.length > PAYLOAD_PREVIEW_MAX_CHARS;
+  return {
+    ...delivery,
+    payload_preview: truncated ? points.slice(0, PAYLOAD_PREVIEW_MAX_CHARS).join('') : body,
+    payload_size: size,
+    payload_truncated: truncated,
   };
 }
 
@@ -2639,7 +2679,10 @@ const handlers: Handler[] = [
     method: 'GET',
     pattern: '/v1/projects/:projectId/deliveries',
     handle: ({ params, query }) =>
-      offsetEnvelope<Delivery>(filterDeliveries(params.projectId, query), query),
+      offsetEnvelope<DeliveryListItem>(
+        filterDeliveries(params.projectId, query).map(toListItem),
+        query,
+      ),
   },
 
   /*
@@ -2819,7 +2862,7 @@ const handlers: Handler[] = [
     method: 'GET',
     pattern: '/v1/projects/:projectId/events/:eventId/deliveries',
     handle: ({ params, query }) =>
-      offsetEnvelope<Delivery>(deliveriesForEvent(params.eventId), query),
+      offsetEnvelope<DeliveryListItem>(deliveriesForEvent(params.eventId).map(toListItem), query),
   },
   {
     method: 'POST',

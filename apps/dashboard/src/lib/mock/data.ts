@@ -1467,6 +1467,16 @@ function buildAttempts(
        * key, and it is the one thing a consumer can compare against when
        * verification fails.
        */
+      /*
+       * The body THIS attempt sent, as the worker stored it: BOUNDED, and
+       * identical on every attempt of the chain — the signature covers the raw
+       * bytes, so a retry cannot send anything else. Null on the in-flight
+       * attempt: the row is written when the call finishes, so there is nothing
+       * recorded yet, and the detail page has to render that case.
+       */
+      request_payload: inFlight
+        ? null
+        : `{"id":"${deliveryId}","amount":${between(100, 99_999)},"currency":"NGN"}`,
       request_headers: {
         'content-type': 'application/json',
         'user-agent': 'HookuBit/1.0',

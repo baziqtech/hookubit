@@ -15,9 +15,14 @@ import {
 import { deliveryOutcome, describeDelivery } from '../../lib/delivery-status';
 import { formatRelativeTime, truncateId } from '../../lib/format';
 import { StuckEventsNotice } from '../outbox/StuckEventsNotice';
-import { DEFAULT_PAGE_SIZE, type Delivery, type DeliveryStatus } from '../../types/api';
+import { DEFAULT_PAGE_SIZE, type DeliveryListItem, type DeliveryStatus } from '../../types/api';
 import { useEndpoints } from '../endpoints/api';
 import { useDeliveries, type DeliveryFilters } from './api';
+import {
+  describePayloadPreview,
+  payloadPreviewState,
+  type PayloadPreviewFields,
+} from './payload-preview';
 
 const STATUSES: DeliveryStatus[] = [
   'pending',
@@ -203,11 +208,42 @@ export function DeliveriesPage() {
   );
 }
 
+/**
+ * The payload cell, and the four things `payload_preview` can mean.
+ *
+ * Exported for its test. The reason it is a component rather than
+ * `{row.payload_preview}` is that three of the four cases are NOT bytes: an
+ * empty body, a body too big to preview, and a body whose preview could not be
+ * produced all have to read as different sentences, and none of them may render
+ * as the blank cell that says "this event was published with nothing in it".
+ *
+ * The bytes are mono, because they are a machine value; everything this page
+ * says ABOUT them is sans, so a reader never mistakes our words for the
+ * payload's. The rest of the story — including that this is not what the
+ * signature was computed over — is on the cell's `title`, which is where the
+ * other explained numbers in this product keep their long form.
+ */
+export function PayloadPreviewCell({ row }: { row: PayloadPreviewFields }) {
+  const state = payloadPreviewState(row);
+  const { label, note, title } = describePayloadPreview(state);
+
+  return (
+    <div className="flex min-w-0 max-w-[15rem] flex-col gap-0.5" title={title}>
+      {state.kind === 'body' ? (
+        <code className="truncate font-mono text-2xs text-ink-muted">{state.text}</code>
+      ) : (
+        <span className="text-xs text-ink-subtle">{label}</span>
+      )}
+      <span className="text-2xs text-ink-subtle">{note}</span>
+    </div>
+  );
+}
+
 function deliveryColumns(
   orgId: string,
   projectId: string,
   endpointNames: Map<string, string>,
-): Column<Delivery>[] {
+): Column<DeliveryListItem>[] {
   return [
     {
       key: 'id',
@@ -257,6 +293,29 @@ function deliveryColumns(
         // carries none. `describeDelivery` falls back to `last_error`.
         <span className="text-xs text-ink-muted">{describeDelivery(deliveryOutcome(row))}</span>
       ),
+    },
+    /*
+     * AFTER the two columns an operator actually scans. The payload answers
+     * "which order was that?", which is context for a row you have already
+     * found by its status — so it sits behind Status and Outcome, and in front
+     * of the right-aligned pair that stays together at the end.
+     *
+     * `secondary`, which means it is dropped below `md` — in the narrow table
+     * and in the phone card list, from the one flag, so nothing here adds a
+     * second DOM. That is the right call for a phone: 160 characters of mono in
+     * a card's right-aligned `dd` is unreadable, and the delivery it belongs to
+     * is one tap away with the body in full.
+     */
+    {
+      key: 'payload',
+      header: (
+        <span title="The first 160 characters of the event body, decoded. A preview — not the bytes the signature was computed over.">
+          Payload
+        </span>
+      ),
+      secondary: true,
+      width: 'w-60',
+      render: (row) => <PayloadPreviewCell row={row} />,
     },
     {
       key: 'attempts',

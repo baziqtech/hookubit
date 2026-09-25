@@ -57,6 +57,9 @@ const attempt: DeliveryAttempt = {
   status: 'failure',
   http_status: 503,
   request_headers: { 'Webhook-Signature': 'v1=deadbeef', 'Content-Type': 'application/json' },
+  // What the ledger kept of what this attempt sent: bounded, and not the
+  // system of record for the body — the event is.
+  request_payload: '{"order":"ord_9"}',
   response_headers: null,
   response_body: null,
   response_body_location: null,
