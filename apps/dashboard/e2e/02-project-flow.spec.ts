@@ -434,7 +434,12 @@ test.describe.serial('a project, end to end', () => {
   });
 
   test('usage and the audit log reflect what happened', async ({ page }) => {
+    // Usage is a tab on Analytics now. The old address is kept because it was
+    // bookmarked and is linked from billing: it resolves a project and lands on
+    // the tab, pinned to the 30-day window the standalone page was fixed at.
     await page.goto(`/orgs/${state.orgId}/usage`);
+    await expect(page).toHaveURL(/\/analytics\?tab=usage&window=30d/);
+    await expect(page.getByRole('tab', { name: 'Usage', selected: true })).toBeVisible();
     await expect(rowNamed(page, /renamed/)).toBeVisible();
     await expect(rowNamed(page, /renamed/)).toContainText(/\b[1-9]\d*\b/);
     await page.goto(`/orgs/${state.orgId}/audit`);

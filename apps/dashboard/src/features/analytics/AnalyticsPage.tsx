@@ -1,4 +1,4 @@
-import { Link, useParams } from 'react-router-dom';
+import { Link, useParams, useSearchParams } from 'react-router-dom';
 import {
   Async,
   Badge,
@@ -8,6 +8,7 @@ import {
   Panel,
   Stat,
   Table,
+  Tabs,
   type Column,
 } from '../../components';
 import { cn } from '../../lib/cn';
@@ -29,40 +30,131 @@ import {
   useFailingEndpoints,
 } from './api';
 import {
-  deliveriesPerEvent,
   formatCountDelta,
   formatNullableDuration,
   formatRate,
   formatRateDelta,
-  formatRatio,
   rateTone,
   share,
 } from './derive';
 import { WindowCaption } from './tiles';
 import { OutcomeChart, OutcomeLegend } from './OutcomeChart';
+import { UsageTab } from './UsageTab';
 import { WindowSelector, useAnalyticsWindow } from './WindowSelector';
+import type { AnalyticsWindowChoice } from './window';
 
 /**
- * Five questions, five routes, five panels that land independently.
+ * Analytics — two questions about one window, behind one nav item.
  *
- * The chart at the top is a real time series now — `/analytics/deliveries/series`
- * buckets the window, and `series-layout.ts` turns it into bars. Everything
- * below it still COMPARES rather than charts: each count is reported for the
- * window and for the immediately preceding window of equal length, with the
- * delta, which answers "is it getting worse?" in a number rather than asking
- * someone to eyeball a slope. The two are complements — the chart says WHEN,
- * the deltas say WHETHER.
+ * ## Why Usage is a tab here rather than a page of its own
+ *
+ * The two screens were asking the same routes the same question at different
+ * scopes: "how is delivery going in this project" and "what has each project
+ * consumed". Separately they each carried their own notion of the window —
+ * Analytics a selector, Usage a hard-coded 720 hours — so the same figure
+ * (deliveries per event) could be read off two screens and disagree. One page,
+ * one selector in the header above the tabs, and every number on both tabs is
+ * the same window.
+ *
+ * A tab rather than a sixth panel on one long scroll, for a reason that is not
+ * layout: the Usage rows are TWO THROTTLED REQUESTS PER PROJECT, and this is
+ * the page an operator reloads during an incident. Appending them to the
+ * delivery panels would spend an organization's whole `analytics/events` budget
+ * every time someone refreshed to see whether the failure rate moved. A tab
+ * mounts its queries when someone asks for consumption. It also keeps the
+ * 2am answer — the chart, the outcome tiles, the failing endpoints — above the
+ * fold rather than pushing it under a billing-adjacent table.
+ *
+ * ## The Delivery tab
+ *
+ * Five questions, five routes, five panels that land independently. The chart
+ * at the top is a real time series — `/analytics/deliveries/series` buckets the
+ * window, and `series-layout.ts` turns it into bars. Everything below it
+ * COMPARES rather than charts: each count is reported for the window and for
+ * the immediately preceding window of equal length, with the delta, which
+ * answers "is it getting worse?" in a number rather than asking someone to
+ * eyeball a slope. The two are complements — the chart says WHEN, the deltas
+ * say WHETHER.
  *
  * Every proportional bar beside a table is a share of counts the response
  * actually carries, never a bucket this page invented, and the table is the
  * accessible equal of every bar.
  *
- * The window is in the URL (`?window=1h|24h|7d|30d`) so a link pasted into an
- * incident channel opens on the same period.
+ * Both the window and the tab are in the URL (`?window=1h|24h|7d|30d&tab=usage`)
+ * so a link pasted into an incident channel opens on the same period and the
+ * same half of the page.
  */
+const ANALYTICS_TABS = [
+  { value: 'delivery', label: 'Delivery' },
+  { value: 'usage', label: 'Usage' },
+] as const;
+
+export type AnalyticsTab = (typeof ANALYTICS_TABS)[number]['value'];
+
+export const DEFAULT_ANALYTICS_TAB: AnalyticsTab = 'delivery';
+
+/**
+ * `?tab=` → a tab. Anything unrecognised is the delivery panels rather than an
+ * error: the parameter is a view preference, and a stale link should open the
+ * page on its primary half, not break it.
+ */
+export function readAnalyticsTab(raw: string | null | undefined): AnalyticsTab {
+  return ANALYTICS_TABS.some((tab) => tab.value === raw)
+    ? (raw as AnalyticsTab)
+    : DEFAULT_ANALYTICS_TAB;
+}
+
 export function AnalyticsPage() {
   const { orgId = '', projectId = '' } = useParams();
   const { key: windowKey, window, setKey: setWindow } = useAnalyticsWindow();
+  const [searchParams, setSearchParams] = useSearchParams();
+  const tab = readAnalyticsTab(searchParams.get('tab'));
+
+  return (
+    <div className="flex flex-col gap-4">
+      <PageHeader
+        title="Analytics"
+        description={`How delivery is going, and what each project consumed — both over the ${window.label.toLowerCase()}, beside ${window.previous}. One window governs both tabs.`}
+        actions={<WindowSelector value={windowKey} onChange={setWindow} />}
+      />
+
+      <Tabs
+        aria-label="Analytics view"
+        items={[...ANALYTICS_TABS]}
+        value={tab}
+        onChange={(value) =>
+          setSearchParams(
+            (previous) => {
+              const next = new URLSearchParams(previous);
+              if (value === DEFAULT_ANALYTICS_TAB) next.delete('tab');
+              else next.set('tab', value);
+              return next;
+            },
+            { replace: true },
+          )
+        }
+      >
+        {tab === 'delivery' ? (
+          <DeliveryTab orgId={orgId} projectId={projectId} window={window} />
+        ) : (
+          <UsageTab orgId={orgId} windowKey={windowKey} window={window} />
+        )}
+      </Tabs>
+    </div>
+  );
+}
+
+/* ── Delivery ─────────────────────────────────────────────────────────────── */
+
+function DeliveryTab({
+  orgId,
+  projectId,
+  window,
+}: {
+  orgId: string;
+  projectId: string;
+  window: AnalyticsWindowChoice;
+}) {
   const base = `/orgs/${orgId}/projects/${projectId}`;
 
   const series = useDeliverySeries(projectId, window.hours, window.bucket);
@@ -72,13 +164,7 @@ export function AnalyticsPage() {
   const events = useEventVolume(projectId, window.hours, DEFAULT_ANALYTICS_LIMIT);
 
   return (
-    <div className="flex flex-col gap-4">
-      <PageHeader
-        title="Analytics"
-        description={`Delivery outcomes, failing endpoints, attempt latency and event volume over the ${window.label.toLowerCase()}, each beside ${window.previous}.`}
-        actions={<WindowSelector value={windowKey} onChange={setWindow} />}
-      />
-
+    <div className="flex flex-col gap-4 pt-4">
       <Panel
         title="Delivery over time"
         description={`Deliveries created in each bucket of the ${window.label.toLowerCase()}, and how they turned out.`}
@@ -162,7 +248,7 @@ export function AnalyticsPage() {
 
       <Panel
         title="Event volume"
-        description={`Events published in the ${window.label.toLowerCase()} — not deliveries. One event routes to one delivery per matching subscription, so the two totals differ and their ratio is this project's deliveries per event.`}
+        description={`Events published in the ${window.label.toLowerCase()} — not deliveries. One event routes to one delivery per matching subscription, so the two totals differ; the ratio between them is on the Usage tab, for this project beside every other.`}
       >
         <Async
           query={events}
@@ -174,15 +260,7 @@ export function AnalyticsPage() {
             />
           }
         >
-          {(data) => (
-            <Events
-              data={data}
-              deliveriesTotal={outcomes.data?.current.total}
-              deliveriesPending={outcomes.isPending}
-              previousLabel={window.previous}
-              base={base}
-            />
-          )}
+          {(data) => <Events data={data} previousLabel={window.previous} base={base} />}
         </Async>
       </Panel>
     </div>
@@ -537,22 +615,24 @@ function Latency({ data }: { data: AttemptLatency }) {
 
 function Events({
   data,
-  deliveriesTotal,
-  deliveriesPending,
   previousLabel,
   base,
 }: {
   data: EventVolume;
-  deliveriesTotal: number | undefined;
-  deliveriesPending: boolean;
   previousLabel: string;
   base: string;
 }) {
-  const ratio = deliveriesPerEvent(deliveriesTotal, data.total);
-
   return (
     <div className="flex flex-col gap-4">
-      <div className="grid gap-3 sm:grid-cols-3">
+      {/*
+        Deliveries per event used to be a third tile here, divided out of the
+        outcomes response beside this one. It is on the Usage tab now, where it
+        is computed for every project in the organization and for the
+        organization's total — the same division, in the one place it can be
+        compared. Two screens carrying the same ratio was how they could
+        disagree.
+      */}
+      <div className="grid gap-3 sm:grid-cols-2">
         <Stat
           label="Events published"
           value={formatCount(data.total)}
@@ -562,24 +642,6 @@ function Events({
           label="Previous window"
           value={formatCount(data.previous_total)}
           hint={`Events published in ${previousLabel}`}
-        />
-        {/*
-          The one number here from two responses: deliveries created (from the
-          outcomes route) over events published (this one). Shown only when
-          both are in hand and there were events; otherwise it says why.
-        */}
-        <Stat
-          label="Deliveries per event"
-          value={formatRatio(ratio)}
-          hint={
-            ratio !== null
-              ? `${formatCount(deliveriesTotal ?? 0)} deliveries created ÷ ${formatCount(data.total)} events published`
-              : data.total === 0
-                ? 'No events to divide by'
-                : deliveriesPending
-                  ? 'Waiting for delivery outcomes'
-                  : 'Delivery outcomes did not load'
-          }
         />
       </div>
 

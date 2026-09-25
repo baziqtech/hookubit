@@ -126,11 +126,11 @@ export function BillingPage() {
 
               <p className="mt-3 text-2xs leading-relaxed text-ink-subtle">
                 Counted from hourly rollups, so the period ends at the last complete hour rather
-                than at this moment. Per-project figures are on{' '}
+                than at this moment. Per-project figures are on the{' '}
                 <Link to={`/orgs/${orgId}/usage`} className="text-accent hover:underline">
-                  Usage
+                  Usage tab of Analytics
                 </Link>
-                .
+                , over a rolling window rather than this period.
               </p>
             </Panel>
 

@@ -32,7 +32,6 @@ export type NavIconName =
   | 'policies'
   | 'api-keys'
   | 'analytics'
-  | 'usage'
   | 'audit'
   | 'project-settings'
   | 'notifications'
@@ -106,14 +105,6 @@ const PATHS: Record<NavIconName, ReactNode> = {
     <>
       <path d="M3 21h18" />
       <path d="M6 21v-7M11 21V6M16 21v-10M21 21v-4" />
-    </>
-  ),
-  // A dial: how much of the allowance is gone.
-  usage: (
-    <>
-      <path d="M3.5 17a9 9 0 1 1 17 0" />
-      <path d="m12 13 4-4" />
-      <circle cx="12" cy="14" r="1.5" />
     </>
   ),
   // A scroll with writing on it: the record of who did what.

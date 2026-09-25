@@ -19,13 +19,13 @@ import { GetStartedPage } from '../features/onboarding/GetStartedPage';
 import { OverviewPage } from '../features/overview/OverviewPage';
 import { PoliciesPage } from '../features/policies/PoliciesPage';
 import { AnalyticsPage } from '../features/analytics/AnalyticsPage';
+import { UsageRedirect } from '../features/analytics/UsageRedirect';
 import { OrganizationSettingsPage } from '../features/settings/OrganizationSettingsPage';
 import { ProjectSettingsPage } from '../features/settings/ProjectSettingsPage';
 import { BillingPage } from '../features/settings/BillingPage';
 import { SubscriptionsPage } from '../features/subscriptions/SubscriptionsPage';
 import { AcceptInvitationPage } from '../features/team/AcceptInvitationPage';
 import { TeamPage } from '../features/team/TeamPage';
-import { UsagePage } from '../features/usage/UsagePage';
 import { AppLayout } from '../layouts/AppLayout';
 import { AuthLayout } from '../layouts/AuthLayout';
 import { NotFoundPage, OrganizationLanding, RootRedirect } from './LandingRoutes';
@@ -74,7 +74,10 @@ export const router = createBrowserRouter([
           { path: '/orgs/:orgId/settings', element: <OrganizationSettingsPage /> },
           { path: '/orgs/:orgId/team', element: <TeamPage /> },
           { path: '/orgs/:orgId/billing', element: <BillingPage /> },
-          { path: '/orgs/:orgId/usage', element: <UsagePage /> },
+          // Usage is a tab on Analytics now. The address is kept because it was
+          // bookmarked and is linked from billing; `UsageRedirect` resolves a
+          // project and forwards to it. Removing it would 404 those links.
+          { path: '/orgs/:orgId/usage', element: <UsageRedirect /> },
           { path: '/orgs/:orgId/audit', element: <AuditPage /> },
 
           {

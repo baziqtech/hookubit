@@ -1,58 +1,74 @@
 import { useQueries } from '@tanstack/react-query';
 import type { ReactNode } from 'react';
-import { Link, useParams } from 'react-router-dom';
-import { Async, Badge, EmptyState, PageHeader, Panel, Skeleton } from '../../components';
+import { Link } from 'react-router-dom';
+import { Async, Badge, EmptyState, Panel, Skeleton } from '../../components';
 import { formatCount } from '../../lib/format';
 import type { Project } from '../../types/api';
-import { MAX_WINDOW_HOURS } from '../../types/api';
-import { deliveryOutcomesQuery, eventVolumeQuery } from '../analytics/api';
-import { deliveriesPerEvent, formatRatio } from '../analytics/derive';
-import { describeFailure } from '../analytics/tiles';
+import { DEFAULT_ANALYTICS_LIMIT, MAX_WINDOW_HOURS } from '../../types/api';
 import { useProjects } from '../projects/api';
+import { deliveryOutcomesQuery, eventVolumeQuery } from './api';
+import { deliveriesPerEvent, formatRatio } from './derive';
+import { describeFailure } from './tiles';
+import type { AnalyticsWindowChoice, AnalyticsWindowKey } from './window';
+import { DEFAULT_WINDOW_KEY } from './window';
 
 /**
- * Usage, from what exists.
+ * Usage, from what exists — the second half of Analytics.
  *
  * There is NO usage route and NO billing period on the control API — not a
- * stub, not a shape. What there is: per-project analytics with a 720-hour
- * ceiling. So this page is the organization's projects, one row each, with
- * events published and deliveries created over the last 30 days read from
- * `analytics/events` and `analytics/deliveries` at `window_hours=720`, and
- * the routing ratio between them. Each row is its own pair of requests and
- * lands on its own.
+ * stub, not a shape. What there is: per-project analytics. So this tab is the
+ * organization's projects, one row each, with events published and deliveries
+ * created over THE WINDOW THE PAGE IS SET TO, read from `analytics/events` and
+ * `analytics/deliveries`, and the routing ratio between them. Each row is its
+ * own pair of requests and lands on its own.
  *
- * What it is NOT is said on the page: these are rolling windows ending at the
+ * The window is the page's, not this tab's. It used to be pinned at 720 hours
+ * on a page of its own, which meant the dashboard had two disagreeing notions
+ * of "the window"; now the selector in the page header governs these rows and
+ * the delivery panels alike, and `30d` is still here as the widest of the four.
+ *
+ * What it is NOT is said on the tab: these are rolling windows ending at the
  * moment each row was fetched, not a calendar month and not anything an
- * invoice is calculated from. `BillingPage` points here as "real numbers",
- * and they are — they are just not billing numbers.
+ * invoice is calculated from. `BillingPage` points here as "real numbers", and
+ * they are — they are just not billing numbers.
  *
- * Only the first page of projects is read. Every project on this page costs
- * two throttled requests (120 per five minutes per route), so an organization
- * at the ceiling of projects is the one to be careful with, and paging
- * through all of them would be the wrong kind of thorough.
+ * Only the first page of projects is read. Every project costs two throttled
+ * requests (120 per five minutes per route), so an organization at the ceiling
+ * of projects is the one to be careful with, and paging through all of them
+ * would be the wrong kind of thorough. This is also why the tab is a tab: the
+ * queries mount when someone asks for consumption, not on every reload of the
+ * delivery panels during an incident.
  */
-export function UsagePage() {
-  const { orgId = '' } = useParams();
+export function UsageTab({
+  orgId,
+  windowKey,
+  window,
+}: {
+  orgId: string;
+  windowKey: AnalyticsWindowKey;
+  window: AnalyticsWindowChoice;
+}) {
   const projects = useProjects(orgId);
 
   return (
-    <div className="flex flex-col gap-4">
-      <PageHeader
-        title="Usage"
-        description="Events published and deliveries created per project over the last 30 days."
-      />
-
+    <div className="flex flex-col gap-4 pt-4">
       <Panel>
         <p className="text-xs leading-relaxed text-ink-muted">
-          <strong className="font-medium text-ink">These are rolling 30-day windows, not a billing period.</strong>{' '}
+          <strong className="font-medium text-ink">
+            These are rolling windows, not a billing period.
+          </strong>{' '}
           Each row is read from that project’s analytics routes at{' '}
           <code className="rounded border border-line bg-raised px-1 py-0.5 font-mono text-2xs">
-            window_hours={MAX_WINDOW_HOURS}
+            window_hours={window.hours}
           </code>{' '}
-          — the API’s ceiling — and the window ends at the moment the row was fetched. The
-          control API has no usage or billing module, so nothing here is metered, invoiced or
-          tied to a calendar month; it is the same delivery ledger the{' '}
-          <span className="text-ink">Analytics</span> page reads, summed over 30 days. Each
+          — the window this page is set to — and it ends at the moment the row was fetched, not at
+          a month boundary. The control API has no usage or billing module, so nothing here is
+          metered, invoiced or tied to a calendar month; it is the same delivery ledger the{' '}
+          <span className="text-ink">Delivery</span> tab reads, summed one project at a time.{' '}
+          <code className="rounded border border-line bg-raised px-1 py-0.5 font-mono text-2xs">
+            30d
+          </code>{' '}
+          is the widest comparison available — {MAX_WINDOW_HOURS} hours is the API’s ceiling. Each
           project costs two throttled requests (120 per five minutes per route), so reload
           sparingly on a large organization.
         </p>
@@ -73,14 +89,28 @@ export function UsagePage() {
         {(page) => (
           <Panel
             flush
-            title="Last 30 days by project"
+            title={`By project over the ${window.label.toLowerCase()}`}
             description={
               page.hasMore
                 ? `Only the first ${page.rows.length} projects are shown — the organization has more, and their usage is not included below.`
                 : `${page.rows.length} ${page.rows.length === 1 ? 'project' : 'projects'}. Every project in the organization is listed.`
             }
           >
-            <UsageTable orgId={orgId} projects={page.rows} />
+            <UsageTable
+              orgId={orgId}
+              projects={page.rows}
+              windowKey={windowKey}
+              windowHours={window.hours}
+            />
+            <div className="border-t border-line px-4 py-2.5">
+              <p className="text-2xs leading-relaxed text-ink-subtle">
+                Deliveries per event is deliveries created ÷ events published — how many endpoints
+                an average publish reached in that project. It is the same division the{' '}
+                <span className="text-ink-muted">Delivery</span> tab’s event volume panel explains,
+                computed here for every project and for the organization, and it is “—” for a
+                project that published nothing in the window rather than a zero.
+              </p>
+            </div>
           </Panel>
         )}
       </Async>
@@ -88,18 +118,30 @@ export function UsagePage() {
   );
 }
 
-const WINDOW_HOURS = MAX_WINDOW_HOURS;
-
-function UsageTable({ orgId, projects }: { orgId: string; projects: Project[] }) {
-  // One query per project per route, under the same keys the Analytics page
-  // uses, so a project already opened there costs nothing here. The number of
-  // queries is the number of projects on this page and never changes between
-  // renders of the same page, which is what makes `useQueries` legal here.
+function UsageTable({
+  orgId,
+  projects,
+  windowKey,
+  windowHours,
+}: {
+  orgId: string;
+  projects: Project[];
+  windowKey: AnalyticsWindowKey;
+  windowHours: number;
+}) {
+  // One query per project per route, under exactly the keys the Delivery tab
+  // uses — same window, same limit — so the project you are already looking at
+  // costs nothing here, and switching tabs does not re-fetch its two figures.
+  // The number of queries is the number of projects on this page and never
+  // changes between renders of the same page, which is what makes `useQueries`
+  // legal here.
   const events = useQueries({
-    queries: projects.map((project) => eventVolumeQuery(project.id, WINDOW_HOURS, 1)),
+    queries: projects.map((project) =>
+      eventVolumeQuery(project.id, windowHours, DEFAULT_ANALYTICS_LIMIT),
+    ),
   });
   const deliveries = useQueries({
-    queries: projects.map((project) => deliveryOutcomesQuery(project.id, WINDOW_HOURS)),
+    queries: projects.map((project) => deliveryOutcomesQuery(project.id, windowHours)),
   });
 
   const everyRowLoaded = events.every((q) => q.isSuccess) && deliveries.every((q) => q.isSuccess);
@@ -114,7 +156,7 @@ function UsageTable({ orgId, projects }: { orgId: string; projects: Project[] })
     <div className="w-full overflow-x-auto scrollbar-thin">
       <table className="w-full border-collapse text-sm">
         <caption className="sr-only">
-          Events published and deliveries created per project over the last 30 days
+          Events published and deliveries created per project over the window this page is set to
         </caption>
         <thead>
           <tr className="border-b border-line">
@@ -131,6 +173,7 @@ function UsageTable({ orgId, projects }: { orgId: string; projects: Project[] })
               key={project.id}
               orgId={orgId}
               project={project}
+              windowKey={windowKey}
               events={events[index]}
               deliveries={deliveries[index]}
             />
@@ -177,21 +220,26 @@ type RowQuery<T> = { isPending: boolean; isError: boolean; error: unknown; data?
 function UsageRow({
   orgId,
   project,
+  windowKey,
   events,
   deliveries,
 }: {
   orgId: string;
   project: Project;
+  windowKey: AnalyticsWindowKey;
   events: RowQuery<{ total: number; window: { to: string } }>;
   deliveries: RowQuery<{ current: { total: number } }>;
 }) {
   const ratio = deliveriesPerEvent(deliveries.data?.current.total, events.data?.total);
+  // The window travels with the link, so the project you open answers the same
+  // question these rows were asked. The default is left out of the address.
+  const search = windowKey === DEFAULT_WINDOW_KEY ? '' : `?window=${windowKey}`;
 
   return (
     <tr className="border-b border-line last:border-0">
       <td className="px-3 py-2 align-middle">
         <Link
-          to={`/orgs/${orgId}/projects/${project.id}/analytics?window=30d`}
+          to={`/orgs/${orgId}/projects/${project.id}/analytics${search}`}
           className="flex flex-col hover:underline"
         >
           <span className="flex items-center gap-1.5 text-xs font-medium text-ink">

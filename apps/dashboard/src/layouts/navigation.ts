@@ -23,7 +23,7 @@ export interface NavGroup {
  *
  * ## Why groups
  *
- * Sixteen flat items is a list you read rather than a structure you learn. The
+ * Fifteen flat items is a list you read rather than a structure you learn. The
  * groups name the four questions the product answers, in the order an incident
  * actually asks them: what happened (RECORD), who was supposed to get it
  * (ROUTING), how is it trending (INSIGHT), and how is this configured
@@ -36,9 +36,14 @@ export interface NavGroup {
  * which reads as "you have left the project" when you have not. One rail, five
  * headings, nothing vanishes.
  *
- * `Usage` and `Audit log` are organization-scoped routes that sit under INSIGHT
- * beside the project-scoped `Analytics`, because the heading names what the
- * screen is FOR, not which id is in its path.
+ * `Audit log` is an organization-scoped route that sits under INSIGHT beside
+ * the project-scoped `Analytics`, because the heading names what the screen is
+ * FOR, not which id is in its path.
+ *
+ * `Usage` is NOT here: it is a tab on Analytics (`?tab=usage`), because the two
+ * screens read the same routes over the same window and a second nav item made
+ * the window ambiguous. `/orgs/:orgId/usage` still resolves — it redirects —
+ * but a redirect has no place in the rail.
  *
  * ## Deliveries before Events
  *
@@ -54,7 +59,7 @@ export function navigationGroups(orgId: string, projectId?: string): NavGroup[] 
     // No project selected: only the routes that are genuinely reachable. A
     // heading over a group whose every item 404s is worse than no heading.
     return [
-      { title: 'Insight', items: [usage(org), auditLog(org)] },
+      { title: 'Insight', items: [auditLog(org)] },
       { title: 'Organization', items: organizationItems(org) },
     ];
   }
@@ -81,7 +86,10 @@ export function navigationGroups(orgId: string, projectId?: string): NavGroup[] 
     },
     {
       title: 'Insight',
-      items: [{ to: `${base}/analytics`, label: 'Analytics', icon: 'analytics' }, usage(org), auditLog(org)],
+      items: [
+        { to: `${base}/analytics`, label: 'Analytics', icon: 'analytics' },
+        auditLog(org),
+      ],
     },
     {
       title: 'Project',
@@ -92,10 +100,6 @@ export function navigationGroups(orgId: string, projectId?: string): NavGroup[] 
     },
     { title: 'Organization', items: organizationItems(org) },
   ];
-}
-
-function usage(org: string): NavItem {
-  return { to: `${org}/usage`, label: 'Usage', icon: 'usage' };
 }
 
 function auditLog(org: string): NavItem {
