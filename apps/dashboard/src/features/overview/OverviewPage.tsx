@@ -30,8 +30,9 @@ import { useEndpoints } from '../endpoints/api';
 import { StuckEventsNotice } from '../outbox/StuckEventsNotice';
 import { useOutboxEntries } from '../outbox/api';
 import { stuckEventsState } from '../outbox/stuck-summary';
-import { useSetupState } from '../onboarding/api';
-import { isSetupComplete, setupHeadline } from '../onboarding/setup';
+import { useSetupAffordance } from '../onboarding/api';
+import { setupHeadline } from '../onboarding/setup';
+import { resolveOverviewSurface } from '../onboarding/setup-visibility';
 import { SetupChecklist } from '../onboarding/SetupChecklist';
 import type { SetupStep } from '../onboarding/setup';
 import type { AnalyticsWindowChoice } from '../analytics/window';
@@ -44,25 +45,52 @@ import type { AnalyticsWindowChoice } from '../analytics/window';
  * reading 0.00%: that is a number dressed up as a diagnosis, and it points at
  * nothing. So while setup is incomplete the overview IS the guided path, and it
  * only becomes the health dashboard once a webhook can actually flow.
+ *
+ * ## Which of the two, and the third answer
+ *
+ * `resolveOverviewSurface` decides, from the same three-valued affordance the
+ * rail reads. This page used to ask `isPending || isError || isComplete`
+ * directly, which made it the one affordance the visibility rule did not
+ * govern — and a cold load of a 0/6 project therefore rendered the whole health
+ * block, skeletons, charts and analytics requests included, before swapping it
+ * for the checklist. `waiting` renders NEITHER branch instead, which is the same
+ * nothing the rail shows for the same beat.
+ *
+ * The cost is paid on the first overview of a project in a session: the
+ * analytics requests start once the setup check has resolved rather than beside
+ * it. Afterwards the session remembers the answer, so every later visit mounts
+ * the health page immediately.
+ *
+ * AN ERRORED CHECK IS DELIBERATELY DIFFERENT HERE. The rail shows its Setup item
+ * when a check fails; this page stays on health, per design frame `07b Overview —
+ * could not check`. Replacing an operator's instruments with onboarding copy
+ * because one list request failed is the worse error on this surface, and the
+ * reasoning is with the rule, in `resolveOverviewSurface`.
  */
 export function OverviewPage() {
   const { orgId = '', projectId = '' } = useParams();
-  const setup = useSetupState(orgId, projectId);
+  const { affordance, setup } = useSetupAffordance(orgId, projectId);
   const { key: windowKey, window, setKey: setWindow } = useAnalyticsWindow();
 
-  const ready = setup.isPending || setup.isError || isSetupComplete(setup.steps);
+  const surface = resolveOverviewSurface(affordance, setup.isError);
+  const ready = surface === 'health';
 
   return (
     <div className="flex flex-col gap-5">
       <PageHeader
         title="Overview"
         description={
-          ready
-            ? 'Delivery health for this project.'
-            : 'This project cannot deliver a webhook yet. Here is what is left.'
+          surface === 'waiting'
+            ? undefined
+            : ready
+              ? 'Delivery health for this project.'
+              : 'This project cannot deliver a webhook yet. Here is what is left.'
         }
         actions={
-          ready ? (
+          // Nothing is offered while the check is unresolved: a window selector
+          // implies the health page and a setup button implies the checklist, and
+          // either would be the claim this page is waiting not to make.
+          surface === 'waiting' ? undefined : ready ? (
             <WindowSelector value={windowKey} onChange={setWindow} />
           ) : (
             // While setup is incomplete there is nothing to window: every
@@ -77,9 +105,11 @@ export function OverviewPage() {
         }
       />
 
-      {!ready && <FirstRun orgId={orgId} projectId={projectId} steps={setup.steps} />}
+      {surface === 'checklist' && (
+        <FirstRun orgId={orgId} projectId={projectId} steps={setup.steps} />
+      )}
 
-      {ready && <Health orgId={orgId} projectId={projectId} window={window} />}
+      {surface === 'health' && <Health orgId={orgId} projectId={projectId} window={window} />}
     </div>
   );
 }
@@ -102,6 +132,8 @@ function FirstRun({
 }) {
   const base = `/orgs/${orgId}/projects/${projectId}`;
   const hrefFor = (step: SetupStep): string | null => {
+    // A step this role cannot read is not a link: the page behind it answers 403.
+    if (step.state === 'unavailable') return null;
     switch (step.id) {
       case 'api-key':
         return `${base}/api-keys`;

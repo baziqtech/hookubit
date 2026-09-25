@@ -22,7 +22,7 @@ import type {
  * This is the ONE source for the list; `features/endpoints/api.ts` re-exports
  * it for the callers that imported it from there.
  */
-export function useSubscriptions(projectId: string, offset = 0) {
+export function useSubscriptions(projectId: string, offset = 0, enabled = true) {
   return useQuery({
     queryKey: queryKeys.subscriptions(projectId, offset),
     queryFn: async () =>
@@ -31,7 +31,9 @@ export function useSubscriptions(projectId: string, offset = 0) {
           `/v1/projects/${projectId}/subscriptions${queryString(pageParams(offset))}`,
         ),
       ),
-    enabled: Boolean(projectId),
+    // `enabled: false` is for a caller that knows the role lacks
+    // `subscriptions.read` (billing) — a 403 it would never retry.
+    enabled: Boolean(projectId) && enabled,
   });
 }
 

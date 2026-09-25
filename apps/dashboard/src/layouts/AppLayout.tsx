@@ -371,7 +371,14 @@ export function RailGroups({ orgId, projectId }: { orgId: string; projectId?: st
   const groups = navigationGroups(orgId, projectId, affordance);
 
   const progress =
-    projectId && affordance === 'show' && !setup.isPending && !setup.isError
+    projectId &&
+    affordance === 'show' &&
+    !setup.isPending &&
+    !setup.isError &&
+    // A count taken from a page that did not contain the answer is a wrong
+    // number, not a stale one: "5/6" on a project whose fifty-first endpoint is
+    // delivering. The item may still be offered; the number may not.
+    !setup.isUndetermined
       ? setupProgress(setup.steps)
       : null;
   const badges =

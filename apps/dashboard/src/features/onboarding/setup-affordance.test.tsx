@@ -6,7 +6,15 @@ import { RailGroups } from '../../layouts/AppLayout';
 import * as mock from '../../lib/mock/data';
 import type { Paged } from '../../lib/pagination';
 import { queryKeys } from '../../lib/query-keys';
-import type { ApiKey, Endpoint, Organization, Project, Subscription, WebhookEvent } from '../../types/api';
+import type {
+  ApiKey,
+  Endpoint,
+  Organization,
+  Project,
+  Role,
+  Subscription,
+  WebhookEvent,
+} from '../../types/api';
 import { OverviewPage } from '../overview/OverviewPage';
 import { GetStartedPage } from './GetStartedPage';
 import { forgetSetupCompleteness, rememberSetupCompleteness } from './setup-visibility';
@@ -49,11 +57,18 @@ const activeKey = (id: string): ApiKey => ({
 
 const page = <T,>(rows: T[]): Paged<T> => ({ rows, hasMore: false, nextOffset: null });
 
+/** A page the server says is not the last one — `has_more`, never a length check. */
+const truncated = <T,>(rows: T[]): Paged<T> => ({ rows, hasMore: true, nextOffset: rows.length });
+
 interface Inputs {
   keys?: ApiKey[];
   endpoints?: Endpoint[];
   subscriptions?: Subscription[];
   events?: WebhookEvent[];
+  /** Pages seeded as "more rows exist beyond this one". */
+  truncate?: Array<'keys' | 'endpoints' | 'subscriptions'>;
+  /** The caller's role in the organization. Defaults to the mock owner. */
+  role?: Role;
 }
 
 /** Everything satisfied: one key, three delivering endpoints, four live subscriptions, an event. */
@@ -78,7 +93,10 @@ const OPERATING: Inputs = {
  * is reproduced here; `failing` seeds an error state instead, for the branch
  * where the check cannot resolve at all.
  */
-function client({ keys, endpoints, subscriptions, events }: Inputs, failing?: QueryKey): QueryClient {
+function client(
+  { keys, endpoints, subscriptions, events, truncate = [], role }: Inputs,
+  failing?: QueryKey,
+): QueryClient {
   // `retryOnMount: false` is what lets a seeded error state RENDER as an error:
   // React Query otherwise reports an errored query with no data as pending again
   // the moment an observer mounts, because it is optimistically refetching. That
@@ -88,11 +106,19 @@ function client({ keys, endpoints, subscriptions, events }: Inputs, failing?: Qu
     defaultOptions: { queries: { retry: false, retryOnMount: false } },
   });
 
-  query.setQueryData(queryKeys.organizations(0), page<Organization>([ORG]));
+  const paged = <T,>(rows: T[], which: 'keys' | 'endpoints' | 'subscriptions'): Paged<T> =>
+    truncate.includes(which) ? truncated(rows) : page(rows);
+
+  query.setQueryData(
+    queryKeys.organizations(0),
+    page<Organization>([role ? { ...ORG, role } : ORG]),
+  );
   query.setQueryData(queryKeys.project(PROJECT.id), PROJECT satisfies Project);
-  if (keys) query.setQueryData(queryKeys.apiKeys(PROJECT.id, 0), page(keys));
-  if (endpoints) query.setQueryData(queryKeys.endpoints(PROJECT.id, 0, undefined), page(endpoints));
-  if (subscriptions) query.setQueryData(queryKeys.subscriptions(PROJECT.id, 0), page(subscriptions));
+  if (keys) query.setQueryData(queryKeys.apiKeys(PROJECT.id, 0), paged(keys, 'keys'));
+  if (endpoints)
+    query.setQueryData(queryKeys.endpoints(PROJECT.id, 0, undefined), paged(endpoints, 'endpoints'));
+  if (subscriptions)
+    query.setQueryData(queryKeys.subscriptions(PROJECT.id, 0), paged(subscriptions, 'subscriptions'));
   if (events) query.setQueryData(queryKeys.events(PROJECT.id, {}, 0), page(events));
 
   if (failing) {
@@ -320,5 +346,113 @@ describe('an unresolved check neither hides nor shows spuriously', () => {
 
     expect(html).not.toContain('Open setup checklist');
     expect(html).not.toContain('This project cannot deliver a webhook yet');
+  });
+});
+
+describe('a role that may not read an input is not pinned to the checklist', () => {
+  beforeEach(() => forgetSetupCompleteness());
+
+  /*
+   * THE BLOCKING CASE. `api-keys.read` is false for viewer and billing, and
+   * `lib/api.ts` never retries a 403 — so the check could never resolve, the
+   * session never recorded completeness, and the Setup item was pinned to `show`
+   * for the life of the tab on EVERY project, including a fully operating one,
+   * with `/get-started` behind it reading "Setup state is incomplete". Its
+   * presence became a false claim about the project: the mirror of the failure
+   * the rule exists to prevent.
+   *
+   * `failing` here seeds exactly what a 403 leaves behind, so the test fails
+   * again if the denial is ever read as an error.
+   */
+  const DENIED_KEYS = queryKeys.apiKeys(PROJECT.id, 0);
+
+  it('drops the Setup item for a viewer on an operating project', () => {
+    const html = rail({ ...OPERATING, keys: undefined, role: 'viewer' }, DENIED_KEYS);
+
+    expect(html).not.toContain(SETUP_HREF);
+    expect(html).toContain(`${BASE}/deliveries`);
+  });
+
+  it('drops it for a billing member, who may read none of the four project inputs', () => {
+    const html = rail(
+      { keys: undefined, endpoints: undefined, subscriptions: undefined, events: undefined, role: 'billing' },
+      DENIED_KEYS,
+    );
+
+    expect(html).not.toContain(SETUP_HREF);
+  });
+
+  it('leaves the overview on the health page rather than on a guided path', () => {
+    const html = overview({ ...OPERATING, keys: undefined, role: 'viewer' }, DENIED_KEYS);
+
+    expect(html).toContain('Delivery health for this project.');
+    expect(html).not.toContain('Open setup checklist');
+  });
+
+  it('still shows the item to a viewer when the project is genuinely short', () => {
+    // The denial removes one QUESTION, not the whole checklist. A viewer can read
+    // endpoints, subscriptions and events, so an unset-up project still says so —
+    // out of five steps now, because the sixth is not theirs to answer.
+    const html = rail(
+      { ...OPERATING, keys: undefined, subscriptions: [], role: 'viewer' },
+      DENIED_KEYS,
+    );
+
+    expect(html).toContain(SETUP_HREF);
+    expect(html).toContain('4/5');
+  });
+
+  it('says why the step is blank on /get-started, and does not link it', () => {
+    const html = getStarted({ ...OPERATING, keys: undefined, role: 'viewer' });
+
+    expect(html).toContain('Not visible to you');
+    expect(html).toContain('needs the owner, admin or developer role');
+    expect(html).not.toContain('Not started');
+    // Five of five, and no link into a page that would answer 403.
+    expect(html).toContain('5 of 5');
+    expect(html).not.toContain(`${BASE}/api-keys`);
+  });
+});
+
+describe('an answer that is not on the page we read', () => {
+  beforeEach(() => forgetSetupCompleteness());
+
+  it('claims nothing when page one holds no live endpoint and more rows exist', () => {
+    /*
+     * `lib/pagination.ts` opens with the rule: never infer the last page from a
+     * row count, read `has_more`. Fifty paused endpoints with more behind them is
+     * not "nothing is delivering" — and reading it as such put a permanent Setup
+     * item on a project that is delivering fine.
+     */
+    const paused = OPERATING.endpoints!.map((endpoint) => ({ ...endpoint, enabled: false }));
+    const html = rail({ ...OPERATING, endpoints: paused, truncate: ['endpoints'] });
+
+    expect(html).not.toContain(SETUP_HREF);
+  });
+
+  it('resolves normally when the answer IS on the page, truncated or not', () => {
+    // One delivering endpoint settles the step; further pages cannot unsettle it.
+    const html = rail({ ...OPERATING, truncate: ['endpoints', 'keys', 'subscriptions'] });
+
+    expect(html).not.toContain(SETUP_HREF);
+    expect(html).toContain(`${BASE}/deliveries`);
+  });
+
+  it('shows the item from a remembered incompleteness rather than going quiet', () => {
+    rememberSetupCompleteness(PROJECT.id, false);
+    const paused = OPERATING.endpoints!.map((endpoint) => ({ ...endpoint, enabled: false }));
+    const html = rail({ ...OPERATING, endpoints: paused, truncate: ['endpoints'] });
+
+    expect(html).toContain(SETUP_HREF);
+    // No badge: a number needs a resolved check, and this one has none.
+    expect(html).not.toContain('/6');
+  });
+
+  it('keeps the overview off both branches while nothing is determined', () => {
+    const noKeys = { ...OPERATING, keys: [], truncate: ['keys'] as const };
+    const html = overview({ ...noKeys, truncate: ['keys'] });
+
+    expect(html).not.toContain('Open setup checklist');
+    expect(html).not.toContain('Delivery health for this project.');
   });
 });

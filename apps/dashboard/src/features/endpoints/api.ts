@@ -22,10 +22,16 @@ export interface EndpointListOptions {
    * `?include_deleted=false` turning soft-deleted rows ON.
    */
   includeDeleted?: boolean;
+  /**
+   * `false` for a caller that already knows the role lacks `endpoints.read`
+   * (billing). A 403 is not retried, so an un-gated caller holds an errored
+   * query for the life of the tab.
+   */
+  enabled?: boolean;
 }
 
 export function useEndpoints(projectId: string, options: EndpointListOptions = {}) {
-  const { offset = 0, includeDeleted } = options;
+  const { offset = 0, includeDeleted, enabled = true } = options;
   return useQuery({
     queryKey: queryKeys.endpoints(projectId, offset, includeDeleted),
     queryFn: async () =>
@@ -37,7 +43,7 @@ export function useEndpoints(projectId: string, options: EndpointListOptions = {
           })}`,
         ),
       ),
-    enabled: Boolean(projectId),
+    enabled: Boolean(projectId) && enabled,
   });
 }
 

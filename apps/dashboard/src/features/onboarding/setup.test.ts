@@ -184,3 +184,85 @@ describe('wording', () => {
     expect(stepById(EMPTY, 'api-key').action).toMatch(/shown once and cannot be recovered/i);
   });
 });
+
+describe('a step this role may not read', () => {
+  /*
+   * A DENIAL IS NOT AN UNFINISHED STEP. A viewer cannot read the API key
+   * inventory and a billing member cannot read four of the six inputs, so those
+   * steps are not questions they can answer — and counting them as unsatisfied
+   * pinned a Setup item onto both roles on every project, for ever, with no way
+   * to clear it. See `permissions.ts`.
+   */
+  const VIEWER: SetupInputs = {
+    ...READY,
+    // What a viewer's own reads would produce: no key inventory at all.
+    activeApiKeyCount: 0,
+    unreadable: { 'api-key': 'Reading this needs the owner, admin or developer role.' },
+  };
+
+  it('marks the step unavailable rather than not-started', () => {
+    const step = stepById(VIEWER, 'api-key');
+
+    expect(step.state).toBe('unavailable');
+    expect(step.satisfied).toBe(false);
+    expect(step.evidence).toMatch(/needs the owner, admin or developer role/);
+  });
+
+  it('takes the step out of the count entirely, numerator and denominator', () => {
+    // NOT 5/6, which would be an outstanding item, and not 6/6, which would claim
+    // something nobody read. Five questions, five answers.
+    expect(setupProgress(deriveSetupSteps(VIEWER))).toEqual({ done: 5, total: 5 });
+    expect(isSetupComplete(deriveSetupSteps(VIEWER))).toBe(true);
+  });
+
+  it('never makes an unreadable step the current one', () => {
+    // "Do this next" on a step whose input the reader may not even see, and whose
+    // action needs a write they do not hold, is a dead end.
+    const fresh = deriveSetupSteps({
+      ...EMPTY,
+      organizationName: 'ShaQ',
+      projectName: 'Payments',
+      unreadable: VIEWER.unreadable,
+    });
+
+    expect(fresh.find((step) => step.state === 'current')?.id).not.toBe('api-key');
+    expect(fresh.filter((step) => step.state === 'current')).toHaveLength(1);
+  });
+
+  it('leaves the step below it reachable — the resource may well exist', () => {
+    const steps = deriveSetupSteps({
+      ...EMPTY,
+      organizationName: 'ShaQ',
+      projectName: 'Payments',
+      unreadable: { 'api-key': 'denied' },
+    });
+
+    expect(steps.find((step) => step.state === 'current')?.id).toBe('endpoint');
+  });
+
+  it('drops the evidence and the warning derived from an empty list', () => {
+    // Those numbers came from a list that was never read; "0 endpoints, none
+    // delivering" would be a statement about the reader's permissions dressed up
+    // as a statement about the project.
+    const billing = deriveSetupSteps({
+      ...EMPTY,
+      organizationName: 'ShaQ',
+      projectName: 'Payments',
+      blockedEndpointCount: 0,
+      unreadable: { 'api-key': 'denied', endpoint: 'denied', subscription: 'denied', event: 'denied' },
+    });
+
+    for (const step of billing.filter((row) => row.state === 'unavailable')) {
+      expect(step.warning).toBeUndefined();
+      expect(step.watching).toBe(false);
+      expect(step.evidence).toBe('denied');
+    }
+    // Two steps left, both satisfied: nothing here is this role's to set up.
+    expect(setupProgress(billing)).toEqual({ done: 2, total: 2 });
+    expect(isSetupComplete(billing)).toBe(true);
+  });
+
+  it('counts normally for a role that holds every read', () => {
+    expect(setupProgress(deriveSetupSteps(READY))).toEqual({ done: 6, total: 6 });
+  });
+});

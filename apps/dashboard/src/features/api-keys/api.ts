@@ -4,7 +4,14 @@ import { offsetPage, pageParams } from '../../lib/pagination';
 import { queryKeys } from '../../lib/query-keys';
 import type { ApiKey, CreatedApiKey, OffsetPage } from '../../types/api';
 
-export function useApiKeys(projectId: string, offset = 0) {
+/**
+ * `enabled` follows `useEndpointSecrets`: a caller that already knows the role
+ * lacks `api-keys.read` passes `false` rather than issuing a 403 it will then
+ * have to explain. Reading a key INVENTORY is owner/admin/developer — a viewer
+ * and a billing member are refused, and `lib/api.ts` never retries a 403, so an
+ * un-gated caller keeps an errored query for the life of the tab.
+ */
+export function useApiKeys(projectId: string, offset = 0, enabled = true) {
   return useQuery({
     queryKey: queryKeys.apiKeys(projectId, offset),
     queryFn: async () =>
@@ -13,7 +20,7 @@ export function useApiKeys(projectId: string, offset = 0) {
           `/v1/projects/${projectId}/api-keys${queryString(pageParams(offset))}`,
         ),
       ),
-    enabled: Boolean(projectId),
+    enabled: Boolean(projectId) && enabled,
   });
 }
 

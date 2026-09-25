@@ -30,8 +30,15 @@ export type SetupStepId =
  * will not deliver. An endpoint created by a developer comes back paused with
  * no signing secret; a subscription can be disabled. Ticking those green is how
  * someone spends an afternoon wondering why nothing arrives.
+ *
+ * `unavailable` is the one state that is not about the project at all: this
+ * member's role may not read the input, so the step is NOT APPLICABLE to them.
+ * It is neither satisfied nor unsatisfied — it is a question they may not ask —
+ * and `isSetupComplete`/`setupProgress` leave it out of the count rather than
+ * guessing. See `permissions.ts` for why a denial must not be read as a failed
+ * check.
  */
-export type SetupStepState = 'done' | 'attention' | 'current' | 'todo';
+export type SetupStepState = 'done' | 'attention' | 'current' | 'todo' | 'unavailable';
 
 export interface SetupStep {
   id: SetupStepId;
@@ -53,7 +60,10 @@ export interface SetupStep {
   /** What the operator should do, when the step is not yet satisfied. */
   action: string;
   state: SetupStepState;
-  /** What satisfied the step — shown instead of the action once it is done. */
+  /**
+   * What satisfied the step — shown instead of the action once it is done — or,
+   * on an `unavailable` step, why this role cannot see it.
+   */
   evidence?: string;
   /** Why a satisfied step still will not deliver. */
   warning?: string;
@@ -78,6 +88,12 @@ export interface SetupInputs {
   /** Subscriptions that exist but are switched off. */
   disabledSubscriptionCount: number;
   eventCount: number;
+  /**
+   * Steps whose input this member's ROLE may not read, mapped to the sentence
+   * saying so. Built by `permissions.ts`; the counts above carry no answer for
+   * such a step, and none is invented — it becomes `unavailable`.
+   */
+  unreadable?: Partial<Record<SetupStepId, string>>;
 }
 
 /**
@@ -148,7 +164,47 @@ export function deriveSetupSteps(inputs: SetupInputs): SetupStep[] {
     },
   ];
 
-  return markCurrent(steps);
+  return markCurrent(steps.map((step) => withReadability(step, inputs.unreadable)));
+}
+
+/**
+ * A step whose input this role may not read, rewritten as `unavailable`.
+ *
+ * Applied BEFORE `markCurrent`, so such a step is never "do this next" — it is
+ * not this member's next thing to do, and the step below it is reachable
+ * regardless: the resource may well exist, we simply are not allowed to look.
+ * Everything derived from the project (`evidence`, `warning`, `watching`) is
+ * dropped, because those were computed from an empty list rather than from
+ * nothing being there.
+ */
+function withReadability(
+  step: SetupStep,
+  unreadable: Partial<Record<SetupStepId, string>> | undefined,
+): SetupStep {
+  const reason = unreadable?.[step.id];
+  if (!reason) return step;
+  return {
+    ...step,
+    // NOT satisfied and not unsatisfied: `setupStepApplies` takes it out of the
+    // question entirely. `false` here so that any future reader of `satisfied`
+    // that forgets the filter under-claims rather than reporting a project ready.
+    satisfied: false,
+    state: 'unavailable',
+    evidence: reason,
+    warning: undefined,
+    watching: false,
+  };
+}
+
+/**
+ * Whether this step is part of the completeness question at all.
+ *
+ * An `unavailable` step is not. Counting it as unsatisfied pins an unclearable
+ * to-do onto a role that may neither read the input nor perform the action;
+ * counting it as satisfied asserts something nobody checked.
+ */
+export function setupStepApplies(step: SetupStep): boolean {
+  return step.state !== 'unavailable';
 }
 
 function endpointStep(inputs: SetupInputs): SetupStep {
@@ -269,14 +325,25 @@ function markCurrent(steps: SetupStep[]): SetupStep[] {
  * step is reachable — which is why the two questions have two answers. This one
  * is what the nav item, the badge and the overview card are derived from, so
  * losing the last live endpoint brings all three back automatically.
+ *
+ * Steps this role may not read are excluded rather than counted either way —
+ * see `setupStepApplies`. For a billing member, whose role reads none of the
+ * four gated inputs, that leaves the organization and the project, and "nothing
+ * here is yours to set up" is the honest answer.
  */
 export function isSetupComplete(steps: SetupStep[]): boolean {
-  return steps.every((step) => step.satisfied);
+  return steps.filter(setupStepApplies).every((step) => step.satisfied);
 }
 
-/** Steps satisfied, for a progress read-out. */
+/**
+ * Steps satisfied, for a progress read-out.
+ *
+ * The DENOMINATOR moves: a step this role cannot read is out of the count, so a
+ * viewer sees "n of 5" rather than a sixth step stuck at not-started forever.
+ */
 export function setupProgress(steps: SetupStep[]): { done: number; total: number } {
-  return { done: steps.filter((step) => step.satisfied).length, total: steps.length };
+  const scope = steps.filter(setupStepApplies);
+  return { done: scope.filter((step) => step.satisfied).length, total: scope.length };
 }
 
 /**

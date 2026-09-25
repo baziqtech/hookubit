@@ -18,6 +18,9 @@ const STATE_LABEL: Record<SetupStepState, string> = {
   attention: 'Needs attention',
   current: 'Do this next',
   todo: 'Not started',
+  // Never "Not started": nobody knows whether it was. This row is about the
+  // reader's role, not about the project — see `permissions.ts`.
+  unavailable: 'Not visible to you',
 };
 
 export interface SetupChecklistProps {
@@ -80,6 +83,7 @@ function StepRow({ step, index, href }: { step: SetupStep; index: number; href: 
         step.state === 'attention' && 'border-warn/40 bg-warn-soft/40',
         step.state === 'done' && 'border-line bg-panel',
         step.state === 'todo' && 'border-line bg-panel opacity-70',
+        step.state === 'unavailable' && 'border-line border-dashed bg-panel',
         href && 'hover:border-line-strong',
       )}
     >
@@ -95,6 +99,7 @@ function StepRow({ step, index, href }: { step: SetupStep; index: number; href: 
               step.state === 'attention' && 'border-warn/25 bg-warn-soft text-warn',
               step.state === 'current' && 'border-accent/30 bg-accent-soft text-accent',
               step.state === 'todo' && 'border-line bg-raised text-ink-subtle',
+              step.state === 'unavailable' && 'border-line bg-raised text-ink-subtle',
             )}
           >
             {STATE_LABEL[step.state]}
@@ -192,9 +197,10 @@ function StepMarker({ state, index }: { state: SetupStepState; index: number }) 
         state === 'attention' && 'border-warn/40 bg-warn-soft text-warn',
         state === 'current' && 'border-accent/40 bg-accent text-accent-ink',
         state === 'todo' && 'border-line bg-raised text-ink-subtle',
+        state === 'unavailable' && 'border-dashed border-line bg-transparent text-ink-subtle',
       )}
     >
-      {state === 'attention' ? '!' : index}
+      {state === 'attention' ? '!' : state === 'unavailable' ? '–' : index}
     </span>
   );
 }

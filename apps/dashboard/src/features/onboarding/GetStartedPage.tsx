@@ -35,6 +35,9 @@ export function GetStartedPage() {
 
   const base = `/orgs/${orgId}/projects/${projectId}`;
   const hrefFor = (step: SetupStep): string | null => {
+    // A step this role may not read is not a link: the page behind it answers a
+    // 403, and offering the route is offering a dead end.
+    if (step.state === 'unavailable') return null;
     switch (step.id) {
       case 'api-key':
         return `${base}/api-keys`;

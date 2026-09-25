@@ -39,8 +39,25 @@ export type SetupAffordance = 'show' | 'hide' | 'unknown';
 export interface SetupCheck {
   /** No answer yet — the first load of this project's inputs. */
   isPending: boolean;
-  /** At least one input could not be read. */
+  /**
+   * At least one input could not be read.
+   *
+   * A 403 from the role matrix is NOT one of these. That is a question this
+   * member may not ask, not a check that failed, and reading it as an error
+   * pinned the affordance to `show` forever for the two roles that cannot read
+   * an input — see `permissions.ts`.
+   */
   isError: boolean;
+  /**
+   * An input the read we made cannot answer: nothing on the page satisfied the
+   * requirement and the server says there are more rows (`has_more`).
+   *
+   * Not an error and not still loading — a real, successful response that
+   * happens not to contain the answer. Treated like pending, because the only
+   * direction it can be wrong in is "not satisfied": a page that DID contain a
+   * satisfying row answered the question outright.
+   */
+  isUndetermined: boolean;
   /**
    * Derived from live project state. Only meaningful when the check has
    * resolved: an unread project derives as incomplete simply because its
@@ -77,7 +94,9 @@ const NOTHING_KNOWN: SetupMemory = Object.freeze({ complete: null, failed: false
  */
 export function resolveSetupAffordance(check: SetupCheck, memory: SetupMemory): SetupAffordance {
   // Resolved. The only branch entitled to an opinion of its own.
-  if (!check.isPending && !check.isError) return check.isComplete ? 'hide' : 'show';
+  if (!check.isPending && !check.isError && !check.isUndetermined) {
+    return check.isComplete ? 'hide' : 'show';
+  }
 
   // Unresolved, but this project has resolved before. Render what was true then
   // rather than a guess — stale is honest, invented is not.
@@ -94,6 +113,44 @@ export function resolveSetupAffordance(check: SetupCheck, memory: SetupMemory): 
 
   // A first load, in flight. Nothing is known, so nothing is claimed.
   return 'unknown';
+}
+
+/** Which of the overview's two pages to render. `waiting` is neither, yet. */
+export type OverviewSurface = 'health' | 'checklist' | 'waiting';
+
+/**
+ * The overview is two different screens, and this picks one.
+ *
+ * It used to read `isPending || isError || isComplete` directly, which is the
+ * one affordance the visibility rule did not govern: a cold load of a 0/6
+ * project rendered the whole health block — stat-tile skeletons, charts and the
+ * analytics requests behind them — and then swapped it for the checklist. That
+ * is exactly the flash `unknown` exists to prevent, and it contradicted the
+ * page's own argument that a project with no endpoints does not need a
+ * success-rate tile reading 0.00%. `waiting` renders NEITHER branch until the
+ * check resolves.
+ *
+ * ## The errored check is deliberately different here, and only here
+ *
+ * On the rail an errored check SHOWS the item; on the overview it leaves the
+ * health page up. Design frame `07b Overview — could not check` is an operating
+ * page with a non-blocking "could not check" strip, and that is the right call
+ * for this surface: flipping a working project's 2am page over to a guided setup
+ * path because one list request failed replaces the operator's instruments with
+ * onboarding copy. The rail keeps its stricter rule, because an item that is
+ * merely PRESENT costs nothing and hiding it would be the false claim.
+ *
+ * So one rule governs all four affordances except this one case, on this one
+ * surface, on purpose.
+ */
+export function resolveOverviewSurface(
+  affordance: SetupAffordance,
+  isError: boolean,
+): OverviewSurface {
+  if (isError) return 'health';
+  if (affordance === 'show') return 'checklist';
+  if (affordance === 'hide') return 'health';
+  return 'waiting';
 }
 
 /**
@@ -129,6 +186,31 @@ export function rememberSetupCompleteness(projectId: string, isComplete: boolean
 export function rememberSetupCheckFailed(projectId: string): void {
   if (!projectId) return;
   entry(projectId).failed = true;
+}
+
+/**
+ * Everything one observed check writes down — the whole of what `useSetupAffordance`
+ * does in an effect.
+ *
+ * A function rather than two statements inside the hook, because `useEffect` does
+ * not run under `renderToStaticMarkup` and this workspace has no jsdom: as inline
+ * effect bodies, the sticky-failure wiring had no coverage at all and deleting it
+ * left the suite green. `setup-session.test.ts` drives this through a whole
+ * outage-and-recovery sequence with no React in sight.
+ *
+ * The three cases are exclusive and ordered on purpose:
+ *
+ * - errored     → a failure, remembered as a failure and never as an answer.
+ * - undetermined → nothing. A page that did not contain the answer is not one.
+ * - resolved    → the only knowledge there is.
+ */
+export function recordSetupCheck(projectId: string, check: SetupCheck): void {
+  if (check.isError) {
+    rememberSetupCheckFailed(projectId);
+    return;
+  }
+  if (check.isPending || check.isUndetermined) return;
+  rememberSetupCompleteness(projectId, check.isComplete);
 }
 
 export function setupMemory(projectId: string): SetupMemory {

@@ -249,27 +249,49 @@ test.describe.serial('a project, end to end', () => {
   });
 
   test('six of six: every setup affordance goes, and /get-started still resolves', async ({ page }) => {
-    await page.goto(`${projectBase()}/overview`);
-
-    // The overview is the health page now, for good.
-    await expect(page.getByText('Success rate (24h)')).toBeVisible();
-    await expect(page.getByRole('link', { name: 'Open setup checklist' })).toHaveCount(0);
-    await expect(page.getByRole('heading', { name: 'Setup' })).toHaveCount(0);
-
-    // The rail drops the item rather than ticking it green: a checklist that can
-    // never change again is a slot spent on nothing.
-    const rail = page.locator('nav[aria-label="Primary"]');
-    await expect(rail.locator('a[href$="/get-started"]')).toHaveCount(0);
-    await expect(rail).not.toContainText(/\d\/6/);
-
-    // Still a page. Docs, emails and bookmarks point at it, and re-reading what
-    // you configured is a legitimate reason to be here — so it neither 404s nor
-    // bounces to the overview, and it still says where you are.
+    /*
+     * THE RESOLVED-STATE ANCHOR COMES FIRST, and the order is the test.
+     *
+     * Every assertion about the affordances is NEGATIVE — count 0, no n/6 — and
+     * Playwright satisfies a negative on its first poll. `unknown` renders the
+     * same nothing `hide` does, so a rail-first version of this test passed on the
+     * frame before the setup queries had even landed: a regression that left every
+     * project permanently `unknown`, or an API that was simply down, would have
+     * gone green. Nothing here can tell "hidden because complete" from "hidden
+     * because we do not know yet" without first proving the check RESOLVED.
+     *
+     * `/get-started` is the proof available: it is no longer advertised but it
+     * still renders, and "Setup complete" beside its live evidence strings can only
+     * come from six satisfied steps derived from this project.
+     */
     await page.goto(`${projectBase()}/get-started`);
     await expect(page.getByRole('heading', { name: 'Get started' })).toBeVisible();
     await expect(page.getByText('Setup complete')).toBeVisible();
     await expect(page.getByText(/\d+ endpoints? delivering/)).toBeVisible();
+    await expect(page.getByText(/\d+ active subscriptions?/)).toBeVisible();
+    await expect(page.getByText(/\d+ events? received/)).toBeVisible();
+    // Docs, emails and bookmarks point here, and it still says where you are.
     await expect(page.getByRole('navigation', { name: 'Breadcrumb' })).toContainText('Setup');
+
+    /*
+     * The rail is on screen on this very page — the one page whose own nav item is
+     * gone. It drops the item rather than ticking it green: a checklist that can
+     * never change again is a slot in the primary nav spent on nothing. Asserted
+     * only now that the check above has been shown to have resolved as complete.
+     */
+    const rail = page.locator('nav[aria-label="Primary"]');
+    await expect(rail.locator('a[href$="/get-started"]')).toHaveCount(0);
+    await expect(rail).not.toContainText(/\d\/6/);
+
+    // And the overview is the health page now, for good. `Success rate (24h)` is
+    // this surface's own positive anchor: it renders only once the check has
+    // resolved as complete (or failed, which the assertions above rule out).
+    await page.goto(`${projectBase()}/overview`);
+    await expect(page.getByText('Success rate (24h)')).toBeVisible();
+    await expect(page.getByRole('link', { name: 'Open setup checklist' })).toHaveCount(0);
+    await expect(page.getByRole('heading', { name: 'Setup' })).toHaveCount(0);
+    await expect(rail.locator('a[href$="/get-started"]')).toHaveCount(0);
+    await expect(rail).not.toContainText(/\d\/6/);
   });
 
   test('the event detail explains the delivery, and replaying it delivers again', async ({ page }) => {

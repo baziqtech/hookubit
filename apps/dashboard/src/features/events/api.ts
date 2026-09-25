@@ -50,7 +50,7 @@ export function useEvents(
   options?: Partial<
     Pick<
       UseQueryOptions<Paged<WebhookEvent>>,
-      'refetchInterval' | 'refetchIntervalInBackground' | 'staleTime'
+      'refetchInterval' | 'refetchIntervalInBackground' | 'staleTime' | 'enabled'
     >
   >,
 ) {
@@ -62,6 +62,10 @@ export function useEvents(
           `/v1/projects/${projectId}/events${queryString({ ...filters, ...pageParams(offset) })}`,
         ),
       ),
+    // `...options` is merged LAST, so a caller may switch the query off
+    // entirely: the checklist does that for a role without `events.read`
+    // (billing), which would otherwise 403 — and 403 forever, every three
+    // seconds, because the poll below stops on rows and not on refusals.
     enabled: Boolean(projectId),
     ...options,
   });
