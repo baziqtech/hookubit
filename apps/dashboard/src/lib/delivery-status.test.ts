@@ -85,7 +85,6 @@ function attempt(overrides: Partial<DeliveryAttempt> = {}): DeliveryAttempt {
     completed_at: '2026-09-06T12:00:00.120Z',
     duration_ms: 120,
     request_headers: null,
-    request_payload: null,
     response_headers: null,
     response_body: null,
     response_body_location: null,

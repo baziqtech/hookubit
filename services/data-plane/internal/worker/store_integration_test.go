@@ -3,7 +3,6 @@ package worker
 import (
 	"context"
 	"errors"
-	"strings"
 	"testing"
 	"time"
 
@@ -544,81 +543,5 @@ func TestStoreLoadFallsBackToTheProjectDefaultRetryPolicy(t *testing.T) {
 	mustExec(t, pool, `UPDATE endpoints SET retry_policy_id = $2 WHERE id = $1`, f.endpointID, f.policyID)
 	if _, err := store.Load(ctx, f.insertDelivery(t, "wrk_1")); err != nil {
 		t.Fatalf("load with endpoint policy: %v", err)
-	}
-}
-
-// request_payload, against the real column.
-//
-// Two things only a database can prove. First, that the column exists and is
-// named what the INSERT thinks it is - this package's SQL is hand-written, so
-// this is the only place drift against Prisma's schema is caught. Second, that
-// what the worker's sanitiser produces is actually insertable: `text` cannot
-// hold a NUL byte, and a publisher's payload_raw is arbitrary bytes, so an
-// unsanitised copy would fail the INSERT and lose the attempt row entirely -
-// which is far worse than losing the bytes.
-func TestStoreCompleteStoresTheRequestPayloadItWasGiven(t *testing.T) {
-	pool := requirePool(t)
-	f := seedWorkerFixture(t, pool)
-	store := NewPostgresStore(pool)
-	ctx := context.Background()
-
-	// Exactly what the delivery path writes: sanitised, and bounded small enough
-	// that the marker is present too.
-	raw := []byte("{\"a\":\"\x00\x80z\",\"pad\":\"" + strings.Repeat("A", 128) + "\"}")
-	sanitised := storableText(raw, 64, false)
-
-	deliveryID := f.insertDelivery(t, "wrk_1")
-	if err := store.Complete(ctx, "wrk_1", deliveryID, &AttemptRecord{
-		Number: 1, StartedAt: time.Now(), CompletedAt: time.Now(),
-		Status: AttemptSuccess, HTTPStatus: 200, WorkerID: "wrk_1",
-		RequestHeaders: map[string]string{"Webhook-Id": f.eventID},
-		RequestPayload: sanitised,
-	}, Transition{State: StateSucceeded, Reason: ReasonDelivered, AttemptCount: 1}); err != nil {
-		t.Fatalf("complete: %v", err)
-	}
-
-	var stored *string
-	if err := pool.QueryRow(ctx,
-		`SELECT request_payload FROM delivery_attempts WHERE delivery_id = $1 AND attempt_number = 1`,
-		deliveryID).Scan(&stored); err != nil {
-		t.Fatalf("read attempt: %v", err)
-	}
-	if stored == nil {
-		t.Fatal("request_payload came back NULL; the column was not written")
-	}
-	if *stored != sanitised {
-		t.Fatalf("request_payload round-tripped as %q, want %q", *stored, sanitised)
-	}
-	if !strings.Contains(*stored, "truncated") {
-		t.Fatalf("the bound marker did not survive storage: %q", *stored)
-	}
-}
-
-// An attempt that never reached the network writes NULL, not "". The difference
-// is the difference between "we have no record of what this attempt sent" and
-// "this attempt sent an empty body", and an operator reading the ledger at 2am
-// has to be able to tell them apart.
-func TestStoreCompleteWritesNullWhenNothingWasSent(t *testing.T) {
-	pool := requirePool(t)
-	f := seedWorkerFixture(t, pool)
-	store := NewPostgresStore(pool)
-	ctx := context.Background()
-
-	deliveryID := f.insertDelivery(t, "wrk_1")
-	if err := store.Complete(ctx, "wrk_1", deliveryID, &AttemptRecord{
-		Number: 1, StartedAt: time.Now(), CompletedAt: time.Now(),
-		Status: AttemptError, ErrorCode: "signing_failed", WorkerID: "wrk_1",
-	}, Transition{State: StateRetrying, Reason: ReasonSigningFailed, Delay: time.Minute, AttemptCount: 1}); err != nil {
-		t.Fatalf("complete: %v", err)
-	}
-
-	var stored *string
-	if err := pool.QueryRow(ctx,
-		`SELECT request_payload FROM delivery_attempts WHERE delivery_id = $1 AND attempt_number = 1`,
-		deliveryID).Scan(&stored); err != nil {
-		t.Fatalf("read attempt: %v", err)
-	}
-	if stored != nil {
-		t.Fatalf("request_payload = %q for an attempt that sent nothing; it must be NULL", *stored)
 	}
 }

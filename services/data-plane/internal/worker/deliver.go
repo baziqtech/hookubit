@@ -393,13 +393,6 @@ func (w *Worker) attempt(ctx context.Context, job *Job, verdict Verdict, log *sl
 		Status:         decision.AttemptStatus,
 		HTTPStatus:     status,
 		RequestHeaders: RedactHeaders(headers),
-		// Beside the headers, and for the same reason they are here: this row is
-		// the record of what THIS attempt sent. It is recorded after the call
-		// rather than before because that is where the attempt row is built -
-		// the bytes are the ones w.client.Do was handed above and cannot have
-		// changed since; resolvePayload has already verified them against
-		// events.payload_hash.
-		RequestPayload: w.storablePayload(job.Payload),
 		ErrorCode:      decision.ErrorCode,
 		Duration:       finished.Sub(started),
 		WorkerID:       w.workerID,
@@ -782,32 +775,14 @@ func (w *Worker) storableBody(resp *egress.Response) string {
 	return storableText(resp.Body, w.maxStoredBody, resp.Truncated)
 }
 
-// storablePayload bounds and sanitises the REQUEST body for the ledger.
-//
-// Same treatment as a response body, for the same two hazards, plus one
-// argument of its own: these bytes are not unique to the attempt (the signature
-// covers them, so they are identical across a delivery's retries) and they are
-// already stored whole on the event. A bounded prefix is evidence of what this
-// attempt sent; the exact bytes are served by GET /events/:id/payload.
-//
-// Empty in, empty out - which writes NULL. An attempt that sent nothing must not
-// claim it sent "".
-func (w *Worker) storablePayload(payload []byte) string {
-	if len(payload) == 0 {
-		return ""
-	}
-	return storableText(payload, w.maxStoredPayload, false)
-}
-
 // storableText is the one place bytes are made safe for a text column of the
-// ledger, so request and response bodies cannot drift apart in their treatment.
+// ledger.
 //
 // Three hazards, all of them real and all of them survivable only here:
 //
-//   - PostgreSQL text cannot hold a NUL byte, and `jsonb` rejects \u0000. A
-//     publisher's or an endpoint's bytes are arbitrary, and failing the INSERT
-//     that records an attempt loses the ledger row, which is far worse than
-//     losing some bytes.
+//   - PostgreSQL text cannot hold a NUL byte, and `jsonb` rejects \u0000. An
+//     endpoint's bytes are arbitrary, and failing the INSERT that records an
+//     attempt loses the ledger row, which is far worse than losing some bytes.
 //   - The bytes need not be valid UTF-8 (a gzipped or binary body, or a cut that
 //     lands mid-rune), and an invalid string is not storable text. Repaired
 //     rather than rejected: Go's own ToValidUTF8, not a regex - the equivalent

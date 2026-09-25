@@ -441,10 +441,6 @@ describe('modules that were speculative and are now real', () => {
     expect(detail).not.toHaveProperty('payload');
     expect(detail).not.toHaveProperty('request_headers');
     expect(detail.attempts[0]).toHaveProperty('request_headers');
-    // Same for the body: per attempt, bounded, and a prefix of what the event
-    // holds in full — not a field on the delivery.
-    expect(detail).not.toHaveProperty('request_payload');
-    expect(detail.attempts[0]).toHaveProperty('request_payload');
   });
 
   it('a replay creates a NEW delivery row that points back at the original', async () => {

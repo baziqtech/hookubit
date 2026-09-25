@@ -767,19 +767,6 @@ model DeliveryAttempt {
   status          AttemptStatus
   httpStatus      Int?          @map("http_status")
   requestHeaders  Json?         @map("request_headers")
-  /// The request body THIS attempt put on the wire, bounded to
-  /// MAX_STORED_REQUEST_PAYLOAD_BYTES (4 KiB) and marked `…[truncated]` when cut.
-  ///
-  /// Evidence, not the system of record: the exact bytes are `events.payload_raw`
-  /// (or the offloaded object), hashed into `events.payload_hash`, and this
-  /// column is pruned 30 days before the delivery summary is. TEXT rather than
-  /// Json because a bounded JSON document is usually not JSON, and because a NUL
-  /// in a publisher's body must not fail the INSERT that records the attempt.
-  ///
-  /// Null means "no record of what this attempt sent": a row older than the
-  /// column, one whose detail retention reclaimed, or an attempt where nothing
-  /// reached the network (unsignable, or the payload could not be resolved).
-  requestPayload  String?       @map("request_payload")
   responseHeaders Json?         @map("response_headers")
   /// Truncated to EGRESS_MAX_RESPONSE_BYTES. Larger bodies go to object storage.
   responseBody    String?       @map("response_body")

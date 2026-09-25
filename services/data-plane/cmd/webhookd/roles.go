@@ -320,11 +320,10 @@ func runWorker(ctx context.Context, cfg *config.Config, pool *pgxpool.Pool, log 
 		PollInterval: cfg.WorkerPollInterval,
 		Lease:        cfg.DeliveryLease,
 		// Two budgets, neither of them the ingest one. See workerTimeouts.
-		DBTimeout:                    dbTimeout,
-		PayloadTimeout:               payloadTimeout,
-		MaxStoredResponseBytes:       cfg.MaxStoredResponseBytes,
-		MaxStoredRequestPayloadBytes: cfg.MaxStoredRequestPayloadBytes,
-		Logger:                       log,
+		DBTimeout:              dbTimeout,
+		PayloadTimeout:         payloadTimeout,
+		MaxStoredResponseBytes: cfg.MaxStoredResponseBytes,
+		Logger:                 log,
 	})
 	if err != nil {
 		return fmt.Errorf("build worker: %w", err)

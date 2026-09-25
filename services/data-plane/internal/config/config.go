@@ -15,7 +15,6 @@ import (
 	"github.com/shaq/hookubit/services/data-plane/internal/queue"
 	"github.com/shaq/hookubit/services/data-plane/internal/ratelimit"
 	"github.com/shaq/hookubit/services/data-plane/internal/router"
-	"github.com/shaq/hookubit/services/data-plane/internal/worker"
 )
 
 // ShutdownGrace is the TOTAL budget from SIGTERM to process exit, and
@@ -188,14 +187,6 @@ type Config struct {
 	BreakerBaseCooldown      time.Duration
 	MaxStoredResponseBytes   int
 
-	// MaxStoredRequestPayloadBytes bounds what of the request body is kept on
-	// each attempt row. Smaller than MaxStoredResponseBytes on purpose: a
-	// response body is unique information per attempt, while the request body is
-	// necessarily identical across the attempts of one delivery (the signature
-	// covers the raw bytes) AND is already stored in full on `events`. What is
-	// wanted here is an identifying prefix, not another copy.
-	MaxStoredRequestPayloadBytes int
-
 	// ClaimStrategy selects how the worker picks its batch: "fifo" (default)
 	// or "tenant_fair" (ADR-0007). See the note on the default in
 	// queue.NewPostgresQueue and in HANDOFF.md.
@@ -314,9 +305,6 @@ func Load() (*Config, error) {
 		BreakerHalfOpenSuccesses: envInt("BREAKER_HALF_OPEN_SUCCESSES", 2),
 		BreakerBaseCooldown:      envDuration("BREAKER_BASE_COOLDOWN_MS", 30*time.Second),
 		MaxStoredResponseBytes:   envInt("MAX_STORED_RESPONSE_BYTES", 64<<10),
-
-		MaxStoredRequestPayloadBytes: envInt("MAX_STORED_REQUEST_PAYLOAD_BYTES",
-			worker.DefaultMaxStoredRequestPayloadBytes),
 
 		// Default "fifo" deliberately, inverting ADR-0007's stated default.
 		// Nothing has been measured, the prerequisite index and NOT NULL

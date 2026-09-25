@@ -97,23 +97,12 @@ type Job struct {
 // AttemptRecord is one append-only delivery_attempts row (ARCHITECTURE.md 33).
 // Nothing ever updates a row once written; a second attempt is a second row.
 type AttemptRecord struct {
-	Number         int
-	StartedAt      time.Time
-	CompletedAt    time.Time
-	Status         AttemptStatus
-	HTTPStatus     int
-	RequestHeaders map[string]string
-	// RequestPayload is the body THIS attempt put on the wire, bounded to
-	// maxStoredPayload and sanitised for a text column - see storablePayload.
-	//
-	// Empty writes NULL, and NULL means "no record of what this attempt sent".
-	// That is the honest value for every attempt that never reached the network:
-	// recordNonHTTP leaves it empty because an unsignable delivery, or one whose
-	// payload could not be fetched or verified, sent nothing. It is EVIDENCE,
-	// never the system of record - the exact bytes live on the event and are
-	// hashed into events.payload_hash, and retention prunes this row 30 days
-	// before the delivery it belongs to.
-	RequestPayload  string
+	Number          int
+	StartedAt       time.Time
+	CompletedAt     time.Time
+	Status          AttemptStatus
+	HTTPStatus      int
+	RequestHeaders  map[string]string
 	ResponseHeaders map[string]string
 	ResponseBody    string
 	ResponseSize    int
@@ -480,11 +469,11 @@ RETURNING id
 const insertAttemptSQL = `
 INSERT INTO delivery_attempts (
     id, delivery_id, attempt_number, started_at, completed_at, status,
-    http_status, request_headers, request_payload, response_headers, response_body,
+    http_status, request_headers, response_headers, response_body,
     response_size, error_code, error_message, duration_ms, worker_id, created_at,
     trace_id)
-VALUES ($1, $2, $3, $4, $5, $6::text::"AttemptStatus", $7, $8::jsonb, $9, $10::jsonb,
-        $11, $12, $13, $14, $15, $16, now(), $17)
+VALUES ($1, $2, $3, $4, $5, $6::text::"AttemptStatus", $7, $8::jsonb, $9::jsonb,
+        $10, $11, $12, $13, $14, $15, now(), $16)
 `
 
 // Complete implements Store.
@@ -572,7 +561,6 @@ func insertAttempt(ctx context.Context, tx pgx.Tx, deliveryID string, a *Attempt
 		string(a.Status),
 		httpStatus,
 		jsonOrNil(a.RequestHeaders),
-		textOrNil(a.RequestPayload),
 		jsonOrNil(a.ResponseHeaders),
 		textOrNil(a.ResponseBody),
 		a.ResponseSize,

@@ -165,7 +165,6 @@ contains keys and belongs in a Secret.
 | `ENCRYPTION_KEYS_RETIRED` | unset | both | Comma-separated `<kid>:<base64key>` pairs accepted for decryption only. Keep old keys here through rotation and for as long as your oldest restorable backup. |
 | `ENCRYPTION_KEY_ID` | `k1` | both | Key id written into new ciphertext (1-16 chars of `[A-Za-z0-9_-]`). |
 | `INGEST_DB_TIMEOUT_MS` | `5000` | data plane | Deadline for the database work of one publish. Must be positive. |
-| `MAX_STORED_REQUEST_PAYLOAD_BYTES` | `4096` | data plane | Request body bytes persisted per attempt in `delivery_attempts.request_payload`. A bounded prefix on purpose: the exact bytes are already stored once on the event, and the same body is re-sent on every retry. |
 | `MAX_STORED_RESPONSE_BYTES` | `65536` | data plane | Response body bytes persisted per attempt. |
 | `PAYLOAD_DOWNLOAD_TIMEOUT_MS` | `10000` | data plane | Bound on one payload download (worker). Must be positive. |
 | `PAYLOAD_STORE_MAX_ATTEMPTS` | `3` | data plane | SDK retry count for one object-storage call. Must be positive. |
