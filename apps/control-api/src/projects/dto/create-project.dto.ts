@@ -40,4 +40,19 @@ export class CreateProjectDto {
   @IsOptional()
   @IsEnum(Environment)
   environment?: Environment;
+
+  @ApiPropertyOptional({
+    example: 'proj_01J8ZK...',
+    description:
+      'Copy the CONFIGURATION of an existing project in this organization: endpoints with their ' +
+      'timeouts, limits and custom headers, retry policies, and subscriptions.\n\n' +
+      'NEVER copied: signing secrets, API keys, the delivery record, notification destinations. ' +
+      'A leak in one project stays in one project.\n\n' +
+      'Every copied endpoint arrives PAUSED and without a secret, because the URL it points at ' +
+      'belongs to the source project — often the test one — and an endpoint that arrived live ' +
+      'would start delivering real traffic to a staging server before anybody looked at the list.',
+  })
+  @IsOptional()
+  @IsString()
+  copy_from_project_id?: string;
 }

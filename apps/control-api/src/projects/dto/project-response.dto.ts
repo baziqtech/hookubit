@@ -40,6 +40,18 @@ export class ProjectDto {
   })
   status!: ProjectStatus;
 
+  @ApiProperty({
+    type: [String],
+    example: ['203.0.113.0/24'],
+    description:
+      'Addresses permitted to PUBLISH events to this project. EMPTY means every address may, ' +
+      'which is the default. The data plane checks this before it judges whether the API key ' +
+      'is valid, so a blocked address learns nothing about the credential it presented. ' +
+      'Publishing only - never consulted for reading the record or for signing in, so it ' +
+      'cannot lock anyone out of the dashboard.',
+  })
+  allowed_ips!: string[];
+
   @ApiProperty({ format: 'date-time' })
   created_at!: string;
 
@@ -83,6 +95,41 @@ export class ProjectListDto {
   next_offset!: number | null;
 }
 
+/** What copying from another project actually produced. */
+export class TemplateResultDto {
+  @ApiProperty() endpoints!: number;
+  @ApiProperty() subscriptions!: number;
+  @ApiProperty() retry_policies!: number;
+
+  @ApiProperty({
+    description:
+      'ALWAYS 0, and it is in the response so the client can say so out loud. Secrets are never ' +
+      'copied — a leak in one project stays in one project — and it is why nothing this copy ' +
+      'produced is delivering yet.',
+  })
+  signing_secrets!: number;
+}
+
+/** `POST /projects` — the project, plus what a copy produced, if one was asked for. */
+export class CreatedProjectDto extends ProjectDto {
+  @ApiProperty({
+    type: () => TemplateResultDto,
+    nullable: true,
+    description: 'Null when nothing was copied.',
+  })
+  copied!: TemplateResultDto | null;
+
+  @ApiProperty({
+    type: String,
+    nullable: true,
+    description:
+      'Why the copy failed, when one was asked for and did not work. The PROJECT still exists: ' +
+      'an empty project is recoverable — copy again, or start from empty — and rolling the ' +
+      'create back would lose it and explain nothing.',
+  })
+  copy_error!: string | null;
+}
+
 export function toProjectDto(project: Project): ProjectDto {
   return {
     id: project.id,
@@ -91,6 +138,7 @@ export function toProjectDto(project: Project): ProjectDto {
     slug: project.slug,
     environment: project.environment,
     status: project.status,
+    allowed_ips: project.allowedIps ?? [],
     created_at: project.createdAt.toISOString(),
     updated_at: project.updatedAt.toISOString(),
   };

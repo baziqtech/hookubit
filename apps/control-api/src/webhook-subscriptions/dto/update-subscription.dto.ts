@@ -34,6 +34,7 @@ import { EventTypesConstraint, PayloadFilterConstraint } from './create-subscrip
  */
 export class UpdateSubscriptionDto {
   @ApiPropertyOptional({
+    type: String,
     maxLength: MAX_SUBSCRIPTION_NAME_LENGTH,
     nullable: true,
     description: 'Null clears the name.',

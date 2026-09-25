@@ -1,16 +1,18 @@
 import { INestApplication } from '@nestjs/common';
-import { CROSS_TENANT_MESSAGE, assertRoutesAreGuarded } from '../authz';
+import { CROSS_TENANT_MESSAGE, MAX_PAGE_SIZE, assertRoutesAreGuarded } from '../authz';
 import { IDS } from '../authz/testing/fixtures';
 import { THROTTLE_KEY, ThrottleOptions } from '../common/throttle.guard';
 import { EventsController } from '../events/events.controller';
 import { DeliveriesController } from './deliveries.controller';
-import { DeliveryListDto, ReplayResultDto } from './dto';
+import { PAYLOAD_PREVIEW_MAX_CHARS } from '../events/event-payload';
+import { DeliveryListDto, DeliveryListItemDto, ReplayResultDto } from './dto';
 import {
   DELIVERIES_PATH,
   EVENTS_PATH,
   HttpHarness,
   HttpResult,
   LEDGER,
+  MULTIBYTE_CHAR,
   startLedgerApp,
 } from './testing/harness';
 
@@ -245,6 +247,96 @@ describe('the ledger over HTTP', () => {
     });
   });
 
+  describe('the payload preview on the wire', () => {
+    // ONE full page, fetched once and read by the assertions below. Every one of
+    // them needs the whole ledger in view - the offloaded delivery is one of the
+    // oldest rows - and re-fetching 200 rows per assertion is cost for nothing.
+    let page: DeliveryListDto;
+
+    beforeAll(async () => {
+      const res = await call<DeliveryListDto>('GET', `${DELIVERIES_PATH}?limit=${MAX_PAGE_SIZE}`, {
+        as: IDS.ownerA,
+      });
+      expect(res.status).toBe(200);
+      page = res.body;
+    });
+
+    const row = (id: string): DeliveryListItemDto => {
+      const found = page.data.find((delivery) => delivery.id === id);
+      if (!found) throw new Error(`no delivery ${id} in the response`);
+      return found;
+    };
+
+    it('every list row carries the three preview fields, always present', () => {
+      for (const delivery of page.data) {
+        // PRESENT on every row, whatever the payload turned out to be: a client
+        // branching on `'payload_preview' in row` is branching on nothing.
+        expect(delivery).toHaveProperty('payload_preview');
+        expect(delivery).toHaveProperty('payload_size');
+        expect(typeof delivery.payload_truncated).toBe('boolean');
+        // And nothing longer than the bound leaves the server. This is the
+        // assertion the whole design exists for: 200 rows x 1 MiB is a 200 MB
+        // response, and no client-side truncation would have prevented it.
+        expect(Array.from(delivery.payload_preview ?? '').length).toBeLessThanOrEqual(
+          PAYLOAD_PREVIEW_MAX_CHARS,
+        );
+      }
+    });
+
+    it('serialises a truncated multi-byte preview as valid JSON text', () => {
+      const multibyte = row(LEDGER.deliveryMultibyte);
+
+      // Through a real HTTP round trip and a real JSON.parse: a lone surrogate
+      // from a mid-pair cut, or a U+FFFD from a mid-code-point one, would show
+      // up here and nowhere else.
+      expect(multibyte.payload_preview).toBe(MULTIBYTE_CHAR.repeat(PAYLOAD_PREVIEW_MAX_CHARS));
+      expect(multibyte.payload_truncated).toBe(true);
+      expect(multibyte.payload_size).toBe(900);
+    });
+
+    it('an offloaded payload is a null preview with its size intact', () => {
+      const offloaded = row(LEDGER.deliveryPaused);
+
+      expect(offloaded.payload_preview).toBeNull();
+      expect(offloaded.payload_size).toBe(4_194_304);
+      expect(offloaded.payload_truncated).toBe(false);
+    });
+
+    it("the same three fields on an event's nested delivery list", async () => {
+      const res = await call<DeliveryListDto>(
+        'GET',
+        `${eventPath(LEDGER.eventLongBody)}/deliveries`,
+        { as: IDS.ownerA },
+      );
+
+      expect(res.status).toBe(200);
+      expect(res.body.data).toHaveLength(1);
+      expect(res.body.data[0].payload_preview).toHaveLength(PAYLOAD_PREVIEW_MAX_CHARS);
+      expect(res.body.data[0].payload_truncated).toBe(true);
+    });
+
+    it('a viewer sees the preview - it is the delivery, not a secret', async () => {
+      const res = await call<DeliveryListDto>('GET', DELIVERIES_PATH, { as: IDS.viewerA });
+
+      expect(res.status).toBe(200);
+      expect(res.body.data.some((delivery) => delivery.payload_preview !== null)).toBe(true);
+    });
+
+    it('the DETAIL response does not pretend to have a preview', async () => {
+      // A null there would read as "this payload is unavailable". The detail
+      // screen gets the exact bytes from the event instead.
+      const res = await call<Record<string, unknown>>(
+        'GET',
+        deliveryPath(LEDGER.deliveryLongBody),
+        { as: IDS.ownerA },
+      );
+
+      expect(res.status).toBe(200);
+      expect(res.body).not.toHaveProperty('payload_preview');
+      expect(res.body).not.toHaveProperty('payload_truncated');
+    });
+  });
+
   describe('replay refusals carry a reason a human can act on', () => {
     it('409 for a soft-deleted endpoint', async () => {
       const res = await call('POST', `${deliveryPath(LEDGER.deliverySettledGone)}/replay`, {
@@ -257,7 +349,7 @@ describe('the ledger over HTTP', () => {
       expect(res.body.error?.details).toMatchObject({ endpoint_status: 'deleted' });
     });
 
-    it('409 with structured details for a fan-out over the cap', async () => {
+    it('409 with structured details for a routing over the cap', async () => {
       const res = await call('POST', `${eventPath(LEDGER.eventWide)}/replay`, {
         as: IDS.ownerA,
         body: {},
@@ -265,7 +357,7 @@ describe('the ledger over HTTP', () => {
 
       expect(res.status).toBe(409);
       expect(res.body.error?.code).toBe('limit_exceeded');
-      expect(res.body.error?.details).toMatchObject({ resource: 'replay_fan_out' });
+      expect(res.body.error?.details).toMatchObject({ resource: 'replay_deliveries' });
     });
 
     it('rejects a reason longer than the limit rather than storing it', async () => {
@@ -308,7 +400,7 @@ describe('the ledger over HTTP', () => {
     });
 
     it('the event replay is tighter than the single-delivery replay', () => {
-      // One event replay can create up to MAX_REPLAY_FAN_OUT real HTTP calls;
+      // One event replay can create up to MAX_REPLAY_DELIVERIES real HTTP calls;
       // one delivery replay creates one.
       const perEvent = throttleOf('EventsController', 'replay');
       const perDelivery = throttleOf('DeliveriesController', 'replay');

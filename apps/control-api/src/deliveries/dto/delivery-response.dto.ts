@@ -1,5 +1,6 @@
-import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
+import { ApiProperty } from '@nestjs/swagger';
 import { Delivery, DeliveryAttempt, DeliveryStatus, Endpoint, Event } from '@prisma/client';
+import { PAYLOAD_PREVIEW_MAX_CHARS, PayloadPreview } from '../../events/event-payload';
 import { HEADER_REDACTED, isRedactedRequestHeader } from '../delivery-limits';
 
 /** ISO-8601, or null. One helper so nine nullable timestamps read the same. */
@@ -54,12 +55,12 @@ export class DeliveryAttemptDto {
   })
   status!: string;
 
-  @ApiPropertyOptional({ nullable: true }) http_status!: number | null;
+  @ApiProperty({ type: Number, nullable: true }) http_status!: number | null;
   @ApiProperty() started_at!: string;
-  @ApiPropertyOptional({ nullable: true }) completed_at!: string | null;
-  @ApiPropertyOptional({ nullable: true }) duration_ms!: number | null;
+  @ApiProperty({ type: String, nullable: true }) completed_at!: string | null;
+  @ApiProperty({ type: Number, nullable: true }) duration_ms!: number | null;
 
-  @ApiPropertyOptional({
+  @ApiProperty({
     type: 'object',
     additionalProperties: { type: 'string' },
     nullable: true,
@@ -71,32 +72,36 @@ export class DeliveryAttemptDto {
   })
   request_headers!: Record<string, string> | null;
 
-  @ApiPropertyOptional({
+  @ApiProperty({
     type: 'object',
     additionalProperties: { type: 'string' },
     nullable: true,
   })
   response_headers!: Record<string, string> | null;
 
-  @ApiPropertyOptional({
+  @ApiProperty({
+    type: String,
     nullable: true,
     description: 'Truncated by the worker to EGRESS_MAX_RESPONSE_BYTES.',
   })
   response_body!: string | null;
 
-  @ApiPropertyOptional({
+  @ApiProperty({
+    type: String,
     nullable: true,
     description: 'Set instead of `response_body` when the response was too large to inline.',
   })
   response_body_location!: string | null;
 
-  @ApiPropertyOptional({
+  @ApiProperty({
+    type: Number,
     nullable: true,
     description: 'Bytes the endpoint sent, BEFORE truncation. Compare with `response_body`.',
   })
   response_size!: number | null;
 
-  @ApiPropertyOptional({
+  @ApiProperty({
+    type: String,
     nullable: true,
     description:
       'Low-cardinality classification derived from the error TYPE, never its message: ' +
@@ -105,13 +110,26 @@ export class DeliveryAttemptDto {
   })
   error_code!: string | null;
 
-  @ApiPropertyOptional({ nullable: true }) error_message!: string | null;
+  @ApiProperty({ type: String, nullable: true }) error_message!: string | null;
 
-  @ApiPropertyOptional({
+  @ApiProperty({
+    type: String,
     nullable: true,
     description: 'Which worker made this attempt. Useful when one replica is misbehaving.',
   })
   worker_id!: string | null;
+
+  @ApiProperty({
+    type: String,
+    nullable: true,
+    description:
+      'The 32-hex trace id of the span for THIS attempt - the seam between this ledger and the ' +
+      'trace backend. The worker writes it only when that span was actually sampled, so null ' +
+      'honestly means "no trace was kept for this attempt": not that tracing is broken, and not ' +
+      'a link worth rendering. Each attempt has its own trace; the retry chain is reassembled ' +
+      'by querying the backend for `webhook.delivery.id`, not by walking a span tree.',
+  })
+  trace_id!: string | null;
 
   @ApiProperty() created_at!: string;
 }
@@ -134,6 +152,7 @@ export function toAttemptDto(attempt: DeliveryAttempt): DeliveryAttemptDto {
     error_code: attempt.errorCode ?? null,
     error_message: attempt.errorMessage ?? null,
     worker_id: attempt.workerId ?? null,
+    trace_id: attempt.traceId ?? null,
     created_at: new Date(attempt.createdAt).toISOString(),
   };
 }
@@ -141,7 +160,7 @@ export function toAttemptDto(attempt: DeliveryAttempt): DeliveryAttemptDto {
 /**
  * One delivery: one event, one endpoint, one retry chain of its own.
  *
- * The materialised fan-out is what makes this row exist - a published event
+ * The materialised routing is what makes this row exist - a published event
  * becomes N of these, each with an independent lifecycle - and it is what makes
  * "did finance ever receive this?" answerable at all.
  */
@@ -150,7 +169,8 @@ export class DeliveryDto {
   @ApiProperty() event_id!: string;
   @ApiProperty() endpoint_id!: string;
 
-  @ApiPropertyOptional({
+  @ApiProperty({
+    type: String,
     nullable: true,
     description:
       'The subscription that matched. Null on a replay whose subscription has since been ' +
@@ -181,23 +201,30 @@ export class DeliveryDto {
   @ApiProperty() attempt_count!: number;
   @ApiProperty() max_attempts!: number;
 
-  @ApiPropertyOptional({
+  @ApiProperty({
+    type: String,
     nullable: true,
-    description: 'When the next attempt is due. Null means "as soon as a worker is free".',
+    description:
+      'When the next attempt is due. Always set - the column is NOT NULL and defaults to the ' +
+      'insert time, so a fresh delivery is due immediately. Read it together with `terminal`: ' +
+      'a terminal delivery still carries the time of its last transition here and nothing will ' +
+      'ever act on it. Nullable in the contract only so a client never has to change shape.',
   })
   next_attempt_at!: string | null;
 
-  @ApiPropertyOptional({ nullable: true }) last_attempt_at!: string | null;
-  @ApiPropertyOptional({ nullable: true }) completed_at!: string | null;
-  @ApiPropertyOptional({ nullable: true }) ordering_key!: string | null;
+  @ApiProperty({ type: String, nullable: true }) last_attempt_at!: string | null;
+  @ApiProperty({ type: String, nullable: true }) completed_at!: string | null;
+  @ApiProperty({ type: String, nullable: true }) ordering_key!: string | null;
 
-  @ApiPropertyOptional({
+  @ApiProperty({
+    type: String,
     nullable: true,
     description: 'The last failure, as the worker phrased it. The full history is in `attempts`.',
   })
   last_error!: string | null;
 
-  @ApiPropertyOptional({
+  @ApiProperty({
+    type: String,
     nullable: true,
     description:
       'The worker holding this delivery, and until when. A row stuck in `processing` whose ' +
@@ -205,9 +232,10 @@ export class DeliveryDto {
   })
   locked_by!: string | null;
 
-  @ApiPropertyOptional({ nullable: true }) locked_until!: string | null;
+  @ApiProperty({ type: String, nullable: true }) locked_until!: string | null;
 
-  @ApiPropertyOptional({
+  @ApiProperty({
+    type: String,
     nullable: true,
     description:
       'The delivery this one replays. Set on every replay and never on an original, which is ' +
@@ -215,7 +243,8 @@ export class DeliveryDto {
   })
   replay_of_delivery_id!: string | null;
 
-  @ApiPropertyOptional({
+  @ApiProperty({
+    type: String,
     nullable: true,
     description: 'The user id that asked for the replay. Null on originals.',
   })
@@ -223,6 +252,21 @@ export class DeliveryDto {
 
   @ApiProperty({ description: 'Shorthand for `replay_of_delivery_id !== null`.' })
   is_replay!: boolean;
+
+  @ApiProperty({
+    type: String,
+    nullable: true,
+    description:
+      'When retention deleted this delivery`s per-attempt detail. Null means the attempt ' +
+      'history is still here.\n\n' +
+      'Read it before you read `attempts`. Past the attempt horizon the platform reclaims the ' +
+      'request/response headers and bodies - which is where the bytes are - while keeping this ' +
+      'summary row for much longer. Without this field a pruned delivery reads `attempt_count: ' +
+      '5` next to an empty attempt list, which is indistinguishable from "the platform never ' +
+      'tried"; with it, the answer is "we tried five times and the detail was reclaimed on this ' +
+      'date".',
+  })
+  attempts_pruned_at!: string | null;
 
   @ApiProperty() created_at!: string;
   @ApiProperty() updated_at!: string;
@@ -235,7 +279,13 @@ const TERMINAL_STATUSES: ReadonlySet<DeliveryStatus> = new Set<DeliveryStatus>([
   DeliveryStatus.cancelled,
 ]);
 
-/** Mirrors `State.Terminal()` in services/data-plane/internal/worker/state.go. */
+/**
+ * Mirrors `State.Terminal()` in services/data-plane/internal/worker/state.go -
+ * and, since it is the same four statuses, `retention.TerminalStatuses` and the
+ * predicates of `deliveries_retention_idx` and `deliveries_attempt_pruning_idx`.
+ * A delivery this returns true for is one the retention sweep may eventually
+ * prune; one it returns false for is never touched, however old.
+ */
 export function isTerminal(status: DeliveryStatus): boolean {
   return TERMINAL_STATUSES.has(status);
 }
@@ -261,8 +311,83 @@ export function toDeliveryDto(delivery: Delivery): DeliveryDto {
     replay_of_delivery_id: delivery.replayOfDeliveryId ?? null,
     replayed_by: delivery.replayedBy ?? null,
     is_replay: delivery.replayOfDeliveryId !== null && delivery.replayOfDeliveryId !== undefined,
+    attempts_pruned_at: iso(delivery.attemptsPrunedAt),
     created_at: new Date(delivery.createdAt).toISOString(),
     updated_at: new Date(delivery.updatedAt).toISOString(),
+  };
+}
+
+/**
+ * A delivery AS A LIST ROW: the delivery, plus a bounded look at the body.
+ *
+ * Separate from `DeliveryDto` on purpose. These three fields are only honest
+ * where they were actually read - `GET /deliveries`, `GET /events/:id/deliveries`
+ * - and a `payload_preview: null` on a response that never looked at
+ * `payload_raw` (a replay result, the detail route) would read as "this payload
+ * is unavailable", which is the one thing null is supposed to mean. The detail
+ * route serves the exact bytes under `GET /events/:id/payload` instead, and has
+ * no use for a truncated copy.
+ */
+export class DeliveryListItemDto extends DeliveryDto {
+  @ApiProperty({
+    type: String,
+    nullable: true,
+    description:
+      'The first ' +
+      String(PAYLOAD_PREVIEW_MAX_CHARS) +
+      ' characters of the event body, decoded as UTF-8. A PREVIEW, and three ' +
+      'things follow from that.\n\n' +
+      '**It is not what was signed.** The signature a consumer verifies is an HMAC over the ' +
+      'WHOLE body; hashing this string will not reproduce it, and a signature investigation ' +
+      'belongs on `GET /events/:id/payload`, which serves the exact bytes.\n\n' +
+      '**It is cut by character count, not at a structural boundary**, so it is very often ' +
+      'invalid JSON - a truncated string literal, an unclosed brace. Render it as text. ' +
+      '`payload_truncated` says whether anything was cut.\n\n' +
+      '**Null is not "empty body".** It means no preview could be produced: the payload ' +
+      'exceeded the inline threshold and lives in object storage (this API has no ' +
+      'object-storage client and will not fetch 200 objects to draw a column), retention has ' +
+      'reclaimed the bytes, or they are not valid UTF-8 - a gzipped or binary body, which would ' +
+      'decode to replacement characters that look like data. `payload_size` is populated in all ' +
+      'three cases; an empty body gives `""`, not null.',
+  })
+  payload_preview!: string | null;
+
+  @ApiProperty({
+    type: Number,
+    nullable: true,
+    description:
+      'Bytes of the WHOLE body (`events.payload_size`), not of `payload_preview`. Recorded at ' +
+      'ingest, so it is the real size even when the preview is null. Null only when the event ' +
+      'row itself could not be read.',
+  })
+  payload_size!: number | null;
+
+  @ApiProperty({
+    description:
+      'True when the body continues past `payload_preview`. FALSE whenever `payload_preview` is ' +
+      'null - there is no preview for the body to be longer than, and a client that rendered an ' +
+      'ellipsis after nothing would be inventing content. Read `payload_size` for how big the ' +
+      'body is.',
+  })
+  payload_truncated!: boolean;
+}
+
+/**
+ * A list row: the delivery, plus whatever preview the payload allowed.
+ *
+ * `preview` is passed in rather than read here: it comes from ONE companion
+ * query over the page's distinct event ids (see `DeliveriesService.list`), and a
+ * mapper that fetched per row would be the N+1 this design exists to avoid.
+ */
+export function toDeliveryListItemDto(
+  delivery: Delivery,
+  preview: PayloadPreview,
+): DeliveryListItemDto {
+  return {
+    ...toDeliveryDto(delivery),
+    payload_preview: preview.preview,
+    payload_size: preview.size,
+    payload_truncated: preview.truncated,
   };
 }
 
@@ -274,7 +399,7 @@ export function toDeliveryDto(delivery: Delivery): DeliveryDto {
 export class DeliveryEventRefDto {
   @ApiProperty() id!: string;
   @ApiProperty() event_type!: string;
-  @ApiPropertyOptional({ nullable: true }) idempotency_key!: string | null;
+  @ApiProperty({ type: String, nullable: true }) idempotency_key!: string | null;
   @ApiProperty() created_at!: string;
 }
 
@@ -291,7 +416,7 @@ export class DeliveryEndpointRefDto {
   })
   status!: string;
 
-  @ApiPropertyOptional({ nullable: true }) disabled_reason!: string | null;
+  @ApiProperty({ type: String, nullable: true }) disabled_reason!: string | null;
 }
 
 /**
@@ -345,15 +470,15 @@ export function toEndpointRef(endpoint: Endpoint): DeliveryEndpointRefDto {
  * theoretical cost.
  */
 export class DeliveryListDto {
-  @ApiProperty({ type: [DeliveryDto] }) data!: DeliveryDto[];
+  @ApiProperty({ type: [DeliveryListItemDto] }) data!: DeliveryListItemDto[];
   @ApiProperty() has_more!: boolean;
-  @ApiPropertyOptional({ nullable: true }) next_offset!: number | null;
+  @ApiProperty({ type: Number, nullable: true }) next_offset!: number | null;
 }
 
 export class DeliveryAttemptListDto {
   @ApiProperty({ type: [DeliveryAttemptDto] }) data!: DeliveryAttemptDto[];
   @ApiProperty() has_more!: boolean;
-  @ApiPropertyOptional({ nullable: true }) next_offset!: number | null;
+  @ApiProperty({ type: Number, nullable: true }) next_offset!: number | null;
 }
 
 /**

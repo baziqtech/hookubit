@@ -9,6 +9,7 @@ const base: CreatedEndpoint = {
   name: 'warehouse-sync',
   url: 'https://example.com/hooks',
   description: null,
+  health: null,
   status: 'active',
   enabled: true,
   disabled_reason: null,
@@ -19,6 +20,8 @@ const base: CreatedEndpoint = {
   rate_limit_window_seconds: 1,
   retry_policy_id: null,
   custom_headers: null,
+  // The caller received the plaintext below, so a secret is signing right now.
+  has_live_secret: true,
   created_at: '2026-09-06T00:00:00.000Z',
   updated_at: '2026-09-06T00:00:00.000Z',
   secret: 'whsec_plaintext',
@@ -42,6 +45,9 @@ describe('EndpointCreatedNotice', () => {
       enabled: false,
       secret: null,
       secret_pending: true,
+      // Nothing to sign with: this is the state `has_live_secret` reports, and
+      // the reason `POST /enable` would refuse this endpoint with a 409.
+      has_live_secret: false,
       disabled_reason: 'Awaiting a signing secret.',
     });
 
@@ -69,7 +75,7 @@ describe('EndpointCreatedNotice', () => {
 
   it('treats a null secret as pending even if the flag disagrees', () => {
     // Defensive: there is nothing to show, so it must not claim success.
-    const html = render({ ...base, secret: null, secret_pending: false });
+    const html = render({ ...base, secret: null, secret_pending: false, has_live_secret: false });
     expect(html).toContain('secret-pending-notice');
   });
 });

@@ -1,4 +1,5 @@
 import { PrismaService } from '../../infrastructure/prisma/prisma.service';
+import { EVENT_PAYLOAD_HEAD_TAG } from '../event-payload-head';
 
 /**
  * In-memory stand-in for the tenant-owned tables, in the spirit of
@@ -45,11 +46,16 @@ const SCHEMA: Record<string, Record<string, Relation>> = {
   apiKey: { project: { table: 'project', fk: 'projectId' } },
   retryPolicy: { project: { table: 'project', fk: 'projectId' } },
   rateLimitPolicy: { project: { table: 'project', fk: 'projectId' } },
+  notificationDestination: { project: { table: 'project', fk: 'projectId' } },
+  notificationDispatch: {
+    destination: { table: 'notificationDestination', fk: 'destinationId' },
+  },
   idempotencyKey: { project: { table: 'project', fk: 'projectId' } },
   event: {
     project: { table: 'project', fk: 'projectId' },
     organization: { table: 'organization', fk: 'organizationId' },
   },
+  eventOutbox: { event: { table: 'event', fk: 'eventId' } },
   delivery: {
     endpoint: { table: 'endpoint', fk: 'endpointId' },
     project: { table: 'project', fk: 'projectId' },
@@ -154,19 +160,17 @@ export class FakeTenantPrisma {
           if (row[key] === operator.not) return false;
           continue;
         }
-        // Ordering comparisons, string-compared the way PostgreSQL compares the
-        // text primary keys these tables use. `forEachPage` walks a keyset
-        // (`WHERE id > <last seen>`), so without these the exhaustive paging
-        // tests would be testing nothing.
+        // Ordering comparisons. `forEachPage` walks a keyset (`WHERE id > <last
+        // seen>`) over text primary keys, so without these the exhaustive paging
+        // tests would be testing nothing - and `expires_at > now()`, the live-
+        // secret predicate, is the same operator over a timestamp.
         const comparisons = ['gt', 'gte', 'lt', 'lte'] as const;
         if (comparisons.some((name) => name in operator)) {
           const actual = row[key];
           if (actual === null || actual === undefined) return false;
-          const left = String(actual);
           for (const name of comparisons) {
             if (!(name in operator)) continue;
-            const right = String(operator[name]);
-            const sign = left < right ? -1 : left > right ? 1 : 0;
+            const sign = FakeTenantPrisma.compare(actual, operator[name]);
             if (name === 'gt' && sign <= 0) return false;
             if (name === 'gte' && sign < 0) return false;
             if (name === 'lt' && sign >= 0) return false;
@@ -180,6 +184,41 @@ export class FakeTenantPrisma {
       if (row[key] !== value) return false;
     }
     return true;
+  }
+
+  /**
+   * Orders two values the way PostgreSQL orders that column's type.
+   *
+   * Timestamps are compared as instants, NOT as strings. `String(new Date())`
+   * is `'Tue Sep 08 2026 ...'`, so a lexical comparison of two of those orders
+   * by weekday and then by MONTH NAME - `'Apr' < 'Jan'` - and a filter like
+   * `expires_at > now()` came out right or wrong depending on the calendar. A
+   * test asserting an expired secret is not live would have passed in December
+   * and failed in April, or worse, passed for the wrong reason.
+   *
+   * Everything else stays a string comparison, which is what the text primary
+   * keys `forEachPage` pages over need.
+   */
+  private static compare(left: unknown, right: unknown): number {
+    const order = (a: number, b: number): number => (a < b ? -1 : a > b ? 1 : 0);
+    if (left instanceof Date || right instanceof Date) {
+      const at = FakeTenantPrisma.instant(left);
+      const bt = FakeTenantPrisma.instant(right);
+      if (Number.isNaN(at) || Number.isNaN(bt)) {
+        throw new Error('FakeTenantPrisma: cannot compare a Date against a non-date value');
+      }
+      return order(at, bt);
+    }
+    if (typeof left === 'number' && typeof right === 'number') return order(left, right);
+    const a = String(left);
+    const b = String(right);
+    return a < b ? -1 : a > b ? 1 : 0;
+  }
+
+  private static instant(value: unknown): number {
+    if (value instanceof Date) return value.getTime();
+    if (typeof value === 'string' || typeof value === 'number') return new Date(value).getTime();
+    return Number.NaN;
   }
 
   /** Projects a row through Prisma's `select`, recursing into relations. */
@@ -223,15 +262,26 @@ export class FakeTenantPrisma {
     return flat;
   }
 
-  /** `_count` (true or per-field) and `_sum`; enough for the dashboard queries. */
-  private static summarise(rows: Row[], args: { _count?: unknown; _sum?: unknown }): Row {
+  /** `_count` (true or per-field), `_sum`, `_max` and `_min`. */
+  private static summarise(
+    rows: Row[],
+    args: { _count?: unknown; _sum?: unknown; _max?: unknown; _min?: unknown },
+  ): Row {
     const out: Row = {};
     if (args._count === true) {
       out._count = rows.length;
     } else if (args._count && typeof args._count === 'object') {
       const counts: Row = {};
       for (const field of Object.keys(args._count as Row)) {
-        counts[field] = rows.filter((row) => row[field] !== null && row[field] !== undefined).length;
+        // `_all` counts EVERY row in the group; a named field counts the rows
+        // where it is non-null. Treating `_all` as a column looked for a
+        // property no row has and returned 0 for every group — a rollup that
+        // is uniformly, silently empty, which reads as "nothing happened"
+        // rather than as a broken fake.
+        counts[field] =
+          field === '_all'
+            ? rows.length
+            : rows.filter((row) => row[field] !== null && row[field] !== undefined).length;
       }
       out._count = counts;
     }
@@ -242,6 +292,29 @@ export class FakeTenantPrisma {
       }
       out._sum = sums;
     }
+    /*
+     * `_max` and `_min` use the same `compare` every ordering here uses, and
+     * NOT `Math.max` — the fields these are asked for are timestamps, where
+     * `Math.max` coerces to NaN and returns undefined for every group. That
+     * reads as "this endpoint has never been delivered to", which is a
+     * plausible answer and a wrong one.
+     */
+    for (const key of ['_max', '_min'] as const) {
+      const spec = args[key];
+      if (!spec || typeof spec !== 'object') continue;
+      const picked: Row = {};
+      for (const field of Object.keys(spec as Row)) {
+        const values = rows.map((row) => row[field]).filter((value) => value !== null && value !== undefined);
+        picked[field] =
+          values.length === 0
+            ? null
+            : values.reduce((best, value) => {
+                const sign = FakeTenantPrisma.compare(value, best);
+                return (key === '_max' ? sign > 0 : sign < 0) ? value : best;
+              });
+      }
+      out[key] = picked;
+    }
     return out;
   }
 
@@ -251,10 +324,17 @@ export class FakeTenantPrisma {
     let found = this.all(table).filter((row) => this.matches(table, row, where));
     if (args.orderBy) {
       const [[field, direction]] = Object.entries(args.orderBy);
+      // `compare`, not localeCompare over String(...). Every listing in this API
+      // orders by `created_at DESC`, and `String(new Date(...))` is
+      // 'Sun Mar 01 2026 ...' - so a lexical sort ordered by WEEKDAY and then by
+      // MONTH NAME ('Apr' < 'Jan'). The same trap the `compare` docblock below
+      // describes for filters, in the sort. A test asserting "newest first" came
+      // out right or wrong depending on the calendar, which is worse than not
+      // asserting it: the fixture dates happened to agree often enough that the
+      // ordering looked verified.
       found = [...found].sort((a, b) => {
-        const left = String(a[field] ?? '');
-        const right = String(b[field] ?? '');
-        return direction === 'desc' ? right.localeCompare(left) : left.localeCompare(right);
+        const sign = FakeTenantPrisma.compare(a[field] ?? '', b[field] ?? '');
+        return direction === 'desc' ? -sign : sign;
       });
     }
     if (args.skip) found = found.slice(args.skip);
@@ -302,6 +382,8 @@ export class FakeTenantPrisma {
         where?: Row;
         _count?: unknown;
         _sum?: unknown;
+        take?: number;
+        skip?: number;
       }): Promise<Row[]> => {
         this.queries.push({ table, op: 'groupBy', where: args.where });
         const rows = this.find(table, { where: args.where });
@@ -312,11 +394,35 @@ export class FakeTenantPrisma {
           if (bucket) bucket.push(row);
           else groups.set(key, [row]);
         }
-        return [...groups.values()].map((bucket) => {
+
+        const built = [...groups.values()].map((bucket) => {
           const head: Row = {};
           for (const field of args.by) head[field] = bucket[0][field] ?? null;
           return { ...head, ...FakeTenantPrisma.summarise(bucket, args) };
         });
+
+        /*
+         * `take` and `skip` are HONOURED, and the order is the grouped columns
+         * ascending — the same default `ScopedRepository.groupBy` applies.
+         *
+         * They used to be ignored, which made this fake unable to fail on the
+         * one bug that class of query actually has: a caller that pages a
+         * grouped rollup and stops early, or one that does not page at all and
+         * is silently truncated. A fake that returns everything in one call
+         * passes both the correct and the broken version.
+         */
+        built.sort((left, right) => {
+          for (const field of args.by) {
+            const a = JSON.stringify(left[field] ?? null);
+            const b = JSON.stringify(right[field] ?? null);
+            if (a !== b) return a < b ? -1 : 1;
+          }
+          return 0;
+        });
+
+        const skip = args.skip ?? 0;
+        const take = args.take ?? built.length;
+        return built.slice(skip, skip + take);
       },
       deleteMany: async (args: { where?: Row } = {}): Promise<{ count: number }> => {
         const targets = this.find(table, { where: args.where });
@@ -338,8 +444,11 @@ export class FakeTenantPrisma {
   readonly apiKey = this.delegate('apiKey');
   readonly retryPolicy = this.delegate('retryPolicy');
   readonly rateLimitPolicy = this.delegate('rateLimitPolicy');
+  readonly notificationDestination = this.delegate('notificationDestination');
+  readonly notificationDispatch = this.delegate('notificationDispatch');
   readonly idempotencyKey = this.delegate('idempotencyKey');
   readonly event = this.delegate('event');
+  readonly eventOutbox = this.delegate('eventOutbox');
   readonly delivery = this.delegate('delivery');
   readonly deliveryAttempt = this.delegate('deliveryAttempt');
   readonly auditLog = this.delegate('auditLog');
@@ -348,6 +457,83 @@ export class FakeTenantPrisma {
 
   async $transaction<T>(fn: (tx: FakeTenantPrisma) => Promise<T>): Promise<T> {
     return fn(this);
+  }
+
+  /**
+   * The ONE raw statement this layer issues: `eventPayloadHeadQuery`.
+   *
+   * Emulated rather than stubbed, because the interesting parts of that query
+   * are its tenant predicate and its byte slice, and a stub returning canned
+   * rows would make "a cross-tenant event id yields no preview" and "the slice
+   * is bounded" pass without being true.
+   *
+   * It reads the parameters POSITIONALLY - `$1` maxBytes, `$2` ids, `$3`
+   * organization id, optional `$4` project id - and refuses any other arity, so
+   * a production change that drops the organization conjunct fails here loudly
+   * instead of quietly widening the fence. Anything without the tag is refused
+   * outright: a second raw query added later must not be answered with payload
+   * heads.
+   */
+  async $queryRaw<T>(query: {
+    values?: unknown[];
+    text?: string;
+    sql?: string;
+    strings?: readonly string[];
+  }): Promise<T> {
+    const text = query?.text ?? query?.sql ?? (query?.strings ?? []).join('');
+    if (!text.includes(EVENT_PAYLOAD_HEAD_TAG)) {
+      throw new Error(
+        `FakeTenantPrisma.$queryRaw only implements the '${EVENT_PAYLOAD_HEAD_TAG}' statement; got: ${text.slice(0, 120)}`,
+      );
+    }
+
+    const values = query.values ?? [];
+    if (values.length !== 3 && values.length !== 4) {
+      throw new Error(
+        `${EVENT_PAYLOAD_HEAD_TAG} expects 3 or 4 parameters (maxBytes, ids, organizationId[, projectId]); got ${values.length}`,
+      );
+    }
+    const [maxBytes, ids, organizationId, projectId] = values as [
+      number,
+      string[],
+      string,
+      string | undefined,
+    ];
+    // The predicate has to be IN the statement, not merely applied below: a fake
+    // that filtered by an organization id the SQL never mentioned would make an
+    // unscoped raw query look isolated.
+    if (!text.includes('organization_id =')) {
+      throw new Error(`${EVENT_PAYLOAD_HEAD_TAG} has no organization predicate`);
+    }
+    if (values.length === 4 && !text.includes('project_id =')) {
+      throw new Error(`${EVENT_PAYLOAD_HEAD_TAG} passed a project id it does not filter on`);
+    }
+
+    this.queries.push({ table: 'event', op: 'payloadHead' });
+
+    const wanted = new Set(ids);
+    const rows = this.all('event').filter(
+      (row) =>
+        wanted.has(String(row.id)) &&
+        row.organizationId === organizationId &&
+        (projectId === undefined || row.projectId === projectId),
+    );
+
+    return rows.map((row) => {
+      const raw = row.payloadRaw as Uint8Array | null | undefined;
+      const buffer = raw === null || raw === undefined ? null : Buffer.from(raw);
+      return {
+        id: String(row.id),
+        // `substring(payload_raw from 1 for $1)` - a BYTE slice, so a multi-byte
+        // code point straddling the bound is handed over half-cut, exactly as
+        // PostgreSQL would.
+        head: buffer === null ? null : buffer.subarray(0, maxBytes),
+        // `octet_length(payload_raw)`: the whole column, not the slice.
+        inline_bytes: buffer === null ? null : buffer.byteLength,
+        payload_size: row.payloadSize ?? null,
+        payload_location: row.payloadLocation ?? null,
+      };
+    }) as unknown as T;
   }
 
   asPrisma(): PrismaService {

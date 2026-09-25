@@ -44,10 +44,10 @@ var prismaOnlyParams = map[string]string{
 	"sslpassword":      "",
 }
 
-// normaliseDSN rewrites a Prisma-flavoured connection string into one pgx can
+// NormaliseDSN rewrites a Prisma-flavoured connection string into one pgx can
 // use. It is deliberately conservative: anything it does not recognise is left
 // exactly as the operator wrote it.
-func normaliseDSN(raw string) (string, error) {
+func NormaliseDSN(raw string) (string, error) {
 	u, err := url.Parse(raw)
 	if err != nil {
 		// Not a URL - probably key=value DSN form, which pgx also accepts.
@@ -74,7 +74,95 @@ func normaliseDSN(raw string) (string, error) {
 }
 
 func Open(ctx context.Context, url string, maxConns int32, statementTimeout time.Duration) (*pgxpool.Pool, error) {
-	dsn, err := normaliseDSN(url)
+	cfg, err := buildConfig(url, maxConns, statementTimeout)
+	if err != nil {
+		return nil, err
+	}
+	return connect(ctx, cfg)
+}
+
+// OpenWithRetry is Open with a bounded, cancellable wait for a database that is
+// not reachable yet.
+//
+// Why this exists: run() opens the pool during boot and exits non-zero when it
+// cannot, so a PostgreSQL outage turned every starting pod into
+// CrashLoopBackOff - and recovery was then gated on kubelet's exponential
+// backoff, up to five minutes, rather than on the database. That is precisely
+// the fleet-wide restart the liveness probe avoids by never touching PostgreSQL
+// (ARCHITECTURE.md 46), reintroduced at a different point in the lifecycle. A
+// startupProbe cannot rescue it either: a process that has already exited has
+// no port left to probe.
+//
+// A malformed DATABASE_URL is NOT retried. From the outside, waiting out a
+// configuration error looks identical to waiting out an outage, and those need
+// telling apart: one clears on its own, the other never will.
+//
+// The wait ends when ctx does, so a SIGTERM arriving mid-wait still exits
+// promptly.
+func OpenWithRetry(
+	ctx context.Context,
+	url string,
+	maxConns int32,
+	statementTimeout time.Duration,
+	onRetry func(attempt int, err error, retryIn time.Duration),
+) (*pgxpool.Pool, error) {
+	// Validate once, before the loop, so a bad DSN fails on the first pass
+	// instead of being retried until the startup budget runs out.
+	if _, err := buildConfig(url, maxConns, statementTimeout); err != nil {
+		return nil, err
+	}
+
+	const (
+		initialBackoff = 250 * time.Millisecond
+		maxBackoff     = 10 * time.Second
+	)
+
+	backoff := initialBackoff
+	for attempt := 1; ; attempt++ {
+		// Rebuilt per attempt rather than shared: pgxpool.NewWithConfig takes
+		// ownership of the config it is handed, and a pool we just closed must
+		// not leave the next attempt reusing its internals.
+		cfg, err := buildConfig(url, maxConns, statementTimeout)
+		if err != nil {
+			return nil, err
+		}
+
+		pool, err := connect(ctx, cfg)
+		if err == nil {
+			return pool, nil
+		}
+		if ctx.Err() != nil {
+			return nil, waitCancelled(ctx, err)
+		}
+		if onRetry != nil {
+			onRetry(attempt, err, backoff)
+		}
+
+		timer := time.NewTimer(backoff)
+		select {
+		case <-timer.C:
+		case <-ctx.Done():
+			timer.Stop()
+			return nil, waitCancelled(ctx, err)
+		}
+
+		if backoff < maxBackoff {
+			if backoff *= 2; backoff > maxBackoff {
+				backoff = maxBackoff
+			}
+		}
+	}
+}
+
+// waitCancelled reports the shutdown AND the connection error that was standing
+// when it arrived. A bare "context canceled" would name the shutdown and hide
+// the reason the process was still waiting to start.
+func waitCancelled(ctx context.Context, last error) error {
+	return fmt.Errorf("waiting for PostgreSQL: %w (last connection error: %v)", ctx.Err(), last)
+}
+
+func buildConfig(rawURL string, maxConns int32, statementTimeout time.Duration) (*pgxpool.Config, error) {
+	dsn, err := NormaliseDSN(rawURL)
 	if err != nil {
 		return nil, fmt.Errorf("normalise DATABASE_URL: %w", err)
 	}
@@ -108,7 +196,10 @@ func Open(ctx context.Context, url string, maxConns int32, statementTimeout time
 			return nil
 		}
 	}
+	return cfg, nil
+}
 
+func connect(ctx context.Context, cfg *pgxpool.Config) (*pgxpool.Pool, error) {
 	pool, err := pgxpool.NewWithConfig(ctx, cfg)
 	if err != nil {
 		return nil, fmt.Errorf("create connection pool: %w", err)

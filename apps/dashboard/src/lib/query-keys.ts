@@ -18,8 +18,9 @@ export const queryKeys = {
   membersRoot: (orgId: string) => ['organization', orgId, 'members'] as const,
   members: (orgId: string, offset = 0) => ['organization', orgId, 'members', { offset }] as const,
 
-  auditLogs: (orgId: string) => ['organization', orgId, 'audit-logs'] as const,
-  usage: (orgId: string) => ['organization', orgId, 'usage'] as const,
+  auditLogsRoot: (orgId: string) => ['organization', orgId, 'audit-logs'] as const,
+  auditLogs: (orgId: string, filters: Record<string, string>, offset = 0) =>
+    ['organization', orgId, 'audit-logs', filters, { offset }] as const,
 
   projectsRoot: (orgId: string) => ['projects', orgId] as const,
   projects: (orgId: string, offset = 0) => ['projects', orgId, { offset }] as const,
@@ -29,6 +30,8 @@ export const queryKeys = {
   endpoints: (projectId: string, offset = 0, includeDeleted?: boolean) =>
     ['project', projectId, 'endpoints', { offset, includeDeleted: includeDeleted ?? false }] as const,
 
+  endpoint: (endpointId: string) => ['endpoint', endpointId] as const,
+
   endpointSecretsRoot: (endpointId: string) => ['endpoint', endpointId, 'secrets'] as const,
   endpointSecrets: (endpointId: string, offset = 0) =>
     ['endpoint', endpointId, 'secrets', { offset }] as const,
@@ -37,14 +40,55 @@ export const queryKeys = {
   apiKeys: (projectId: string, offset = 0) =>
     ['project', projectId, 'api-keys', { offset }] as const,
 
-  subscriptions: (projectId: string) => ['project', projectId, 'subscriptions'] as const,
-  analytics: (projectId: string) => ['project', projectId, 'analytics'] as const,
-  events: (projectId: string, filters: Record<string, string>) =>
-    ['project', projectId, 'events', filters] as const,
-  event: (eventId: string) => ['event', eventId] as const,
-  eventDeliveries: (eventId: string) => ['event', eventId, 'deliveries'] as const,
-  deliveries: (projectId: string, filters: Record<string, string>) =>
-    ['project', projectId, 'deliveries', filters] as const,
-  delivery: (deliveryId: string) => ['delivery', deliveryId] as const,
-  deliveryAttempts: (deliveryId: string) => ['delivery', deliveryId, 'attempts'] as const,
+  subscriptionsRoot: (projectId: string) => ['project', projectId, 'subscriptions'] as const,
+  subscriptions: (projectId: string, offset = 0) =>
+    ['project', projectId, 'subscriptions', { offset }] as const,
+
+  retryPoliciesRoot: (projectId: string) => ['project', projectId, 'retry-policies'] as const,
+  retryPolicies: (projectId: string, offset = 0) =>
+    ['project', projectId, 'retry-policies', { offset }] as const,
+  retryPolicy: (projectId: string, policyId: string) =>
+    ['project', projectId, 'retry-policy', policyId] as const,
+
+  rateLimitsRoot: (projectId: string) => ['project', projectId, 'rate-limits'] as const,
+  rateLimits: (projectId: string, offset = 0) =>
+    ['project', projectId, 'rate-limits', { offset }] as const,
+  /*
+   * Analytics: four routes, one key each, with the window (and limit) in the
+   * key so 24h and 7d are separate cache entries rather than one overwriting
+   * the other. `analyticsRoot` is the prefix a replay or requeue can drop.
+   */
+  analyticsRoot: (projectId: string) => ['project', projectId, 'analytics'] as const,
+  analyticsDeliveries: (projectId: string, windowHours: number) =>
+    ['project', projectId, 'analytics', 'deliveries', { windowHours }] as const,
+  billing: (orgId: string) => ['org', orgId, 'billing'] as const,
+  notificationDestinations: (projectId: string) =>
+    ['project', projectId, 'notification-destinations'] as const,
+  analyticsSeries: (projectId: string, windowHours: number, bucket: string | undefined) =>
+    ['project', projectId, 'analytics', 'deliveries', 'series', { windowHours, bucket }] as const,
+  analyticsEndpoints: (projectId: string, windowHours: number, limit: number) =>
+    ['project', projectId, 'analytics', 'endpoints', { windowHours, limit }] as const,
+  analyticsLatency: (projectId: string, windowHours: number) =>
+    ['project', projectId, 'analytics', 'latency', { windowHours }] as const,
+  analyticsEvents: (projectId: string, windowHours: number, limit: number) =>
+    ['project', projectId, 'analytics', 'events', { windowHours, limit }] as const,
+  eventsRoot: (projectId: string) => ['project', projectId, 'events'] as const,
+  events: (projectId: string, filters: Record<string, string>, offset = 0) =>
+    ['project', projectId, 'events', filters, { offset }] as const,
+  event: (projectId: string, eventId: string) => ['project', projectId, 'event', eventId] as const,
+  eventDeliveries: (projectId: string, eventId: string) =>
+    ['project', projectId, 'event', eventId, 'deliveries'] as const,
+  deliveriesRoot: (projectId: string) => ['project', projectId, 'deliveries'] as const,
+  deliveries: (projectId: string, filters: Record<string, string>, offset = 0) =>
+    ['project', projectId, 'deliveries', filters, { offset }] as const,
+  delivery: (projectId: string, deliveryId: string) =>
+    ['project', projectId, 'delivery', deliveryId] as const,
+  deliveryAttempts: (projectId: string, deliveryId: string) =>
+    ['project', projectId, 'delivery', deliveryId, 'attempts'] as const,
+
+  outboxRoot: (projectId: string) => ['project', projectId, 'outbox'] as const,
+  outbox: (projectId: string, filters: Record<string, string>, offset = 0) =>
+    ['project', projectId, 'outbox', filters, { offset }] as const,
+  outboxEntry: (projectId: string, outboxId: string) =>
+    ['project', projectId, 'outbox-entry', outboxId] as const,
 };

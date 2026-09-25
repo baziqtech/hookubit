@@ -1,4 +1,4 @@
-# @webhook/contracts
+# @hookubit/contracts
 
 Shared contracts that cross a service boundary and therefore must not be defined
 twice: the ingest request/response shape, the delivery job envelope

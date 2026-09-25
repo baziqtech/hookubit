@@ -6,7 +6,7 @@
 #
 #   1. Provision PostgreSQL      2. Set DATABASE_URL     3. Optionally set REDIS_URL
 #   4. Configure secrets         5. Run the migrate job  6. docker compose up -d
-name: webhook-platform
+name: hookubit
 
 # OPTIONAL VARIABLES ARE PASSED THROUGH, NOT DEFAULTED TO ''.
 #
@@ -47,7 +47,7 @@ services:
     # that morning. On a host with no egress it fails instead, confusingly.
     #
     # `--no-install` makes that impossible even if the image is ever wrong.
-    image: ${IMAGE_CONTROL_API_MIGRATE:-ghcr.io/shaq/webhook-control-api:latest-migrate}
+    image: ${IMAGE_CONTROL_API_MIGRATE:-ghcr.io/shaq/hookubit-control-api:latest-migrate}
     working_dir: /app/apps/control-api
     command: ['npx', '--no-install', 'prisma', 'migrate', 'deploy']
     environment:
@@ -62,11 +62,25 @@ services:
     restart: 'no'
 
   control-api:
-    image: ${IMAGE_CONTROL_API:-ghcr.io/shaq/webhook-control-api:latest}
+    image: ${IMAGE_CONTROL_API:-ghcr.io/shaq/hookubit-control-api:latest}
     environment:
       <<: *common-env
       JWT_SECRET: ${JWT_SECRET:?JWT_SECRET is required}
       SESSION_SECRET: ${SESSION_SECRET:?SESSION_SECRET is required}
+      # APP_ENV is production above, and the control API refuses to boot in
+      # production without a mail transport - registration, password reset
+      # and invitations would all silently deliver nothing. Required here so
+      # `compose up` fails with a readable message instead of a crash loop.
+      SMTP_URL: ${SMTP_URL:?SMTP_URL is required in production (smtp://user:pass@mail.example.com:587) - the control API refuses to start without a mail transport}
+      MAIL_FROM: ${MAIL_FROM:?MAIL_FROM is required with SMTP_URL, e.g. "HookuBit <no-reply@example.com>"}
+      # Base of every link a mail carries (/verify-email, /reset-password,
+      # /accept-invitation). Wrong here means mail full of dead links.
+      DASHBOARD_URL: ${DASHBOARD_URL:?DASHBOARD_URL is required - the origin the dashboard is served from, e.g. https://webhooks.example.com}
+      # EXACT number of reverse proxies in front of :3000 - 1 for the usual
+      # nginx or Caddy terminating TLS in front of 127.0.0.1:3000. Passed
+      # through (absent means the process default of 0, "no proxy"), because at
+      # 0 behind a proxy every request shares one per-IP rate-limit bucket.
+      TRUST_PROXY_HOPS:
       CONTROL_API_PORT: 3000
       CORS_ORIGINS: ${CORS_ORIGINS:-}
     ports:
@@ -82,11 +96,14 @@ services:
     restart: unless-stopped
 
   ingest:
-    image: ${IMAGE_DATA_PLANE:-ghcr.io/shaq/webhook-data-plane:latest}
+    image: ${IMAGE_DATA_PLANE:-ghcr.io/shaq/hookubit-data-plane:latest}
     command: ['ingest']
     environment:
       <<: *common-env
       INGEST_PORT: 8080
+      # Same rule as TRUST_PROXY_HOPS on control-api: the exact number of
+      # proxies in front of :8080, passed through, 0 when unset.
+      INGEST_TRUSTED_PROXY_HOPS:
     ports:
       - '${INGEST_BIND:-0.0.0.0:8080}:8080'
     # Docker's default stop_grace_period is 10s. webhookd's in-process drain is
@@ -98,7 +115,7 @@ services:
     restart: unless-stopped
 
   router:
-    image: ${IMAGE_DATA_PLANE:-ghcr.io/shaq/webhook-data-plane:latest}
+    image: ${IMAGE_DATA_PLANE:-ghcr.io/shaq/hookubit-data-plane:latest}
     command: ['router']
     environment: *common-env
     # Above webhookd's 25s in-process drain. Docker's 10s default is not.
@@ -106,7 +123,7 @@ services:
     restart: unless-stopped
 
   scheduler:
-    image: ${IMAGE_DATA_PLANE:-ghcr.io/shaq/webhook-data-plane:latest}
+    image: ${IMAGE_DATA_PLANE:-ghcr.io/shaq/hookubit-data-plane:latest}
     command: ['scheduler']
     environment: *common-env
     # Above webhookd's 25s in-process drain. Docker's 10s default is not.
@@ -116,11 +133,18 @@ services:
   # The throughput dial. Scale this, not the control plane:
   #   docker compose -f docker-compose.prod.yml up -d --scale worker=8
   worker:
-    image: ${IMAGE_DATA_PLANE:-ghcr.io/shaq/webhook-data-plane:latest}
+    image: ${IMAGE_DATA_PLANE:-ghcr.io/shaq/hookubit-data-plane:latest}
     command: ['worker']
     environment:
       <<: *common-env
       WORKER_CONCURRENCY: ${WORKER_CONCURRENCY:-64}
+      # This file runs 2 worker replicas by default. With no REDIS_URL, endpoint
+      # delivery rate limits are enforced per replica - a customer's limit of N
+      # becomes N x 2 - and a PRODUCTION worker refuses to start rather than
+      # quietly weaken a limit the control plane accepted. Either set REDIS_URL
+      # or export DELIVERY_RATE_LIMIT_ALLOW_PER_REPLICA=true to take that
+      # deliberately. Passed through, not defaulted, so the refusal stands.
+      DELIVERY_RATE_LIMIT_ALLOW_PER_REPLICA:
     deploy:
       replicas: ${WORKER_REPLICAS:-2}
     # Above the in-process drain budget AND above one full outbound attempt
@@ -129,7 +153,12 @@ services:
     restart: unless-stopped
 
   dashboard:
-    image: ${IMAGE_DASHBOARD:-ghcr.io/shaq/webhook-dashboard:latest}
+    # Static bundle: VITE_INGEST_BASE_URL and VITE_API_TRANSPORT are inlined
+    # when the IMAGE is built, and nginx reads no environment - there is
+    # nothing to set here. If the get-started page's publish `curl` points at
+    # http://localhost:8080, the image was built without
+    # --build-arg VITE_INGEST_BASE_URL=... (deployments/docker/dashboard.Dockerfile).
+    image: ${IMAGE_DASHBOARD:-ghcr.io/shaq/hookubit-dashboard:latest}
     ports:
       - '${DASHBOARD_BIND:-127.0.0.1:8088}:8080'
     restart: unless-stopped

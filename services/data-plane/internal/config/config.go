@@ -10,8 +10,11 @@ import (
 	"strings"
 	"time"
 
-	"github.com/shaq/webhook-platform/services/data-plane/internal/ingest"
-	"github.com/shaq/webhook-platform/services/data-plane/internal/queue"
+	"github.com/shaq/hookubit/services/data-plane/internal/ingest"
+	"github.com/shaq/hookubit/services/data-plane/internal/payloadstore"
+	"github.com/shaq/hookubit/services/data-plane/internal/queue"
+	"github.com/shaq/hookubit/services/data-plane/internal/ratelimit"
+	"github.com/shaq/hookubit/services/data-plane/internal/router"
 )
 
 // ShutdownGrace is the TOTAL budget from SIGTERM to process exit, and
@@ -45,6 +48,58 @@ type Config struct {
 	DatabaseStatementTimeout time.Duration
 
 	RedisURL string
+	// DeliveryRateLimitAllowPerReplica acknowledges, explicitly, that endpoint
+	// delivery rate limits will be enforced PER WORKER REPLICA rather than
+	// fleet-wide, which is what happens when REDIS_URL is unset.
+	//
+	// It exists so that the downgrade is a decision somebody wrote down rather
+	// than an omission nobody noticed. In production the worker refuses to
+	// start without either REDIS_URL or this flag - the same treatment
+	// EGRESS_ALLOW_PRIVATE_NETWORKS gets, and for the same reason: a
+	// customer-visible guarantee quietly weaker than the configured one.
+	//
+	// It changes NO runtime behaviour. Delivery never depends on Redis being
+	// up: the limiter fails open, the worker keeps its in-process bucket as the
+	// fallback, and internal/failure/outage asserts the delivery path imports
+	// no Redis client at all. This is a configuration gate, not a dependency.
+	DeliveryRateLimitAllowPerReplica bool
+	// RedisTimeout bounds ONE rate-limiter round trip. It is deliberately tiny:
+	// the limiter is an optimisation on a path whose latency budget is already
+	// spoken for, and a limiter that blocks a request for seconds waiting on
+	// its own store has done more damage than the traffic it was refusing.
+	RedisTimeout time.Duration
+
+	// --- Rate limiting (ARCHITECTURE.md 25) ------------------------------
+	//
+	// RateLimitPolicyCacheTTL is the ONLY staleness in the system: it is how
+	// long after an operator changes a rate_limit_policies row before every
+	// data-plane replica is enforcing the new value. Bounded and finite by
+	// requirement (ARCHITECTURE.md 55); nothing pushes an invalidation, so
+	// there is no cache that can get stuck.
+	RateLimitPolicyCacheTTL time.Duration
+
+	// IngestRateLimit is the built-in per-API-key ceiling, applied only when
+	// the project has no scope='ingest' policy of its own. It exists so a
+	// compromised or runaway credential is bounded out of the box; 0 disables
+	// it and leaves ingest limited by policy rows alone.
+	IngestRateLimit              int
+	IngestRateLimitWindowSeconds int
+	IngestRateLimitBurst         int
+
+	// IngestSourceRateLimit is the PRE-AUTH per-address ceiling - the one that
+	// runs before any database work. 0 disables it, which reopens
+	// unauthenticated pressure on the connection pool; see ingest.SourceLimiter.
+	IngestSourceRateLimit              int
+	IngestSourceRateLimitWindowSeconds int
+	IngestSourceRateLimitBurst         int
+	// IngestSourceAuthFailurePenalty is the EXTRA cost charged to an address
+	// whose request failed authentication.
+	IngestSourceAuthFailurePenalty int
+
+	// TrustedProxyHops is the exact number of proxies in front of the ingest
+	// server. It is never inferred: guessing high means a client can forge its
+	// own bucket key, guessing low means every client shares one bucket.
+	TrustedProxyHops int
 
 	S3Endpoint       string
 	S3Bucket         string
@@ -52,14 +107,50 @@ type Config struct {
 	S3AccessKey      string
 	S3SecretKey      string
 	S3ForcePathStyle bool
+	// S3Prefix is the key namespace the platform owns inside the bucket.
+	// Everything written lives under it, so the orphan sweep can name one
+	// prefix and be sure it covers the platform's objects and nothing an
+	// operator put in the bucket by hand.
+	S3Prefix string
 
 	PayloadInlineMaxBytes int64
 	PayloadMaxBytes       int64
+
+	// PayloadUploadTimeout and PayloadDownloadTimeout bound ONE object storage
+	// call each, retries included. Neither may be unbounded: an upload sits on
+	// the ingest hot path and a download sits between a worker and its
+	// endpoint (ARCHITECTURE.md 31).
+	PayloadUploadTimeout   time.Duration
+	PayloadDownloadTimeout time.Duration
+	// PayloadStoreMaxAttempts bounds the SDK's own retrying. A count, not a
+	// deadline; the timeouts above are the deadline.
+	PayloadStoreMaxAttempts int
+
+	// Orphan sweep. `PlanPayload` uploads before the ingest transaction, so a
+	// process that dies in between leaves an object no events row references.
+	// See internal/payloadstore for why this is a sweep rather than a bucket
+	// lifecycle rule.
+	PayloadSweepEnabled  bool
+	PayloadSweepInterval time.Duration
+	// PayloadSweepMinAge is how old an object must be before the sweep will
+	// even consider it. It is floored at payloadstore.MinAgeFloor: anything
+	// shorter races a request that is between its upload and its COMMIT.
+	PayloadSweepMinAge    time.Duration
+	PayloadSweepMaxDelete int
 
 	IngestPort  int
 	MetricsPort int
 	// IngestDBTimeout bounds the database work of one accepted request.
 	IngestDBTimeout time.Duration
+	// WorkerDBTimeout bounds ONE database call on the delivery path: the load,
+	// the breaker read, the attempt write, the deferral.
+	//
+	// It is separate from IngestDBTimeout because the two bound different work
+	// with different tolerances - an ingest call is on a request a client is
+	// waiting on, a delivery call is on a background loop that would rather
+	// wait than abandon a lease - and because sharing one knob meant tuning the
+	// ingest deadline silently retuned every database call the worker makes.
+	WorkerDBTimeout time.Duration
 
 	// ShutdownReadinessDelay is how long the process keeps accepting traffic
 	// after readiness has already flipped to draining on SIGTERM. It exists so
@@ -73,7 +164,6 @@ type Config struct {
 	WorkerClaimBatch   int
 	DeliveryLease      time.Duration
 	OutboxPollInterval time.Duration
-	OutboxBatchSize    int
 
 	// Endpoint signing secrets are encrypted by the NestJS control plane and
 	// decrypted here. Same key, same envelope, same AAD - see internal/worker.
@@ -86,6 +176,10 @@ type Config struct {
 	RouterLease                    time.Duration
 	RouterMaxSubscriptionsPerEvent int
 	RouterMaxOutboxAttempts        int
+	// RouterMaxOutboxRetryDuration bounds RECORDED outbox failure by elapsed
+	// time. A count cannot separate a twenty-minute database brownout from a row
+	// that fails every time; a clock can. See router.DefaultMaxOutboxRetryDuration.
+	RouterMaxOutboxRetryDuration time.Duration
 
 	BreakerFailureThreshold  int
 	BreakerDegradedThreshold int
@@ -113,6 +207,12 @@ type Config struct {
 	EgressAllowPrivateNetworks  bool
 	EgressPrivateAllowlist      []string
 
+	// EgressMaxConnsPerHost is the hard ceiling on concurrent connections this
+	// process opens to one destination host:port, shared by every endpoint and
+	// every tenant that resolves there. Defaults to WorkerConcurrency - see the
+	// derivation below for why the two are tied.
+	EgressMaxConnsPerHost int
+
 	OTLPEndpoint string
 }
 
@@ -136,7 +236,22 @@ func Load() (*Config, error) {
 		DatabaseMaxConnections:   int32(envInt("DATABASE_MAX_CONNECTIONS", 20)),
 		DatabaseStatementTimeout: envDuration("DATABASE_STATEMENT_TIMEOUT_MS", 30*time.Second),
 
-		RedisURL: os.Getenv("REDIS_URL"),
+		RedisURL:                         os.Getenv("REDIS_URL"),
+		DeliveryRateLimitAllowPerReplica: envBool("DELIVERY_RATE_LIMIT_ALLOW_PER_REPLICA", false),
+		RedisTimeout:                     envDuration("REDIS_TIMEOUT_MS", 50*time.Millisecond),
+
+		RateLimitPolicyCacheTTL: envDuration("RATE_LIMIT_POLICY_CACHE_TTL_MS", ratelimit.DefaultCacheTTL),
+
+		IngestRateLimit:              envInt("INGEST_RATE_LIMIT", 1000),
+		IngestRateLimitWindowSeconds: envInt("INGEST_RATE_LIMIT_WINDOW_SECONDS", 1),
+		IngestRateLimitBurst:         envInt("INGEST_RATE_LIMIT_BURST", 2000),
+
+		IngestSourceRateLimit:              envInt("INGEST_SOURCE_RATE_LIMIT", 300),
+		IngestSourceRateLimitWindowSeconds: envInt("INGEST_SOURCE_RATE_LIMIT_WINDOW_SECONDS", 1),
+		IngestSourceRateLimitBurst:         envInt("INGEST_SOURCE_RATE_LIMIT_BURST", 600),
+		IngestSourceAuthFailurePenalty:     envInt("INGEST_SOURCE_AUTH_FAILURE_PENALTY", 20),
+
+		TrustedProxyHops: envInt("INGEST_TRUSTED_PROXY_HOPS", 0),
 
 		S3Endpoint:       os.Getenv("S3_ENDPOINT"),
 		S3Bucket:         os.Getenv("S3_BUCKET"),
@@ -144,13 +259,27 @@ func Load() (*Config, error) {
 		S3AccessKey:      os.Getenv("S3_ACCESS_KEY"),
 		S3SecretKey:      os.Getenv("S3_SECRET_KEY"),
 		S3ForcePathStyle: envBool("S3_FORCE_PATH_STYLE", true),
+		S3Prefix:         env("S3_PREFIX", payloadstore.DefaultPrefix),
 
 		PayloadInlineMaxBytes: int64(envInt("PAYLOAD_INLINE_MAX_BYTES", 64<<10)),
 		PayloadMaxBytes:       int64(envInt("PAYLOAD_MAX_BYTES", 1<<20)),
 
+		PayloadUploadTimeout:    envDuration("PAYLOAD_UPLOAD_TIMEOUT_MS", payloadstore.DefaultUploadTimeout),
+		PayloadDownloadTimeout:  envDuration("PAYLOAD_DOWNLOAD_TIMEOUT_MS", payloadstore.DefaultDownloadTimeout),
+		PayloadStoreMaxAttempts: envInt("PAYLOAD_STORE_MAX_ATTEMPTS", payloadstore.DefaultMaxAttempts),
+
+		PayloadSweepEnabled:   envBool("PAYLOAD_SWEEP_ENABLED", true),
+		PayloadSweepInterval:  envDuration("PAYLOAD_SWEEP_INTERVAL_MS", time.Hour),
+		PayloadSweepMinAge:    envDuration("PAYLOAD_SWEEP_MIN_AGE_MS", 24*time.Hour),
+		PayloadSweepMaxDelete: envInt("PAYLOAD_SWEEP_MAX_DELETES", 1000),
+
 		IngestPort:      envInt("INGEST_PORT", 8080),
 		MetricsPort:     envInt("DATA_PLANE_METRICS_PORT", 9090),
 		IngestDBTimeout: envDuration("INGEST_DB_TIMEOUT_MS", ingest.DefaultDBTimeout),
+		// Defaults to the same 5s the worker inherited from
+		// INGEST_DB_TIMEOUT_MS, so adding the knob changes no shipped
+		// behaviour - it only makes the two separately tunable.
+		WorkerDBTimeout: envDuration("WORKER_DB_TIMEOUT_MS", ingest.DefaultDBTimeout),
 
 		ShutdownReadinessDelay: envDuration("SHUTDOWN_READINESS_DELAY_MS", 5*time.Second),
 
@@ -159,7 +288,6 @@ func Load() (*Config, error) {
 		WorkerClaimBatch:   envInt("WORKER_CLAIM_BATCH_SIZE", 100),
 		DeliveryLease:      time.Duration(envInt("DELIVERY_LEASE_SECONDS", 120)) * time.Second,
 		OutboxPollInterval: envDuration("OUTBOX_POLL_INTERVAL_MS", 250*time.Millisecond),
-		OutboxBatchSize:    envInt("OUTBOX_BATCH_SIZE", 200),
 
 		EncryptionKey:         os.Getenv("ENCRYPTION_KEY"),
 		EncryptionKeyID:       env("ENCRYPTION_KEY_ID", "k1"),
@@ -170,6 +298,7 @@ func Load() (*Config, error) {
 		RouterLease:                    time.Duration(envInt("ROUTER_LEASE_SECONDS", 60)) * time.Second,
 		RouterMaxSubscriptionsPerEvent: envInt("ROUTER_MAX_SUBSCRIPTIONS_PER_EVENT", 1000),
 		RouterMaxOutboxAttempts:        envInt("ROUTER_MAX_OUTBOX_ATTEMPTS", 10),
+		RouterMaxOutboxRetryDuration:   envDuration("ROUTER_MAX_OUTBOX_RETRY_DURATION_MS", router.DefaultMaxOutboxRetryDuration),
 
 		BreakerFailureThreshold:  envInt("BREAKER_FAILURE_THRESHOLD", 5),
 		BreakerDegradedThreshold: envInt("BREAKER_DEGRADED_THRESHOLD", 3),
@@ -196,10 +325,36 @@ func Load() (*Config, error) {
 		EgressTotalTimeout:          envDuration("EGRESS_TOTAL_TIMEOUT_MS", 30*time.Second),
 		EgressMaxResponseBytes:      int64(envInt("EGRESS_MAX_RESPONSE_BYTES", 64<<10)),
 		EgressMaxRedirects:          envInt("EGRESS_MAX_REDIRECTS", 0),
-		EgressAllowPrivateNetworks:  envBool("EGRESS_ALLOW_PRIVATE_NETWORKS", false),
-		EgressPrivateAllowlist:      splitList(os.Getenv("EGRESS_PRIVATE_ALLOWLIST")),
+		// 0 means "derive from WORKER_CONCURRENCY"; see below.
+		EgressMaxConnsPerHost:      envInt("EGRESS_MAX_CONNS_PER_HOST", 0),
+		EgressAllowPrivateNetworks: envBool("EGRESS_ALLOW_PRIVATE_NETWORKS", false),
+		EgressPrivateAllowlist:     splitList(os.Getenv("EGRESS_PRIVATE_ALLOWLIST")),
 
 		OTLPEndpoint: os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT"),
+	}
+
+	// The per-host transport ceiling defaults to the worker pool size, because
+	// a single process cannot have more than WorkerConcurrency attempts in
+	// flight, so WorkerConcurrency connections to one host is exactly enough
+	// for the pool to never queue on the transport - and not one connection
+	// more than it could use.
+	//
+	// The alternative, a fixed small number, is what shipped: the ceiling was
+	// 16 whatever the pool was, and it sat BELOW MAX_CONCURRENCY_PER_ENDPOINT,
+	// MAX_CONCURRENCY_PER_PROJECT and the delivery gate, silently overriding
+	// all of them for any customer whose endpoints share a hostname - which is
+	// the normal shape. Politeness to a customer's server is real, but it
+	// belongs to the controls an operator can see and a customer can be told
+	// about (the concurrency gate and the rate limiter), not to a transport
+	// constant that makes those controls fiction. Set EGRESS_MAX_CONNS_PER_HOST
+	// explicitly to be gentler than the pool; the platform will then queue on
+	// the transport on purpose rather than by accident.
+	//
+	// Only an UNSET knob derives. A negative one is rejected below rather than
+	// quietly replaced, because silently substituting a number for the one an
+	// operator wrote is the failure mode this whole change exists to remove.
+	if c.EgressMaxConnsPerHost == 0 && c.WorkerConcurrency > 0 {
+		c.EgressMaxConnsPerHost = c.WorkerConcurrency
 	}
 
 	// Guard rails that have bitten real deployments.
@@ -209,6 +364,23 @@ func Load() (*Config, error) {
 	}
 	if c.PayloadInlineMaxBytes > c.PayloadMaxBytes {
 		problems = append(problems, "PAYLOAD_INLINE_MAX_BYTES cannot exceed PAYLOAD_MAX_BYTES")
+	}
+	if c.PayloadUploadTimeout <= 0 {
+		problems = append(problems, "PAYLOAD_UPLOAD_TIMEOUT_MS must be positive; an unbounded upload holds an ingest request open")
+	}
+	if c.PayloadDownloadTimeout <= 0 {
+		problems = append(problems, "PAYLOAD_DOWNLOAD_TIMEOUT_MS must be positive; an unbounded download holds a worker slot open")
+	}
+	if c.PayloadStoreMaxAttempts <= 0 {
+		problems = append(problems, "PAYLOAD_STORE_MAX_ATTEMPTS must be positive")
+	}
+	if c.PayloadSweepEnabled && c.PayloadSweepMinAge < payloadstore.MinAgeFloor {
+		problems = append(problems, fmt.Sprintf(
+			"PAYLOAD_SWEEP_MIN_AGE_MS must be at least %d; a shorter window races an ingest request that is between its upload and its COMMIT",
+			payloadstore.MinAgeFloor.Milliseconds()))
+	}
+	if c.S3Bucket != "" && c.S3Prefix == "" {
+		problems = append(problems, "S3_PREFIX must not be empty; the sweep needs a namespace it can be sure the platform owns")
 	}
 	if c.WorkerConcurrency <= 0 {
 		problems = append(problems, "WORKER_CONCURRENCY must be positive; unbounded worker pools are not permitted")
@@ -223,6 +395,13 @@ func Load() (*Config, error) {
 		problems = append(problems,
 			"DATABASE_STATEMENT_TIMEOUT_MS must not be below INGEST_DB_TIMEOUT_MS; the server-side backstop would fire first and mask the request deadline")
 	}
+	if c.WorkerDBTimeout <= 0 {
+		problems = append(problems, "WORKER_DB_TIMEOUT_MS must be positive; an unbounded delivery query holds a pool connection and a lease")
+	}
+	if c.DatabaseStatementTimeout > 0 && c.DatabaseStatementTimeout < c.WorkerDBTimeout {
+		problems = append(problems,
+			"DATABASE_STATEMENT_TIMEOUT_MS must not be below WORKER_DB_TIMEOUT_MS; the server-side backstop would fire first and mask the delivery deadline")
+	}
 	if c.ShutdownReadinessDelay < 0 {
 		problems = append(problems, "SHUTDOWN_READINESS_DELAY_MS must not be negative")
 	}
@@ -231,8 +410,37 @@ func Load() (*Config, error) {
 			"SHUTDOWN_READINESS_DELAY_MS must not exceed %d; the delay plus the longest role drain (%s) has to fit inside the process shutdown grace",
 			MaxShutdownReadinessDelay.Milliseconds(), ingest.DrainTimeout))
 	}
+	if c.TrustedProxyHops < 0 {
+		problems = append(problems, "INGEST_TRUSTED_PROXY_HOPS must not be negative")
+	}
+	if c.RateLimitPolicyCacheTTL <= 0 {
+		problems = append(problems, "RATE_LIMIT_POLICY_CACHE_TTL_MS must be positive; an uncached policy lookup puts a query on the ingest hot path")
+	}
+	// A burst below the limit means the bucket cannot hold one window's worth
+	// of tokens, so the configured limit is unreachable - the same check the
+	// control plane enforces on rate_limit_policies rows.
+	if c.IngestRateLimit > 0 && c.IngestRateLimitBurst > 0 && c.IngestRateLimitBurst < c.IngestRateLimit {
+		problems = append(problems, "INGEST_RATE_LIMIT_BURST must not be below INGEST_RATE_LIMIT")
+	}
+	if c.IngestRateLimit > 0 && c.IngestRateLimitWindowSeconds <= 0 {
+		problems = append(problems, "INGEST_RATE_LIMIT_WINDOW_SECONDS must be positive")
+	}
+	if c.IngestSourceRateLimit > 0 && c.IngestSourceRateLimitBurst > 0 &&
+		c.IngestSourceRateLimitBurst < c.IngestSourceRateLimit {
+		problems = append(problems, "INGEST_SOURCE_RATE_LIMIT_BURST must not be below INGEST_SOURCE_RATE_LIMIT")
+	}
+	if c.IngestSourceRateLimit > 0 && c.IngestSourceRateLimitWindowSeconds <= 0 {
+		problems = append(problems, "INGEST_SOURCE_RATE_LIMIT_WINDOW_SECONDS must be positive")
+	}
+	if c.IngestSourceAuthFailurePenalty < 0 {
+		problems = append(problems, "INGEST_SOURCE_AUTH_FAILURE_PENALTY must not be negative")
+	}
 	if c.MaxConcurrencyEndpoint > c.MaxConcurrencyProject {
 		problems = append(problems, "MAX_CONCURRENCY_PER_ENDPOINT cannot exceed MAX_CONCURRENCY_PER_PROJECT")
+	}
+	if c.EgressMaxConnsPerHost <= 0 {
+		problems = append(problems,
+			"EGRESS_MAX_CONNS_PER_HOST must be positive; net/http reads zero as UNLIMITED connections to one host, which is not a bound")
 	}
 
 	if len(problems) > 0 {

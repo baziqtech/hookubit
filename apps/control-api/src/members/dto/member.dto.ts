@@ -1,4 +1,4 @@
-import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
+import { ApiProperty } from '@nestjs/swagger';
 import { MemberRole, OrganizationMember } from '@prisma/client';
 import { UserIdentity } from '../../organizations';
 
@@ -21,10 +21,10 @@ export class MemberDto {
   @ApiProperty({ example: 'usr_01J...' })
   user_id!: string;
 
-  @ApiPropertyOptional({ nullable: true, example: 'ada@example.com' })
+  @ApiProperty({ type: String, nullable: true, example: 'ada@example.com' })
   email!: string | null;
 
-  @ApiPropertyOptional({ nullable: true })
+  @ApiProperty({ type: String, nullable: true })
   name!: string | null;
 
   @ApiProperty({ enum: ['owner', 'admin', 'developer', 'viewer', 'billing'] })

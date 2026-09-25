@@ -154,7 +154,7 @@ describe('concurrent replays of the same delivery', () => {
     const before = allDeliveries(harness.db);
 
     const outcomes = await Promise.allSettled([
-      // The fan-out includes the soft-deleted endpoint: refused as a whole.
+      // The routing includes the soft-deleted endpoint: refused as a whole.
       harness.events.replay(harness.context, LEDGER.eventSettled, {}),
       harness.deliveries.replay(harness.context, LEDGER.deliverySettledGone, {}),
     ]);
@@ -176,7 +176,7 @@ describe('the pre-fix shapes, run against the same property checks', () => {
    *
    * It reads as harmless - "copy the row, reset the counters, insert" - and it
    * is what a replay looks like if nobody has read the migration. The partial
-   * unique index is the arbiter the fan-out router names, so an unmarked insert
+   * unique index is the arbiter the router names, so an unmarked insert
    * is not a second delivery, it is a duplicate ORIGINAL, and the database
    * refuses it.
    */
@@ -225,7 +225,7 @@ describe('the pre-fix shapes, run against the same property checks', () => {
     const before = allDeliveries(harness.db);
 
     // Stand in for a database without the partial index: insert the unmarked
-    // row directly. This is the state the fan-out router's ON CONFLICT would
+    // row directly. This is the state the router's ON CONFLICT would
     // then be unable to arbitrate - the reason the index exists at all.
     harness.db.insert('delivery', {
       id: 'del_unmarked',

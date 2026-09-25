@@ -12,7 +12,7 @@
 #
 # DO NOT RUN `prisma migrate dev` TO MAKE THIS GREEN. It will generate a
 # migration that DROPS deliveries_event_endpoint_original_key. That index is the
-# ON CONFLICT arbiter the router names when it materialises fan-out. Without it
+# ON CONFLICT arbiter the router names when it materialises routing. Without it
 # a router that inserted its delivery rows and then died before marking the
 # outbox row processed is re-run on restart — and every subscriber receives
 # every event a second time. Dropping it silently converts a crash into
@@ -27,7 +27,7 @@
 # One index name per line. Blank lines and #-comments are ignored.
 
 # Partial unique index (WHERE replay_of_delivery_id IS NULL). Prisma has no
-# partial-index syntax. This is the fan-out idempotency arbiter — see above.
+# partial-index syntax. This is the routing idempotency arbiter — see above.
 deliveries_event_endpoint_original_key
 
 # NULLS NOT DISTINCT (PostgreSQL 15+). Prisma always emits NULLS DISTINCT, under
@@ -66,11 +66,19 @@ retry_policies_one_default_per_project
 # the claim reclaims expired leases. Narrow the predicate and a dead worker's
 # deliveries fall outside the index - stuck in 'processing' forever, never
 # retried, never exhausted, findable only by sequential scan.
+#
+# REBUILT by 20260911000000_next_attempt_at_not_null under the SAME NAME as
+# (organization_id, project_id, next_attempt_at, created_at, id): no NULLS
+# FIRST, because the claim's ORDER BY dropped it once the column became NOT
+# NULL and the planner will not use a NULLS FIRST index for a NULLS LAST order;
+# and `id` appended so the claim's tiebreaker is served by the index rather
+# than by an Incremental Sort over each routing's tie group. Same predicate.
 deliveries_ready_idx
 
-# Same ready set, leading with (next_attempt_at, created_at) instead of the
+# Same ready set, leading with (next_attempt_at, created_at, id) instead of the
 # tenant pair, because CLAIM_STRATEGY=fifo - the SHIPPING DEFAULT - orders
 # globally and cannot use an index that leads with organization_id/project_id.
+# Rebuilt by 20260911000000 exactly as the one above, for the same reasons.
 deliveries_ready_fifo_idx
 
 # Partial index over the outbox ready set (WHERE status IN ('pending',
@@ -80,3 +88,28 @@ deliveries_ready_fifo_idx
 # An outbox row that is never claimed is an event that returned 202 and will
 # never be delivered.
 event_outbox_ready_idx
+
+# ---------------------------------------------------------------------------
+# Added by 20260909100000_delivery_retention. Both are PARTIAL indexes over the
+# TERMINAL delivery set; Prisma has no partial-index syntax, so both are drift
+# by construction, forever.
+#
+# They serve the two retention sweeps in
+# services/data-plane/internal/retention. The status list in their predicates
+# must agree with worker.State.Terminal(): a terminal status MISSING from it
+# means those rows are never pruned (a leak), and a NON-terminal status present
+# in it means a delivery is deleted while a worker is still retrying it (data
+# loss, after a 202 was already returned).
+# ---------------------------------------------------------------------------
+
+# Ordered by created_at over terminal deliveries. The candidate scan for the
+# long horizon, which deletes the delivery row itself.
+deliveries_retention_idx
+
+# The same set, narrowed to rows whose attempt detail has not been pruned yet
+# (AND attempts_pruned_at IS NULL). Deliberately a SECOND index rather than a
+# filter on the one above: a pruned row LEAVES this index, so it stays the size
+# of the arrears between the two horizons, whereas served by the broader index
+# the short sweep would scan oldest-first through a prefix of already-pruned
+# rows that grows with the retained history.
+deliveries_attempt_pruning_idx

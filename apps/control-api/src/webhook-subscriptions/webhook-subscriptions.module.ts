@@ -17,7 +17,7 @@ import { WebhookSubscriptionsService } from './webhook-subscriptions.service';
  * `TenantScopeFactory` in `src/authz` (see HANDOFF.md), and this import becomes
  * `AuthzModule` when it moves.
  *
- * The service is exported because the events/fan-out module will need to read
+ * The service is exported because the events/routing module will need to read
  * the subscriptions matching an event, and that read must go through this
  * module rather than through a second opinion about what a filter means.
  */

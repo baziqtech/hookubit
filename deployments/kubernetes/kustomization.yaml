@@ -6,9 +6,19 @@
 #
 # 02-secret.template.yaml is deliberately NOT listed either. It contains
 # placeholders; create the real Secrets out of band from your secret manager.
+#
+# RENAMED webhook-platform -> hookubit. If a `webhook-platform` namespace is
+# still running these workloads, this is NOT an in-place apply: every selector
+# label value changed, and `spec.selector` is IMMUTABLE on a Deployment and on a
+# Job, so `kubectl apply` is REJECTED by the API server for each one. Delete the
+# old workloads (or the old namespace) and apply this fresh. Nothing durable is
+# lost - PostgreSQL is external and none of these manifests own storage - but
+# Secrets do not follow a namespace rename, so recreate them from
+# 02-secret.template.yaml in `hookubit` FIRST, with the SAME ENCRYPTION_KEY as
+# before or no endpoint signing secret in the database can be decrypted.
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
-namespace: webhook-platform
+namespace: hookubit
 
 resources:
   - 00-namespace.yaml
@@ -30,9 +40,9 @@ resources:
   - 50-networkpolicy.yaml
 
 images:
-  - name: ghcr.io/shaq/webhook-control-api
+  - name: ghcr.io/shaq/hookubit-control-api
     newTag: 0.1.0
-  - name: ghcr.io/shaq/webhook-data-plane
+  - name: ghcr.io/shaq/hookubit-data-plane
     newTag: 0.1.0
-  - name: ghcr.io/shaq/webhook-dashboard
+  - name: ghcr.io/shaq/hookubit-dashboard
     newTag: 0.1.0

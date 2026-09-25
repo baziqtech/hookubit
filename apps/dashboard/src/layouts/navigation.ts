@@ -1,33 +1,231 @@
 /** The navigation model. Route paths live here once, not scattered through JSX. */
+import type { SetupAffordance } from '../features/onboarding/setup-visibility';
+import type { NavIconName } from './nav-icons';
 
 export interface NavItem {
   to: string;
   label: string;
+  icon: NavIconName;
   /** Matched as a prefix so detail pages keep their parent highlighted. */
   match?: string;
 }
 
-export function projectNav(orgId: string, projectId: string): NavItem[] {
-  const base = `/orgs/${orgId}/projects/${projectId}`;
+export interface NavGroup {
+  /**
+   * The small uppercase heading above the group, or `null` for the ungrouped
+   * items that sit at the top of the rail before any heading.
+   */
+  title: string | null;
+  items: NavItem[];
+}
+
+/**
+ * The rail, grouped.
+ *
+ * ## Why groups
+ *
+ * Fifteen flat items is a list you read rather than a structure you learn. The
+ * groups name the four questions the product answers, in the order an incident
+ * actually asks them: what happened (RECORD), who was supposed to get it
+ * (ROUTING), how is it trending (INSIGHT), and how is this configured
+ * (PROJECT / ORGANIZATION).
+ *
+ * ## Why organization items are a section rather than a separate rail
+ *
+ * They used to REPLACE the project items whenever you opened an org-level
+ * screen, so navigating to Settings made Deliveries and Events disappear —
+ * which reads as "you have left the project" when you have not. One rail, five
+ * headings, nothing vanishes.
+ *
+ * `Audit log` is an organization-scoped route that sits under INSIGHT beside
+ * the project-scoped `Analytics`, because the heading names what the screen is
+ * FOR, not which id is in its path.
+ *
+ * `Usage` is NOT here: it is a tab on Analytics (`?tab=usage`), because the two
+ * screens read the same routes over the same window and a second nav item made
+ * the window ambiguous. `/orgs/:orgId/usage` still resolves — it redirects —
+ * but a redirect has no place in the rail.
+ *
+ * ## Deliveries before Events
+ *
+ * Deliberate, and the opposite of the underlying data flow. An operator arrives
+ * holding a complaint — "the partner says they never got it" — which is a
+ * question about a delivery. Events is where you go second, once the delivery
+ * turns out not to exist.
+ *
+ * ## Setup is conditional, and defaults to present
+ *
+ * `setup` decides whether the Setup item is in the rail AT ALL. A fully set-up
+ * project has no use for a checklist that can never change again, and a green
+ * `6/6` in its place is the same noise with a tick on it — so the item goes,
+ * rather than changing colour. The decision itself is not this function's: see
+ * `features/onboarding/setup-visibility.ts` for why "we could not check" is a
+ * third value (`unknown`) rather than a falsy one, and why `unknown` renders the
+ * same nothing that `hide` does.
+ *
+ * The default is `'show'` because this model is also read for NAMING —
+ * `currentSectionLabel` derives the breadcrumb from it, and `/get-started` still
+ * resolves for every bookmark and docs link that points at it. A page that is
+ * no longer advertised must still be able to say where you are, so only the rail
+ * passes the derived value.
+ */
+export function navigationGroups(
+  orgId: string,
+  projectId?: string,
+  setup: SetupAffordance = 'show',
+): NavGroup[] {
+  const org = `/orgs/${orgId}`;
+
+  if (!projectId) {
+    // No project selected: only the routes that are genuinely reachable. A
+    // heading over a group whose every item 404s is worse than no heading.
+    return [
+      { title: 'Insight', items: [auditLog(org)] },
+      { title: 'Organization', items: organizationItems(org) },
+    ];
+  }
+
+  const base = `${org}/projects/${projectId}`;
   return [
-    { to: `${base}/overview`, label: 'Overview' },
-    { to: `${base}/events`, label: 'Events' },
-    { to: `${base}/deliveries`, label: 'Deliveries' },
-    { to: `${base}/endpoints`, label: 'Endpoints' },
-    { to: `${base}/subscriptions`, label: 'Subscriptions' },
-    { to: `${base}/api-keys`, label: 'API keys' },
-    { to: `${base}/analytics`, label: 'Analytics' },
-    { to: `${base}/settings`, label: 'Settings' },
+    ...(setup === 'show'
+      ? [{ title: null, items: [setupItem(base)] } satisfies NavGroup]
+      : []),
+    {
+      title: 'Record',
+      items: [
+        { to: `${base}/overview`, label: 'Overview', icon: 'overview' },
+        { to: `${base}/deliveries`, label: 'Deliveries', icon: 'deliveries' },
+        { to: `${base}/events`, label: 'Events', icon: 'events' },
+      ],
+    },
+    {
+      title: 'Routing',
+      items: [
+        { to: `${base}/endpoints`, label: 'Endpoints', icon: 'endpoints' },
+        { to: `${base}/subscriptions`, label: 'Subscriptions', icon: 'subscriptions' },
+        { to: `${base}/policies`, label: 'Policies', icon: 'policies' },
+        { to: `${base}/api-keys`, label: 'API keys', icon: 'api-keys' },
+      ],
+    },
+    {
+      title: 'Insight',
+      items: [
+        { to: `${base}/analytics`, label: 'Analytics', icon: 'analytics' },
+        auditLog(org),
+      ],
+    },
+    {
+      title: 'Project',
+      items: [
+        { to: `${base}/settings`, label: 'Project settings', icon: 'project-settings' },
+        { to: `${base}/notifications`, label: 'Notifications', icon: 'notifications' },
+      ],
+    },
+    { title: 'Organization', items: organizationItems(org) },
   ];
 }
 
-export function organizationNav(orgId: string): NavItem[] {
-  const base = `/orgs/${orgId}`;
+/**
+ * The Setup item, named in one place.
+ *
+ * The route is `/get-started` and the label is `Setup`: the path is what docs
+ * and emails link to, the label is what the rail and the breadcrumb say. The
+ * rail may omit this item; nothing may rename or re-path it.
+ */
+function setupItem(base: string): NavItem {
+  return { to: `${base}/get-started`, label: 'Setup', icon: 'setup' };
+}
+
+/** The route the Setup item points at, for a caller that needs to key on it. */
+export function setupNavPath(orgId: string, projectId: string): string {
+  return setupItem(`/orgs/${orgId}/projects/${projectId}`).to;
+}
+
+function auditLog(org: string): NavItem {
+  return { to: `${org}/audit`, label: 'Audit log', icon: 'audit' };
+}
+
+function organizationItems(org: string): NavItem[] {
   return [
-    { to: `${base}/settings`, label: 'Settings' },
-    { to: `${base}/team`, label: 'Team' },
-    { to: `${base}/billing`, label: 'Billing' },
-    { to: `${base}/usage`, label: 'Usage' },
-    { to: `${base}/audit`, label: 'Audit log' },
+    { to: `${org}/team`, label: 'Team', icon: 'team' },
+    { to: `${org}/billing`, label: 'Billing', icon: 'billing' },
+    { to: `${org}/settings`, label: 'Organization settings', icon: 'organization' },
+  ];
+}
+
+/**
+ * Routes that have a NAME but no place in the navigation.
+ *
+ * Stuck events is the whole list. Most projects have nothing stuck most of the
+ * time, so a permanent entry spends a slot on a condition that is almost always
+ * absent; `StuckEventsNotice` brings it to the operator on the two screens they
+ * live on, exactly when there is something to say.
+ *
+ * It still needs a name, because the breadcrumb is derived from this model and
+ * a page you arrive at should say where you are. Separating "rendered in the
+ * rail" from "has a label" is the whole point of this list — without it,
+ * dropping the entry leaves the page titled by nothing.
+ */
+export function unlistedProjectNav(orgId: string, projectId: string): NavItem[] {
+  const base = `/orgs/${orgId}/projects/${projectId}`;
+  return [{ to: `${base}/outbox`, label: 'Stuck events', icon: 'stuck' }];
+}
+
+/**
+ * The name of the section the given path is in, for the breadcrumb.
+ *
+ * Derived from the same nav model the sidebar renders rather than from a second
+ * hand-written map, so a renamed nav item cannot end up disagreeing with the
+ * breadcrumb above it. Longest match wins, which is what keeps
+ * `/orgs/x/projects/y/settings` resolving to "Project settings" rather than to
+ * the organization's `/orgs/x/settings`, and `/events/:id` to Events rather
+ * than to whichever prefix happened to be checked first.
+ *
+ * Naming is not advertising: the model is asked for every item it HAS, Setup
+ * included, so `/get-started` is still titled "Setup" on a project whose rail no
+ * longer offers it. Deriving the label from the rail's filtered model instead
+ * would leave that page's breadcrumb blank for exactly the operators who reached
+ * it from a bookmark.
+ */
+export function currentSectionLabel(
+  pathname: string,
+  orgId: string,
+  projectId?: string,
+): string | null {
+  const candidates = [
+    ...navigationGroups(orgId, projectId, 'show').flatMap((group) => group.items),
+    // Unlisted routes are named here too: a page reached from a notice rather
+    // than from the rail still has to tell you where you are.
+    ...(projectId ? unlistedProjectNav(orgId, projectId) : []),
+  ];
+
+  let best: NavItem | null = null;
+  for (const item of candidates) {
+    if (pathname === item.to || pathname.startsWith(`${item.to}/`)) {
+      if (!best || item.to.length > best.to.length) best = item;
+    }
+  }
+  return best?.label ?? null;
+}
+
+/**
+ * The five destinations a phone's bottom bar carries.
+ *
+ * Five, because a sixth stops being a target and starts being a guess at
+ * thumb width. They are the four screens an incident actually moves between —
+ * where am I, what failed, what was published, who was it going to — plus a
+ * door to everything else.
+ *
+ * Deliberately NOT derived from `navigationGroups`: the rail's order serves
+ * learning the product and this one serves reaching for something at 2am with
+ * one hand, and those are different orders.
+ */
+export function bottomNav(orgId: string, projectId: string): NavItem[] {
+  const base = `/orgs/${orgId}/projects/${projectId}`;
+  return [
+    { to: `${base}/overview`, label: 'Overview', icon: 'overview' },
+    { to: `${base}/deliveries`, label: 'Deliveries', icon: 'deliveries' },
+    { to: `${base}/events`, label: 'Events', icon: 'events' },
+    { to: `${base}/endpoints`, label: 'Endpoints', icon: 'endpoints' },
   ];
 }

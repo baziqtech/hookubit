@@ -1,0 +1,168 @@
+# Alert rules for HookuBit.
+#
+# Plain Prometheus rule groups: point `rule_files:` at this, or paste the
+# `groups:` block into a PrometheusRule CRD's `spec:` if you run
+# prometheus-operator.
+#
+# THE RULE THESE FOLLOW: alert on symptoms a human must act on, not on every
+# number that moved. Each rule below names, in its annotations, what an operator
+# should DO - because an alert nobody knows how to answer gets silenced, and a
+# silenced alert is worse than no alert.
+#
+# Every expression here uses a metric this platform actually exports. There is
+# deliberately no rule for "circuit breakers currently open" or "endpoints
+# disabled": no such gauge exists, and a rule against a series that is never
+# written is a rule that never fires and always looks healthy.
+
+groups:
+  - name: hookubit-delivery
+    interval: 30s
+    rules:
+      # ── The backlog ────────────────────────────────────────────────────
+      # queue_depth is the only signal that shows work which is NOT happening.
+      # A delivery deferred by an open circuit breaker or a rate limit produces
+      # no attempt, no response class and no latency sample - counters of things
+      # that happened cannot show you an absence. The rows just accumulate.
+      #
+      # REQUIRES metrics.NewQueueDepthCollector to be running. Until it is
+      # wired, queue_depth is absent, this rule cannot fire, and the absence
+      # rule below is what tells you so.
+      - alert: WebhookQueueBacklogGrowing
+        expr: |
+          sum(queue_depth{state="ready"}) > 1000
+            and
+          deriv(sum(queue_depth{state="ready"})[15m:30s]) > 0
+        for: 15m
+        labels: { severity: warning }
+        annotations:
+          summary: 'Ready deliveries are piling up and still climbing ({{ $value | printf "%.0f" }} ready)'
+          description: >-
+            Deliveries are becoming claimable faster than workers are finishing them, for
+            fifteen minutes. Check worker_active_count first: if it is pinned at
+            replicas x DELIVERY_CONCURRENCY the pool is saturated and the fix is more
+            worker replicas (the HPA ceiling is a DATABASE ceiling - raise
+            externalDatabase.maxConnections with it or the new pods will not start). If
+            it is near zero while this grows, the workers are not claiming: look at
+            queue_claim_duration_seconds and the database.
+
+      - alert: WebhookQueueDepthNotExported
+        expr: absent(queue_depth)
+        for: 30m
+        labels: { severity: info }
+        annotations:
+          summary: 'queue_depth is not being exported by anything'
+          description: >-
+            No process is refreshing the queue-depth gauge, so the backlog alert above
+            cannot fire and the backlog panel reads a flat zero - which is
+            indistinguishable from a healthy queue. Wire
+            metrics.NewQueueDepthCollector into the scheduler role.
+
+      - alert: WebhookDeliveriesExhausting
+        expr: |
+          sum(rate(deliveries_completed_total{outcome="exhausted"}[10m])) > 0.1
+        for: 10m
+        labels: { severity: warning }
+        annotations:
+          summary: 'Deliveries are running out of retry budget'
+          description: >-
+            An exhausted delivery will never be attempted again without a manual replay.
+            A steady rate usually means one customer's endpoint has been down for the
+            length of the whole retry window; a fleet-wide rate means something on our
+            side of the socket. Cross-check egress_http_responses_total{class="error"}.
+
+      - alert: WebhookOutboxLagHigh
+        expr: max(outbox_pending_age_seconds) > 300
+        for: 10m
+        labels: { severity: warning }
+        annotations:
+          summary: 'The oldest unrouted event is {{ $value | printf "%.0f" }}s old'
+          description: >-
+            The router is not draining the outbox. Every second here is added to
+            end-to-end latency BEFORE a delivery row even exists, so nothing downstream
+            shows it. Check the router pods and router_events_routed_total for `parked`
+            or `retried` outcomes.
+
+  - name: hookubit-safety
+    interval: 30s
+    rules:
+      # ── The security one ───────────────────────────────────────────────
+      # Everything else in this file is an operational symptom. This is someone
+      # trying to read your cloud credentials out of a webhook response body.
+      - alert: WebhookEgressBlockedMetadataAddress
+        expr: increase(egress_blocked_total{reason="metadata"}[15m]) > 0
+        labels: { severity: critical }
+        annotations:
+          summary: 'A registered endpoint pointed at the cloud instance metadata service'
+          description: >-
+            The SSRF guard refused a delivery to an instance-metadata address
+            (169.254.169.254 and friends). That is the canonical credential-theft path
+            and it is not a typo anybody makes twice: find the endpoint in the delivery
+            log, then find who registered it. The guard held - this alert exists because
+            the attempt itself is the signal.
+
+      - alert: WebhookEgressBlockedSpike
+        expr: |
+          sum(rate(egress_blocked_total{reason!="metadata"}[10m])) > 1
+        for: 15m
+        labels: { severity: info }
+        annotations:
+          summary: 'Sustained SSRF-guard refusals ({{ $value | printf "%.2f" }}/s)'
+          description: >-
+            Usually a customer who configured an internal URL (`private`, `loopback`,
+            `link_local`) and is watching every delivery fail permanently. Worth telling
+            them, because the guard's refusal is permanent by design and no retry will
+            fix it.
+
+      # The limiter fails OPEN. A Redis outage therefore costs no traffic and
+      # produces no errors - so without this rule, nothing in the system would
+      # ever tell an operator that fleet-wide ceilings have quietly become
+      # per-replica ones.
+      - alert: WebhookRateLimiterDegraded
+        expr: sum(rate(rate_limiter_degraded_total[10m])) > 0
+        for: 10m
+        labels: { severity: warning }
+        annotations:
+          summary: 'Rate limits are being applied without the shared store'
+          description: >-
+            The configured limits are NOT the limits in force: each replica is enforcing
+            its own copy, so the effective ceiling is roughly N x what you configured.
+            Cause `redis` means the store is unreachable. Nothing will fail while this
+            is true, which is exactly why it needs an alert.
+
+      - alert: WebhookCircuitBreakersOpeningRapidly
+        expr: sum(rate(circuit_breaker_open_total[10m])) > 0.5
+        for: 10m
+        labels: { severity: warning }
+        annotations:
+          summary: 'Endpoint circuit breakers are opening across the fleet'
+          description: >-
+            A burst for one customer is normal - their endpoint fell over. A sustained
+            fleet-wide rate is usually us: check egress_http_responses_total{class="error"}
+            and DNS. Note that deliveries held behind an open breaker produce no attempts
+            at all, so they are invisible everywhere except queue_depth.
+
+      - alert: WebhookIngestRejectionRatioHigh
+        expr: |
+          sum(rate(events_ingestion_failed_total[10m]))
+            /
+          clamp_min(sum(rate(events_ingested_total[10m])) + sum(rate(events_ingestion_failed_total[10m])), 0.001)
+            > 0.1
+        for: 15m
+        labels: { severity: warning }
+        annotations:
+          summary: 'More than 10% of publish attempts are being rejected'
+          description: >-
+            Break down events_ingestion_failed_total by `reason`. A publisher that just
+            deployed shows up as one reason dominating; an auth or signature problem
+            shows up the same way and is equally theirs to fix - but they will call us.
+
+      - alert: WebhookPayloadOffloadFailing
+        expr: sum(rate(payload_offloads_total{outcome="error"}[10m])) > 0
+        for: 10m
+        labels: { severity: critical }
+        annotations:
+          summary: 'Oversized payloads cannot be written to object storage'
+          description: >-
+            A failed offload is a 500 to the publisher, never a 202 - so this is
+            dropped ingest, not degraded ingest. Check the bucket credentials and
+            reachability (S3_* in the data-plane Secret).

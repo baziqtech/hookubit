@@ -1,5 +1,12 @@
 # API contract (v1)
 
+> **Customer-facing reference:** `apps/docs` (the documentation site) carries the
+> full integration guide and an API reference generated from the control plane's
+> OpenAPI document on every build. This file is the internal summary of the
+> contract's shape and its invariants; when the two disagree, the generated
+> reference reflects the code and this file needs updating.
+
+
 Two surfaces, deliberately separate:
 
 - **Ingest API** — Go, `:8080`. Publishers post events. High volume, hot path.
@@ -34,7 +41,7 @@ Content-Type: application/json
 ```
 
 **`accepted` means durably persisted, not delivered.** The response returns once
-the event and its outbox row are committed; fan-out happens afterwards
+the event and its outbox row are committed; routing happens afterwards
 (ARCHITECTURE.md 16). Delivery is at-least-once and, unless you opt into
 ordering, unordered — deduplicate on the event ID.
 
@@ -90,14 +97,23 @@ chain and `Webhook-Id` is stable across every delivery of one event.
 ## Control API shape
 
 ```
-/v1/auth/{register,login,logout,verify-email,forgot-password,reset-password}
-/v1/organizations                              …/{id}/{members,invitations,audit-logs,usage,billing}
-/v1/projects                                   …/{id}/{api-keys,endpoints,subscriptions,
-                                                       retry-policies,rate-limits,analytics}
-/v1/endpoints/{id}                             …/{secrets,secrets:rotate,test}
-/v1/events/{id}                                …/{deliveries,replay}
-/v1/deliveries/{id}                            …/{attempts,replay}
+/v1/auth/{register,login,logout,session,verify-email,resend-verification,
+          forgot-password,reset-password,onboarding-completed}
+/v1/invitations/accept
+/v1/organizations                    …/{orgId}/{projects,members,audit-logs}
+/v1/projects/{projectId}/            api-keys · endpoints · subscriptions · retry-policies ·
+                                     rate-limits · events · deliveries · outbox · analytics
+/v1/projects/{projectId}/events/{eventId}/{deliveries,replay}
+/v1/projects/{projectId}/deliveries/{deliveryId}/{attempts,replay}
+/v1/projects/{projectId}/outbox/{outboxId}/requeue        (and bulk …/outbox/requeue)
+/v1/endpoints/{endpointId}/secrets   …/rotate · …/{secretId}
 ```
+
+Every project-scoped resource carries `{projectId}` in the path; there are no
+flat `/v1/endpoints/{id}`-style routes except the secrets sub-resource, which is
+keyed by endpoint alone. There is no "send a test delivery" route: publish a real
+event and watch its delivery. The generated reference in `apps/docs/api/` is the
+complete list.
 
 Browser sessions use HTTP-only cookies; server-to-server calls use API keys.
 No credential is ever stored in `localStorage` (ARCHITECTURE.md 9).
@@ -113,9 +129,9 @@ Every non-2xx response has the same body, with a stable machine-readable code
              "request_id": "req_01J..." } }
 ```
 
-`invalid_request` · `unauthenticated` · `forbidden` · `not_found` · `conflict` ·
-`idempotency_key_reused` · `payload_too_large` · `rate_limited` ·
-`internal_error`.
+`invalid_request` · `unauthenticated` · `email_not_verified` · `forbidden` ·
+`not_found` · `conflict` · `idempotency_key_reused` · `payload_too_large` ·
+`rate_limited` · `limit_exceeded` · `internal_error`.
 
 Codes are additive. Quote `request_id` in any support conversation; it appears
 on every log line for that request.

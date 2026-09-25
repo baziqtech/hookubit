@@ -3,6 +3,7 @@ package queue
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"sync"
@@ -196,5 +197,86 @@ func TestLeaseKeeperIsConcurrencySafe(t *testing.T) {
 	wg.Wait()
 	if k.Tracked() != 0 {
 		t.Fatalf("tracked = %d after every attempt finished", k.Tracked())
+	}
+}
+
+// errTestShutdown stands in for worker.ErrWorkerShutdown, which this package
+// cannot import (worker imports queue, not the other way round).
+var errTestShutdown = errors.New("worker shutting down")
+
+// The keeper must not overwrite the cancellation cause its parent is setting.
+//
+// The regression this pins is a race, not a logic error. The worker uses ONE
+// context as both the keeper's context and the parent of every tracked attempt.
+// On shutdown it cancels that context with ErrWorkerShutdown; the keeper wakes
+// on the same Done channel and, as Run unwinds, cancels every tracked child too.
+// Both reach the same children, and context cancellation is first-writer-wins —
+// so when the keeper hard-coded context.Canceled it won a fraction of those
+// races. A delivery that lost got an attempt row reading "context canceled",
+// its attempt_count advanced, and its endpoint's circuit breaker moved one
+// failure closer to open: the customer charged for our restart.
+//
+// A single iteration proves nothing here — the losing interleaving appeared in
+// roughly 1 run in 400 — so this hammers it.
+func TestKeeperInheritsTheParentCancellationCause(t *testing.T) {
+	const (
+		iterations = 2000
+		tracked    = 64
+	)
+
+	for i := 0; i < iterations; i++ {
+		// A lease long enough that the renewal ticker never fires, so the nil
+		// queue is never touched and only the cancellation path is under test.
+		keeper := NewLeaseKeeper(nil, "wrk_test", time.Hour, slog.New(slog.NewTextHandler(io.Discard, nil)))
+
+		root, cancelRoot := context.WithCancelCause(context.WithoutCancel(context.Background()))
+
+		children := make([]context.Context, 0, tracked)
+		for j := 0; j < tracked; j++ {
+			child, release := keeper.Track(root, fmt.Sprintf("dlv_%d", j))
+			defer release()
+			children = append(children, child)
+		}
+
+		done := make(chan struct{})
+		go func() {
+			_ = keeper.Run(root)
+			close(done)
+		}()
+
+		cancelRoot(errTestShutdown)
+		<-done
+
+		for j, child := range children {
+			<-child.Done()
+			if cause := context.Cause(child); !errors.Is(cause, errTestShutdown) {
+				t.Fatalf("iteration %d, child %d: cause = %v, want %v; "+
+					"the keeper overwrote the parent's cause, so a shutdown-cancelled "+
+					"attempt is indistinguishable from an endpoint that went silent",
+					i, j, cause, errTestShutdown)
+			}
+		}
+		cancelRoot(errTestShutdown)
+	}
+}
+
+// When Run returns for a reason that is not its context, there is no inherited
+// cause and the keeper must still cancel what it tracks.
+func TestKeeperCancelsTrackedAttemptsWithoutAnInheritedCause(t *testing.T) {
+	keeper := NewLeaseKeeper(nil, "wrk_test", time.Hour, slog.New(slog.NewTextHandler(io.Discard, nil)))
+
+	root, cancelRoot := context.WithCancelCause(context.Background())
+	defer cancelRoot(context.Canceled)
+
+	child, release := keeper.Track(root, "dlv_1")
+	defer release()
+
+	// Cancel with no cause at all: context.Cause then reports context.Canceled.
+	cancelRoot(nil)
+	_ = keeper.Run(root)
+
+	<-child.Done()
+	if cause := context.Cause(child); !errors.Is(cause, context.Canceled) {
+		t.Fatalf("cause = %v, want context.Canceled", cause)
 	}
 }

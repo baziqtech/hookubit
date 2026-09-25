@@ -2,6 +2,11 @@ import { Injectable } from '@nestjs/common';
 import { Delivery, Prisma } from '@prisma/client';
 import { RequestContext, TenantScope, TenantScopeFactory } from '../authz';
 import { AppError } from '../common/errors';
+import {
+  PAYLOAD_PREVIEW_READ_BYTES,
+  PayloadPreview,
+  previewPayload,
+} from '../events/event-payload';
 import { DeliveryReplayService } from './delivery-replay.service';
 import { FAILING_NOW_STATUSES, MAX_INLINE_ATTEMPTS } from './delivery-limits';
 import {
@@ -14,10 +19,23 @@ import {
   ReplayResultDto,
   toAttemptDto,
   toDeliveryDto,
+  toDeliveryListItemDto,
   toEndpointRef,
   toEventRef,
 } from './dto';
 import { crossTenantNotFound, withCrossTenantNotFound } from './not-found';
+
+/**
+ * What a list row says when the event row behind it could not be read at all.
+ *
+ * Not "an empty payload": `null` throughout, and `truncated: false` so nothing
+ * renders an ellipsis after nothing.
+ */
+const NO_PAYLOAD_PREVIEW: PayloadPreview = Object.freeze({
+  preview: null,
+  size: null,
+  truncated: false,
+});
 
 /**
  * The delivery ledger: one row per (event, endpoint), each with its own retry
@@ -62,21 +80,67 @@ export class DeliveriesService {
    * rides which index and which one is a scan.
    */
   async list(context: RequestContext, query: ListDeliveriesQueryDto): Promise<DeliveryListDto> {
-    const page = await this.scopes.for(context).deliveries.findPage({
+    const scope = this.scopes.for(context);
+    const page = await scope.deliveries.findPage({
       where: DeliveriesService.filterWhere(query),
       orderBy: { createdAt: 'desc' },
       take: query.limit,
       skip: query.offset,
     });
+    const previews = await DeliveriesService.payloadPreviews(scope, page.rows);
     return {
-      data: page.rows.map(toDeliveryDto),
+      data: page.rows.map((delivery) =>
+        toDeliveryListItemDto(delivery, previews.get(delivery.eventId) ?? NO_PAYLOAD_PREVIEW),
+      ),
       has_more: page.hasMore,
       next_offset: page.nextSkip,
     };
   }
 
   /**
-   * Every delivery an event was fanned out to. "Did finance ever receive this?"
+   * The payload preview for every row of a page: TWO statements for the page,
+   * never one per row.
+   *
+   * Materialised routing means one event becomes N delivery rows, so a page of a
+   * broadcast is mostly the SAME event repeated - the ids are deduplicated
+   * first, and a 200-row page of one broadcast asks about one event. The
+   * statement itself slices in PostgreSQL (`substring(payload_raw from 1 for
+   * N)`), so a 1 MiB body costs 640 bytes on the wire, and it never touches
+   * object storage: an offloaded payload has `payload_raw` NULL and comes back
+   * as a null preview with its size intact, rather than 200 S3 round trips
+   * hanging off a list request.
+   *
+   * An event id with no row - another tenant's, or one whose event is gone -
+   * simply has no entry, and the caller renders no preview. The delivery is
+   * still the record of what should have been delivered, which is the whole
+   * point of the table; a missing event does not get to fail the listing.
+   */
+  private static async payloadPreviews(
+    scope: TenantScope,
+    rows: readonly Delivery[],
+  ): Promise<Map<string, PayloadPreview>> {
+    const eventIds = [...new Set(rows.map((row) => row.eventId))];
+    const heads = await scope.eventPayloadHeads(eventIds, PAYLOAD_PREVIEW_READ_BYTES);
+
+    const previews = new Map<string, PayloadPreview>();
+    for (const eventId of eventIds) {
+      const head = heads.get(eventId);
+      if (!head) continue;
+      previews.set(
+        eventId,
+        previewPayload({
+          head: head.head ?? null,
+          inlineBytes: head.inline_bytes ?? null,
+          payloadSize: head.payload_size ?? null,
+          payloadLocation: head.payload_location ?? null,
+        }),
+      );
+    }
+    return previews;
+  }
+
+  /**
+   * Every delivery an event was routed to. "Did finance ever receive this?"
    *
    * Called by the events module for `GET /events/:id/deliveries`. The event id
    * is forced onto the predicate here rather than trusted from `event_id` in

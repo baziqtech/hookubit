@@ -279,6 +279,42 @@ export class AuditService {
   }
 
   /**
+   * The form a PLATFORM-INITIATED action must use: no user, no API key, no IP,
+   * no user agent, because there was no request and inventing one would put a
+   * human's name on something a background job did.
+   *
+   * It exists for exactly one shape of caller - a periodic sweep that acts on a
+   * customer's resource without a customer asking - and the endpoint
+   * auto-disable in `src/maintenance` is currently the only one. That is the
+   * shape `write`'s docblock refuses to expose generally, so the two guard rails
+   * `recordFor` gets from the tenant context have to be replaced by discipline
+   * here, and both are stated as obligations on the caller rather than
+   * pretended away:
+   *
+   *  1. **`organizationId` must be DERIVED from the resource's own ownership
+   *     chain** - endpoint -> project -> organization, read in the same
+   *     transaction as the change - and never from anything a request could
+   *     reach. There is no tenant context to check it against.
+   *  2. **Pass the transaction client.** The audit row is the only thing that
+   *     tells a customer their endpoint was switched off; a change that commits
+   *     without its audit row is a silent disable, which is the support ticket
+   *     this whole path exists to avoid.
+   *
+   * The actor columns are written NULL rather than a sentinel string like
+   * 'system'. `user_id` is a foreign key to `users` and a sentinel would either
+   * violate it or require a fake user row that someone could later authenticate
+   * as; NULL is already the schema's way of saying "no user did this", and the
+   * action name says who did.
+   */
+  async recordSystem(
+    organizationId: string,
+    entry: AuditEntry,
+    client?: TenantClient,
+  ): Promise<string> {
+    return this.write(organizationId, {}, entry, client);
+  }
+
+  /**
    * Drop values whose key looks like a credential, at EVERY depth.
    *
    * Audit metadata is written by fourteen modules and read by whoever is

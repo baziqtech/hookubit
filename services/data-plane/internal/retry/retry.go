@@ -160,10 +160,40 @@ func (p Policy) Exhausted(attempt int, firstAttemptAt time.Time, now time.Time) 
 	if p.MaxAttempts > 0 && attempt >= p.MaxAttempts {
 		return true
 	}
-	if p.MaxRetryDuration > 0 && !firstAttemptAt.IsZero() {
-		if now.Sub(firstAttemptAt) >= p.MaxRetryDuration {
-			return true
-		}
+	return p.DurationExhausted(firstAttemptAt, now)
+}
+
+// DurationExhausted is the WALL-CLOCK half of Exhausted, on its own.
+//
+// It is separate because the two halves are spent by different things. An
+// attempt is spent only by a request that was actually made, so a delivery the
+// worker declined to send - an open breaker, a rate limit, a concurrency
+// ceiling - must not consume one. Wall-clock time is spent by the clock, which
+// does not care whether we asked. A delivery that is only ever DEFERRED
+// therefore has a budget that can still run out, and something has to be able
+// to ask that question without pretending an attempt happened.
+//
+// Without this, a delivery to a permanently dead endpoint whose breaker never
+// closes is re-claimed and re-deferred forever: Exhausted is only consulted
+// when an attempt completes, and no attempt ever does.
+func (p Policy) DurationExhausted(firstAttemptAt time.Time, now time.Time) bool {
+	if p.MaxRetryDuration <= 0 || firstAttemptAt.IsZero() {
+		return false
 	}
-	return false
+	return now.Sub(firstAttemptAt) >= p.MaxRetryDuration
+}
+
+// Remaining reports how much wall-clock budget a delivery has left. It is zero
+// when the budget is spent and, when no duration cap applies, the largest
+// duration - callers use it as a ceiling, and "no cap" must not read as "no
+// time left".
+func (p Policy) Remaining(firstAttemptAt time.Time, now time.Time) time.Duration {
+	if p.MaxRetryDuration <= 0 || firstAttemptAt.IsZero() {
+		return time.Duration(math.MaxInt64)
+	}
+	left := firstAttemptAt.Add(p.MaxRetryDuration).Sub(now)
+	if left < 0 {
+		return 0
+	}
+	return left
 }

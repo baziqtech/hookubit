@@ -9,7 +9,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"github.com/shaq/webhook-platform/services/data-plane/internal/ids"
+	"github.com/shaq/hookubit/services/data-plane/internal/ids"
 )
 
 // ErrNotFound is returned by lookups that found nothing. Callers translate it;
@@ -28,6 +28,11 @@ type APIKeyRecord struct {
 	ProjectStatus      string
 	RevokedAt          *time.Time
 	ExpiresAt          *time.Time
+	// ProjectAllowedIPs is the project's publish allowlist. Empty permits every
+	// address, which is the default. It rides this query rather than costing
+	// one of its own: the handler needs it on every published event, and the
+	// join to `projects` is already here.
+	ProjectAllowedIPs []string
 }
 
 // CreateEventParams is everything the ingest transaction writes.
@@ -52,6 +57,16 @@ type CreateEventParams struct {
 	// empty.
 	RequestHash          string
 	IdempotencyExpiresAt time.Time
+
+	// TraceContext is the W3C `traceparent` of the ingest request, written to
+	// event_outbox.trace_context INSIDE this transaction (ARCHITECTURE.md 44).
+	//
+	// It goes on the OUTBOX row and not on the event, because it describes the
+	// WORK - and the work is what the router claims. It commits with the event,
+	// so a rolled-back transaction leaves no context describing an acceptance
+	// that never happened. Empty writes NULL, which is what every row written
+	// with tracing off carries and what the router treats as "no upstream".
+	TraceContext string
 }
 
 // Store is the ingest API's whole database surface. Narrow on purpose: it makes
@@ -80,7 +95,7 @@ func NewPostgresStore(pool *pgxpool.Pool) *PostgresStore { return &PostgresStore
 
 const findAPIKeySQL = `
 SELECT k.id, k.project_id, k.revoked_at, k.expires_at, k.environment::text,
-       p.organization_id, p.environment::text, p.status::text
+       p.organization_id, p.environment::text, p.status::text, p.allowed_ips
 FROM api_keys k
 JOIN projects p ON p.id = k.project_id
 WHERE k.key_hash = $1
@@ -90,7 +105,7 @@ func (s *PostgresStore) FindAPIKey(ctx context.Context, keyHash string) (*APIKey
 	var rec APIKeyRecord
 	err := s.pool.QueryRow(ctx, findAPIKeySQL, keyHash).Scan(
 		&rec.ID, &rec.ProjectID, &rec.RevokedAt, &rec.ExpiresAt, &rec.KeyEnvironment,
-		&rec.OrganizationID, &rec.ProjectEnvironment, &rec.ProjectStatus,
+		&rec.OrganizationID, &rec.ProjectEnvironment, &rec.ProjectStatus, &rec.ProjectAllowedIPs,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrNotFound
@@ -171,8 +186,8 @@ INSERT INTO events (
 // (ARCHITECTURE.md 15). It commits with the event; the router picks it up
 // afterwards. Nothing is published anywhere before this COMMIT.
 const insertOutboxSQL = `
-INSERT INTO event_outbox (id, event_id, type, status, attempts, available_at, created_at)
-VALUES ($1, $2, 'event.created', 'pending', 0, now(), now())
+INSERT INTO event_outbox (id, event_id, type, status, attempts, available_at, created_at, trace_context)
+VALUES ($1, $2, 'event.created', 'pending', 0, now(), now(), $3)
 `
 
 func (s *PostgresStore) CreateEvent(ctx context.Context, p CreateEventParams) (created bool, err error) {
@@ -235,7 +250,11 @@ func (s *PostgresStore) CreateEvent(ctx context.Context, p CreateEventParams) (c
 		return false, fmt.Errorf("insert event: %w", err)
 	}
 
-	if _, err := tx.Exec(ctx, insertOutboxSQL, ids.New(ids.Outbox), p.EventID); err != nil {
+	var traceContext any
+	if p.TraceContext != "" {
+		traceContext = p.TraceContext
+	}
+	if _, err := tx.Exec(ctx, insertOutboxSQL, ids.New(ids.Outbox), p.EventID, traceContext); err != nil {
 		return false, fmt.Errorf("insert event outbox: %w", err)
 	}
 

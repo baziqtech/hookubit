@@ -11,8 +11,11 @@ import (
 	"sync"
 	"time"
 
-	"github.com/shaq/webhook-platform/services/data-plane/internal/ids"
-	"github.com/shaq/webhook-platform/services/data-plane/internal/metrics"
+	"go.opentelemetry.io/otel/trace"
+
+	"github.com/shaq/hookubit/services/data-plane/internal/ids"
+	"github.com/shaq/hookubit/services/data-plane/internal/metrics"
+	"github.com/shaq/hookubit/services/data-plane/internal/tracing"
 )
 
 // requestIDPrefix matches the `req_...` shape quoted in error bodies and on
@@ -37,12 +40,20 @@ const DefaultDBTimeout = 5 * time.Second
 
 // Options configures a Handler. Every field except Store has a working default.
 type Options struct {
-	Store          Store
-	Limiter        RateLimiter
-	Payloads       PayloadStore
-	Limits         PayloadLimits
-	Logger         *slog.Logger
-	IdempotencyTTL time.Duration
+	Store   Store
+	Limiter RateLimiter
+	// Source is the pre-auth per-address ceiling. Nil disables it, which is
+	// only appropriate when something in front of the process already bounds
+	// an unauthenticated flood.
+	Source *SourceLimiter
+	// TrustedProxyHops is the EXACT number of proxies in front of this
+	// process. See ClientAddress: it is never inferred and never "trust
+	// everything".
+	TrustedProxyHops int
+	Payloads         PayloadStore
+	Limits           PayloadLimits
+	Logger           *slog.Logger
+	IdempotencyTTL   time.Duration
 	// DBTimeout bounds the database work of one accept. Defaults to
 	// DefaultDBTimeout.
 	DBTimeout time.Duration
@@ -52,28 +63,32 @@ type Options struct {
 
 // Handler serves POST /v1/projects/{project_id}/events.
 type Handler struct {
-	store          Store
-	limiter        RateLimiter
-	payloads       PayloadStore
-	limits         PayloadLimits
-	log            *slog.Logger
-	idempotencyTTL time.Duration
-	dbTimeout      time.Duration
-	now            func() time.Time
-	touch          *touchThrottle
+	store            Store
+	limiter          RateLimiter
+	source           *SourceLimiter
+	trustedProxyHops int
+	payloads         PayloadStore
+	limits           PayloadLimits
+	log              *slog.Logger
+	idempotencyTTL   time.Duration
+	dbTimeout        time.Duration
+	now              func() time.Time
+	touch            *touchThrottle
 }
 
 func New(opts Options) *Handler {
 	h := &Handler{
-		store:          opts.Store,
-		limiter:        opts.Limiter,
-		payloads:       opts.Payloads,
-		limits:         opts.Limits,
-		log:            opts.Logger,
-		idempotencyTTL: opts.IdempotencyTTL,
-		dbTimeout:      opts.DBTimeout,
-		now:            opts.Now,
-		touch:          newTouchThrottle(time.Minute),
+		store:            opts.Store,
+		limiter:          opts.Limiter,
+		source:           opts.Source,
+		trustedProxyHops: opts.TrustedProxyHops,
+		payloads:         opts.Payloads,
+		limits:           opts.Limits,
+		log:              opts.Logger,
+		idempotencyTTL:   opts.IdempotencyTTL,
+		dbTimeout:        opts.DBTimeout,
+		now:              opts.Now,
+		touch:            newTouchThrottle(time.Minute),
 	}
 	if h.limiter == nil {
 		h.limiter = AllowAll{}
@@ -118,11 +133,23 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	started := h.now()
-	log := h.log.With("request_id", requestID, "project_id", projectID)
+
+	// The stage root for the whole accept. It is opened here and not in a
+	// wrapping middleware so that the 404 and 405 paths above - which are not
+	// this API's route at all - produce no spans; an unrouted scan of the
+	// internet must not be able to fill a trace backend.
+	ctx, span := startIngestSpan(r, projectID, requestID)
+	defer span.End()
+	r = r.WithContext(ctx)
+
+	// trace_id on the log line is the seam ARCHITECTURE.md 63 asks for: both,
+	// not either. It is absent, and the line unchanged, when tracing is off.
+	log := tracing.Logger(ctx, h.log).With("request_id", requestID, "project_id", projectID)
 
 	eventID, apiErr := h.accept(r, projectID, log)
 	if apiErr != nil {
 		metrics.EventsIngestionFailed.WithLabelValues(apiErr.Code).Inc()
+		finishIngestSpan(span, apiErr.Status, apiErr.Code, "")
 		// Message text is contract, not customer data: safe to log.
 		log.Warn("ingest rejected",
 			"code", apiErr.Code,
@@ -133,6 +160,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	finishIngestSpan(span, http.StatusAccepted, "", eventID)
 	log.Info("event accepted",
 		"event_id", eventID,
 		"duration_ms", h.now().Sub(started).Milliseconds(),
@@ -150,9 +178,67 @@ func (h *Handler) accept(r *http.Request, projectID string, log *slog.Logger) (s
 	ctx, cancel := context.WithTimeout(r.Context(), h.dbTimeout)
 	defer cancel()
 
+	// 0. Pre-auth ceiling, BEFORE the database is touched.
+	//
+	// Steps 1..6 below are the order fixed by ARCHITECTURE.md 16 and this is
+	// not an extra step in it - it is the gate in front of it. Step 1 costs a
+	// connection from a pool of DATABASE_MAX_CONNECTIONS held for up to
+	// DBTimeout, and it runs for anyone who can open a socket. Charging an
+	// unauthenticated flood before that is the difference between a rate limit
+	// and a denial-of-service window (see SourceLimiter).
+	addr := ClientAddress(r, h.trustedProxyHops)
+	// The same hop, as an ADDRESS rather than a rate-limit bucket. See
+	// ClientIP for why the allowlist must not be given the bucket: it widens
+	// IPv6 to a /64, which would turn an entry naming one address into one
+	// permitting eighteen quintillion.
+	clientIP := ClientIP(r, h.trustedProxyHops)
+	if allowed, wait := h.source.Allow(addr); !allowed {
+		metrics.RateLimitHits.WithLabelValues("source_ip").Inc()
+		return "", errRateLimited(wait)
+	}
+
 	// 1. Authenticate the API key.
 	key, apiErr := h.authenticate(ctx, r)
 	if apiErr != nil {
+		// A failed credential costs this address extra. It keeps the ceiling
+		// generous for honest traffic and punitive for a key-spraying flood,
+		// which is the only traffic that reaches this line repeatedly.
+		if apiErr.Code == CodeUnauthenticated {
+			h.source.Penalise(addr)
+		}
+		return "", apiErr
+	}
+
+	// 1a. The project's publish allowlist, BEFORE anything is said about the
+	// key.
+	//
+	// Placed here and not further down on purpose. Every check below this line
+	// - revoked, expired, wrong project, wrong environment - answers a
+	// different error, and an attacker who can tell those apart has an oracle
+	// for whether a credential they hold is live. From a blocked address they
+	// all collapse into this one answer, so the list refuses first and says
+	// nothing about the key.
+	//
+	// What this does NOT hide is that the credential EXISTS: reaching this line
+	// at all means the hash matched. Hiding that too would need a project read
+	// before authentication and a single indistinguishable error for both,
+	// which costs a database round trip on every published event to deny an
+	// attacker who already holds a real key one bit. The trade is deliberate.
+	//
+	// The message names the address because the caller already knows their own
+	// address, and an operator debugging a deployment that moved subnets should
+	// not have to guess which one we saw.
+	if !AllowedIP(key.ProjectAllowedIPs, clientIP) {
+		log.Warn("refused by project allowlist", "project_id", projectID, "source", clientIP)
+		metrics.RateLimitHits.WithLabelValues("ip_allowlist").Inc()
+		return "", errForbidden("Address " + clientIP + " is not on this project's allowed list")
+	}
+
+	// 1b. NOW judge the credential. Everything from here down can answer a
+	// different error for a different reason, which is exactly why it runs
+	// after the list and not before it.
+	if apiErr := usableKey(key, h.now()); apiErr != nil {
+		h.source.Penalise(addr)
 		return "", apiErr
 	}
 
@@ -191,16 +277,16 @@ func (h *Handler) accept(r *http.Request, projectID string, log *slog.Logger) (s
 
 	// 4. Rate limit. A limiter fault must not reject traffic: Redis is a
 	// throughput control here, not the source of truth.
-	allowed, err := h.limiter.Allow(ctx, Scope{
+	decision, err := h.limiter.Allow(ctx, Scope{
 		OrganizationID: key.OrganizationID,
 		ProjectID:      key.ProjectID,
 		APIKeyID:       key.ID,
 	})
 	if err != nil {
 		log.Error("rate limiter unavailable, failing open", "error", err.Error())
-	} else if !allowed {
-		metrics.RateLimitHits.WithLabelValues("ingest").Inc()
-		return "", errRateLimited()
+	} else if !decision.Allowed {
+		log.Warn("rate limited", "limited_scope", decision.LimitedScope)
+		return "", errRateLimited(decision.RetryAfter)
 	}
 
 	// The request hash is over the EXACT bytes received, which is also what
@@ -243,14 +329,27 @@ func (h *Handler) authenticate(ctx context.Context, r *http.Request) (*APIKeyRec
 		h.log.Error("api key lookup failed", "error", err.Error())
 		return nil, errInternal()
 	}
-	now := h.now()
+	// Revoked and expired are NOT checked here. They are judged by usableKey,
+	// after the project's publish allowlist has had its say — see step 1a. A
+	// blocked address must not be able to tell a live key from a dead one.
+	return record, nil
+}
+
+// usableKey judges a credential that has already been found.
+//
+// Separate from authenticate so the caller can interpose the publish allowlist
+// between "this hash matches a row" and "this row is still good". The error is
+// the same opaque one authenticate uses, for the same reason: distinguishing
+// "revoked" from "expired" hands an attacker an oracle about a key they hold.
+func usableKey(record *APIKeyRecord, now time.Time) *apiError {
+	const rejected = "Invalid API key"
 	if record.RevokedAt != nil && !record.RevokedAt.After(now) {
-		return nil, errUnauthenticated(rejected)
+		return errUnauthenticated(rejected)
 	}
 	if record.ExpiresAt != nil && !record.ExpiresAt.After(now) {
-		return nil, errUnauthenticated(rejected)
+		return errUnauthenticated(rejected)
 	}
-	return record, nil
+	return nil
 }
 
 // readBody enforces the hard payload ceiling while reading, so an oversized
@@ -306,12 +405,19 @@ func (h *Handler) persist(
 ) (string, *apiError) {
 	eventID := ids.New(ids.Event)
 
-	// NOTE: an offloaded payload is uploaded here, BEFORE the transaction. If
-	// the claim below is lost or the insert fails, that object is orphaned - no
-	// events row will ever reference it and nothing reclaims it. Uploading
-	// after the claim would mean holding the ingest transaction open across an
-	// S3 round trip, which is worse. See "Object storage reconciliation" in
-	// HANDOFF.md: the fix is a lifecycle rule or a sweep on the bucket.
+	// An offloaded payload is uploaded here, BEFORE the transaction, because
+	// the key contains the event ID and the row carries the location - and
+	// because holding the ingest transaction open across an S3 round trip is
+	// the thing ARCHITECTURE.md forbids on this path.
+	//
+	// That leaves a window in which the object exists and no row references it.
+	// It is closed by the compensating deletes below on every path where we
+	// KNOW nothing was written, and by the sweep in internal/payloadstore for
+	// the residue (a crash between the PUT and the COMMIT).
+	//
+	// Note also what does NOT happen here: an offload that fails is an error,
+	// never a 202. `accepted` means durably recoverable, and a payload that is
+	// in neither PostgreSQL nor the bucket is neither.
 	plan, apiErr := PlanPayload(ctx, h.payloads, h.limits, key.ProjectID, eventID, body)
 	if apiErr != nil {
 		return "", apiErr
@@ -320,10 +426,31 @@ func (h *Handler) persist(
 	headers, err := requestMetadata(envelope)
 	if err != nil {
 		log.Error("encode event metadata", "error", err.Error())
+		// Nothing has touched the database yet, so the object we just wrote is
+		// provably unreferenced.
+		DisposeOrphan(h.payloads, plan.Location, log)
 		return "", errInternal()
 	}
 
-	created, err := h.store.CreateEvent(ctx, CreateEventParams{
+	// The durability boundary, and the only part of the accept that can be
+	// slow for a reason an operator can act on. The trace context written to
+	// the outbox row is taken from the STAGE ROOT rather than from this child:
+	// what the router links to is "the request that accepted this event", and a
+	// child span that has already ended is not a useful link target.
+	persistCtx, persistSpan := tracing.Start(ctx, "ingest.persist",
+		trace.WithSpanKind(trace.SpanKindInternal),
+		trace.WithAttributes(
+			tracing.AttrEventID.String(eventID),
+			tracing.AttrPayloadBytes.Int(plan.Size),
+			tracing.AttrPayloadStored.Bool(plan.Location != ""),
+		))
+	created, err := h.store.CreateEvent(persistCtx, CreateEventParams{
+		// The traceparent of the ingest REQUEST, committed in the same
+		// transaction as the event and its outbox row. If the transaction rolls
+		// back there is no row and no context, which is the property that makes
+		// this honest: a stored context always describes work that actually
+		// happened.
+		TraceContext:         tracing.Encode(ctx),
 		EventID:              eventID,
 		OrganizationID:       key.OrganizationID,
 		ProjectID:            key.ProjectID,
@@ -337,14 +464,29 @@ func (h *Handler) persist(
 		RequestHash:          requestHash,
 		IdempotencyExpiresAt: h.now().Add(h.idempotencyTTL),
 	})
+	tracing.RecordError(persistSpan, err)
+	persistSpan.End()
 	if err != nil {
 		log.Error("persist event failed", "error", err.Error())
+		// DELIBERATELY NO compensating delete. A CreateEvent error is
+		// AMBIGUOUS: a COMMIT that timed out may still have landed, and an
+		// events row whose payload object we deleted is unrecoverable, whereas
+		// an orphaned object costs storage until the sweep reclaims it. When
+		// the two mistakes are not symmetrical, take the cheap one.
+		if plan.Location != "" {
+			metrics.PayloadOrphans.WithLabelValues("leaked").Inc()
+		}
 		return "", errInternal()
 	}
 	if !created {
 		// Lost the race on the unique (project_id, key) index: another request
-		// with the same key committed while this one was in flight. Re-read and
-		// answer from what actually committed.
+		// with the same key committed while this one was in flight. Nothing was
+		// written under OUR event ID - the transaction returned before the
+		// INSERT and rolled back - so the object we uploaded a moment ago is
+		// provably unreferenced and is cleaned up now rather than swept later.
+		DisposeOrphan(h.payloads, plan.Location, log)
+
+		// Re-read and answer from what actually committed.
 		eventID, decided, apiErr := h.checkIdempotency(ctx, key.ProjectID, idempotencyKey, requestHash)
 		if apiErr != nil {
 			return "", apiErr
@@ -358,6 +500,9 @@ func (h *Handler) persist(
 	}
 
 	metrics.EventsIngested.WithLabelValues(key.ProjectEnvironment).Inc()
+	if plan.Location != "" {
+		metrics.PayloadOffloads.WithLabelValues("stored").Inc()
+	}
 	return eventID, nil
 }
 

@@ -25,6 +25,13 @@ type Gate struct {
 
 	orgLimit     int
 	projectLimit int
+	// endpointLimit is the configured MAX_CONCURRENCY_PER_ENDPOINT. Nothing on
+	// the acquire path reads it - AcquireEndpoint is handed the ceiling by the
+	// caller, which also knows the endpoint's own max_concurrency - so it is
+	// held here for ONE purpose: Occupancy publishes it, so an operator can see
+	// occupancy against the ceiling without knowing the deployment's
+	// environment.
+	endpointLimit int
 }
 
 // GateLimits are the configured ceilings (MAX_CONCURRENCY_*).
@@ -40,12 +47,13 @@ type GateLimits struct {
 // it is the absence of one, and engineering rule 29 forbids it.
 func NewGate(l GateLimits) *Gate {
 	return &Gate{
-		global:       &counter{limit: atLeastOne(l.Global)},
-		org:          newKeyedCounter(),
-		project:      newKeyedCounter(),
-		endpoint:     newKeyedCounter(),
-		orgLimit:     atLeastOne(l.Org),
-		projectLimit: atLeastOne(l.Project),
+		global:        &counter{limit: atLeastOne(l.Global)},
+		org:           newKeyedCounter(),
+		project:       newKeyedCounter(),
+		endpoint:      newKeyedCounter(),
+		orgLimit:      atLeastOne(l.Org),
+		projectLimit:  atLeastOne(l.Project),
+		endpointLimit: atLeastOne(l.Endpoint),
 	}
 }
 
@@ -103,6 +111,63 @@ func (g *Gate) AcquireEndpoint(endpointID string, capacity, ceiling int) (Releas
 // InFlight reports the number of deliveries currently holding a global slot.
 func (g *Gate) InFlight() int { return g.global.inFlight() }
 
+// Gate scope names. They are the values of the `scope` label on the
+// concurrency_gate_* gauges, and - for the first three - the values
+// AcquireTenant already returns and rate_limit_hits_total already carries.
+const (
+	ScopeGlobal   = "global"
+	ScopeOrg      = "organization"
+	ScopeProject  = "project"
+	ScopeEndpoint = "endpoint"
+)
+
+// Occupancy is a point-in-time reading of one scope of the gate.
+//
+// It exists because the gate was, until it did, entirely invisible.
+// rate_limit_hits_total counted the REFUSALS, which says something was turned
+// away and nothing at all about what was holding the capacity - and the whole
+// difficulty of per-endpoint isolation is that the symptom (one tenant's
+// deliveries are slow) shows up nowhere near the cause (a different tenant's
+// endpoints are sitting on the pool). See docs/FAILURE_RECOVERY.md, G13.
+//
+// BusiestKey is the deliberate compromise on cardinality. The useful question
+// is "is one endpoint eating the pool?", and the obvious way to answer it - a
+// gauge labelled by endpoint id - is a series per customer endpoint, which is
+// the outage this package's header exists to forbid. The largest single
+// holding answers the question with the identity left out; WHICH endpoint it is
+// belongs in a log line and a delivery-log query.
+type Occupancy struct {
+	// InUse is the slots held at this scope, summed ACROSS keys for the keyed
+	// scopes. It can therefore exceed Capacity, which is a per-key ceiling.
+	InUse int
+	// Capacity is the configured ceiling: process-wide for global, per key for
+	// the rest.
+	Capacity int
+	// Keys is how many distinct keys hold capacity. Zero for global, which is
+	// unkeyed by construction.
+	Keys int
+	// BusiestKey is the largest single key's holding. Zero for global.
+	BusiestKey int
+}
+
+// Occupancy snapshots every scope. Each scope is read under its own lock, so
+// the four readings are individually consistent and not a single instant across
+// the gate - which is what a gauge sampled on an interval wants anyway, and is
+// far cheaper than freezing the whole gate to publish a metric.
+func (g *Gate) Occupancy() map[string]Occupancy {
+	globalInUse, globalLimit := g.global.snapshot()
+	orgInUse, orgKeys, orgMax := g.org.snapshot()
+	projInUse, projKeys, projMax := g.project.snapshot()
+	epInUse, epKeys, epMax := g.endpoint.snapshot()
+
+	return map[string]Occupancy{
+		ScopeGlobal:   {InUse: globalInUse, Capacity: globalLimit},
+		ScopeOrg:      {InUse: orgInUse, Capacity: g.orgLimit, Keys: orgKeys, BusiestKey: orgMax},
+		ScopeProject:  {InUse: projInUse, Capacity: g.projectLimit, Keys: projKeys, BusiestKey: projMax},
+		ScopeEndpoint: {InUse: epInUse, Capacity: g.endpointLimit, Keys: epKeys, BusiestKey: epMax},
+	}
+}
+
 func atLeastOne(n int) int {
 	if n < 1 {
 		return 1
@@ -147,6 +212,15 @@ func (c *counter) inFlight() int {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.held
+}
+
+// snapshot reads the held count and the limit together, under one lock. Reading
+// them with two calls would let a reconfigured limit be reported against a
+// count taken before it.
+func (c *counter) snapshot() (held, limit int) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.held, c.limit
 }
 
 // keyedCounter is one semaphore per tenant key. Entries are deleted when they
@@ -214,4 +288,23 @@ func (k *keyedCounter) keys() int {
 	k.mu.Lock()
 	defer k.mu.Unlock()
 	return len(k.entries)
+}
+
+// snapshot totals the scope in ONE pass under ONE lock: slots held across every
+// key, the number of keys holding them, and the largest single holding.
+//
+// It is O(active keys), which is why the caller samples it on an interval
+// rather than on the acquire path. The map is bounded by concurrent tenants -
+// entries are deleted at zero - so in practice that is bounded by the worker
+// pool, not by the customer list.
+func (k *keyedCounter) snapshot() (inUse, keys, busiest int) {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	for _, e := range k.entries {
+		inUse += e.held
+		if e.held > busiest {
+			busiest = e.held
+		}
+	}
+	return inUse, len(k.entries), busiest
 }

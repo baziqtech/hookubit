@@ -1,5 +1,25 @@
 # Dashboard — handoff
 
+> **Status, 2026-09-10.** Every section below this note is history: the notes
+> of the sessions that built the dashboard against a mock while the control
+> API was being written. They are kept for the reasoning. The current facts:
+>
+> - Every page reads the real control API. The last mock-only routes
+>   (`/analytics`, `/usage`) are gone; `src/lib/mock/` mirrors the API for
+>   `vitest` and for `VITE_API_TRANSPORT` unset, and its contract tests pin it
+>   to the OpenAPI document.
+> - Every control the dashboard offers is exercised against the running stack
+>   by `e2e/` (Playwright): `pnpm test:e2e`, prerequisites in
+>   `docs/LOCAL_SETUP.md` section 9. Twenty-eight steps from registration to
+>   deleting the project, with the HMAC on each delivery verified at a local
+>   receiver.
+> - Things the e2e run found and fixed in the product, for the record: a
+>   dialog's submit button bound to the wrong form when the same dialog was
+>   mounted twice (`Dialog` now unmounts when closed and forms use `useId`);
+>   the account menu opened below the fold; sign-out left the shell on screen;
+>   deleting a project sent you back into it (cached list); the pause dialog
+>   said queued deliveries wait when the data plane cancels them.
+
 ## The build serves mock data by default, and now says so
 
 `resolveTransport()` in `src/lib/api.ts` uses the in-memory mock in
@@ -19,7 +39,7 @@ away by being acknowledged. The quieter `MockBanner` that used to live inside
 **To turn it off:** build with the real transport.
 
 ```sh
-VITE_API_TRANSPORT=http pnpm --filter @webhook/dashboard build
+VITE_API_TRANSPORT=http pnpm --filter @hookubit/dashboard build
 ```
 
 `usingMockApi` in `src/lib/api.ts` is the single source of that signal — the
@@ -64,6 +84,13 @@ Needed from the control API, then a button on that panel:
 - Rate limited per address and per IP — this endpoint sends mail on demand.
 
 ## Contract drift found against the six mounted control-plane modules
+
+> **Superseded, and kept for the reasoning rather than the findings.** This
+> section was written by reading `apps/control-api/src/**/dto/**` by hand. The
+> control API now publishes `/docs-json` and the types are generated from it —
+> see **"The types are generated now, and here is everything that was wrong"** at
+> the end of this file, which corrects several claims below (there is one list
+> envelope, not three; `SessionResponseDto` carries no organizations).
 
 `src/types/api.ts` was hand-written against `docs/API.md` and had silently
 drifted from the DTO classes that actually exist. **TypeScript could not catch
@@ -126,37 +153,127 @@ final page reads as complete instead of promising one more empty page.
 `GET /v1/organizations/:orgId/projects`. A request to the old path would have
 404'd against the real API the moment the transport flipped.
 
-### Rate limits and ceilings are both refusals, and the API cannot tell them apart
+### Rate limits and ceilings are both refusals, and the API DOES tell them apart
 
-Every write route now carries `@Throttle`. Separately, creates can fail on a
-resource ceiling (organizations per user, projects per org, endpoints and API
-keys per project).
+*This section said the opposite until the routes were checked again. It was
+accurate when written and is corrected here rather than deleted, because the
+old behaviour is why the dashboard has a classifier at all.*
 
-**There is no `limit_exceeded` error code.** A ceiling is thrown as
-`AppError('conflict', …)`, so on the wire it is a 409 that is
-*indistinguishable from a duplicate-slug conflict on `code` alone*. The
-dashboard therefore classifies rather than switches, in `src/lib/api-errors.ts`:
+Every write route carries `@Throttle`. Separately, creates can fail on a
+resource ceiling (organizations per user, projects per org, endpoints, API keys
+and subscriptions per project).
 
-1. `details.limit` present on a 409 → ceiling, with numbers. Exact.
-2. otherwise a 409 whose message matches `/which is (its limit|the limit|the maximum)/`
-   → ceiling, without numbers. **Fragile — it breaks if anyone rewords a message.**
-3. anything else 409 → an ordinary conflict.
+**`limit_exceeded` exists.** It is in `ERROR_CODES` (`common/errors.ts:37`), it
+is a 409 like `conflict`, and **every ceiling raises it with
+`details: { limit, current, resource }`** — including the two this document
+previously said "attach nothing but prose": endpoints
+(`endpoints.service.ts` `requireHeadroom`, line ~407) and organizations
+(`organizations.service.ts` `create`, line ~140). Both were verified by reading
+the services.
+
+So `src/lib/api-errors.ts` **no longer matches prose**, and the old rule 2 —
+`/which is (its limit|the limit|the maximum)/` — is gone. Keeping it would now
+do harm rather than good: a genuine `conflict` worded like a ceiling would be
+classified as one, and the user told to delete something to fix a name
+collision. `api-errors.test.ts` pins exactly that case.
+
+    1. 429 / `rate_limited`   → throttled, transient, with `retry_after_seconds`
+    2. `limit_exceeded`       → ceiling, with `{ limit, current, resource }`
+    3. any other 409          → an ordinary conflict (duplicate slug, deleted row)
+    4. 400 / `invalid_request`→ invalid, split into per-field issues (below)
 
 The distinction matters because the remedies are opposites: a 429 clears itself
 and the panel says how long, a ceiling never does and its copy must never say
 "try again". `WriteErrorNotice` renders them differently and
 `WriteErrorNotice.test.tsx` pins that they cannot converge.
 
+### A 400 carries an ARRAY at `error.message`, and it is the only field map there is
+
+`AppExceptionFilter` passes a non-`AppError` `HttpException` body straight
+through (`common/errors.ts:82`), and the global `ValidationPipe` puts the array
+of per-property messages there. So a validation failure arrives as:
+
+```json
+{ "error": { "code": "invalid_request",
+             "message": ["url: loopback address", "timeout_ms: must not be less than 1000"] } }
+```
+
+Each entry is `"<property>: <reason>"`, produced by class-validator's
+`defaultMessage`. **That array is the only place the API says which field it
+refused.** Flattened into a sentence — which is what the dashboard used to do,
+because `ApiError.message` was typed `string` — a form can do nothing but show a
+paragraph next to the submit button.
+
+`normaliseApiError` in `src/lib/api.ts` now runs on both transports and keeps
+the array as `messages`; `classifyWriteError` splits it into
+`{ field, reason }` issues; forms call `setError(field, …)` and focus the first.
+`WriteErrorNotice` takes `claimedFields` and renders **nothing** when the form
+placed every reason under its own input, so a rejection is never shown twice and
+never silently dropped.
+
+## Four routes that already existed and were only unwired
+
+Checked against the controllers, not against this document:
+
+| Route | Wired in |
+| --- | --- |
+| `PATCH /v1/projects/:projectId/endpoints/:endpointId` | `EndpointEditDialog` |
+| `POST …/endpoints/:endpointId/enable` | `EndpointActions` |
+| `POST …/endpoints/:endpointId/disable` | `EndpointActions` |
+| `PATCH /v1/organizations/:orgId/projects/:projectId` | `ProjectSettingsPage` |
+| `PATCH /v1/organizations/:orgId` | `OrganizationSettingsPage` |
+
+### More route drift found while wiring them
+
+Both of these would have 404'd the moment the transport flipped, and both are
+fixed, in the hooks and in the mock:
+
+- **`GET /v1/endpoints/:id` does not exist.** `EndpointsController` is mounted
+  at `projects/:projectId/endpoints`, and the project id in the path is what
+  `TenantResolver` reads the organization off — it is a lookup key, never an
+  authorization claim. `useEndpoint` now takes a project id.
+  `/v1/endpoints/:id/secrets` **is** top-level, because
+  `EndpointSecretsController` is mounted separately. The asymmetry is real.
+- **`GET /v1/projects/:id` does not exist** either; projects are nested under
+  the organization for reads as well as for the list. `useProject` now takes an
+  org id, and its three callers pass the one already in the URL.
+
+### The breaker affordance says "Resume deliveries anyway"
+
+`enabled` is operator intent, `status` is the breaker's verdict, and the pair is
+the most easily misread thing in the product. The delivery page could already
+say *"no retry will run — the circuit breaker has disabled this endpoint"*; that
+is a diagnosis with no cure, and it sent the operator away to find the endpoint
+by name in a paged table.
+
+The rule, in `src/features/endpoints/breaker.ts` as pure data so it is testable
+without a DOM:
+
+- `enabled: true, status: 'disabled'` — the platform stopped it. Re-enabling
+  changes nothing about the consumer whose failures opened the breaker, so the
+  next run of failures opens it again, and the queued deliveries that resume in
+  the meantime hit a still-broken consumer as a burst. The control is
+  **"Resume deliveries anyway"** / **"Resume anyway"**: it offers the action and
+  refuses to imply a repair. `breaker.test.ts` asserts the label never matches
+  `/fix|restore|repair|re-?enable/`.
+- Alongside it, **"Pause it instead"** — the honest option when the consumer is
+  known broken. It converts a platform verdict into a recorded operator decision
+  with a reason in the audit log, which is what makes the delivery gap
+  explainable next week, and it stops the retry churn.
+- `enabled: false` — a person paused it. Reversing your own decision reads as
+  an ordinary action: **"Resume deliveries"**.
+
+`POST …/enable` is refused with a 409 when the endpoint has no live signing
+secret (the data plane fails closed rather than delivering unsigned). That
+branch is reachable in the mock via `ep_01JQPENDING` and is surfaced, not
+swallowed.
+
 ## Still needed from the control API
 
-1. **A distinct error code for a resource ceiling** — `limit_exceeded`, or a
-   stable `details.reason`. Rule 2 above is prose-matching in a UI, which is not
-   a contract. This is the single most valuable thing to add.
-2. **`details: { limit, current }` on every ceiling.** Projects
-   (`projects.service.ts:217`) and API keys (`api-keys.service.ts:212`) attach
-   it. **Endpoints (`endpoints.service.ts:401`) and organizations
-   (`organizations.service.ts:134`) attach nothing but prose**, so the UI cannot
-   tell the user how close they are for two of the four ceilings.
+1. ~~A distinct error code for a resource ceiling.~~ **Done** — `limit_exceeded`.
+2. ~~`details: { limit, current }` on every ceiling.~~ **Done**, on all four,
+   plus `resource`, which is what lets the copy say *"delete one of your
+   endpoints"* rather than *"delete something"*.
 3. **`Retry-After` / `retry_after_seconds` reachable from the browser.** The
    guard sets both, but a cross-origin deploy needs `Retry-After` in
    `Access-Control-Expose-Headers`; the dashboard currently reads only
@@ -165,12 +282,15 @@ and the panel says how long, a ceiling never does and its copy must never say
 5. **Publish `/docs-json`.** `src/types/api.ts` is a second source of truth and
    this whole document is the cost of it. `pnpm generate:api` deletes the
    problem.
-6. **Whether `secret_pending` is derivable after creation.** It appears only on
-   the create response. A dashboard listing endpoints cannot currently
-   distinguish "paused by an operator" from "paused because it has no secret" —
-   it infers it from `enabled` + `status`, which is a guess. A
-   `has_live_secret` field on `EndpointDto`, or the secrets count, would settle
-   it.
+6. **Whether `secret_pending` is derivable after creation.** Still open, and it
+   is now the sharpest gap on this page rather than a cosmetic one. `EndpointDto`
+   carries no signing-secret state, so the Endpoints table cannot distinguish
+   "paused by an operator" from "paused because it has no secret" — and it is
+   the second of those for which `POST …/enable` answers 409. The dashboard
+   therefore offers "Resume deliveries" on an endpoint that cannot be resumed,
+   and only learns better from the conflict. A `has_live_secret` boolean on
+   `EndpointDto` (or the active-secret count) would let the button be disabled
+   with the real reason instead.
 7. **Modules that do not exist yet.** Events, deliveries, subscriptions,
    analytics, usage and audit logs are still served only by the mock and are
    marked SPECULATIVE in `src/types/api.ts`. They currently use `CursorPage<T>`;
@@ -247,3 +367,494 @@ resets the module graph and stubs `VITE_API_TRANSPORT` per case, because
 `usingMockApi` is evaluated once at import time. If interaction coverage becomes
 necessary, add `jsdom` + `@testing-library/react` and a `test.environment` block
 in `vite.config.ts` — the existing tests keep working either way.
+
+---
+
+# First-run experience, the product tour, and what the backend owed them
+
+> **Delivered, both sides.** `users.onboarding_completed_at` exists, the API
+> exposes it on the session and accepts `POST /v1/auth/onboarding-completed`
+> (idempotent by conditional UPDATE, user id from the session only), and the
+> dashboard now decides from the server value first with `localStorage` as the
+> fallback for the window between the click and the response. The ask below is
+> kept as the record of why the field has the shape it has.
+
+This pass added a guided setup path, an orientation tour, a real Analytics
+page, and a rewritten delivery-detail screen. Everything below is either a
+decision worth not re-litigating or a concrete ask on the control API.
+
+## The single most important backend ask: `onboarding_completed_at` (delivered)
+
+**The product tour's "has this person seen it?" flag is in `localStorage`, and
+that is a stand-in, not the design.**
+
+`src/features/onboarding/tour-storage.ts` writes `hookubit.tour.v1` with a value
+of `completed` or `skipped`. Every access is wrapped in try/catch, because
+`localStorage` does not merely return empty in a private window or with site
+data blocked — **the accessor itself throws**, and an unguarded read there would
+take down the whole app shell. A throw and a cleared store both read as "never
+seen", which is the safe direction: the tour is skippable and re-openable, so
+showing it once more costs a keystroke, while wrongly suppressing it leaves a
+new user with no orientation at all.
+
+What it costs today:
+
+- The same person gets the tour again on a second device or browser.
+- Clearing site data replays it.
+- Support cannot see whether a user was ever onboarded.
+
+**What is wanted on the control API**, on the user record, exposed on
+`GET /v1/auth/session` inside `user`:
+
+```jsonc
+{
+  "user": {
+    "id": "usr_…",
+    // ISO-8601 when the user finished OR skipped the tour; null if neither.
+    "onboarding_completed_at": "2026-09-08T14:20:00.000Z"
+  }
+}
+```
+
+plus a write route:
+
+```
+POST /v1/auth/onboarding-completed   →  204, idempotent
+```
+
+One nullable timestamp, not a boolean and not a JSON blob of per-step progress.
+A boolean cannot answer "when", which is what you want when someone asks why a
+cohort churned; per-step progress is state the tour would then have to
+reconcile against the server mid-session for no benefit. Skipping and finishing
+deliberately collapse to the same field — the product question is "has this
+person been oriented", and someone who skipped has decided they have.
+
+Until that exists, `readTourRecord()` is the only reader and
+`writeTourRecord()` the only writer, so the swap is those two functions plus a
+mutation. Nothing else in the app touches the key.
+
+## Why the tour is non-modal, and why it has no focus trap
+
+`src/features/onboarding/ProductTour.tsx` is `role="dialog"` **without**
+`aria-modal`, with no backdrop and no focus trap. That is deliberate on both
+UX and accessibility grounds, and it should not be "fixed" into a normal modal:
+
+- A tour that dims the page and swallows clicks teaches a new user that the
+  product gets in the way. The app behind it stays fully interactive, so someone
+  reading the routing step can click into Deliveries and look at a real one.
+- **Trapping focus in a non-modal dialog is precisely the keyboard trap WCAG
+  2.1.2 forbids.** Focus still moves in on open and returns to the invoking
+  control on close, which is the part users actually need; it is simply not
+  fenced in between.
+- Step changes are announced through a `role="status" aria-atomic` region rather
+  than by moving focus, so a screen-reader user hears the new step without being
+  yanked out of wherever they were reading.
+- It is mounted in `AppLayout`, not on a route, so it survives navigation.
+- `Skip tour` is a labelled control in the header on **every** step, and Escape
+  closes from anywhere. Both record `skipped`.
+
+The tour and the setup checklist are **different things and must stay that
+way**: the tour answers "what is this product", is static prose, and ends by
+handing off to the checklist; the checklist answers "what do I do next" and is
+derived entirely from live queries. Someone who skips the tour still lands on
+the checklist and can finish unaided.
+
+## Setup state is derived, never stored
+
+`useSetupState()` in `src/features/onboarding/api.ts` composes the queries the
+product already runs — organizations, project, API keys, endpoints,
+subscriptions, events — and feeds `deriveSetupSteps()` in `setup.ts`.
+
+**Please do not add `GET /v1/projects/:id/setup-state`.** It would be a second
+source of truth for "does this project have a live endpoint" and would drift
+from the list that answers the same question one click away. The cost is five
+parallel requests on the overview, all cached under the keys those screens
+already use, so navigating onward is served from cache.
+
+The rule the derivation exists to enforce, and the one a naive checklist gets
+wrong: **a resource can exist and still not deliver.** An endpoint created by a
+developer comes back paused with no signing secret; a subscription can be
+disabled. Those are `attention` (amber), never `done` (green) — ticking them
+green is how someone spends an afternoon wondering why nothing arrives.
+`setup.test.ts` pins that they cannot converge.
+
+## The `curl` needs the INGEST base URL, which is not this app's origin
+
+The get-started page renders a ready-to-run publish request with the operator's
+real project id. Ingest is a **separate service** from the control API this
+dashboard talks to — Go on `:8080` versus NestJS on `:3000` (docs/API.md) — so
+it is not behind the dev proxy and it is not `window.location.origin`.
+
+`ingestBaseUrl()` reads `VITE_INGEST_BASE_URL` and falls back to
+`http://localhost:8080`. **The deployment side needs to pass that build arg**,
+alongside the `VITE_API_TRANSPORT=http` ask already recorded above. A wrong base
+URL produces connection-refused, which is annoying but honest; deriving it from
+the dashboard's origin would produce a request that 404s against the *control*
+API, which looks like it reached something and is far more confusing.
+
+## The mock now accepts writes, and they persist
+
+`PATCH`, `enable` and `disable` mutate the fixtures in place — they have to, or
+a query invalidated after a mutation would refetch the old row and the change
+would look lost. That makes `src/lib/mock/data.ts` shared mutable state across a
+test file, so `resetMockState()` (which also clears the throttle counters)
+rewinds every write and is called from `beforeEach` in every mock suite.
+
+The write-side validation lives in `src/lib/mock/writes.ts` and mirrors
+`endpoint-url.ts`, `endpoint-headers.ts` and `endpoint-limits.ts` in the same
+words. `writes.test.ts` covers the failures the UI has to render, not just the
+200s: an SSRF-shaped URL (loopback, private, metadata, a bad scheme, embedded
+credentials), a reserved `Webhook-*` header, `status` refused by
+`forbidNonWhitelisted`, the numeric bounds, a 409 on a soft-deleted endpoint, a
+409 on enabling an endpoint with no signing secret, a slug collision, and a 429
+with `retry_after_seconds`.
+
+## Mock changes that bring it closer to the real contract
+
+Two changes to `src/lib/mock/`, both of which make the mock **more** faithful:
+
+1. **Project scoping.** `GET /v1/projects/:id/{endpoints,api-keys,subscriptions,
+   events,deliveries,analytics}` previously ignored `:id` entirely and returned
+   the same rows for every project. That is not what a tenant-scoped API does,
+   and it made the first-run experience impossible to see — a brand-new project
+   appeared to already have 64 events. They now filter on `project_id`, and
+   `analyticsFor()` returns zeroes for a project with no traffic rather than
+   borrowing the busy project's numbers. `proj_01JQPAYSTG` is now genuinely
+   empty and is the fixture to open when working on onboarding.
+2. **`NOW` is anchored at module load** instead of being hard-coded to
+   2026-09-06. The fixed date made fixtures reproducible across days but meant
+   every relative timestamp drifted further into the past — the delivery detail
+   page rendered a *scheduled future retry* as "2 days ago", which is exactly
+   the fact that screen exists to state correctly. Anchoring at import keeps the
+   property that mattered (stable for the life of a page) and the seeded RNG is
+   untouched, so which endpoint is broken and which chains are exhausted is
+   still identical every run.
+
+## Still needed from the control API (additions to the list above)
+
+7. **`onboarding_completed_at`** on the user, plus
+   `POST /v1/auth/onboarding-completed`. Detailed above. Highest value of these.
+8. **`VITE_INGEST_BASE_URL`** passed as a build arg by the deployments side.
+9. ~~Endpoint enable/pause/disable routes.~~ **They already existed** —
+   `POST …/enable` and `POST …/disable`, plus `PATCH` for everything else — and
+   are now wired. See the breaker section above for what the control says and
+   why.
+10. ~~`PATCH /v1/projects/:id` and `PATCH /v1/organizations/:id`.~~ **They
+    already existed too** (nested under the organization), and both settings
+    pages are now real forms. What each DTO refuses — `environment`, `status` —
+    is rendered as a fact with the reason rather than as a disabled input, since
+    a greyed-out dropdown reads as "ask an admin" when the truth is "create a
+    second project".
+11. **A retry-policy picker.** `EndpointEditDialog` accepts `retry_policy_id` as
+    free text with the caveat spelled out, because `RetryPoliciesController` is
+    mounted (`projects/:projectId/retry-policies`) but has no dashboard hook and
+    no mock fixtures. Wiring that list turns the field into a select; until then
+    an id from another project answers 404 through the tenant scope.
+12. **An audit-log surface for these writes.** `POST …/disable` writes the
+    operator's reason to the audit log, which is what makes a delivery gap
+    explainable later — and `AuditPage` is still served only by the mock, so the
+    reason cannot actually be read back yet.
+13. **A billing surface, or a decision not to have one.** `BillingPage` is the
+    only genuinely empty screen left. There is no route, no shape, not even a
+    mock, so it renders an honest empty state pointing at Usage rather than a
+    fabricated invoice table.
+14. **Analytics, events, deliveries and subscriptions modules.** `AnalyticsPage`
+    is now built against the mock's `GET /v1/projects/:id/analytics`, since a
+    working shape existed and a dead route was the worse option. It is still
+    SPECULATIVE and the page says so on itself. When the real module lands,
+    expect an offset envelope rather than the cursor page the mock returns, and
+    these screens will need the same treatment the other five got.
+
+---
+
+# The types are generated now, and here is everything that was wrong
+
+`src/types/api.d.ts` is written by `pnpm --filter @hookubit/dashboard
+generate:api` from the control API's live `/docs-json` — 42 paths, 68 schemas.
+`src/types/api.ts` no longer states a single field name or field type by hand:
+every domain type is `components['schemas'][…]`, so a rename on the wire is now
+a compile error rather than an `undefined` on a page.
+
+**Regenerate it whenever the control API changes.** It is checked in so a fresh
+clone type-checks without a running API; it is not a source file.
+
+## What survives by hand in `src/types/api.ts`, and why
+
+Two groups, each of them something the document **cannot** carry. The other two
+groups are gone: the error envelope is a declared schema now, and there are no
+nullability repairs left at all.
+
+1. **`OffsetPage<T>`** — a generic. The document declares thirteen concrete
+   `*ListDto` schemas; a type parameterised over its row type is not expressible
+   in OpenAPI. Its fields match the generated envelopes exactly
+   (`{ data, has_more, next_offset: number | null }`).
+2. **Client-side mirrors of server limits** — `ENDPOINT_LIMITS`, the slug rules,
+   `RESERVED_HEADER_NAMES`, `MAX_PAGE_SIZE`. openapi-typescript does not emit
+   `minLength`/`maximum`/`pattern` into the type at all, so these cannot be
+   derived. A form uses them to refuse a value before spending a round trip; the
+   server stays the authority, and a stale one costs a 400 rather than
+   corruption.
+
+Plus the mock-only view models at the foot of the file (`ProjectAnalytics`,
+`UsageSummary`) — two screens the control API has no module for. Not drift: no
+route, no schema.
+
+`CountedOffsetPage`, `TotalPage` and `CursorPage` are **deleted**, along with
+`totalPage()` in `src/lib/pagination.ts` and `Paged.total`.
+
+## The drift the generated types exposed
+
+Every item below was believed correct, was type-checked, and was wrong. Each one
+would have broken the moment `VITE_API_TRANSPORT=http` was set.
+
+### Routes that do not exist
+
+The dashboard called five paths the control API does not serve. All five were
+already the *correct-looking* shape, which is exactly why nothing caught them.
+
+| Called | Actually |
+| --- | --- |
+| `GET /v1/events/:id` | `GET /v1/projects/:projectId/events/:eventId` |
+| `GET /v1/events/:id/deliveries` | `…/projects/:projectId/events/:eventId/deliveries` |
+| `POST /v1/events/:id/replay` | `…/projects/:projectId/events/:eventId/replay` |
+| `GET /v1/deliveries/:id` | `GET /v1/projects/:projectId/deliveries/:deliveryId` |
+| `GET /v1/deliveries/:id/attempts` | `…/projects/:projectId/deliveries/:deliveryId/attempts` |
+| `POST /v1/deliveries/:id/replay` | `…/projects/:projectId/deliveries/:deliveryId/replay` |
+
+`EventsController` and `DeliveriesController` are mounted under the project. The
+project id in the path is what `TenantResolver` reads the organization off — a
+lookup key, never an authorization claim. (`/v1/endpoints/:id/secrets` **is**
+top-level; that asymmetry is real and unchanged.)
+
+### The session does not carry organizations
+
+`SessionResponseDto` is **`{ user }` and nothing else.** The hand-written
+`Session` had `organizations: Organization[]`, and **two places read
+`session.organizations[0]`** to decide where to land the user after login:
+`LoginPage` and `RootRedirect`. Both would have thrown on the first real
+response — on the first screen after signing in.
+
+Both now read `GET /v1/organizations`. Login navigates to `/orgs` and lets
+`RootRedirect` forward, which costs one request on a transition the user is
+already waiting through.
+
+`AuthUserDto` also disagreed: **`email_verified` is a boolean**, not
+`email_verified_at: string | null`, and there is **no `created_at`** on it.
+
+### There is ONE list envelope, not three
+
+Every `*ListDto` in the document is `{ data, has_more, next_offset }`.
+
+- **`count` is gone** from `ProjectListDto` and `ApiKeyListDto`.
+- **`{ total, limit, offset }` is gone** from `OrganizationListDto` and
+  `MemberListDto` — they use the same offset envelope as everything else.
+
+The organizations and members pagers were reading `total` to render "1–3 of 7".
+That property does not exist, so the range would have read **"1–3 of undefined"**
+and `totalPage()` would have derived `hasMore` from `offset + rows < undefined`
+— always `false`, so **the pager would have reported every truncated list as
+complete.** That is precisely the failure the envelope was introduced to close.
+
+`pageRange()` no longer shows a total for anything, because nothing carries one.
+
+`next_cursor` **does not exist anywhere.** Events, deliveries and audit logs are
+offset paged like the rest.
+
+### `DeliveryDto` — four invented fields, one of them load-bearing
+
+`event_type`, `endpoint_name`, `endpoint_url` and **`last_status_code`** are not
+on a delivery row. The row carries ids; the identifying detail is on
+`DeliveryDetailDto` as nested `event` and `endpoint` objects, and **the status
+code only ever existed on an attempt, as `http_status`.**
+
+`last_status_code` was read by `describeDelivery`, `diagnoseDelivery` and the
+delivery detail page's "Last response" tile — the three things the operator
+surface exists for. They now take an explicit `DeliveryOutcome`, built by
+`deliveryOutcome(delivery, attempts)`: the code comes from the highest-numbered
+attempt where there is one, and is `null` where there is not. A list row has no
+attempts, so it degrades to "no HTTP response", which `classifyFailure` already
+treats as a transport failure — the honest reading, not a fabricated code.
+
+Names are joined client-side from the endpoint list the page already loads, with
+the id as the fallback. New on the wire and now used: `is_replay`,
+`replay_of_delivery_id`, `replayed_by`, `subscription_id`, `last_attempt_at`.
+
+### `DeliveryAttemptDto` — every field name was different
+
+`status_code` → **`http_status`**; `error` → **`error_message`** (plus a separate
+`error_code`); `attempted_at` → **`started_at`**; `response_truncated` → gone, in
+favour of `response_size` and `response_body_location`. `duration_ms` is
+**nullable** — an attempt in flight has not got one, and `formatDuration(null)`
+would have rendered "NaNms". New and now used: the attempt's own `status`
+(`success | failure | timeout | error`) and per-attempt `request_headers`.
+
+### The delivery detail page had no payload and no request headers
+
+`DeliveryDetailDto` carries **neither**. The page rendered
+`delivery.request_headers` and `delivery.payload`; both were the mock's
+invention. The request headers are per **attempt** (the signature is recomputed
+each time, so that is the more accurate place anyway) and the payload is on the
+**event** — one copy, however many deliveries. The Request tab now shows the
+latest attempt's headers and links to the event for the body.
+
+`attempts` is **embedded** in the detail response, with `attempts_truncated`
+saying whether it is complete. The page reads the flag and only then fetches the
+paged route. The mock caps the embedded array at 5 so the flag is reachable.
+
+### `EventDto` — no `delivery_counts`, and a renamed size
+
+`payload_size_bytes` → **`payload_size`**. **`delivery_counts` does not exist**;
+the "3 ok / 1 exhausted" routing column on the events list was invented, and
+there is no route returning per-event counts in a list. Deriving it would mean
+one request per visible row — fifty requests to paint one page — so **the column
+is gone** and the list shows the idempotency key instead. The detail page keeps
+the roll-up, derived from the delivery rows via `summarizeDeliveries()`, which
+is better anyway: a denormalised counter can disagree with the table printed
+directly beneath it and a derived one cannot.
+
+**`EventDetailDto.payload` is an envelope, not the body.** `EventPayloadDto` says
+where the bytes came from (`inline | object_storage | unavailable`), carries a
+`notice`, and may have no body at all. Reading it as the body would render an
+offloaded payload as an empty code block. New: `payload_hash`, `payload_inline`,
+`payload_location`, `processed_at`, `headers`.
+
+### Filters the dashboard sent that do not exist
+
+**Neither events nor deliveries accepts `search`.** Both pages had a free-text
+box wired to `?search=`, which `forbidNonWhitelisted` refuses. What exists:
+
+- Events: `event_type` (exact), `status`, `created_after`/`created_before`, and
+  **`idempotency_key`** — a case-insensitive substring, 3-character minimum.
+  That last one is what the box was really being used for.
+- Deliveries: `status`, **`failing_now`**, `endpoint_id`, `event_id`,
+  `event_type`, the date range, and **`origin`**.
+
+The events page also had a **hard-coded list of five payment event types** in its
+dropdown. No route enumerates the types a project has seen, so a project
+publishing `shipment.dispatched` could not filter for it at all. It is a text
+input now.
+
+`failing_now` and `status` **cannot be combined** — the API refuses the pair
+rather than picking one — so the status select is disabled while it is on, and
+the mock refuses the combination too.
+
+### `SubscriptionDto`
+
+No `endpoint_name` (joined client-side). `filter` → **`payload_filter`**. `name`
+is **nullable**. New `updated_at`. The list was read as a bare `{ data }` array
+and is offset paged, so it was **silently truncating at the page size**.
+
+### `AuditLogDto` — the actor is not an object
+
+There is **no nested `actor: { id, email, type }`** and **no `target` string**;
+the page rendered both. The actor is `user_id` **or** `api_key_id`, either of
+which may be null (a platform action has neither — the circuit breaker
+auto-disabling an endpoint is exactly that case). The target is `resource_type`
+plus a nullable `resource_id`. `ip` → **`ip_address`**. New: `user_agent`.
+
+## The two repairs are gone. What closed them
+
+The dashboard carried **21 `Patch<>` types** re-declaring fields the document
+described wrongly. All 21 are deleted; **none survived**. Both causes were fixed
+at the source rather than worked around.
+
+**1. Nullable properties had no type — fixed on the control API.** It wrote
+`@ApiProperty({ nullable: true })` with no `type`, so the emitted schema was
+`{ nullable: true }` and openapi-typescript rendered it, correctly, as
+`Record<string, never> | null`: `rate_limit` was a type no number could be
+assigned to and `expires_at` one no string could. The root cause is worth
+recording — there is **no @nestjs/swagger CLI plugin**, so the schema comes from
+TypeScript's `design:type` reflection, and reflection emits `Object` for *any*
+union. `x!: string | null` was therefore indistinguishable from a free-form
+object. Every nullable property now states its type explicitly and required-ness
+is correct per field: **101 properties across 34 schemas.** The regenerated
+document contains **zero** `Record<string, never>` properties.
+
+**2. `default` implies required — fixed with a generator flag.** `generate:api`
+now passes **`--default-non-nullable false`**. `CreateEndpointDto`'s `required`
+array is `["name","url"]`, exactly right, but `timeout_ms`, `max_concurrency`
+and `rate_limit_window_seconds` each carry a `default`, and openapi-typescript's
+`defaultNonNullable` (on by default) renders any property with a default as
+required — which would make the create dialog send three numbers the operator
+never chose, overriding the server defaults that exist so it does not have to.
+The flag's blast radius is 26 fields, **all of them in `Create*` / `Update*` /
+`RotateSecretDto` request bodies and none in a response DTO**, so it is strictly
+more correct rather than a loosening.
+
+`offsetPage()` still type-guards `next_offset`, but for a different reason now:
+all thirteen envelopes type it `number | null`, so the guard is no longer
+repairing a type, it is repairing a **response** — an older deployment or a
+proxy that rewrote the body would otherwise put `[object Object]` into a URL.
+
+## What was wired
+
+**Retry-policy picker.** `useRetryPolicies` reads
+`GET /v1/projects/:projectId/retry-policies`. `EndpointEditDialog`'s free-text
+`retry_policy_id` box is a `<select>` whose options say what the policy *does*
+("8 attempts, exponential ×2 from 1s up to 60m") rather than showing an id. The
+old box invited the obvious thing — paste the id from the project that already
+retries the way you want — which answers **404**, because the id is resolved
+through the tenant scope. Three states: the list, an **honest empty state** that
+names `POST /v1/projects/:id/retry-policies` because there is no screen for
+creating one either, and a **saved id not on the current page kept as an explicit
+option** so saving cannot silently unset a policy nobody touched.
+
+**Audit log.** `useAuditLogs` reads `GET /v1/organizations/:orgId/audit-logs`
+with the real filters and offset paging. This matters because
+`POST …/endpoints/:id/disable` writes the operator's reason here, and **until now
+that reason could not be read back at all** — the whole point of asking for it
+was unreachable. A `viewer` (who holds `members.read`, **not** `audit.read`) gets
+`PermissionDenied` naming their actual role from `OrganizationDto.role`, not a
+red "request failed" with a retry button that will fail identically forever.
+`retry: false` is what makes that state appear promptly. Reachable in the mock
+via `?as=viewer`.
+
+## Honest gaps — screens with no backend at all
+
+Not "a module whose shape drifted": **no route in the document**.
+
+- **`GET /v1/projects/:projectId/analytics`** — no analytics module.
+- **`GET /v1/organizations/:orgId/usage`** — no usage or billing module.
+
+Both pages are finished and work against the mock. Under the real transport they
+render `NoBackendRoute`, which names the missing route and what it would have to
+return, and **does not run the query**. A 404 shown as an error reads as an
+outage and invites a retry; fabricated overage figures shown to an operator are
+worse than either.
+
+## Still needed from the control API
+
+Ordered by what costs most today.
+
+1. **An `actor_email` (or a nested actor) on `AuditLogDto`.** The audit page's
+   entire job is "who paused this endpoint and why", and it can currently answer
+   *why* but only show a `usr_…` id for *who*. Every alternative — a member
+   lookup per row, a client-side join against a paged member list — is worse
+   than the API returning the string it already has.
+2. **`last_status_code` on `DeliveryDto`.** The deliveries list can say "gave up
+   after 8 attempts" but not "HTTP 504", because the code is only on an attempt.
+   One denormalised column would put the cause back in the list, which is where
+   an operator scanning for a pattern needs it.
+3. **`delivery_counts` on `EventDto`.** Restores the routing column on the events
+   list. Without it, "which of my events failed to reach somebody" needs one
+   click per event.
+4. **`POST /v1/auth/resend-verification`** and **`onboarding_completed_at`** —
+   both unchanged from the sections above, both still open.
+
+### Closed since the last handoff
+
+- **The error envelope is in the document.** `ApiErrorResponse` is declared and
+  attached to all 150 error responses, with an 11-value `code` enum, `message`
+  as `string | string[]` and typed `details`. `ApiErrorBody` / `ApiErrorCode` /
+  `ApiErrorDetails` are aliases of it now, not hand-written mirrors, and
+  `ApiError.code` is a **closed union**: `ErrorState`'s title map is
+  `Record<ApiErrorCode, string>`, so a code added on the server is a build
+  failure here rather than a silent "Request failed".
+- **`has_live_secret` is on `EndpointDto`.** The document served on :3000 now
+  carries it, so the Endpoints table can tell "paused by an operator" from
+  "paused because it has no secret".
+
+  The general point outlived the field and is worth keeping: **`generate:api` is
+  only as fresh as the process serving `/docs-json`.** A stale server silently
+  produces stale types — the same failure mode as hand-writing them, just
+  faster.

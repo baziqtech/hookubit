@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { useParams } from 'react-router-dom';
+import { Link, useParams } from 'react-router-dom';
 import {
   Async,
   Badge,
@@ -16,17 +16,35 @@ import {
   WriteErrorNotice,
   type Column,
 } from '../../components';
-import { formatDuration, formatRelativeTime } from '../../lib/format';
+import { cn } from '../../lib/cn';
+import { formatCount, formatDuration, formatPercent, formatRelativeTime } from '../../lib/format';
 import { DEFAULT_PAGE_SIZE, type CreatedEndpoint, type Endpoint } from '../../types/api';
+import { useOrganization } from '../organizations/api';
 import { useCreateEndpoint, useEndpoints } from './api';
+import { EndpointActions } from './EndpointActions';
+import { EndpointEditDialog } from './EndpointEditDialog';
+import { EndpointSecretsDialog } from './EndpointSecretsDialog';
+import { SOURCE_LABEL, endpointFacts } from './endpoint-state';
+
+/** What the Secrets dialog needs of an endpoint — a created one qualifies too. */
+type SecretsTarget = Pick<Endpoint, 'id' | 'name' | 'status' | 'has_live_secret'>;
 
 export function EndpointsPage() {
-  const { projectId = '' } = useParams();
+  const { orgId = '', projectId = '' } = useParams();
   const [offset, setOffset] = useState(0);
   const [includeDeleted, setIncludeDeleted] = useState(false);
   const [creating, setCreating] = useState(false);
+  // One dialog for the whole table, driven by which row was clicked. A dialog
+  // per row would put sixty `<dialog>` elements — and sixty copies of the same
+  // element id — in the document.
+  const [editing, setEditing] = useState<Endpoint | null>(null);
+  const [secretsFor, setSecretsFor] = useState<SecretsTarget | null>(null);
 
   const endpoints = useEndpoints(projectId, { offset, includeDeleted });
+  // The caller's own role, for the Secrets dialog's denial copy: signing
+  // secrets are owner/admin only, and "you cannot" should name the role.
+  const role = useOrganization(orgId).data?.role;
+  const columns = buildColumns(projectId, setEditing, setSecretsFor);
 
   return (
     <div className="flex flex-col gap-4">
@@ -97,7 +115,27 @@ export function EndpointsPage() {
         projectId={projectId}
         open={creating}
         onClose={() => setCreating(false)}
+        onOpenSecrets={(endpoint) => {
+          setCreating(false);
+          setSecretsFor(endpoint);
+        }}
       />
+
+      {editing && (
+        <EndpointEditDialog
+          endpoint={editing}
+          projectId={projectId}
+          onClose={() => setEditing(null)}
+        />
+      )}
+
+      {secretsFor && (
+        <EndpointSecretsDialog
+          endpoint={secretsFor}
+          currentRole={role}
+          onClose={() => setSecretsFor(null)}
+        />
+      )}
     </div>
   );
 }
@@ -114,10 +152,13 @@ function CreateEndpointDialog({
   projectId,
   open,
   onClose,
+  onOpenSecrets,
 }: {
   projectId: string;
   open: boolean;
   onClose: () => void;
+  /** The cure for `secret_pending`: hands the created endpoint to the Secrets dialog. */
+  onOpenSecrets: (endpoint: SecretsTarget) => void;
 }) {
   const [name, setName] = useState('');
   const [url, setUrl] = useState('');
@@ -162,7 +203,7 @@ function CreateEndpointDialog({
       }
     >
       {created ? (
-        <EndpointCreatedNotice endpoint={created} />
+        <EndpointCreatedNotice endpoint={created} onOpenSecrets={() => onOpenSecrets(created)} />
       ) : (
         <div className="flex flex-col gap-3">
           {create.isError && <WriteErrorNotice error={create.error} />}
@@ -205,7 +246,14 @@ function CreateEndpointDialog({
  * exists to prevent — the user would wire up a consumer and wait for
  * deliveries that are never going to arrive.
  */
-export function EndpointCreatedNotice({ endpoint }: { endpoint: CreatedEndpoint }) {
+export function EndpointCreatedNotice({
+  endpoint,
+  onOpenSecrets,
+}: {
+  endpoint: CreatedEndpoint;
+  /** Opens the Secrets dialog for this endpoint — where the rotation happens. */
+  onOpenSecrets?: () => void;
+}) {
   if (endpoint.secret_pending || endpoint.secret === null) {
     return (
       <div
@@ -230,6 +278,16 @@ export function EndpointCreatedNotice({ endpoint }: { endpoint: CreatedEndpoint 
           Status: <Badge tone="neutral">{endpoint.status}</Badge> · secret version{' '}
           {endpoint.secret_version} pending
         </p>
+        {onOpenSecrets && (
+          <p>
+            <Button size="sm" variant="secondary" onClick={onOpenSecrets}>
+              Open secrets for this endpoint
+            </Button>
+            <span className="ml-2 text-2xs text-ink-subtle">
+              Rotation happens there. It names the role required if yours is not enough.
+            </span>
+          </p>
+        )}
       </div>
     );
   }
@@ -250,65 +308,196 @@ export function EndpointCreatedNotice({ endpoint }: { endpoint: CreatedEndpoint 
  * `success_rate_24h` on the wire: the breaker reports through `status` plus
  * `disabled_reason`/`disabled_at`, and the token bucket is `rate_limit` per
  * `rate_limit_window_seconds` rather than a per-second scalar.
+ *
+ * "Your setting" and "HookuBit" are two columns rather than one status, and
+ * that is the most load-bearing decision on this screen. `enabled` is what the
+ * operator asked for; `status` is what the platform did about it. They are
+ * separate columns in the database because they DISAGREE — an endpoint
+ * auto-disabled after too many failures still reads `enabled: true` — and an
+ * endpoint you still want delivering that we stopped is a different problem,
+ * with a different fix, from one you paused yourself.
+ *
+ * Built per render rather than declared once at module scope, because the
+ * actions need the project id — every write route is nested under it — and the
+ * edit dialog is owned by the page.
  */
-const columns: Column<Endpoint>[] = [
-  {
-    key: 'name',
-    header: 'Endpoint',
-    render: (row) => (
-      <span className="flex flex-col">
-        <span className="text-xs font-medium text-ink">{row.name}</span>
-        <span className="font-mono text-2xs text-ink-subtle">{row.url}</span>
-        {row.disabled_reason && (
-          <span className="mt-0.5 text-2xs text-danger">{row.disabled_reason}</span>
-        )}
-      </span>
-    ),
-  },
-  {
-    key: 'status',
-    header: 'Status',
-    render: (row) => (
-      <span className="flex flex-wrap gap-1">
-        <Badge tone={statusTone(row.status)} dot>
-          {row.status}
-        </Badge>
-        {/*
-         * Operator intent versus what the breaker did. `enabled: true` with a
-         * `disabled` status means the operator wants this endpoint delivering
-         * and the platform stopped it — a distinction an operator at 2am needs.
-         */}
-        {row.enabled && row.status === 'disabled' && <Badge tone="danger">auto-disabled</Badge>}
-        {!row.enabled && row.status !== 'deleted' && <Badge tone="neutral">operator paused</Badge>}
-      </span>
-    ),
-  },
-  {
-    key: 'limits',
-    header: 'Limits',
-    secondary: true,
-    render: (row) => (
-      <span className="text-2xs text-ink-muted">
-        {row.rate_limit === null
-          ? 'unlimited'
-          : `${row.rate_limit}/${row.rate_limit_window_seconds}s`}{' '}
-        · {formatDuration(row.timeout_ms)} timeout · {row.max_concurrency} concurrent
-      </span>
-    ),
-  },
-  {
-    key: 'created',
-    header: 'Created',
-    align: 'right',
-    secondary: true,
-    render: (row) => (
-      <span className="text-2xs text-ink-subtle">{formatRelativeTime(row.created_at)}</span>
-    ),
-  },
-];
-
-function statusTone(status: Endpoint['status']): 'ok' | 'neutral' | 'danger' {
-  if (status === 'active') return 'ok';
-  if (status === 'paused') return 'neutral';
-  return 'danger';
+function buildColumns(
+  projectId: string,
+  onEdit: (endpoint: Endpoint) => void,
+  onSecrets: (endpoint: Endpoint) => void,
+): Column<Endpoint>[] {
+  return [
+    {
+      key: 'name',
+      header: 'Endpoint',
+      render: (row) => (
+        <span className="flex flex-col">
+          <Link
+            to={`endpoints/${row.id}`}
+            relative="path"
+            className="text-xs font-medium text-ink hover:underline"
+          >
+            {row.name}
+          </Link>
+          <span className="font-mono text-2xs text-ink-subtle">{row.url}</span>
+          {row.disabled_reason && (
+            <span className="mt-0.5 text-2xs text-danger">{row.disabled_reason}</span>
+          )}
+        </span>
+      ),
+    },
+    {
+      key: 'intent',
+      header: 'Your setting',
+      render: (row) => {
+        const facts = endpointFacts(row);
+        return (
+          <Badge tone={facts.intent.tone} dot>
+            {facts.intent.label}
+          </Badge>
+        );
+      },
+    },
+    {
+      // Two columns, because they are two different facts. See
+      // `endpoint-state.ts` for why folding them into one is the thing that
+      // makes an outage unreadable at 2am.
+      key: 'platform',
+      header: 'HookuBit',
+      render: (row) => {
+        const facts = endpointFacts(row);
+        const source = SOURCE_LABEL[facts.source];
+        return (
+          <span className="flex flex-col items-start gap-1">
+            <Badge tone={facts.platform.tone} dot>
+              {facts.platform.label}
+            </Badge>
+            {source && (
+              <span className="text-[0.5625rem] font-bold tracking-wide text-ink-subtle">
+                {source}
+              </span>
+            )}
+          </span>
+        );
+      },
+    },
+    {
+      key: 'success',
+      header: 'Success (1h)',
+      align: 'right',
+      /*
+       * `null` and `0%` are NOT the same reading, and this is the column where
+       * conflating them does the most damage. Zero means every delivery we
+       * attempted failed — the loudest thing this table can say. An endpoint
+       * that simply had no traffic in the last hour, which includes every
+       * endpoint created today, would wear that badge for its first hour of
+       * life and page somebody.
+       */
+      render: (row) =>
+        row.health?.success_rate_1h === null || row.health === null ? (
+          <span className="text-2xs text-ink-subtle" title="Nothing settled in the last hour">
+            no data
+          </span>
+        ) : (
+          <span
+            className={cn(
+              'text-xs font-medium tabular',
+              row.health.success_rate_1h >= 0.99
+                ? 'text-ink'
+                : row.health.success_rate_1h >= 0.9
+                  ? 'text-warn'
+                  : 'text-danger',
+            )}
+            title={`${row.health.deliveries_1h} deliveries created in the last hour`}
+          >
+            {formatPercent(row.health.success_rate_1h)}
+          </span>
+        ),
+    },
+    {
+      key: 'waiting',
+      header: 'Waiting',
+      align: 'right',
+      secondary: true,
+      /*
+       * Not hour-bounded, unlike the column beside it. "What is queued behind
+       * this problem?" is not a question about the last hour — an endpoint
+       * stopped for a day has a day of backlog, and an hourly count would
+       * report almost none of it.
+       */
+      render: (row) =>
+        !row.health || row.health.deliveries_waiting === 0 ? (
+          <span className="text-2xs text-ink-subtle">—</span>
+        ) : (
+          <span className="text-xs tabular text-warn">
+            {formatCount(row.health.deliveries_waiting)}
+          </span>
+        ),
+    },
+    {
+      key: 'last-delivery',
+      header: 'Last delivery',
+      align: 'right',
+      secondary: true,
+      render: (row) => (
+        <span className="text-2xs text-ink-subtle">
+          {row.health?.last_delivery_at ? formatRelativeTime(row.health.last_delivery_at) : 'never'}
+        </span>
+      ),
+    },
+    {
+      key: 'limits',
+      header: 'Limits',
+      secondary: true,
+      render: (row) => (
+        <span className="text-2xs text-ink-muted">
+          {row.rate_limit === null
+            ? 'unlimited'
+            : `${row.rate_limit}/${row.rate_limit_window_seconds}s`}{' '}
+          · {formatDuration(row.timeout_ms)} timeout · {row.max_concurrency} concurrent
+        </span>
+      ),
+    },
+    {
+      key: 'created',
+      header: 'Created',
+      align: 'right',
+      secondary: true,
+      render: (row) => (
+        <span className="text-2xs text-ink-subtle">{formatRelativeTime(row.created_at)}</span>
+      ),
+    },
+    {
+      key: 'actions',
+      header: <span className="sr-only">Actions</span>,
+      align: 'right',
+      render: (row) =>
+        // A deleted endpoint is kept forever so the ledger stays readable, and
+        // every write against it answers 409. No controls, rather than controls
+        // that are guaranteed to fail.
+        row.status === 'deleted' ? (
+          <span className="text-2xs text-ink-subtle">kept for the ledger</span>
+        ) : (
+          <span className="flex flex-wrap items-center justify-end gap-2">
+            <EndpointActions
+              endpoint={row}
+              projectId={projectId}
+              onOpenSecrets={() => onSecrets(row)}
+            />
+            <Button size="sm" onClick={() => onEdit(row)}>
+              Edit
+            </Button>
+            <Button
+              size="sm"
+              variant={row.has_live_secret ? 'secondary' : 'primary'}
+              onClick={() => onSecrets(row)}
+            >
+              Secrets
+            </Button>
+          </span>
+        ),
+    },
+  ];
 }
+
+

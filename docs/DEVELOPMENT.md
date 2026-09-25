@@ -11,66 +11,64 @@ what does not, what is known-broken.
 
 ---
 
-## Current state — Phase 1 complete (foundation)
+## Current state — Phases 1–6 complete (2026-09-10)
 
-Last updated: 2026-09-06
+Everything ARCHITECTURE.md 62 lists is built, and every line of the definition
+of done in ARCHITECTURE.md 63 has been exercised rather than argued. The
+sections that follow are a map; the detailed accounts live in `docs/` and the
+per-app `HANDOFF.md` files.
 
 ### What exists and works
 
-| Area | State |
-|---|---|
-| Monorepo (pnpm workspaces + Go module) | Done |
-| `schema.prisma` — 21 models, full ARCHITECTURE.md §12/§13 model | Done, migration not yet generated |
-| NestJS control API skeleton: config validation, Prisma module, health probes, error model, AES-256-GCM crypto, bootstrap CLI | Done |
-| React dashboard skeleton: Vite, Router, TanStack Query, Tailwind, typed fetch client | Done |
-| Go data plane: config, structured logging, pool, health/metrics server, `webhookd` roles, graceful shutdown | Done |
-| Go `internal/signing` — HMAC-SHA256, rotation overlap, replay tolerance | **Done, tested** |
-| Go `internal/retry` — backoff, jitter, retryable-status policy, exhaustion | **Done, tested** |
-| Go `internal/egress` — SSRF guard, bounded HTTP client | **Done, tested** |
-| Go `internal/router` — event-type matching | **Done, tested** |
-| Go `internal/queue` — `SKIP LOCKED` claim / renew / release / reclaim | Done, needs integration test |
-| Dev + production compose, three Dockerfiles, CI, six ADRs | Done |
+- **Control plane** (`apps/control-api`) — users with email verification,
+  sessions, organizations, memberships and roles, invitations, projects, API
+  keys, endpoints with secrets and rotation, subscriptions, retry and
+  rate-limit policies, the delivery and event read APIs, replay, the outbox
+  recovery API for parked events, analytics, audit, endpoint auto-disable, an
+  SMTP notifications module, OpenTelemetry. The OpenAPI document is emitted
+  offline (`pnpm openapi`) and the dashboard client is generated from it.
+- **Data plane** (`services/data-plane`) — ingest with pre-auth and policy rate
+  limits, idempotency and the transactional outbox; router with batched,
+  resumable, publish-time-pinned routing; scheduler; bounded worker pool with
+  per-endpoint/project/org gates, leases, retries, circuit breakers, HMAC
+  signing, SSRF refusal at dial time, payload offload, retention sweeps,
+  Prometheus metrics, OpenTelemetry traces carried through PostgreSQL.
+- **Dashboard** (`apps/dashboard`) — the operator surface: events, deliveries
+  and attempts (with pruned-detail and trace-id states), replay, endpoints and
+  breaker state, subscriptions, keys, team, audit, analytics, the parked-event
+  recovery page, onboarding tour, and the full signup / verify / reset / invite
+  flows.
+- **Verification** — failure-injection suites for all twenty scenarios in
+  ARCHITECTURE.md 57 (`services/data-plane/internal/failure/`), a k6 load suite
+  (`tests/load/`), destroy-and-recreate and graceful-shutdown exercised for real
+  (`docs/BACKUP_RESTORE.md`, `docs/LOAD_TESTING.md` 7b).
+- **Deployment** — Dockerfiles for four images, dev and prod compose, raw
+  Kubernetes manifests and a Helm chart that refuses to install without an
+  external database and an SMTP URL, Prometheus/Grafana assets, CI that runs
+  all of the above.
 
-### What does NOT exist yet
+### What does NOT exist, on purpose
 
-- **No migration has been generated.** `schema.prisma` has never been applied.
-  Run `pnpm migrate` against a live database first (see Getting started).
-- **Every control-plane domain module.** Only health exists. No auth, no
-  organizations, no projects, no endpoints. Phase 2.
-- **The delivery pipeline bodies.** `runIngest`, `runRouter` and the worker's
-  attempt loop are stubs marked `PHASE 3`; they start, serve probes and shut
-  down cleanly, but deliver nothing. Phase 3.
-- Rate limiting, circuit breakers, replay, payload offload to S3, OpenTelemetry
-  traces, Kubernetes/Helm manifests.
+Kafka, multi-region, ClickHouse, SAML, static egress IPs, private network
+connectors, dedicated tenant databases, payload transformations, WASM, global
+routing — ARCHITECTURE.md 61, unchanged. Also not built: an admin surface above
+organization owner, and billing beyond an honest empty state.
 
 ### Known gaps to watch
 
-- `go.mod` targets Go 1.21 (the toolchain on the original dev machine); the
-  Dockerfiles and CI use 1.23. Align when convenient.
-- `PostgresQueue.Claim` orders by `next_attempt_at, created_at` with no tenant
-  fairness yet. As written, one tenant with a large burst can dominate a claim
-  batch. Fairness (ARCHITECTURE.md 24) must land with the worker in Phase 3 —
-  see "Next task".
-- The claim query needs a partial index (`WHERE status IN (...)`) before it
-  meets any real volume; add it with the first migration that follows load
-  testing.
-
-**Fairness decision — settled, see [ADR-0007](adr/0007-tenant-fairness.md).**
-The open question from the 2026-09-06 session log is closed. The claim becomes a
-1s-ticker tenant snapshot (a loose index scan over the ready set) plus a
-`CROSS JOIN LATERAL … LIMIT cap FOR UPDATE SKIP LOCKED` claim, where
-`cap = max(1, ceil(claim_limit / K))` is **derived from the active tenant count,
-never a constant** — with one tenant it degrades to FIFO, and a fixed cap would
-throttle a lone tenant while workers idle. Org fairness is applied in Go over
-the snapshot list; endpoint fairness is a Redis semaphore in Phase 4 with the
-circuit breaker. The ADR carries the exact SQL, the one required index, the
-`next_attempt_at NOT NULL` schema change it depends on, and the four metrics to
-add. Ordering and thresholds for everything after it are in
-[docs/design/scale-and-partitioning.md](design/scale-and-partitioning.md) —
-including the trap that this claim query prunes no partitions until a
-`created_at` floor is added to it.
-
----
+- **G13 — per-endpoint isolation is a ceiling, not a reservation.** The only
+  open item in `docs/FAILURE_RECOVERY.md`. Isolation holds when the sum of
+  `max_concurrency` across endpoints that can be slow stays under
+  `WORKER_CONCURRENCY`; the worker warns at startup with the arithmetic and
+  exposes gate occupancy, but nothing enforces the rule. The reservation is
+  deliberately unbuilt until those gauges have run under real traffic.
+- Two load scenarios (`slow-endpoints` at default caps, `many-tenants`) fail by
+  design; their thresholds encode the claim above.
+- The outbox recovery API would serve its UI better with a `park_reason` enum,
+  a remaining-count on bulk requeue, and `event_type` on the row.
+- `deliveries.next_attempt_at` is NOT NULL since `20260911000000`; the
+  migration header carries a deploy-ordering rule for the first environment
+  where the planes roll separately.
 
 ## Getting started
 
@@ -132,34 +130,12 @@ Read `docs/adr/` in full before changing any of these.
 
 ---
 
-## Next task — Phase 2, control plane
+## Next task
 
-Work in this order; each step is independently shippable.
-
-1. `prisma migrate dev --name init` and commit the migration.
-2. `auth` module: registration, login, logout, email verification, password
-   reset. Argon2id, HTTP-only session cookies, no token in `localStorage`.
-3. `organizations` + `memberships` + RBAC guards. Permissions are explicit
-   (`events.replay`, `endpoints.write`, …) and enforced in one central policy
-   layer, never scattered through controllers.
-4. `projects`, then `api-keys` (prefix + hash, shown once, scoped, revocable).
-5. `endpoints` + `endpoint-secrets`, including rotation with an overlap window —
-   `internal/signing` already emits one `v1=` per active secret, so the control
-   plane only has to keep two rows active.
-6. `webhook-subscriptions`, `retry-policies`, `rate-limits`.
-
-Then Phase 3 (data plane), where the first three tasks are:
-
-1. `runIngest` — the ARCHITECTURE.md 16 sequence, ending in one transaction that
-   writes `events` + `event_outbox` and returns 202.
-2. `runRouter` — drain the outbox, match subscriptions, insert delivery rows
-   keyed on `(event_id, endpoint_id)` so a retried batch cannot double-fan-out.
-3. The worker attempt loop, with tenant fairness added to the claim query at the
-   same time (see "Known gaps").
-
-Phases 4–6 are unchanged from ARCHITECTURE.md 62.
-
----
+There is no phase left on the roadmap. The candidates, in the order they will
+cost you: G13's reservation (after real occupancy data), the outbox API
+additions above, an admin surface, billing. Anything else should start from a
+new ADR.
 
 ## Session log
 

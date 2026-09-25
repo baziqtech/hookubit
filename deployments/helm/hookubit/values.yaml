@@ -1,0 +1,541 @@
+# ---------------------------------------------------------------------------
+# hookubit
+#
+# THE RULE: containers are disposable, customer data is not.
+#
+# This chart installs six workloads and no database. PostgreSQL is external,
+# required, and supplied by you - RDS/Aurora, Cloud SQL, Azure, Neon, Supabase
+# or self-managed. `helm uninstall` deletes every pod and loses nothing.
+#
+# Redis is optional and holds cache and coordination state only. If it is wiped,
+# throughput degrades; nothing that was accepted is lost.
+# ---------------------------------------------------------------------------
+
+nameOverride: ''
+fullnameOverride: ''
+
+global:
+  # Prefix for all three images. Override for an internal registry mirror.
+  imageRegistry: ghcr.io/shaq
+  imagePullSecrets: []
+  # Applied to every pod. Useful for a dedicated node pool.
+  nodeSelector: {}
+  tolerations: []
+
+# --- REQUIRED: external PostgreSQL ------------------------------------------
+# There is no default. values.schema.json rejects an install without a url, on
+# purpose: a chart that starts without a database only fails later, in the dark.
+externalDatabase:
+  # url: 'postgresql://user:pass@pgbouncer.internal:6432/hookubit?schema=public&sslmode=require'
+  #
+  # Production topology is app -> PgBouncer -> PostgreSQL (ARCHITECTURE.md 36).
+  # Point `url` at the pooler.
+
+  # Migrations must bypass the pooler: transaction pooling breaks DDL and the
+  # session-scoped advisory lock Prisma takes, which can leave a migration half
+  # applied and a _prisma_migrations row stuck in `failed`.
+  #
+  # Empty falls back to `url`. The chart refuses to render the migration Job on
+  # that fallback (see migrations.enabled) unless DIRECT_DATABASE_URL comes from
+  # externalDatabase.existingSecret instead.
+  directUrl: ''
+
+  # Per-pod pool size. The data plane opens this many per pod, and every pod
+  # that cannot Ping the pool at startup exits 1 - so an oversized value turns a
+  # traffic spike into CrashLoopBackOff instead of throughput.
+  #
+  # Ceiling at these defaults: (worker maxReplicas 8 + ingest 2 + router 2 +
+  # scheduler 1) x 10 = 130 backend connections, plus the control API's Prisma
+  # pool. That fits a PgBouncer in front of a modestly tuned PostgreSQL. Raise
+  # this or worker.autoscaling.maxReplicas only after checking the product
+  # against `max_connections` / `default_pool_size`, not before.
+  maxConnections: 10
+
+  # Read the URL from a Secret you manage (External Secrets, SOPS, Vault) rather
+  # than from values. The Secret must contain DATABASE_URL, and DIRECT_DATABASE_URL
+  # if migrations are run from this chart. `url` is still required above - keep
+  # the two in step, or set `url` to the same value and let the Secret win.
+  existingSecret: ''
+
+# --- Optional: external Redis -----------------------------------------------
+externalRedis:
+  # Empty disables Redis entirely. The platform runs without it, more slowly.
+  url: ''
+  existingSecret: ''
+
+# --- Application secrets -----------------------------------------------------
+# Leave the values empty and set `existingSecret` for anything beyond a demo.
+# Generate: openssl rand -base64 48  (jwt/session), openssl rand -base64 32 (encryption)
+secrets:
+  existingSecret: ''
+  jwtSecret: ''
+  # REQUIRED, and deliberately not defaulted to jwtSecret. One key signing both
+  # API tokens and session cookies means rotating either invalidates both, and
+  # a leak of either is a leak of both.
+  sessionSecret: ''
+  # AES-256-GCM key for endpoint signing secrets. Must decode to exactly 32
+  # bytes. Changing it without re-encrypting makes every stored secret unreadable.
+  encryptionKey: ''
+  # REQUIRED. smtp:// or smtps:// with credentials; it carries the password, so it
+  # lives here and not in the ConfigMap. Without it the control API refuses to boot
+  # outside development: a deploy that cannot send verification mail has signup
+  # silently broken, and refusing is the honest failure.
+  smtpUrl: ''
+
+# --- Optional: object storage for oversized payloads (ARCHITECTURE.md 32) ----
+objectStorage:
+  endpoint: ''
+  bucket: ''
+  region: us-east-1
+  accessKey: ''
+  secretKey: ''
+  forcePathStyle: false
+
+app:
+  env: production
+  logLevel: info
+  # Self-serve signup. Off by default; the first owner is created explicitly
+  # (ADR-0006 - no default credentials, ever).
+  allowOpenRegistration: false
+  # Public URLs. Used for CORS and for links in outbound email.
+  publicUrl: 'https://webhooks.example.com'
+  # Sender for every outbound mail. Required whenever secrets.smtpUrl is set; the
+  # display name doubles as the product name in subjects and bodies.
+  mailFrom: 'HookuBit <no-reply@example.com>'
+
+# Outbound HTTP limits (ARCHITECTURE.md 31). Never unbounded.
+egress:
+  # Bounds name resolution ALONE. Keep it below connectTimeoutMs to shed slow
+  # lookups without shortening the connect. 0 disables the split and hands
+  # resolution back to connectTimeoutMs - one budget shared between the lookup
+  # and the TCP connect, where a resolver that is slow rather than absent can
+  # consume the whole allowance and stall the worker slot behind it.
+  dnsTimeoutMs: 2000
+  connectTimeoutMs: 3000
+  tlsTimeoutMs: 3000
+  responseHeaderTimeoutMs: 10000
+  totalTimeoutMs: 30000
+  maxResponseBytes: 65536
+  maxRedirects: 0
+  # The hard ceiling on CONCURRENT connections one data-plane process opens to
+  # one destination host:port - shared by every endpoint and every tenant that
+  # resolves there, so a customer with api.customer.com/webhooks/orders and
+  # /webhooks/refunds shares it across both, and so does everyone else on that
+  # host. net/http BLOCKS requests over the ceiling rather than failing them, so
+  # a value below the worker pool silently overrides concurrency.perEndpoint,
+  # concurrency.perProject and the delivery gate: configured policy becomes a
+  # number nobody is enforcing. It was hard-coded at 16 and the load suite
+  # measured a 7x latency penalty from it (docs/LOAD_TESTING.md).
+  #
+  # null (the default) means "follow dataPlane.worker.concurrency", which is
+  # exactly the number of connections the pool can use and not one more. Set it
+  # explicitly only to be gentler with a consumer than the pool is - the
+  # queueing then happens in the transport, on purpose.
+  maxConnsPerHost: null
+  # SSRF guard (ARCHITECTURE.md 30).
+  #
+  # THIS CANNOT BE ENABLED IN PRODUCTION. The data plane refuses to start when
+  # EGRESS_ALLOW_PRIVATE_NETWORKS is true and APP_ENV=production, and app.env
+  # defaults to production - so setting this true is not "less safe", it is a
+  # data plane that will not boot. The chart now fails at render time rather
+  # than letting you find that out from four CrashLoopBackOffs.
+  #
+  # For a self-hosted install delivering to consumers on your own network, use
+  # privateAllowlist with specific CIDRs. It works in production.
+  allowPrivateNetworks: false
+  privateAllowlist: ''
+
+# Tenant fairness ceilings (ARCHITECTURE.md 24).
+concurrency:
+  global: 512
+  perOrg: 128
+  perProject: 64
+  perEndpoint: 16
+
+payload:
+  inlineMaxBytes: 65536
+  maxBytes: 1048576
+
+observability:
+  otlpEndpoint: ''
+  serviceNamespace: hookubit
+  # Separates two deployments sharing one collector.
+  serviceName: control-api
+  # Head sampling ratio, 0..1. A REMOTE traceparent is capped at this rather
+  # than obeyed: it is an unauthenticated header on an internet-facing API, so
+  # honouring it would let any caller set our span volume.
+  tracesSamplerArg: 1
+  # The data plane reads its OWN name and ratio, with no fallback to the two
+  # above: one ConfigMap, two processes, and these are settings both cannot be
+  # right about. A shared ratio of 1 records a span for every attempt of every
+  # delivery of every event.
+  dataPlaneServiceName: data-plane
+  dataPlaneTracesSamplerArg: 0.05
+  # Adds prometheus.io/scrape annotations to data-plane pods.
+  prometheusAnnotations: true
+
+  # Ships dashboards/hookubit.json as a ConfigMap for the Grafana
+  # sidecar (kiwigrid/k8s-sidecar, which the kube-prometheus-stack and Grafana
+  # charts both run) to load. Off by default because it is inert without that
+  # sidecar and invisible if the label does not match the one your Grafana
+  # watches - check `dashboards.sidecar.dashboards.label` in your Grafana values
+  # before turning this on.
+  #
+  # Every panel is backed by a series this platform actually exports. The
+  # Prometheus scrape config and alert rules that go with it live in
+  # deployments/observability/.
+  grafanaDashboard:
+    enabled: false
+    label: grafana_dashboard
+    labelValue: '1'
+    # Sidecar annotation that files the dashboard into a folder. Leave the
+    # folder empty to drop it in Grafana's default one.
+    folderAnnotation: grafana_folder
+    folder: ''
+
+# Free-form extra environment for every workload. Anything sensitive belongs in
+# a Secret, not here - this map becomes a ConfigMap.
+extraEnv: {}
+
+serviceAccount:
+  create: true
+  name: ''
+  annotations: {}
+
+# --- Control plane ----------------------------------------------------------
+controlApi:
+  # A permanently dead endpoint eventually stops having delivery rows created
+  # for it. 72h clears the two long-outage-but-not-dead cases: a delivery's own
+  # max_retry_duration (24h) and a weekend maintenance window. Re-enabling is the
+  # ordinary enable endpoint, which arms ONE breaker probe rather than resetting
+  # health - a reset would release the whole accumulated backlog at an endpoint
+  # whose recovery is still only the customer's assertion.
+  endpointAutoDisable:
+    enabled: true
+    afterHours: 72
+    intervalMinutes: 15
+    maxPerRun: 200
+  image:
+    repository: hookubit-control-api
+    tag: ''            # defaults to .Chart.AppVersion
+    pullPolicy: IfNotPresent
+  replicaCount: 2
+  # The control plane can be down without stopping queued deliveries
+  # (ARCHITECTURE.md 54) - it is never in the delivery hot path.
+  resources:
+    requests: { cpu: 200m, memory: 256Mi }
+    limits: { cpu: '1', memory: 768Mi }
+  podDisruptionBudget:
+    enabled: true
+    minAvailable: 1
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+
+dashboard:
+  image:
+    repository: hookubit-dashboard
+    tag: ''
+    pullPolicy: IfNotPresent
+
+  # ── BUILD-TIME ONLY. THIS CHART CANNOT SET THESE. ─────────────────────────
+  # The dashboard is a STATIC bundle. Vite inlines every VITE_* variable into
+  # the JavaScript when the image is built, and the runtime stage is nginx
+  # serving files - it reads no environment at all. A ConfigMap, a Secret or an
+  # `env:` entry added here would be read by nothing.
+  #
+  # So these two keys are NOT settings, they are ASSERTIONS about the image in
+  # dashboard.image: what it was built with. They are rendered as annotations
+  # on the Deployment (`kubectl describe deploy ...-dashboard`) so an operator
+  # debugging a wrong `curl` can see the baked value without unpacking the
+  # image, and NOTES.txt warns when ingestBaseUrl is empty or disagrees with
+  # ingress.ingestHost. Changing them rolls nothing and rebuilds nothing.
+  #
+  # To actually change the values, rebuild the image:
+  #   docker build -f deployments/docker/dashboard.Dockerfile \
+  #     --build-arg VITE_INGEST_BASE_URL=https://ingest.example.com \
+  #     --build-arg VITE_API_TRANSPORT=http .
+  build:
+    # Base URL of the INGEST service, which is a different service on a
+    # different host from the control API (Go :8080 vs NestJS :3000). It is the
+    # host in the publish `curl` on the dashboard's get-started page. Leave
+    # empty ONLY if the image was built without the build arg, in which case
+    # that page hands every operator http://localhost:8080 - their own laptop.
+    # Normally this is "https://<ingress.ingestHost>".
+    ingestBaseUrl: ''
+    # `mock` or `http`. The image default is still `mock` (the control API is
+    # not feature-complete; see the Dockerfile), and a mock build shows a
+    # permanent "Demo data - not connected to an API" banner. Record here what
+    # you built, so a demo image is not mistaken for a broken deployment.
+    apiTransport: 'mock'
+
+  replicaCount: 2
+  resources:
+    requests: { cpu: 10m, memory: 32Mi }
+    limits: { cpu: 200m, memory: 128Mi }
+  podDisruptionBudget:
+    enabled: true
+    minAvailable: 1
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+
+# --- Data plane -------------------------------------------------------------
+# All four roles run the SAME image and differ only by argv (ADR-0005).
+dataPlane:
+  image:
+    repository: hookubit-data-plane
+    tag: ''
+    pullPolicy: IfNotPresent
+
+  # Give the four Go roles their own Secret carrying only what
+  # internal/config/config.go reads (DATABASE_URL, REDIS_URL, S3 credentials
+  # and ENCRYPTION_KEY - the worker decrypts endpoint signing secrets with it).
+  # The worker makes outbound HTTP to customer-controlled URLs; JWT_SECRET and
+  # SESSION_SECRET have no business being in its environment. Set false only to
+  # go back to the single shared Secret - for example when ENCRYPTION_KEY lives
+  # in secrets.existingSecret, which the data plane never reads.
+  separateSecret: true
+
+  # Startup probe for all four Go roles.
+  #
+  # While it is running, liveness is suspended - so this is the budget a pod has
+  # to bind :9090 before anything is allowed to restart it. Raise
+  # failureThreshold on clusters where cold starts are slow (image pulls, tight
+  # CPU limits, node autoscaling); lowering it below ~30s only makes a slow node
+  # look like a broken build.
+  #
+  # It targets /health/live, never /health/ready: startup means "the process
+  # bound its port", and a probe that waited for PostgreSQL would kill every pod
+  # during a database outage - the fleet-wide restart ARCHITECTURE.md 46 exists
+  # to prevent.
+  #
+  # NOTE: this is one half of the boot-outage fix; the Go half (bind probes
+  # first, then wait for PostgreSQL with backoff) has landed alongside it.
+  # Neither half works alone - see the comment in templates/data-plane.yaml.
+  startupProbe:
+    enabled: true
+    periodSeconds: 5
+    failureThreshold: 30   # 150s
+    timeoutSeconds: 3
+
+  ingest:
+    replicaCount: 2
+    resources:
+      requests: { cpu: 100m, memory: 64Mi }
+      limits: { cpu: 500m, memory: 256Mi }
+    podDisruptionBudget: { enabled: true, minAvailable: 1 }
+
+  router:
+    replicaCount: 2
+    resources:
+      requests: { cpu: 100m, memory: 64Mi }
+      limits: { cpu: 500m, memory: 256Mi }
+    podDisruptionBudget: { enabled: true, minAvailable: 1 }
+
+  scheduler:
+    # Keep at 1. A second scheduler is not incorrect - its work is claimed with
+    # SKIP LOCKED - but it is duplicated polling for nothing. Note there is no
+    # PDB: a budget over a singleton blocks node drains forever.
+    replicaCount: 1
+    resources:
+      requests: { cpu: 50m, memory: 64Mi }
+      limits: { cpu: 250m, memory: 128Mi }
+    podDisruptionBudget: { enabled: false }
+
+  worker:
+    # The throughput dial. Scale this, not the control plane.
+    replicaCount: 2
+    # In-process delivery concurrency per pod. Total in-flight deliveries is
+    # roughly replicas x concurrency, bounded by the fairness ceilings above.
+    concurrency: 64
+    pollIntervalMs: 250
+    claimBatchSize: 100
+    # The worker's own database deadline. It used to borrow the ingest one, so
+    # tuning ingest silently retuned delivery. Must not exceed
+    # externalDatabase.statementTimeoutMs.
+    dbTimeoutMs: 5000
+    # Endpoint delivery rate limits are enforced fleet-wide through Redis. With
+    # no Redis they degrade to per-replica, multiplying a customer's configured
+    # limit by the replica count, so the worker refuses to start that way in
+    # production. Set true to take the downgrade deliberately.
+    allowPerReplicaRateLimits: false
+
+    # A claimed delivery whose lease expires becomes reclaimable by another
+    # worker. Must exceed the longest possible attempt (egress.totalTimeoutMs).
+    leaseSeconds: 120
+    resources:
+      requests: { cpu: 250m, memory: 128Mi }
+      limits: { cpu: '1', memory: 512Mi }
+    autoscaling:
+      enabled: true
+      minReplicas: 2
+      # Bounded by the DATABASE, not by CPU. Each worker pod opens
+      # externalDatabase.maxConnections and exits 1 if it cannot Ping the pool
+      # at startup, so a ceiling the database cannot serve does not produce
+      # throughput - it produces CrashLoopBackOff at exactly the moment traffic
+      # spiked. 8 x maxConnections (10) = 80, plus 50 for the other roles.
+      # Raise this and maxConnections together, and only against a measured
+      # `max_connections` / PgBouncer `default_pool_size`.
+      maxReplicas: 8
+      # CPU is a proxy, not the signal. Workers are I/O bound; queue depth via
+      # prometheus-adapter or KEDA is the right trigger once metrics are wired.
+      targetCPUUtilizationPercentage: 70
+      # No memory target. Nothing has measured this workload's memory profile,
+      # and an unmeasured memory metric scales on Go's heap retention rather
+      # than on load - it adds pods that do not help and blocks scale-down of
+      # pods that are idle. Set an integer here only with a measurement behind
+      # it.
+    podDisruptionBudget:
+      enabled: true
+      # Percentage, because the replica count belongs to the HPA.
+      maxUnavailable: 25%
+
+  # Delivery ledger retention, swept by the scheduler role. Two horizons: the
+  # attempt rows carry the bytes (two header maps and a truncated body each) and
+  # go first; the deliveries summary row is what answers "what happened to this
+  # event?" and stays three times as long. Both are floored at 48h in code,
+  # because a delivery is live until its max_retry_duration.
+  #
+  # Unlike every other knob here, these REFUSE to fall back to a default if
+  # malformed - a mistyped horizon deletes the ledger on a schedule nobody chose.
+  retention:
+    enabled: true
+    deliveryAgeDays: 90
+    attemptAgeDays: 60
+    intervalMs: 3600000
+    batchSize: 1000
+    # Bounds the FIRST pass against a never-pruned table so it drains over hours
+    # instead of becoming a replication-lag incident.
+    maxDeletesPerRun: 50000
+    batchTimeoutMs: 30000
+
+  outbox:
+    pollIntervalMs: 250
+    # Bounds RECORDED outbox failure by elapsed time rather than a count: a
+    # count cannot separate a database brownout from a row that fails every
+    # time. Batch size is ROUTER_BATCH_SIZE (dataPlane.router), not here - the
+    # OUTBOX_BATCH_SIZE that used to live at this key was never read.
+    maxRetryDurationMs: 3600000
+
+# --- Ingress ----------------------------------------------------------------
+ingress:
+  enabled: false
+  className: nginx
+  annotations: {}
+  # EXACT number of reverse proxies between the internet and the pods. Rendered
+  # into TRUST_PROXY_HOPS (control API) and INGEST_TRUSTED_PROXY_HOPS (ingest)
+  # whether or not this chart's own Ingress is enabled, because on Kubernetes
+  # something is in front of the pods either way: the ingress controller is 1,
+  # a CDN or cloud load balancer that rewrites X-Forwarded-For in front of it
+  # makes 2. Too low and every request is attributed to the proxy's address,
+  # so per-IP rate limiting becomes ONE bucket for the whole internet and a
+  # trickle of anonymous requests locks everybody out of login. Too high and a
+  # client can forge X-Forwarded-For for a fresh bucket per request. Set 0 only
+  # if clients really reach the pods directly.
+  trustedProxyHops: 1
+  # Browser surface: dashboard at /, control API at /v1 and /docs.
+  appHost: webhooks.example.com
+  # Machine write path. A separate host so publisher bursts and browser traffic
+  # can be rate-limited, sized and scaled independently.
+  ingestHost: ingest.example.com
+  tls:
+    enabled: true
+    appSecretName: hookubit-tls
+    ingestSecretName: hookubit-ingest-tls
+
+# --- Migrations -------------------------------------------------------------
+# Disabled by default and NOT a Helm hook, on purpose. Migrations are an
+# explicit operator step (ARCHITECTURE.md 41); `helm upgrade` must never be able
+# to change the schema as a side effect of a config tweak. See NOTES.txt step 5.
+migrations:
+  enabled: false
+  image:
+    # The pruned runtime image has no Prisma CLI (it is a devDependency), so the
+    # job runs the `migrate` target of control-api.Dockerfile.
+    repository: hookubit-control-api
+    tag: ''            # defaults to "<appVersion>-migrate"
+    pullPolicy: IfNotPresent
+  backoffLimit: 2
+  ttlSecondsAfterFinished: 86400
+  resources:
+    requests: { cpu: 100m, memory: 256Mi }
+    limits: { cpu: '1', memory: 1Gi }
+
+# --- NetworkPolicies ---------------------------------------------------------
+# Default-deny ingress and egress, plus the narrowest holes the platform needs.
+#
+# WHY, and why this is ON by default: `internal/egress/ssrf.go` is one process
+# making one decision about URLs a customer typed into a form. It is good code,
+# and it is a single point of failure - a DNS-rebinding race, a redirect path
+# that skips the check, or a future http.Client built somewhere else all end
+# with a worker pod opening a socket to 10.x or to 169.254.169.254. These
+# policies are the second layer, in the kernel, where nothing in Go can bypass
+# them. A security control that is opt-in is a security control nobody has.
+#
+# ═══ TWO WAYS THIS BREAKS YOUR INSTALL - CHECK BOTH ═══
+#
+# 1. YOUR CNI MUST ENFORCE NetworkPolicy. Calico, Cilium, Antrea and Weave do.
+#    Stock EKS (amazon-vpc-cni with no policy agent), flannel, and a default
+#    kind/minikube ACCEPT these objects and silently ignore them - which is
+#    worse than nothing, because you will believe you are protected. Verify
+#    with a test pod, do not assume.
+#
+# 2. A DATABASE ON A PUBLIC ADDRESS IS NOT COVERED. datastoreCidrs is private
+#    address space. Neon, Upstash, Supabase, a public RDS endpoint - none of
+#    them are in it, and the control plane will fail readiness with a
+#    connection timeout. Add the provider's range to datastoreCidrs, or set
+#    enabled: false and say so in your runbook.
+networkPolicy:
+  enabled: true
+
+  # Namespace holding CoreDNS/kube-dns. Egress to :53 is allowed here and
+  # nowhere else. Without it, no hostname in the platform resolves.
+  dnsNamespace: kube-system
+
+  # Where the database and Redis live. Reachable ONLY on datastorePorts below,
+  # so an SSRF to http://10.0.0.5/ is dropped by the kernel: wrong port.
+  datastoreCidrs:
+    - 10.0.0.0/8
+    - 172.16.0.0/12
+    - 192.168.0.0/16
+    # RFC6598. EKS and GKE pod/service CIDRs frequently land here.
+    - 100.64.0.0/10
+  datastorePorts:
+    - 5432   # PostgreSQL direct
+    - 6432   # PgBouncer (ARCHITECTURE.md 36)
+    - 6379   # Redis
+
+  # Subtracted from the worker's 0.0.0.0/0 egress. This is the layer-3 mirror
+  # of ssrf.go's blocklist; every entry is a range a customer URL must never
+  # resolve to. Shortening this list widens the SSRF surface - do not, without
+  # writing down why.
+  blockedEgressCidrs:
+    - 0.0.0.0/8          # "this network"
+    - 10.0.0.0/8         # RFC1918
+    - 100.64.0.0/10      # RFC6598 CGNAT - EKS/GKE pod space
+    - 127.0.0.0/8        # loopback
+    - 169.254.0.0/16     # link-local: 169.254.169.254 lives here
+    - 172.16.0.0/12      # RFC1918
+    - 192.0.0.0/24       # IETF protocol assignments
+    - 192.168.0.0/16     # RFC1918
+    - 198.18.0.0/15      # benchmarking
+    - 224.0.0.0/4        # multicast
+    - 240.0.0.0/4        # reserved
+
+  # Empty means "from anywhere in the cluster, on the service ports only".
+  # Set these to the real namespaces and the rules become actual restrictions.
+  ingressControllerNamespace: ''   # e.g. ingress-nginx
+  monitoringNamespace: ''          # e.g. monitoring
+
+  # Raw NetworkPolicyEgressRule entries applied to every pod in the release.
+  # The escape hatch for anything the rules above do not cover: an SMTP relay,
+  # an OTLP collector in another namespace, IPv6 egress. Example:
+  #
+  # extraEgress:
+  #   - to:
+  #       - namespaceSelector:
+  #           matchLabels: { kubernetes.io/metadata.name: observability }
+  #     ports:
+  #       - { protocol: TCP, port: 4317 }
+  extraEgress: []

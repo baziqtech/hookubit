@@ -1,4 +1,4 @@
-import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
+import { ApiProperty } from '@nestjs/swagger';
 import { ApiKey, Environment, MemberRole } from '@prisma/client';
 import { ApiKeyState, apiKeyState } from '../api-key-state';
 import { effectiveScopes } from '../effective-scopes';
@@ -66,7 +66,8 @@ export class ApiKeyDto {
   })
   effective_scopes!: string[];
 
-  @ApiPropertyOptional({
+  @ApiProperty({
+    type: String,
     nullable: true,
     example: 'usr_01J8ZK...',
     description:
@@ -76,7 +77,8 @@ export class ApiKeyDto {
   })
   created_by_user_id!: string | null;
 
-  @ApiPropertyOptional({
+  @ApiProperty({
+    type: String,
     nullable: true,
     example: 'mem_01J8ZK...',
     description:
@@ -86,7 +88,7 @@ export class ApiKeyDto {
   })
   created_by_membership_id!: string | null;
 
-  @ApiPropertyOptional({
+  @ApiProperty({
     enum: MemberRole,
     enumName: 'MemberRole',
     nullable: true,
@@ -96,17 +98,18 @@ export class ApiKeyDto {
   })
   created_by_role!: MemberRole | null;
 
-  @ApiPropertyOptional({ format: 'date-time', nullable: true })
+  @ApiProperty({ type: String, format: 'date-time', nullable: true })
   expires_at!: string | null;
 
-  @ApiPropertyOptional({
+  @ApiProperty({
+    type: String,
     format: 'date-time',
     nullable: true,
     description: 'Best-effort, written by the data plane. Never a basis for an authorization call.',
   })
   last_used_at!: string | null;
 
-  @ApiPropertyOptional({ format: 'date-time', nullable: true })
+  @ApiProperty({ type: String, format: 'date-time', nullable: true })
   revoked_at!: string | null;
 
   @ApiProperty({ format: 'date-time' })

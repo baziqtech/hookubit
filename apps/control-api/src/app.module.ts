@@ -3,7 +3,9 @@ import { ConfigModule } from '@nestjs/config';
 import { LoggerModule } from 'nestjs-pino';
 import { AuthModule } from './auth/auth.module';
 import { AuditModule } from './audit/audit.module';
+import { BillingModule } from './billing/billing.module';
 import { AuthzModule } from './authz/authz.module';
+import { AnalyticsModule } from './analytics/analytics.module';
 import { ApiKeysModule } from './api-keys/api-keys.module';
 import { CommonModule } from './common/common.module';
 import { resolveRequestId } from './common/request-id';
@@ -13,12 +15,17 @@ import { DeliveriesModule } from './deliveries/deliveries.module';
 import { EndpointsModule } from './endpoints/endpoints.module';
 import { EventsModule } from './events/events.module';
 import { HealthModule } from './health/health.module';
+import { MaintenanceModule } from './maintenance/maintenance.module';
 import { PrismaModule } from './infrastructure/prisma/prisma.module';
 import { MembersModule } from './members/members.module';
 import { OrganizationsModule } from './organizations/organizations.module';
+import { OutboxModule } from './outbox/outbox.module';
 import { ProjectsModule } from './projects/projects.module';
+import { NotificationDestinationsModule } from './notification-destinations/notification-destinations.module';
 import { RateLimitsModule } from './rate-limits/rate-limits.module';
 import { RetryPoliciesModule } from './retry-policies/retry-policies.module';
+import { traceLogFields } from './tracing/log-correlation';
+import { TracingModule } from './tracing/tracing.module';
 import { WebhookSubscriptionsModule } from './webhook-subscriptions/webhook-subscriptions.module';
 
 @Module({
@@ -54,10 +61,22 @@ import { WebhookSubscriptionsModule } from './webhook-subscriptions/webhook-subs
           ],
           remove: true,
         },
+        // Log <-> trace correlation (ARCHITECTURE.md 63 asks for both, and two
+        // systems that cannot be joined are not both). Inert when tracing is
+        // off; see tracing/log-correlation.ts.
+        customProps: traceLogFields,
         transport:
           process.env.APP_ENV === 'development' ? { target: 'pino-pretty' } : undefined,
       },
     }),
+    // OpenTelemetry (ARCHITECTURE.md 44). Registered next to LoggerModule
+    // because the two are one feature: the span carries pino's request id and
+    // pino's lines carry the span's trace id. The relative order of the two
+    // does not matter - the middleware reads `req.id` when the response
+    // finishes, by which time pino has long since minted it, and pino's own
+    // completion line is emitted inside the request's async context either way
+    // (asserted in tracing/log-correlation.spec.ts).
+    TracingModule,
     PrismaModule,
     CommonModule,
     HealthModule,
@@ -77,12 +96,25 @@ import { WebhookSubscriptionsModule } from './webhook-subscriptions/webhook-subs
     WebhookSubscriptionsModule,
     RetryPoliciesModule,
     RateLimitsModule,
+    NotificationDestinationsModule,
     // The operator surface. ARCHITECTURE.md is blunt that this is what people
     // pay for: answering "what happened to this event?" without reaching for
     // psql. It reads the rows the Go router and worker write.
     EventsModule,
     DeliveriesModule,
+    // The recovery surface for events the router could not route. Without it
+    // a parked outbox row - an event already answered 202 Accepted - is
+    // invisible to this API and recoverable only by hand-written SQL.
+    OutboxModule,
     AuditModule,
+    AnalyticsModule,
+    BillingModule,
+    // Periodic reconciliation with no routes of its own. It switches off
+    // endpoints whose circuit breaker has been open past the window, so a dead
+    // endpoint stops accruing a delivery row per matching event for ever, and
+    // it files the audit entry that tells the customer why. The re-enable is
+    // the endpoints module's existing `POST .../enable`.
+    MaintenanceModule,
     // Still to come: admin (platform staff, above organization owner - it needs
     // an authorization concept the tenant matrix deliberately does not have).
   ],

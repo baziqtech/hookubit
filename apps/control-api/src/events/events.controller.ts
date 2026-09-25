@@ -17,11 +17,12 @@ import {
   ApiNotFoundResponse,
   ApiOkResponse,
   ApiOperation,
+  ApiParam,
   ApiTags,
 } from '@nestjs/swagger';
 import { Authorized, RequestContext, Tenant } from '../authz';
 import { Throttle, ThrottleGuard } from '../common/throttle.guard';
-import { MAX_REPLAY_FAN_OUT } from '../deliveries/delivery-limits';
+import { MAX_REPLAY_DELIVERIES } from '../deliveries/delivery-limits';
 import {
   DeliveryListDto,
   ListDeliveriesQueryDto,
@@ -49,6 +50,15 @@ const MINUTE = 60_000;
     "another customer's endpoint ids.",
 })
 @ApiForbiddenResponse({ description: 'You are in this tenant but your role does not allow it.' })
+// A controller-level route parameter is emitted with NO `parameters` entry unless
+// it is declared here, and `type: String` is not decoration: without it the
+// generated client types the parameter as `unknown`.
+@ApiParam({
+  name: 'projectId',
+  type: String,
+  example: 'proj_01J8ZK...',
+  description: 'Project id, `proj_…`. Resolved from the project row, never trusted as a claim.',
+})
 @Controller('projects/:projectId/events')
 @UseGuards(ThrottleGuard)
 export class EventsController {
@@ -95,7 +105,7 @@ export class EventsController {
   @Get(':eventId/deliveries')
   @Authorized('events.read', 'deliveries.read')
   @ApiOperation({
-    summary: 'List the deliveries this event fanned out to',
+    summary: 'List the deliveries this event routed to',
     description:
       'The "did finance ever receive this?" route: one row per endpoint the event was ' +
       'materialised for, each with its own status, attempt count and next attempt. Accepts the ' +
@@ -118,7 +128,7 @@ export class EventsController {
   @Authorized('events.replay', 'deliveries.replay')
   @HttpCode(HttpStatus.CREATED)
   // Tighter than the per-delivery replay, because one request here can create
-  // up to MAX_REPLAY_FAN_OUT real HTTP calls to a customer's infrastructure
+  // up to MAX_REPLAY_DELIVERIES real HTTP calls to a customer's infrastructure
   // rather than one.
   @Throttle({ name: 'events.replay', limit: 10, windowMs: 5 * MINUTE })
   @ApiOperation({
@@ -135,7 +145,7 @@ export class EventsController {
   @ApiConflictResponse({
     description:
       'The event reached no endpoints, the named endpoint never received it, an endpoint is ' +
-      `deleted or disabled, or the fan-out exceeds ${MAX_REPLAY_FAN_OUT} deliveries.`,
+      `deleted or disabled, or the routing exceeds ${MAX_REPLAY_DELIVERIES} deliveries.`,
   })
   replay(
     @Tenant() context: RequestContext,

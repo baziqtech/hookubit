@@ -19,6 +19,7 @@ import {
   ApiNotFoundResponse,
   ApiOkResponse,
   ApiOperation,
+  ApiParam,
   ApiTags,
 } from '@nestjs/swagger';
 import { Authorized, RequestContext, Tenant } from '../authz';
@@ -50,6 +51,15 @@ import { RateLimitsService } from './rate-limits.service';
     'scraped from somewhere else is live infrastructure belonging to another customer.',
 })
 @ApiForbiddenResponse({ description: 'You are in this tenant but your role does not allow it.' })
+// A controller-level route parameter is emitted with NO `parameters` entry unless
+// it is declared here, and `type: String` is not decoration: without it the
+// generated client types the parameter as `unknown`.
+@ApiParam({
+  name: 'projectId',
+  type: String,
+  example: 'proj_01J8ZK...',
+  description: 'Project id, `proj_…`. Resolved from the project row, never trusted as a claim.',
+})
 @Controller('projects/:projectId/rate-limits')
 @UseGuards(ThrottleGuard)
 export class RateLimitsController {

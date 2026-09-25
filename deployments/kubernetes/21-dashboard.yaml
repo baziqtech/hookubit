@@ -1,14 +1,40 @@
 # Static React bundle served by nginx-unprivileged. Stateless by construction;
 # in a hosted deployment this is a CDN origin (ARCHITECTURE.md 52).
+#
+# THERE IS DELIBERATELY NO envFrom/env HERE. The bundle is static: Vite inlined
+# every VITE_* value when the image was built, and nginx reads no environment,
+# so adding this Deployment to the ConfigMap would configure nothing while
+# looking like it did. Two values matter and BOTH live in the image:
+#
+#   VITE_INGEST_BASE_URL  base URL of the INGEST service (Go :8080), which is a
+#                         different service on a different host from the
+#                         control API (NestJS :3000). It is the host in the
+#                         publish `curl` on the get-started page. Unset, that
+#                         curl reads http://localhost:8080 - the operator's own
+#                         laptop, in every deployment.
+#   VITE_API_TRANSPORT    `mock` (image default, shows a permanent demo-data
+#                         banner) or `http`.
+#
+#   docker build -f deployments/docker/dashboard.Dockerfile \
+#     --build-arg VITE_INGEST_BASE_URL=https://ingest.example.com \
+#     --build-arg VITE_API_TRANSPORT=http \
+#     -t ghcr.io/shaq/hookubit-dashboard:0.1.0 .
+#
+# The annotations below record what the referenced image was built with, so
+# `kubectl describe` can answer "why does the curl point at localhost". They
+# are documentation - editing them changes nothing but the documentation.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: dashboard
-  namespace: webhook-platform
+  namespace: hookubit
+  annotations:
+    hookubit.shaq.io/built-with-ingest-base-url: '<unset: bundle falls back to http://localhost:8080>'
+    hookubit.shaq.io/built-with-api-transport: 'mock'
   labels: &labels
-    app.kubernetes.io/name: webhook-platform
+    app.kubernetes.io/name: hookubit
     app.kubernetes.io/component: dashboard
-    app.kubernetes.io/part-of: webhook-platform
+    app.kubernetes.io/part-of: hookubit
 spec:
   replicas: 2
   revisionHistoryLimit: 5
@@ -17,7 +43,7 @@ spec:
     rollingUpdate: { maxSurge: 1, maxUnavailable: 0 }
   selector:
     matchLabels:
-      app.kubernetes.io/name: webhook-platform
+      app.kubernetes.io/name: hookubit
       app.kubernetes.io/component: dashboard
   template:
     metadata:
@@ -33,7 +59,7 @@ spec:
         seccompProfile: { type: RuntimeDefault }
       containers:
         - name: dashboard
-          image: ghcr.io/shaq/webhook-dashboard:0.1.0
+          image: ghcr.io/shaq/hookubit-dashboard:0.1.0
           imagePullPolicy: IfNotPresent
           ports:
             - { name: http, containerPort: 8080, protocol: TCP }
@@ -70,15 +96,15 @@ apiVersion: v1
 kind: Service
 metadata:
   name: dashboard
-  namespace: webhook-platform
+  namespace: hookubit
   labels:
-    app.kubernetes.io/name: webhook-platform
+    app.kubernetes.io/name: hookubit
     app.kubernetes.io/component: dashboard
-    app.kubernetes.io/part-of: webhook-platform
+    app.kubernetes.io/part-of: hookubit
 spec:
   type: ClusterIP
   ports:
     - { name: http, port: 8080, targetPort: http, protocol: TCP }
   selector:
-    app.kubernetes.io/name: webhook-platform
+    app.kubernetes.io/name: hookubit
     app.kubernetes.io/component: dashboard

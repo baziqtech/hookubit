@@ -17,8 +17,15 @@ import (
 // did, a database blip would make Kubernetes restart every pod at once, turning
 // a recoverable incident into an outage.
 type Health struct {
-	ready  atomic.Bool
-	checks func(ctx context.Context) map[string]string
+	ready atomic.Bool
+	// everReady separates "has not come up yet" from "is going away". Both
+	// answer 503 and both must, but they are opposite operator stories: one
+	// resolves itself, the other is the pod leaving. The distinction only
+	// became observable once the probe server started binding BEFORE the
+	// database connection (see cmd/webhookd, run()); until then a process that
+	// could not reach PostgreSQL had already exited.
+	everReady atomic.Bool
+	checks    func(ctx context.Context) map[string]string
 }
 
 func NewHealth(checks func(ctx context.Context) map[string]string) *Health {
@@ -27,7 +34,12 @@ func NewHealth(checks func(ctx context.Context) map[string]string) *Health {
 
 // SetReady flips readiness. Set it false first on SIGTERM so the load balancer
 // stops sending work before the process starts draining.
-func (h *Health) SetReady(ready bool) { h.ready.Store(ready) }
+func (h *Health) SetReady(ready bool) {
+	if ready {
+		h.everReady.Store(true)
+	}
+	h.ready.Store(ready)
+}
 
 func (h *Health) Handler() http.Handler {
 	mux := http.NewServeMux()
@@ -38,7 +50,11 @@ func (h *Health) Handler() http.Handler {
 
 	mux.HandleFunc("/health/ready", func(w http.ResponseWriter, r *http.Request) {
 		if !h.ready.Load() {
-			writeJSON(w, http.StatusServiceUnavailable, map[string]any{"status": "draining"})
+			status := "starting"
+			if h.everReady.Load() {
+				status = "draining"
+			}
+			writeJSON(w, http.StatusServiceUnavailable, map[string]any{"status": status})
 			return
 		}
 		ctx, cancel := context.WithTimeout(r.Context(), 3*time.Second)

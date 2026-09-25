@@ -1,8 +1,14 @@
 import { Module } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import { AuthModule } from '../auth/auth.module';
+import { MAIL_TRANSPORT, MailTransport, NotificationsModule, SmtpMailer, selectMailer } from '../notifications';
 import { OrganizationsModule } from '../organizations';
 import { InvitationsController } from './invitations.controller';
-import { DevelopmentInvitationMailer, INVITATION_MAILER } from './invitation-mailer.port';
+import {
+  DevelopmentInvitationMailer,
+  INVITATION_MAILER,
+  InvitationMailer,
+} from './invitation-mailer.port';
 import { MembersController } from './members.controller';
 import { MembersService } from './members.service';
 
@@ -19,13 +25,27 @@ import { MembersService } from './members.service';
  * owner-count-and-write transaction). All three belong in `src/authz`; when
  * they move, this import becomes unnecessary.
  *
- * Swap `INVITATION_MAILER` for a real transport when the notifications module
- * lands - nothing else has to change.
+ * `INVITATION_MAILER` is chosen at boot by the same rule as `AuthModule`'s
+ * `MAILER_PORT`: SMTP when `SMTP_URL` is set, the logging stub otherwise and
+ * only in development/test. The two ports stay separate - different
+ * consumers, different audiences - and share one transport instance through
+ * `NotificationsModule`.
  */
 @Module({
-  imports: [AuthModule, OrganizationsModule],
+  imports: [AuthModule, OrganizationsModule, NotificationsModule],
   controllers: [MembersController, InvitationsController],
-  providers: [MembersService, { provide: INVITATION_MAILER, useClass: DevelopmentInvitationMailer }],
+  providers: [
+    MembersService,
+    {
+      provide: INVITATION_MAILER,
+      inject: [ConfigService, MAIL_TRANSPORT],
+      useFactory: (config: ConfigService, transport: MailTransport | null): InvitationMailer =>
+        selectMailer<InvitationMailer>(config, transport, {
+          smtp: (smtp, context) => new SmtpMailer(smtp, context),
+          stub: () => new DevelopmentInvitationMailer(config),
+        }),
+    },
+  ],
   exports: [MembersService],
 })
 export class MembersModule {}

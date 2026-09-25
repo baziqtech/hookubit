@@ -1,5 +1,5 @@
 // Package router turns one accepted event into N delivery rows, one per
-// matching subscription (ARCHITECTURE.md 18). The fan-out is materialised: each
+// matching subscription (ARCHITECTURE.md 18). The routing is materialised: each
 // delivery then has an independent lifecycle, so one endpoint failing can never
 // affect another, and "did finance ever receive this?" is a row lookup.
 package router

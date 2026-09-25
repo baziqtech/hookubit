@@ -1,7 +1,9 @@
 import { Body, Controller, Get, HttpCode, HttpStatus, Post, Req, Res, UseGuards } from '@nestjs/common';
 import { Throttle, ThrottleGuard } from '../common/throttle.guard';
 import {
+  ApiAcceptedResponse,
   ApiCookieAuth,
+  ApiNoContentResponse,
   ApiOkResponse,
   ApiOperation,
   ApiTags,
@@ -14,6 +16,7 @@ import {
   ForgotPasswordDto,
   LoginDto,
   RegisterDto,
+  ResendVerificationDto,
   ResetPasswordDto,
   SessionResponseDto,
   VerifyEmailDto,
@@ -55,7 +58,7 @@ export class AuthController {
       'enumerate accounts. No session cookie is set: the user verifies the address from the ' +
       'email and then logs in. A taken address gets a "someone tried to register" notice instead.',
   })
-  @ApiOkResponse({ type: AcknowledgedDto })
+  @ApiAcceptedResponse({ type: AcknowledgedDto })
   async register(@Body() dto: RegisterDto, @Req() req: Request): Promise<AcknowledgedDto> {
     await this.auth.register(dto, AuthController.context(req));
     return { status: 'accepted' };
@@ -106,6 +109,30 @@ export class AuthController {
     return { user: await this.auth.verifyEmail(dto) };
   }
 
+  @Post('resend-verification')
+  // Both buckets ENFORCED, unlike verify-email. That route carries a 256-bit
+  // single-use token and only spends CPU; this one SENDS MAIL to an address the
+  // caller typed, so an unlimited version is a mail-bomb relay pointed at any
+  // unverified account and a way to burn the deployment's sending reputation.
+  // Same shape and same numbers as forgot-password, which is the other
+  // mail-sending route reachable without credentials.
+  @Throttle({ name: 'auth.resend', limit: 5, windowMs: HOUR, byBodyField: 'email' })
+  @HttpCode(HttpStatus.ACCEPTED)
+  @ApiOperation({
+    summary: 'Request a fresh email verification link',
+    description:
+      'ALWAYS 202, with an identical body: whether or not the address is registered, whether ' +
+      'or not it is already verified, whether or not the account is disabled, and whether or ' +
+      'not the mail transport is up. A degraded mailer must not turn this into an oracle - ' +
+      'the same trap that was found and fixed in forgot-password. Any previous verification ' +
+      'link is invalidated, so the newest email is the one that works.',
+  })
+  @ApiAcceptedResponse({ type: AcknowledgedDto })
+  async resendVerification(@Body() dto: ResendVerificationDto): Promise<AcknowledgedDto> {
+    await this.auth.resendVerification(dto.email);
+    return { status: 'accepted' };
+  }
+
   @Post('forgot-password')
   @Throttle({ name: 'auth.forgot', limit: 5, windowMs: HOUR, byBodyField: 'email' })
   @HttpCode(HttpStatus.ACCEPTED)
@@ -113,7 +140,7 @@ export class AuthController {
     summary: 'Request a password reset link',
     description: 'Always 202, whether or not the address is registered.',
   })
-  @ApiOkResponse({ type: AcknowledgedDto })
+  @ApiAcceptedResponse({ type: AcknowledgedDto })
   async forgotPassword(@Body() dto: ForgotPasswordDto): Promise<AcknowledgedDto> {
     await this.auth.forgotPassword(dto.email);
     return { status: 'accepted' };
@@ -137,6 +164,30 @@ export class AuthController {
   ): Promise<AcknowledgedDto> {
     await this.auth.resetPassword(dto, res, AuthController.context(req));
     return { status: 'ok' };
+  }
+
+  @Post('onboarding-completed')
+  @UseGuards(SessionGuard)
+  // Throttled like every other authenticated write, but generously: this is a
+  // one-shot flag a client may retry, not a credential path.
+  @Throttle({ name: 'auth.onboarding', limit: 30, windowMs: HOUR })
+  @HttpCode(HttpStatus.NO_CONTENT)
+  @ApiCookieAuth('session')
+  @ApiOperation({
+    summary: 'Mark the product tour as finished or skipped',
+    description:
+      'Idempotent: completing twice is a 204, not a conflict, and the recorded instant is the ' +
+      'FIRST completion - it never drifts forward on a replay. Acts only on the calling ' +
+      "user's own row; there is no body and no path parameter, so one account cannot complete " +
+      "another's. Read the resulting instant back from `user.onboarding_completed_at` on " +
+      'GET /v1/auth/session.',
+  })
+  @ApiNoContentResponse({ description: 'Recorded, or already recorded.' })
+  async completeOnboarding(
+    @CurrentUser() session: SessionUser,
+    @Req() req: Request,
+  ): Promise<void> {
+    await this.auth.completeOnboarding(session, AuthController.context(req));
   }
 
   @Get('session')

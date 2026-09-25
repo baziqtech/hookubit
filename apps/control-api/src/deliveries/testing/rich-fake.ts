@@ -334,7 +334,27 @@ export function installRichTables(db: FakeTenantPrisma): FakeTenantPrisma {
         db.queries.push({ table, op: 'aggregate', where: args.where });
         return { _count: query.find(table, { where: args.where }).length };
       },
-      groupBy: async (args: { by: readonly string[]; where?: Row }): Promise<Row[]> => {
+      /*
+       * Mirrors Prisma closely enough to be able to FAIL.
+       *
+       * Three things were missing and each hid a different real bug. `_count`
+       * always came back as a bare number, so a caller reading `_count._all`
+       * — the shape Prisma returns for `_count: { _all: true }` — got
+       * undefined and rolled up to zero for every group, which reads as
+       * "nothing happened" rather than as a broken fake. `take` and `skip`
+       * were ignored, so a caller that pages a grouped rollup and one that
+       * does not page at all produced identical results here and different
+       * ones in production — and `ScopedRepository.groupBy` SLICES at
+       * MAX_PAGE_SIZE, so the un-paged version is silently truncated against
+       * PostgreSQL.
+       */
+      groupBy: async (args: {
+        by: readonly string[];
+        where?: Row;
+        _count?: unknown;
+        take?: number;
+        skip?: number;
+      }): Promise<Row[]> => {
         db.queries.push({ table, op: 'groupBy', where: args.where });
         const buckets = new Map<string, Row[]>();
         for (const row of query.find(table, { where: args.where })) {
@@ -343,11 +363,39 @@ export function installRichTables(db: FakeTenantPrisma): FakeTenantPrisma {
           if (bucket) bucket.push(row);
           else buckets.set(key, [row]);
         }
-        return [...buckets.values()].map((bucket) => {
+
+        const built = [...buckets.values()].map((bucket) => {
           const head: Row = {};
           for (const field of args.by) head[field] = value(bucket[0], field);
-          return { ...head, _count: bucket.length };
+          let count: unknown = bucket.length;
+          if (args._count && typeof args._count === 'object') {
+            const shaped: Row = {};
+            for (const field of Object.keys(args._count as Row)) {
+              shaped[field] =
+                field === '_all'
+                  ? bucket.length
+                  : bucket.filter((row) => value(row, field) !== null && value(row, field) !== undefined)
+                      .length;
+            }
+            count = shaped;
+          }
+          const group: Row = { ...head, _count: count };
+          return group;
         });
+
+        // Grouped columns ascending — the default `ScopedRepository.groupBy`
+        // applies, and `skip` is meaningless without a stable order.
+        built.sort((left, right) => {
+          for (const field of args.by) {
+            const a = JSON.stringify(left[field] ?? null);
+            const b = JSON.stringify(right[field] ?? null);
+            if (a !== b) return a < b ? -1 : 1;
+          }
+          return 0;
+        });
+
+        const skip = args.skip ?? 0;
+        return built.slice(skip, skip + (args.take ?? built.length));
       },
     };
   }

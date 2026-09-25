@@ -1,0 +1,17 @@
+{
+  // Static assets on Cloudflare Workers, no script in front of them: this
+  // site is public by design. Compare the internal system documentation, which
+  // runs a Worker first to gate every request behind SSO - deliberately not
+  // copied here, because a customer evaluating the product must be able to
+  // read it before they have an account.
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "hookubit-docs",
+  "compatibility_date": "2026-06-11",
+  "assets": {
+    "directory": ".vitepress/dist",
+    // A static site with a real 404.html, not a client-routed SPA.
+    "not_found_handling": "404-page"
+  }
+  // No "routes" block: attach the custom domain in the Cloudflare dashboard,
+  // then add it here.
+}

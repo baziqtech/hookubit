@@ -19,6 +19,7 @@ import {
   ApiNotFoundResponse,
   ApiOkResponse,
   ApiOperation,
+  ApiParam,
   ApiTags,
 } from '@nestjs/swagger';
 import { Authorized, RequestContext, Tenant } from '../authz';
@@ -53,6 +54,15 @@ const MINUTE = 60_000;
     'somewhere else is live infrastructure belonging to another customer.',
 })
 @ApiForbiddenResponse({ description: 'You are in this tenant but your role does not allow it.' })
+// A controller-level route parameter is emitted with NO `parameters` entry unless
+// it is declared here, and `type: String` is not decoration: without it the
+// generated client types the parameter as `unknown`.
+@ApiParam({
+  name: 'projectId',
+  type: String,
+  example: 'proj_01J8ZK...',
+  description: 'Project id, `proj_…`. Resolved from the project row, never trusted as a claim.',
+})
 @Controller('projects/:projectId/endpoints')
 @UseGuards(ThrottleGuard)
 export class EndpointsController {
@@ -65,7 +75,10 @@ export class EndpointsController {
     description:
       'Soft-deleted endpoints are hidden unless asked for; they are never erased. Paged with ' +
       'the canonical envelope `{ data, has_more, next_offset }`; `next_offset` is null on the ' +
-      'last page.',
+      'last page.\n\n' +
+      'Every row carries `has_live_secret`, answered for the whole page in one grouped read - ' +
+      'so a UI can tell which paused endpoints can actually be resumed without asking per ' +
+      'endpoint.',
   })
   @ApiOkResponse({ type: EndpointListDto })
   list(
@@ -114,7 +127,8 @@ export class EndpointsController {
     summary: 'Fetch one endpoint',
     description:
       'Returns soft-deleted endpoints too, with `status: "deleted"`, so a delivery in the ' +
-      'ledger that points at a removed endpoint is still readable.',
+      'ledger that points at a removed endpoint is still readable. `has_live_secret` is the ' +
+      'same answer the listing gives for this endpoint.',
   })
   @ApiOkResponse({ type: EndpointDto })
   get(
@@ -149,10 +163,23 @@ export class EndpointsController {
     summary: 'Resume deliveries to an endpoint',
     description:
       'Refused when the endpoint has no active signing secret: the data plane fails closed ' +
-      'rather than delivering unsigned, so enabling would only queue failures.',
+      'rather than delivering unsigned, so enabling would only queue failures.\n\n' +
+      'This is also the way back from an automatic disable. It clears `disabled_reason` and ' +
+      '`disabled_at`, and brings the circuit breaker`s next probe forward to now - so recovery ' +
+      'starts immediately instead of waiting out a cooldown that has doubled to its ceiling, ' +
+      'while still admitting exactly ONE delivery until the endpoint answers. A backlog is ' +
+      'never released at an endpoint whose recovery has not been observed yet.\n\n' +
+      '**Check `has_live_secret` before offering this.** It is the same condition, evaluated ' +
+      'the same way, and it is false on a normal, expected state - an endpoint created by a ' +
+      '`developer` stays paused with `secret_pending` because `endpoint-secrets.*` is ' +
+      'owner/admin only. Offering the action there is offering a guaranteed 409; the operator ' +
+      'wants "rotate a secret first", not a refusal after the click.',
   })
   @ApiOkResponse({ type: EndpointDto })
-  @ApiConflictResponse({ description: 'Deleted, or no active signing secret.' })
+  @ApiConflictResponse({
+    description:
+      'Deleted, or no active signing secret - the latter is exactly `has_live_secret: false`.',
+  })
   enable(
     @Tenant() context: RequestContext,
     @Param('endpointId') endpointId: string,
@@ -166,8 +193,13 @@ export class EndpointsController {
   @ApiOperation({
     summary: 'Pause deliveries to an endpoint',
     description:
-      'Queued deliveries are not discarded. The circuit breaker`s own `disabled_reason` and ' +
-      '`disabled_at` are left untouched; the reason given here goes to the audit log.',
+      'Sets `status` to `paused`. `disabled_reason` and `disabled_at` are left untouched - they ' +
+      'are the record of an AUTOMATIC disable, and overwriting them here would erase why the ' +
+      'platform stopped delivering. The reason given here goes to the audit log.\n\n' +
+      'Note what the data plane does with a paused endpoint: a delivery already queued for it is ' +
+      'finished `cancelled` ("we stopped on purpose"), not retried and not failed, and new ' +
+      'events stop producing delivery rows for it. Nothing already recorded in the ledger is ' +
+      'discarded.',
   })
   @ApiOkResponse({ type: EndpointDto })
   @ApiConflictResponse({ description: 'The endpoint has been deleted.' })

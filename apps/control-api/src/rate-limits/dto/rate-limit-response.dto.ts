@@ -1,4 +1,4 @@
-import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
+import { ApiProperty } from '@nestjs/swagger';
 import { RateLimitPolicy, RateLimitScope } from '@prisma/client';
 import { RATE_LIMIT_SCOPES } from '../rate-limit-limits';
 import { RateLimitSettings } from '../rate-limit-rules';
@@ -12,14 +12,15 @@ export class RateLimitDto {
   @ApiProperty() id!: string;
   @ApiProperty() project_id!: string;
   @ApiProperty({ enum: RATE_LIMIT_SCOPES }) scope!: RateLimitScope;
-  @ApiPropertyOptional({
+  @ApiProperty({
+    type: String,
     nullable: true,
     description: 'Null means every resource in this scope.',
   })
   resource_id!: string | null;
   @ApiProperty() limit!: number;
   @ApiProperty() window_seconds!: number;
-  @ApiPropertyOptional({ nullable: true, description: 'Null means the same as `limit`.' })
+  @ApiProperty({ type: Number, nullable: true, description: 'Null means the same as `limit`.' })
   burst!: number | null;
   @ApiProperty() created_at!: string;
   @ApiProperty() updated_at!: string;
@@ -33,7 +34,7 @@ export class RateLimitListDto {
       'derive it from a total, and a total would cost a second COUNT on every list request.',
   })
   has_more!: boolean;
-  @ApiPropertyOptional({ nullable: true, description: '`offset` for the next page, or null.' })
+  @ApiProperty({ type: Number, nullable: true, description: '`offset` for the next page, or null.' })
   next_offset!: number | null;
 }
 

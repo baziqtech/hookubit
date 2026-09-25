@@ -10,7 +10,7 @@ the bootstrap command with real values supplied by the operator:
 
 ```
 BOOTSTRAP_EMAIL=… BOOTSTRAP_PASSWORD=… BOOTSTRAP_ORG=… \
-  pnpm --filter @webhook/control-api bootstrap
+  pnpm --filter @hookubit/control-api bootstrap
 ```
 
 It refuses to run if any user already exists, and creates the organization, the

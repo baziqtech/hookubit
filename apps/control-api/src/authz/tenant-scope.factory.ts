@@ -9,7 +9,9 @@ import {
   EndpointHealth,
   EndpointSecret,
   Event,
+  EventOutbox,
   IdempotencyKey,
+  NotificationDestination,
   Organization,
   OrganizationMember,
   Prisma,
@@ -21,6 +23,7 @@ import {
 } from '@prisma/client';
 import { AppError } from '../common/errors';
 import { PrismaService } from '../infrastructure/prisma/prisma.service';
+import { EventPayloadHeadRow, readEventPayloadHeads } from './event-payload-head';
 import { RequestContext } from './tenant-context';
 import {
   ModelDelegate,
@@ -62,8 +65,10 @@ export type TenantRepositoryName =
   | 'subscriptions'
   | 'retryPolicies'
   | 'rateLimitPolicies'
+  | 'notificationDestinations'
   | 'idempotencyKeys'
   | 'events'
+  | 'eventOutbox'
   | 'deliveries'
   | 'deliveryAttempts';
 
@@ -82,8 +87,10 @@ type DelegateKey =
   | 'apiKey'
   | 'retryPolicy'
   | 'rateLimitPolicy'
+  | 'notificationDestination'
   | 'idempotencyKey'
   | 'event'
+  | 'eventOutbox'
   | 'delivery'
   | 'deliveryAttempt'
   | 'auditLog'
@@ -103,10 +110,20 @@ type DelegateKey =
  * gets written through `PrismaService` instead, and `PrismaService` is
  * `@Global()`, so reaching for it costs an author nothing.
  *
- * Not covered here, on purpose: `users`, `sessions`, `user_tokens`, `plans` and
- * the outbox. They are not tenant-owned - they belong to the auth layer, to the
- * platform, or to the data plane - and pretending otherwise by inventing a
- * scope for them would be worse than leaving them out.
+ * Not covered here, on purpose: `users`, `sessions`, `user_tokens` and `plans`.
+ * They are not tenant-owned - they belong to the auth layer or to the platform -
+ * and pretending otherwise by inventing a scope for them would be worse than
+ * leaving them out.
+ *
+ * `event_outbox` USED TO BE ON THAT LIST, as "the data plane's". That reading
+ * was right about who WRITES the table and wrong about who the rows are about,
+ * and the gap it left was a data-loss path with no recovery: when the router
+ * parks a row - a poisoned event, or one that outlived a degraded-database
+ * window - the event stops dead, having already been answered `202 Accepted`,
+ * and there was nothing in this API that could see it or put it back. The only
+ * remedy was hand-written SQL against production. A parked row is a
+ * customer-visible fact about a customer's event, so it is reachable here,
+ * scoped through that event (`viaEvent`) because that is where the tenancy is.
  */
 export class TenantScope implements OwnershipVerifier {
   constructor(
@@ -269,6 +286,24 @@ export class TenantScope implements OwnershipVerifier {
     return this.repo('retryPolicy', 'project', 'Retry policy');
   }
 
+  /**
+   * Alert destinations, scoped by project.
+   *
+   * `project`, not `projectAndOrganization`: the table carries only
+   * `project_id`, and the design's rule is that these belong to ONE project —
+   * connecting a channel for Payments deliberately does not connect it for
+   * Ledger.
+   */
+  get notificationDestinations(): Repo<
+    Prisma.NotificationDestinationWhereInput,
+    Prisma.NotificationDestinationOrderByWithRelationInput,
+    Prisma.NotificationDestinationCreateManyInput,
+    Prisma.NotificationDestinationUncheckedUpdateManyInput,
+    NotificationDestination
+  > {
+    return this.repo('notificationDestination', 'project', 'Notification destination');
+  }
+
   get rateLimitPolicies(): Repo<
     Prisma.RateLimitPolicyWhereInput,
     Prisma.RateLimitPolicyOrderByWithRelationInput,
@@ -301,6 +336,28 @@ export class TenantScope implements OwnershipVerifier {
     Event
   > {
     return this.repo('event', 'projectAndOrganization', 'Event');
+  }
+
+  /**
+   * The router's queue, scoped `event_outbox -> events -> project`.
+   *
+   * Read-mostly from here: the data plane owns the lifecycle, and the one write
+   * the control plane makes is an operator REQUEUE of a parked row (see
+   * `src/outbox`). It is deliberately not a general-purpose handle on the
+   * queue - there is no `create`, because ingest writes the row in the same
+   * transaction as the event and an outbox row without one would be a delivery
+   * for an event that does not exist.
+   */
+  get eventOutbox(): Repo<
+    Prisma.EventOutboxWhereInput,
+    Prisma.EventOutboxOrderByWithRelationInput,
+    Prisma.EventOutboxCreateManyInput,
+    Prisma.EventOutboxUncheckedUpdateManyInput,
+    EventOutbox
+  > {
+    return this.repo('eventOutbox', 'viaEvent', 'Outbox entry', {
+      foreignKeys: { eventId: 'events' },
+    });
   }
 
   /**
@@ -343,7 +400,14 @@ export class TenantScope implements OwnershipVerifier {
 
   /**
    * Circuit-breaker state, keyed by `endpoint_id` rather than `id`. Read by the
-   * operator UI; the data plane owns the writes.
+   * operator UI.
+   *
+   * The data plane owns the state MACHINE and every transition in it. The one
+   * write this plane makes is `EndpointsService.armBreakerProbe`, which moves
+   * `probe_after` forward when an operator re-enables a tripped endpoint - a
+   * single column, no state and no counter, so the half-open protocol still
+   * decides what happens next. Its docblock has the reasoning; anything wider
+   * than that belongs in the workers.
    */
   get endpointHealth(): Repo<
     Prisma.EndpointHealthWhereInput,
@@ -368,6 +432,24 @@ export class TenantScope implements OwnershipVerifier {
     return this.repo('deliveryAttempt', 'viaDelivery', 'Delivery attempt', {
       foreignKeys: { deliveryId: 'deliveries' },
     });
+  }
+
+  /**
+   * The first `maxBytes` bytes of these events' payloads, keyed by event id.
+   *
+   * The one read here that is not a `ScopedRepository`, and the docblock in
+   * `event-payload-head.ts` is the argument for why: Prisma cannot express a
+   * partial read of a `bytea`, and the deliveries list would otherwise pull up
+   * to 200 whole payloads per page to show 160 characters of each.
+   *
+   * Scoped like `events` (`projectAndOrganization`). An id outside the tenant is
+   * absent from the map rather than an error, so it cannot be used to probe.
+   */
+  async eventPayloadHeads(
+    eventIds: readonly string[],
+    maxBytes: number,
+  ): Promise<Map<string, EventPayloadHeadRow>> {
+    return readEventPayloadHeads(this.client, this.context, eventIds, maxBytes);
   }
 
   /**

@@ -8,11 +8,11 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: ingest
-  namespace: webhook-platform
+  namespace: hookubit
   labels: &labels
-    app.kubernetes.io/name: webhook-platform
+    app.kubernetes.io/name: hookubit
     app.kubernetes.io/component: ingest
-    app.kubernetes.io/part-of: webhook-platform
+    app.kubernetes.io/part-of: hookubit
 spec:
   replicas: 2
   revisionHistoryLimit: 5
@@ -21,7 +21,7 @@ spec:
     rollingUpdate: { maxSurge: 1, maxUnavailable: 0 }
   selector:
     matchLabels:
-      app.kubernetes.io/name: webhook-platform
+      app.kubernetes.io/name: hookubit
       app.kubernetes.io/component: ingest
   template:
     metadata:
@@ -47,23 +47,47 @@ spec:
           whenUnsatisfiable: ScheduleAnyway
           labelSelector:
             matchLabels:
-              app.kubernetes.io/name: webhook-platform
+              app.kubernetes.io/name: hookubit
               app.kubernetes.io/component: ingest
       containers:
         - name: webhookd
-          image: ghcr.io/shaq/webhook-data-plane:0.1.0
+          image: ghcr.io/shaq/hookubit-data-plane:0.1.0
           imagePullPolicy: IfNotPresent
           args: ['ingest']
           ports:
             - { name: http, containerPort: 8080, protocol: TCP }
             - { name: probes, containerPort: 9090, protocol: TCP }
           envFrom:
-            # webhook-platform-data-plane, NOT webhook-platform-app: this
+            # hookubit-data-plane, NOT hookubit-app: this
             # process reads DATABASE_URL, REDIS_URL and the S3 credentials and
             # nothing else. JWT_SECRET and SESSION_SECRET are not projected
             # into a role that makes outbound HTTP to customer-controlled URLs.
-            - configMapRef: { name: webhook-platform-config }
-            - secretRef: { name: webhook-platform-data-plane }
+            - configMapRef: { name: hookubit-config }
+            - secretRef: { name: hookubit-data-plane }
+          # ── STARTUP ────────────────────────────────────────────────────
+          # Suspends liveness until the process has bound :9090, so a cold node,
+          # a throttled CPU limit or a just-pulled image cannot be mistaken for a
+          # dead process by a liveness check that starts counting at 5s.
+          #
+          # It targets /health/live, NOT /health/ready. Startup means "the port
+          # is bound", never "PostgreSQL is reachable": a startup probe waiting
+          # on the database would exhaust its threshold during an outage and
+          # restart every pod, which is the fleet-wide restart ARCHITECTURE.md 46
+          # keeps liveness off the database to avoid.
+          #
+          # Read this before an incident: with PostgreSQL down these pods are
+          # UP, not crash-looping. webhookd binds the probe server before it
+          # opens the pool and then waits for the database with backoff
+          # (db.OpenWithRetry), so liveness serves 200 throughout while
+          # readiness reports "starting" and no traffic is sent. Before that
+          # landed, db.Open pinged first and the process exited 1 having never
+          # bound - and no probe can rescue a container that has already exited,
+          # which is why neither half of this fix works without the other.
+          startupProbe:
+            httpGet: { path: /health/live, port: probes }
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 30   # 150s
           # Liveness never touches PostgreSQL (ARCHITECTURE.md 46).
           livenessProbe:
             httpGet: { path: /health/live, port: probes }
@@ -95,16 +119,16 @@ apiVersion: v1
 kind: Service
 metadata:
   name: ingest
-  namespace: webhook-platform
+  namespace: hookubit
   labels:
-    app.kubernetes.io/name: webhook-platform
+    app.kubernetes.io/name: hookubit
     app.kubernetes.io/component: ingest
-    app.kubernetes.io/part-of: webhook-platform
+    app.kubernetes.io/part-of: hookubit
 spec:
   type: ClusterIP
   ports:
     - { name: http, port: 8080, targetPort: http, protocol: TCP }
     - { name: probes, port: 9090, targetPort: probes, protocol: TCP }
   selector:
-    app.kubernetes.io/name: webhook-platform
+    app.kubernetes.io/name: hookubit
     app.kubernetes.io/component: ingest

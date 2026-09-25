@@ -5,7 +5,7 @@ import { EventsService } from './events.service';
 
 /**
  * Depends on `DeliveriesModule` in one direction only, and for two things:
- * `DeliveriesService.listForEvent` (the fan-out listing) and
+ * `DeliveriesService.listForEvent` (the routing listing) and
  * `DeliveryReplayService` (the replay engine).
  *
  * Deliberately NOT a second replay implementation. The invariant that a replay

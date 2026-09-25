@@ -4,17 +4,25 @@ import {
   DeliveryStatusBadge,
   EmptyState,
   Input,
+  Pager,
   PageHeader,
   Panel,
   Select,
+  StatusLegend,
   Table,
   type Column,
 } from '../../components';
-import { describeDelivery } from '../../lib/delivery-status';
+import { deliveryOutcome, describeDelivery } from '../../lib/delivery-status';
 import { formatRelativeTime, truncateId } from '../../lib/format';
-import type { Delivery, DeliveryStatus } from '../../types/api';
+import { StuckEventsNotice } from '../outbox/StuckEventsNotice';
+import { DEFAULT_PAGE_SIZE, type DeliveryListItem, type DeliveryStatus } from '../../types/api';
 import { useEndpoints } from '../endpoints/api';
-import { useDeliveries } from './api';
+import { useDeliveries, type DeliveryFilters } from './api';
+import {
+  describePayloadPreview,
+  payloadPreviewState,
+  type PayloadPreviewFields,
+} from './payload-preview';
 
 const STATUSES: DeliveryStatus[] = [
   'pending',
@@ -28,22 +36,55 @@ const STATUSES: DeliveryStatus[] = [
   'cancelled',
 ];
 
+/**
+ * Filter state lives in the URL, not in component state: an operator's next
+ * move after finding a bad window is to paste the link into an incident
+ * channel, and that only works if the filters travel with it.
+ *
+ * THE FREE-TEXT SEARCH BOX IS GONE. `DeliveriesController` has no `search`
+ * parameter — the box sent `?search=` at a route that does not accept it — and
+ * the filters it does accept are exact-match. `event_type` replaces it, which
+ * is the thing the box was actually used for, and it is honest about being an
+ * exact match rather than a substring.
+ */
 export function DeliveriesPage() {
   const { orgId = '', projectId = '' } = useParams();
   const [searchParams, setSearchParams] = useSearchParams();
 
-  const filters = {
-    search: searchParams.get('search') ?? '',
-    status: searchParams.get('status') ?? '',
+  const offset = Number(searchParams.get('offset') ?? 0) || 0;
+  const failingNow = searchParams.get('failing_now') === 'true';
+  const filters: DeliveryFilters = {
+    // `failing_now` and `status` CANNOT be combined — the API refuses the pair
+    // rather than picking one, so the narrower control wins here too.
+    status: failingNow ? '' : ((searchParams.get('status') ?? '') as DeliveryStatus | ''),
+    failing_now: failingNow,
     endpoint_id: searchParams.get('endpoint_id') ?? '',
+    event_type: searchParams.get('event_type') ?? '',
+    origin: (searchParams.get('origin') ?? '') as '' | 'original' | 'replay',
   };
-  const deliveries = useDeliveries(projectId, filters);
+  const deliveries = useDeliveries(projectId, filters, offset);
   const endpoints = useEndpoints(projectId);
+
+  // A delivery row carries `endpoint_id` and no name. The name is joined from
+  // the endpoint list the page already loads for its filter, and a row whose
+  // endpoint is not on that page falls back to the id rather than to blank.
+  const endpointNames = new Map(
+    (endpoints.data?.rows ?? []).map((endpoint) => [endpoint.id, endpoint.name]),
+  );
 
   const setFilter = (key: string, value: string) => {
     const next = new URLSearchParams(searchParams);
     if (value) next.set(key, value);
     else next.delete(key);
+    // Any filter change invalidates the page position.
+    next.delete('offset');
+    setSearchParams(next, { replace: true });
+  };
+
+  const setOffset = (value: number) => {
+    const next = new URLSearchParams(searchParams);
+    if (value > 0) next.set('offset', String(value));
+    else next.delete('offset');
     setSearchParams(next, { replace: true });
   };
 
@@ -51,22 +92,40 @@ export function DeliveriesPage() {
     <div className="flex flex-col gap-4">
       <PageHeader
         title="Deliveries"
-        description="One row per event per endpoint, each with its own retry chain."
+        description="One row per event per endpoint. An event you published once appears here once per matching subscription, and each row retries independently."
       />
+
+      {/*
+        An event stuck before routing has no rows in this list at all, so an
+        empty result here is indistinguishable from "never published". This is
+        the only thing on the page that can tell those apart, and it renders
+        nothing when there is nothing stuck.
+      */}
+      <StuckEventsNotice orgId={orgId} projectId={projectId} />
+
+      {/*
+        The glossary lives next to the filter that uses these words, not in a
+        docs site. `exhausted` and `cancelled` both mean "stopped" and mean very
+        different things, and the badge alone never says which.
+      */}
+      <StatusLegend highlight={filters.status as DeliveryStatus | ''} />
 
       <Panel flush>
         <div className="flex flex-wrap items-end gap-2 border-b border-line px-3 py-2.5">
-          <Input
-            aria-label="Search deliveries"
-            placeholder="Search by delivery, event or endpoint…"
-            value={filters.search}
-            onChange={(event) => setFilter('search', event.target.value)}
-            className="w-72"
-          />
+          <label className="flex h-8 items-center gap-1.5 rounded-md border border-line px-2.5 text-xs text-ink">
+            <input
+              type="checkbox"
+              checked={failingNow}
+              onChange={(event) => setFilter('failing_now', event.target.checked ? 'true' : '')}
+              className="h-3.5 w-3.5 accent-[color:var(--danger,#dc2626)]"
+            />
+            Failing now
+          </label>
           <Select
             aria-label="Filter by status"
             placeholder="All statuses"
-            value={filters.status}
+            value={filters.status ?? ''}
+            disabled={failingNow}
             onChange={(event) => setFilter('status', event.target.value)}
             options={STATUSES.map((status) => ({ value: status, label: status }))}
             className="w-40"
@@ -74,7 +133,7 @@ export function DeliveriesPage() {
           <Select
             aria-label="Filter by endpoint"
             placeholder="All endpoints"
-            value={filters.endpoint_id}
+            value={filters.endpoint_id ?? ''}
             onChange={(event) => setFilter('endpoint_id', event.target.value)}
             /*
              * One page of endpoints. A project past the page size would filter
@@ -87,11 +146,38 @@ export function DeliveriesPage() {
             }))}
             className="w-48"
           />
+          <Input
+            aria-label="Filter by event type"
+            placeholder="Event type (exact)"
+            value={filters.event_type ?? ''}
+            onChange={(event) => setFilter('event_type', event.target.value)}
+            className="w-56"
+          />
+          <Select
+            aria-label="Filter by origin"
+            placeholder="Originals and replays"
+            value={filters.origin ?? ''}
+            onChange={(event) => setFilter('origin', event.target.value)}
+            options={[
+              { value: 'original', label: 'Originals only' },
+              { value: 'replay', label: 'Replays only' },
+            ]}
+            className="w-48"
+          />
         </div>
+
+        {failingNow && (
+          <p className="border-b border-line bg-raised px-3 py-1.5 text-2xs text-ink-muted">
+            Showing <strong className="text-ink">retrying</strong>,{' '}
+            <strong className="text-ink">failed</strong> and{' '}
+            <strong className="text-ink">exhausted</strong> together. The status filter is disabled
+            while this is on — the API refuses the two combined rather than quietly picking one.
+          </p>
+        )}
 
         <Async
           query={deliveries}
-          isEmpty={(page) => page.data.length === 0}
+          isEmpty={(page) => page.rows.length === 0}
           empty={
             <EmptyState
               title="No deliveries match"
@@ -100,12 +186,21 @@ export function DeliveriesPage() {
           }
         >
           {(page) => (
-            <Table
-              caption="Deliveries"
-              columns={deliveryColumns(orgId, projectId)}
-              rows={page.data}
-              rowKey={(row) => row.id}
-            />
+            <>
+              <Table
+                caption="Deliveries"
+                columns={deliveryColumns(orgId, projectId, endpointNames)}
+                rows={page.rows}
+                rowKey={(row) => row.id}
+              />
+              <Pager
+                page={page}
+                offset={offset}
+                onOffsetChange={setOffset}
+                limit={DEFAULT_PAGE_SIZE}
+                label="deliveries"
+              />
+            </>
           )}
         </Async>
       </Panel>
@@ -113,7 +208,42 @@ export function DeliveriesPage() {
   );
 }
 
-function deliveryColumns(orgId: string, projectId: string): Column<Delivery>[] {
+/**
+ * The payload cell, and the four things `payload_preview` can mean.
+ *
+ * Exported for its test. The reason it is a component rather than
+ * `{row.payload_preview}` is that three of the four cases are NOT bytes: an
+ * empty body, a body too big to preview, and a body whose preview could not be
+ * produced all have to read as different sentences, and none of them may render
+ * as the blank cell that says "this event was published with nothing in it".
+ *
+ * The bytes are mono, because they are a machine value; everything this page
+ * says ABOUT them is sans, so a reader never mistakes our words for the
+ * payload's. The rest of the story — including that this is not what the
+ * signature was computed over — is on the cell's `title`, which is where the
+ * other explained numbers in this product keep their long form.
+ */
+export function PayloadPreviewCell({ row }: { row: PayloadPreviewFields }) {
+  const state = payloadPreviewState(row);
+  const { label, note, title } = describePayloadPreview(state);
+
+  return (
+    <div className="flex min-w-0 max-w-[15rem] flex-col gap-0.5" title={title}>
+      {state.kind === 'body' ? (
+        <code className="truncate font-mono text-2xs text-ink-muted">{state.text}</code>
+      ) : (
+        <span className="text-xs text-ink-subtle">{label}</span>
+      )}
+      <span className="text-2xs text-ink-subtle">{note}</span>
+    </div>
+  );
+}
+
+function deliveryColumns(
+  orgId: string,
+  projectId: string,
+  endpointNames: Map<string, string>,
+): Column<DeliveryListItem>[] {
   return [
     {
       key: 'id',
@@ -124,14 +254,30 @@ function deliveryColumns(orgId: string, projectId: string): Column<Delivery>[] {
           className="flex flex-col hover:underline"
         >
           <span className="font-mono text-xs text-ink">{truncateId(row.id)}</span>
-          <span className="text-2xs text-ink-subtle">{row.event_type}</span>
+          {/*
+            The event TYPE is not on a delivery row — only `event_id` is, and
+            the type lives on the event. The id is shown rather than a type this
+            row cannot supply; the detail page has both.
+          */}
+          <span className="font-mono text-2xs text-ink-subtle">
+            {truncateId(row.event_id)}
+            {row.is_replay && ' · replay'}
+          </span>
         </Link>
       ),
     },
     {
       key: 'endpoint',
       header: 'Endpoint',
-      render: (row) => <span className="text-xs text-ink">{row.endpoint_name}</span>,
+      render: (row) => (
+        <span className="text-xs text-ink">
+          {endpointNames.get(row.endpoint_id) ?? (
+            <span className="font-mono text-2xs text-ink-subtle">
+              {truncateId(row.endpoint_id)}
+            </span>
+          )}
+        </span>
+      ),
     },
     {
       key: 'status',
@@ -143,8 +289,33 @@ function deliveryColumns(orgId: string, projectId: string): Column<Delivery>[] {
       header: 'Outcome',
       secondary: true,
       render: (row) => (
-        <span className="text-xs text-ink-muted">{describeDelivery(row)}</span>
+        // No status code here: the code lives on an attempt, and a list row
+        // carries none. `describeDelivery` falls back to `last_error`.
+        <span className="text-xs text-ink-muted">{describeDelivery(deliveryOutcome(row))}</span>
       ),
+    },
+    /*
+     * AFTER the two columns an operator actually scans. The payload answers
+     * "which order was that?", which is context for a row you have already
+     * found by its status — so it sits behind Status and Outcome, and in front
+     * of the right-aligned pair that stays together at the end.
+     *
+     * `secondary`, which means it is dropped below `md` — in the narrow table
+     * and in the phone card list, from the one flag, so nothing here adds a
+     * second DOM. That is the right call for a phone: 160 characters of mono in
+     * a card's right-aligned `dd` is unreadable, and the delivery it belongs to
+     * is one tap away with the body in full.
+     */
+    {
+      key: 'payload',
+      header: (
+        <span title="The first 160 characters of the event body, decoded. A preview — not the bytes the signature was computed over.">
+          Payload
+        </span>
+      ),
+      secondary: true,
+      width: 'w-60',
+      render: (row) => <PayloadPreviewCell row={row} />,
     },
     {
       key: 'attempts',

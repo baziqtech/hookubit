@@ -51,8 +51,8 @@ export class ListDeliveriesQueryDto {
   @ApiPropertyOptional({
     enum: DELIVERY_STATUSES,
     description:
-      'Exact status. INDEX-SUPPORTED: leading columns of ' +
-      '`deliveries_project_id_status_created_at_idx`.',
+      'Exact status. INDEX-SUPPORTED: cheap at any volume, and with the default newest-first ' +
+      'order it needs no sort step.',
   })
   @IsOptional()
   @IsEnum(DELIVERY_STATUSES)
@@ -70,7 +70,9 @@ export class ListDeliveriesQueryDto {
   failing_now?: boolean;
 
   @ApiPropertyOptional({
-    description: 'INDEX-SUPPORTED: `deliveries_endpoint_id_created_at_idx`.',
+    description:
+      'Only deliveries to this endpoint. INDEX-SUPPORTED: cheap at any volume, and with the ' +
+      'default newest-first order it needs no sort step.',
   })
   @IsOptional()
   @IsString()
@@ -78,7 +80,7 @@ export class ListDeliveriesQueryDto {
   endpoint_id?: string;
 
   @ApiPropertyOptional({
-    description: 'INDEX-SUPPORTED: `deliveries_event_id_idx`.',
+    description: 'Only the deliveries routed from this event. INDEX-SUPPORTED: cheap at any volume.',
   })
   @IsOptional()
   @IsString()

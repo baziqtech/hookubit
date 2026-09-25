@@ -28,7 +28,7 @@ import { EventsService } from '../../events/events.service';
 import { TenantTransactionRunner } from '../../organizations/tenant-transaction';
 import { DeliveriesController } from '../deliveries.controller';
 import { DeliveriesService } from '../deliveries.service';
-import { MAX_INLINE_ATTEMPTS, MAX_REPLAY_FAN_OUT } from '../delivery-limits';
+import { MAX_INLINE_ATTEMPTS, MAX_REPLAY_DELIVERIES } from '../delivery-limits';
 import { DeliveryReplayService } from '../delivery-replay.service';
 import { installRichTables } from './rich-fake';
 
@@ -40,7 +40,7 @@ import { installRichTables } from './rich-fake';
  * delivery, an exhausted one, one mid-retry, one pointing at a soft-deleted
  * endpoint, one at a paused endpoint, a delivery with more attempts than fit in
  * a response, an offloaded payload, a payload that is not valid UTF-8, an event
- * that matched nothing at all, and an event whose fan-out is wider than a
+ * that matched nothing at all, and an event whose routing is wider than a
  * single replay is allowed to re-send.
  *
  * Project A2 and organization B are seeded with matching rows throughout: a
@@ -48,6 +48,9 @@ import { installRichTables } from './rich-fake';
  * A2's and B's were sitting in the same table and did not come back.
  */
 export const LEDGER = {
+  /** The trace the worker kept for attempt 1 of `deliveryOrderA1`. 32 hex. */
+  attemptA1TraceId: '4bf92f3577b34da6a3ce929d0e0e4736',
+
   // --- endpoints (project A1) ---------------------------------------------
   endpointA1: IDS.endpointA1,
   endpointFinance: 'ep_a_finance',
@@ -63,9 +66,13 @@ export const LEDGER = {
   eventOffloaded: 'evt_a_big',
   /** payload_raw is not valid UTF-8. */
   eventBinary: 'evt_a_binary',
+  /** A body far longer than the preview bound, and longer than the read slice. */
+  eventLongBody: 'evt_a_long',
+  /** All 3-byte characters, so the byte slice lands INSIDE a code point. */
+  eventMultibyte: 'evt_a_multibyte',
   /** Matched no subscription. Nothing to replay. */
   eventOrphan: 'evt_a_orphan',
-  /** Fanned out wider than MAX_REPLAY_FAN_OUT. */
+  /** Routed wider than MAX_REPLAY_DELIVERIES. */
   eventWide: 'evt_a_wide',
   /** Project A2 - same organization, different project. */
   eventOtherProject: 'evt_a2_1',
@@ -83,14 +90,18 @@ export const LEDGER = {
   deliveryPaused: 'del_a_paused',
   /** eventBinary -> endpointFinance, with more attempts than fit inline. */
   deliveryNoisy: 'del_a_noisy',
+  /** eventLongBody -> endpointA1, succeeded. */
+  deliveryLongBody: 'del_a_long',
+  /** eventMultibyte -> endpointA1, succeeded. */
+  deliveryMultibyte: 'del_a_multibyte',
 } as const;
 
 /** Attempts on `deliveryOrderFinance`. Crosses the 9 -> 10 ordering boundary. */
 export const FINANCE_ATTEMPTS = 12;
 /** Attempts on `deliveryNoisy`. Past the inline cap, so a page is truncated. */
 export const NOISY_ATTEMPTS = MAX_INLINE_ATTEMPTS + 5;
-/** Endpoints `eventWide` reached. Past the fan-out cap. */
-export const WIDE_ENDPOINTS = MAX_REPLAY_FAN_OUT + 5;
+/** Endpoints `eventWide` reached. Past the routing cap. */
+export const WIDE_ENDPOINTS = MAX_REPLAY_DELIVERIES + 5;
 
 export const T = {
   order: new Date('2026-03-01T10:00:00.000Z'),
@@ -99,12 +110,31 @@ export const T = {
   binary: new Date('2026-03-04T10:00:00.000Z'),
   orphan: new Date('2026-03-05T10:00:00.000Z'),
   wide: new Date('2026-03-06T10:00:00.000Z'),
+  long: new Date('2026-03-07T10:00:00.000Z'),
+  multibyte: new Date('2026-03-08T10:00:00.000Z'),
 } as const;
 
 const ORDER_BODY = '{"order_id":"41f9","amount":1250,"currency":"GHS"}';
 const SETTLED_BODY = '{ "b": 2,\n  "a": 1 }';
 /** 0xff 0xfe is not valid UTF-8; decoding it as UTF-8 would give U+FFFD soup. */
 export const BINARY_PAYLOAD = Uint8Array.from([0xff, 0xfe, 0x00, 0x01, 0x7f]);
+
+/**
+ * 2011 ASCII bytes: longer than `PAYLOAD_PREVIEW_MAX_CHARS` AND longer than
+ * `PAYLOAD_PREVIEW_READ_BYTES`, so the preview is capped by the character bound
+ * AND the database slice really cut something off.
+ */
+export const LONG_BODY = `{"note":"${'a'.repeat(2_000)}"}`;
+
+/**
+ * A body of nothing but U+20AC (3 bytes each), 900 bytes long.
+ *
+ * `PAYLOAD_PREVIEW_READ_BYTES` is 640, and 640 is not a multiple of 3: the slice
+ * ends one byte into the 214th character. That is the case a naive
+ * `Buffer.toString('utf8')` renders with a trailing U+FFFD.
+ */
+export const MULTIBYTE_CHAR = '€';
+export const MULTIBYTE_BODY = MULTIBYTE_CHAR.repeat(300);
 
 function endpoint(db: FakeTenantPrisma, id: string, projectId: string, extra: Row = {}): void {
   db.insert('endpoint', {
@@ -158,7 +188,9 @@ function delivery(db: FakeTenantPrisma, id: string, extra: Row): void {
     status: 'pending',
     attemptCount: 0,
     maxAttempts: 8,
-    nextAttemptAt: null,
+    // NOT NULL in the schema (20260911000000) and defaulted to the insert
+    // time; a seed that left it null would model a row PostgreSQL rejects.
+    nextAttemptAt: T.order,
     lastAttemptAt: null,
     completedAt: null,
     orderingKey: null,
@@ -191,6 +223,9 @@ function attempt(db: FakeTenantPrisma, id: string, deliveryId: string, number: n
     errorMessage: 'upstream said no',
     durationMs: 400,
     workerId: 'worker-1',
+    // The worker writes this only for a SAMPLED span; the common attempt has
+    // none, and the DTO must say null rather than invent one.
+    traceId: null,
     createdAt: new Date(T.order.getTime() + number * 1000 + 400),
     ...extra,
   });
@@ -236,7 +271,7 @@ function backfill(db: FakeTenantPrisma): void {
       subscriptionId: null,
       attemptCount: 0,
       maxAttempts: 8,
-      nextAttemptAt: null,
+      nextAttemptAt: T.order,
       lastAttemptAt: null,
       completedAt: null,
       orderingKey: null,
@@ -309,6 +344,20 @@ export function seedLedger(db: FakeTenantPrisma = seedWorld()): FakeTenantPrisma
     payloadSize: BINARY_PAYLOAD.byteLength,
     createdAt: T.binary,
     processedAt: T.binary,
+  });
+
+  event(db, LEDGER.eventLongBody, IDS.projectA1, {
+    eventType: 'ledger.exported',
+    body: LONG_BODY,
+    createdAt: T.long,
+    processedAt: T.long,
+  });
+
+  event(db, LEDGER.eventMultibyte, IDS.projectA1, {
+    eventType: 'ledger.multibyte',
+    body: MULTIBYTE_BODY,
+    createdAt: T.multibyte,
+    processedAt: T.multibyte,
   });
 
   event(db, LEDGER.eventOrphan, IDS.projectA1, {
@@ -393,6 +442,26 @@ export function seedLedger(db: FakeTenantPrisma = seedWorld()): FakeTenantPrisma
     createdAt: T.binary,
   });
 
+  delivery(db, LEDGER.deliveryLongBody, {
+    eventId: LEDGER.eventLongBody,
+    endpointId: LEDGER.endpointA1,
+    status: 'succeeded',
+    attemptCount: 1,
+    completedAt: T.long,
+    lastAttemptAt: T.long,
+    createdAt: T.long,
+  });
+
+  delivery(db, LEDGER.deliveryMultibyte, {
+    eventId: LEDGER.eventMultibyte,
+    endpointId: LEDGER.endpointA1,
+    status: 'succeeded',
+    attemptCount: 1,
+    completedAt: T.multibyte,
+    lastAttemptAt: T.multibyte,
+    createdAt: T.multibyte,
+  });
+
   // --- attempts -----------------------------------------------------------
   db.rows('deliveryAttempt').set(IDS.attemptA1, {
     ...(db.rows('deliveryAttempt').get(IDS.attemptA1) as Row),
@@ -411,6 +480,8 @@ export function seedLedger(db: FakeTenantPrisma = seedWorld()): FakeTenantPrisma
     errorCode: 'http_503',
     errorMessage: 'service unavailable',
     durationMs: 1_204,
+    // This attempt's span was sampled, so the worker kept its trace id.
+    traceId: LEDGER.attemptA1TraceId,
   });
   attempt(db, 'att_a1_2', LEDGER.deliveryOrderA1, 2, {
     status: 'success',
@@ -429,7 +500,7 @@ export function seedLedger(db: FakeTenantPrisma = seedWorld()): FakeTenantPrisma
     attempt(db, `att_noisy_${String(number).padStart(4, '0')}`, LEDGER.deliveryNoisy, number);
   }
 
-  // --- the wide fan-out ---------------------------------------------------
+  // --- the wide routing ---------------------------------------------------
   for (let index = 0; index < WIDE_ENDPOINTS; index += 1) {
     const id = `ep_wide_${String(index).padStart(3, '0')}`;
     endpoint(db, id, IDS.projectA1);

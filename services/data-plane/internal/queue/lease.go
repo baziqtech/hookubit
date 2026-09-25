@@ -6,7 +6,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/shaq/webhook-platform/services/data-plane/internal/metrics"
+	"github.com/shaq/hookubit/services/data-plane/internal/metrics"
 )
 
 // LeaseKeeper holds a worker's leases open while attempts are in flight, and -
@@ -94,10 +94,27 @@ func (k *LeaseKeeper) Tracked() int {
 // Run renews on a ticker until ctx is cancelled. Every tracked attempt is
 // cancelled on the way out so a shutdown does not leave a goroutine believing
 // it still holds a lease nobody is renewing.
+//
+// The cancellation cause is INHERITED from ctx rather than hard-coded, and that
+// matters: the worker passes the same context here that it uses as the parent of
+// every tracked attempt, so on shutdown two goroutines race to cancel the same
+// children - the worker with ErrWorkerShutdown, and this defer as Run unwinds.
+// context.CancelFunc is first-writer-wins, so a hard-coded context.Canceled
+// here silently won a fraction of those races, and the delivery was then charged
+// an attempt and a health failure for OUR restart. Inheriting means both racers
+// set the same cause and the winner stops mattering.
 func (k *LeaseKeeper) Run(ctx context.Context) error {
 	ticker := time.NewTicker(k.interval)
 	defer ticker.Stop()
-	defer k.cancelAll(context.Canceled)
+	defer func() {
+		cause := context.Cause(ctx)
+		if cause == nil {
+			// Run returned for a reason other than ctx: there is no inherited
+			// cause to pass on.
+			cause = context.Canceled
+		}
+		k.cancelAll(cause)
+	}()
 
 	for {
 		select {

@@ -26,10 +26,48 @@ export default {
         'danger-soft': 'rgb(var(--c-danger-soft) / <alpha-value>)',
         info: 'rgb(var(--c-info) / <alpha-value>)',
         'info-soft': 'rgb(var(--c-info-soft) / <alpha-value>)',
+        // `sunken` is the third surface the design uses for segmented controls
+        // and inset chips — the thing a control sits IN, as opposed to `raised`,
+        // which is a thing sitting ON the page.
+        sunken: 'rgb(var(--c-sunken) / <alpha-value>)',
+        'accent-line': 'rgb(var(--c-accent-line) / <alpha-value>)',
+        // The darker accent, for accent-coloured TEXT on a soft accent ground,
+        // where the button violet does not carry enough contrast.
+        'accent-deep': 'rgb(var(--c-accent-deep) / <alpha-value>)',
+        // The rail's own vocabulary. Deliberately separate from the page
+        // surfaces so the navigation can be re-skinned without touching a
+        // single component that lives inside it.
+        nav: 'rgb(var(--c-nav) / <alpha-value>)',
+        'nav-ink': 'rgb(var(--c-nav-ink) / <alpha-value>)',
+        'nav-ink-muted': 'rgb(var(--c-nav-ink-muted) / <alpha-value>)',
+        'nav-line': 'rgb(var(--c-nav-line) / <alpha-value>)',
+        'nav-hover': 'rgb(var(--c-nav-hover) / <alpha-value>)',
+        'nav-active': 'rgb(var(--c-nav-active) / <alpha-value>)',
+        'nav-section': 'rgb(var(--c-nav-section) / <alpha-value>)',
+        // The saturated badge-dot forms: a 5px dot needs more chroma than the
+        // text beside it to read at all.
+        'ok-dot': 'rgb(var(--c-ok-dot) / <alpha-value>)',
+        'warn-dot': 'rgb(var(--c-warn-dot) / <alpha-value>)',
+        'danger-dot': 'rgb(var(--c-danger-dot) / <alpha-value>)',
+        'info-dot': 'rgb(var(--c-info-dot) / <alpha-value>)',
+        grid: 'rgb(var(--c-grid) / <alpha-value>)',
+        code: 'rgb(var(--c-code) / <alpha-value>)',
+        'code-ink': 'rgb(var(--c-code-ink) / <alpha-value>)',
       },
       fontFamily: {
-        sans: ['Inter', 'ui-sans-serif', 'system-ui', '-apple-system', 'Segoe UI', 'sans-serif'],
-        mono: ['ui-monospace', 'SFMono-Regular', 'Menlo', 'Consolas', 'monospace'],
+        // Both are SELF-HOSTED (@fontsource-variable, imported in index.css).
+        // A family named here and never loaded is invisible — the product just
+        // renders in whatever the OS supplies and nothing errors. Inter sat
+        // here unloaded for weeks. If you change either name, change the
+        // @import with it.
+        sans: [
+          'Plus Jakarta Sans Variable',
+          'Plus Jakarta Sans',
+          'ui-sans-serif',
+          'system-ui',
+          'sans-serif',
+        ],
+        mono: ['JetBrains Mono Variable', 'ui-monospace', 'SFMono-Regular', 'Menlo', 'monospace'],
       },
       fontSize: {
         // Dense by default: the product baseline is 13px, not 16px.
@@ -37,6 +75,13 @@ export default {
         xs: ['0.75rem', { lineHeight: '1.05rem' }],
         sm: ['0.8125rem', { lineHeight: '1.25rem' }],
         base: ['0.875rem', { lineHeight: '1.375rem' }],
+        // Display sizes, which the scale previously lacked entirely - every
+        // heading above 14px was an arbitrary value. Taken from the design's
+        // own clusters: section titles at 19, metric figures at 23, and the
+        // one hero number at 34.
+        title: ['1.1875rem', { lineHeight: '1.5rem', letterSpacing: '-0.01em' }],
+        display: ['1.4375rem', { lineHeight: '1.75rem', letterSpacing: '-0.02em' }],
+        hero: ['2.125rem', { lineHeight: '2.375rem', letterSpacing: '-0.025em' }],
       },
       boxShadow: {
         panel: '0 1px 2px 0 rgb(0 0 0 / 0.04), 0 1px 1px -1px rgb(0 0 0 / 0.06)',

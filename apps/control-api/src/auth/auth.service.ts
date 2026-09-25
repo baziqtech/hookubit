@@ -288,15 +288,91 @@ export class AuthService {
     return AuthService.toDto(verified);
   }
 
-  /** Idempotent from the caller's point of view; never reveals whether the address exists. */
+  /**
+   * Idempotent from the caller's point of view, and enumeration-safe by
+   * construction: unknown, already-verified, disabled and
+   * unverified-and-mailed are ONE outcome - the caller gets the same empty 202
+   * for all four, and this method resolves rather than throwing in every one
+   * of them.
+   *
+   * Everything past the lookup is best-effort for the reason `forgotPassword`
+   * documents: if a failure escaped from here, a degraded mailer (or a
+   * transient database error on the token write) would answer 202 for an
+   * address with nothing to send and 500 for an unverified registered one -
+   * an enumeration oracle assembled out of the failure mode, which is exactly
+   * the trap that was found and fixed in forgot-password. `sendVerification`
+   * already swallows its own transport error; the try/catch here covers the
+   * token writes either side of it so no path can leak.
+   *
+   * The previous verification link is revoked first, so "resend" means the
+   * newest email is the one that works - a user with two links in their inbox
+   * should not have to guess which.
+   */
   async resendVerification(email: string): Promise<void> {
     const user = await this.prisma.user.findUnique({
       where: { email: AuthService.normalizeEmail(email) },
     });
-    if (user && !user.emailVerifiedAt && !user.disabledAt) {
+
+    // Nothing to do for an unknown, disabled or already-verified address. Not
+    // an error, and not distinguishable from the branch below.
+    if (!user || user.disabledAt || user.emailVerifiedAt) return;
+
+    try {
       await this.tokens.revokeOutstanding(user.email, 'email_verification');
       await this.sendVerification(user);
+    } catch (err) {
+      // Never the address, never the token - only the surrogate id.
+      this.logger.error(
+        `Failed to resend email verification for user ${user.id}: ${AuthService.reason(err)}`,
+      );
     }
+  }
+
+  // -------------------------------------------------------------------------
+  // Onboarding
+  // -------------------------------------------------------------------------
+
+  /**
+   * Mark the CALLING user's product tour as finished or skipped.
+   *
+   * The id comes off the verified session and from nowhere else - there is no
+   * body, no path parameter and no field a caller could use to name a
+   * different user - so one account cannot complete another's onboarding.
+   *
+   * Idempotent by SQL, not by read-then-write: a conditional UPDATE with
+   * `onboardingCompletedAt: null` in the WHERE. Two concurrent completions (two
+   * tabs, a retried request) race inside PostgreSQL and exactly one writes, so
+   * the recorded instant is the FIRST completion and never drifts forward on a
+   * later replay. A second call is a success with no row touched, not a 409:
+   * the client's question is "is this person onboarded", and after either call
+   * the answer is yes.
+   *
+   * Returns the resulting timestamp so the caller can decide whether to echo
+   * it; the HTTP route answers 204 and the client re-reads `/auth/session`.
+   */
+  async completeOnboarding(session: SessionUser, ctx: RequestContext = {}): Promise<Date | null> {
+    const now = new Date();
+    const claimed = await this.prisma.user.updateMany({
+      where: { id: session.userId, onboardingCompletedAt: null, disabledAt: null },
+      data: { onboardingCompletedAt: now },
+    });
+
+    // Audit only the transition, not every replay - a tour completed once is
+    // one fact, and a retrying client must not be able to flood `audit_logs`.
+    // `recordFor` is not usable here: it derives the organization from a
+    // resolved tenant context, and an auth route has no tenant in its path.
+    // `audit()` resolves the user's own first membership instead, which is the
+    // established pattern for every other user-level event in this class.
+    if (claimed.count === 1) {
+      await this.audit(session.userId, 'user.onboarding_completed', ctx);
+      return now;
+    }
+
+    // Zero rows means already completed, or the account is disabled/gone. The
+    // session guard already proved the account is live, so re-read to return
+    // the instant that was recorded first.
+    const user = await this.prisma.user.findUnique({ where: { id: session.userId } });
+    return user?.onboardingCompletedAt ?? null;
   }
 
   // -------------------------------------------------------------------------
@@ -538,6 +614,10 @@ export class AuthService {
       email: user.email,
       name: user.name,
       email_verified: user.emailVerifiedAt !== null,
+      // ISO-8601, or null for "has never finished or skipped the tour". Shipped
+      // on every user-bearing response so the client decides without a second
+      // round trip.
+      onboarding_completed_at: user.onboardingCompletedAt?.toISOString() ?? null,
     };
   }
 }

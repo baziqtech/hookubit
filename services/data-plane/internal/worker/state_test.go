@@ -5,11 +5,13 @@ import (
 	"errors"
 	"math/rand"
 	"net"
+	"net/http"
+	"os"
 	"testing"
 	"time"
 
-	"github.com/shaq/webhook-platform/services/data-plane/internal/egress"
-	"github.com/shaq/webhook-platform/services/data-plane/internal/retry"
+	"github.com/shaq/hookubit/services/data-plane/internal/egress"
+	"github.com/shaq/hookubit/services/data-plane/internal/retry"
 )
 
 func testPolicy() retry.Policy {
@@ -28,7 +30,16 @@ func TestDecideStateMachine(t *testing.T) {
 	now := time.Date(2026, 9, 7, 12, 0, 0, 0, time.UTC)
 	blocked := &egress.BlockedTargetError{Target: "http://169.254.169.254/", Reason: "metadata service"}
 	permanent := &egress.PermanentError{Op: "build request", Err: errors.New("bad method")}
-	timeout := &net.DNSError{Err: "i/o timeout", IsTimeout: true}
+	// The two shapes a DNS failure arrives in. Both must be named `dns`: the
+	// first is an unresponsive nameserver (the common one) and the second is
+	// NXDOMAIN. Before this was fixed the first was classified by isTimeout()
+	// first and landed in the ledger as `timeout`, indistinguishable from an
+	// endpoint that accepted the connection and then went silent.
+	dnsTimeout := &net.DNSError{Err: "i/o timeout", IsTimeout: true}
+	dnsMiss := &net.DNSError{Err: "no such host", Name: "endpoint.invalid"}
+	// A genuine ENDPOINT timeout: the socket was open and the peer stopped
+	// answering. This is what AttemptTimeout is FOR, and it must keep it.
+	endpointTimeout := &net.OpError{Op: "read", Net: "tcp", Err: os.ErrDeadlineExceeded}
 
 	cases := []struct {
 		name          string
@@ -91,7 +102,19 @@ func TestDecideStateMachine(t *testing.T) {
 			wantErrorCode: "http_503",
 		},
 		{
-			name: "timeout retries and is classified as a timeout", attempt: 1, outcome: Outcome{Err: timeout},
+			name:    "an unresponsive nameserver is named as DNS, not as a timeout",
+			attempt: 1, outcome: Outcome{Err: dnsTimeout},
+			wantState: StateRetrying, wantReason: ReasonRetryScheduled,
+			wantAttempt: AttemptError, wantErrorCode: "dns", wantRetryIn: 5 * time.Second,
+		},
+		{
+			name: "NXDOMAIN is named as DNS too", attempt: 1, outcome: Outcome{Err: dnsMiss},
+			wantState: StateRetrying, wantReason: ReasonRetryScheduled,
+			wantAttempt: AttemptError, wantErrorCode: "dns", wantRetryIn: 5 * time.Second,
+		},
+		{
+			name:    "an endpoint that stops answering an open socket is still a timeout",
+			attempt: 1, outcome: Outcome{Err: endpointTimeout},
 			wantState: StateRetrying, wantReason: ReasonRetryScheduled,
 			wantAttempt: AttemptTimeout, wantErrorCode: "timeout", wantRetryIn: 5 * time.Second,
 		},
@@ -235,5 +258,183 @@ func TestTerminalStates(t *testing.T) {
 		if s.Terminal() {
 			t.Fatalf("%s must not be terminal", s)
 		}
+	}
+}
+
+// --- Retry-After -----------------------------------------------------------
+
+func TestParseRetryAfter(t *testing.T) {
+	now := time.Date(2026, 9, 9, 12, 0, 0, 0, time.UTC)
+	cases := []struct {
+		name  string
+		value string
+		want  time.Duration
+		ok    bool
+	}{
+		{name: "absent", value: "", want: 0, ok: false},
+		{name: "delay seconds", value: "120", want: 2 * time.Minute, ok: true},
+		{name: "delay seconds with surrounding space", value: "  30 ", want: 30 * time.Second, ok: true},
+		{name: "zero is an answer, not an absence", value: "0", want: 0, ok: true},
+		{
+			// Not legal delay-seconds. Read as "immediately" it would hand a
+			// broken producer a hot loop, so it is treated as no answer at all.
+			name: "negative is not an answer", value: "-5", want: 0, ok: false,
+		},
+		{name: "http date in the future", value: "Wed, 09 Sep 2026 12:05:00 GMT", want: 5 * time.Minute, ok: true},
+		{
+			// Clock skew, or a date the endpoint has already passed. It DID
+			// answer, and the answer is "now".
+			name:  "http date in the past clamps to zero",
+			value: "Wed, 09 Sep 2026 11:00:00 GMT", want: 0, ok: true,
+		},
+		{name: "garbage", value: "soon please", want: 0, ok: false},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			got, ok := ParseRetryAfter(tc.value, now)
+			if ok != tc.ok {
+				t.Fatalf("ok = %v, want %v", ok, tc.ok)
+			}
+			if ok && got != tc.want {
+				t.Fatalf("duration = %s, want %s", got, tc.want)
+			}
+		})
+	}
+}
+
+// The endpoint's own schedule wins over ours, within bounds it does not choose.
+//
+// Regression: before this, response headers were stored on the attempt row and
+// otherwise unused, so an endpoint answering 429 with "Retry-After: 3600" was
+// re-tried on the policy's five seconds - burning the delivery's budget on
+// requests it had told us in advance it would refuse.
+func TestRetryAfterIsHonouredAndClamped(t *testing.T) {
+	now := time.Date(2026, 9, 9, 12, 0, 0, 0, time.UTC)
+
+	cases := []struct {
+		name         string
+		status       int
+		outcome      Outcome
+		policy       func(retry.Policy) retry.Policy
+		firstAttempt time.Time
+		wantDelay    time.Duration
+		wantHonoured bool
+	}{
+		{
+			name:   "429 with a delay-seconds is honoured over the policy",
+			status: 429, outcome: Outcome{RetryAfter: 15 * time.Minute, HasRetryAfter: true},
+			wantDelay: 15 * time.Minute, wantHonoured: true,
+		},
+		{
+			name: "503 carries it too", status: 503,
+			outcome:   Outcome{RetryAfter: 90 * time.Second, HasRetryAfter: true},
+			wantDelay: 90 * time.Second, wantHonoured: true,
+		},
+		{
+			// A hostile or broken endpoint asking for ~31 years. Unclamped, the
+			// delivery parks past any horizon an operator can see while still
+			// reading as `retrying`.
+			name:   "an absurd value is clamped to the policy's max delay",
+			status: 429, outcome: Outcome{RetryAfter: 999999999 * time.Second, HasRetryAfter: true},
+			wantDelay: time.Hour, wantHonoured: true,
+		},
+		{
+			name:   "zero is floored to a second rather than becoming a hot loop",
+			status: 429, outcome: Outcome{RetryAfter: 0, HasRetryAfter: true},
+			wantDelay: time.Second, wantHonoured: true,
+		},
+		{
+			// The wall-clock budget is the harder ceiling: scheduling past
+			// first_attempt_at + max_retry_duration schedules an attempt that is
+			// guaranteed to be judged exhausted the moment it runs.
+			name:   "it may not push the delivery past its wall-clock budget",
+			status: 429, outcome: Outcome{RetryAfter: 50 * time.Minute, HasRetryAfter: true},
+			firstAttempt: now.Add(-40 * time.Minute),
+			wantDelay:    20 * time.Minute, wantHonoured: true,
+		},
+		{
+			name:   "a status that does not mean 'wait' is retried on the policy",
+			status: 500, outcome: Outcome{RetryAfter: time.Hour, HasRetryAfter: true},
+			wantDelay: 5 * time.Second,
+		},
+		{
+			name: "no header at all is the policy", status: 429, outcome: Outcome{},
+			wantDelay: 5 * time.Second,
+		},
+	}
+
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			policy := testPolicy()
+			if tc.policy != nil {
+				policy = tc.policy(policy)
+			}
+			first := tc.firstAttempt
+			if first.IsZero() {
+				first = now
+			}
+			out := tc.outcome
+			out.HTTPStatus = tc.status
+
+			got := Decide(DecisionInput{
+				Attempt: 1, Policy: policy, FirstAttemptAt: first, Now: now, Outcome: out,
+			}, nil)
+
+			if got.State != StateRetrying {
+				t.Fatalf("state = %s, want retrying", got.State)
+			}
+			if got.Reason != ReasonRetryScheduled {
+				t.Fatalf("reason = %s, want %s: honouring Retry-After is still a scheduled retry",
+					got.Reason, ReasonRetryScheduled)
+			}
+			if delay := got.NextAttemptAt.Sub(now); delay != tc.wantDelay {
+				t.Fatalf("next attempt in %s, want %s", delay, tc.wantDelay)
+			}
+			if got.RetryAfterHonoured != tc.wantHonoured {
+				t.Fatalf("RetryAfterHonoured = %v, want %v", got.RetryAfterHonoured, tc.wantHonoured)
+			}
+		})
+	}
+}
+
+// Retry-After cannot resurrect a delivery whose budget is already spent: the
+// exhaustion check runs first and there is no retry to schedule.
+func TestRetryAfterCannotExtendAnExhaustedDelivery(t *testing.T) {
+	now := time.Date(2026, 9, 9, 12, 0, 0, 0, time.UTC)
+	got := Decide(DecisionInput{
+		Attempt:        1,
+		Policy:         testPolicy(),
+		FirstAttemptAt: now.Add(-2 * time.Hour), // MaxRetryDuration is an hour
+		Now:            now,
+		Outcome:        Outcome{HTTPStatus: 429, RetryAfter: time.Minute, HasRetryAfter: true},
+	}, nil)
+
+	if got.State != StateExhausted || got.Reason != ReasonBudgetExhausted {
+		t.Fatalf("decision = (%s, %s), want (exhausted, %s)", got.State, got.Reason, ReasonBudgetExhausted)
+	}
+	if !got.NextAttemptAt.IsZero() {
+		t.Fatalf("a terminal decision carried a next attempt time: %s", got.NextAttemptAt)
+	}
+}
+
+// The header is read off the response, not invented, and the two forms both
+// reach Decide. This is the seam between net/http and the pure state machine.
+func TestRetryAfterHeaderReachesTheDecision(t *testing.T) {
+	now := time.Date(2026, 9, 9, 12, 0, 0, 0, time.UTC)
+	h := http.Header{}
+	h.Set("Retry-After", "45")
+
+	wait, ok := ParseRetryAfter(h.Get("Retry-After"), now)
+	if !ok || wait != 45*time.Second {
+		t.Fatalf("parsed (%s, %v), want (45s, true)", wait, ok)
+	}
+	got := Decide(DecisionInput{
+		Attempt: 1, Policy: testPolicy(), FirstAttemptAt: now, Now: now,
+		Outcome: Outcome{HTTPStatus: 429, RetryAfter: wait, HasRetryAfter: ok},
+	}, nil)
+	if delay := got.NextAttemptAt.Sub(now); delay != 45*time.Second {
+		t.Fatalf("next attempt in %s, want 45s", delay)
 	}
 }

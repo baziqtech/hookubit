@@ -63,7 +63,7 @@ export const WILDCARD_SUFFIX = '.*';
 /**
  * A single event type or pattern is at most this long.
  *
- * `event_types` is a `text[]` and is read on the hot path of every fan-out, for
+ * `event_types` is a `text[]` and is read on the hot path of every routing, for
  * every subscription in the project. There is no legitimate 4KB event type, and
  * an unbounded one is a cheap way to make the router's per-event work quadratic
  * in a value the caller controls.

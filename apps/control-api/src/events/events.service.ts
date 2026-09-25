@@ -1,9 +1,9 @@
 import { Injectable } from '@nestjs/common';
-import { Delivery, Event, Prisma } from '@prisma/client';
-import { RequestContext, TenantScope, TenantScopeFactory } from '../authz';
+import { Delivery, DeliveryStatus, Event, Prisma } from '@prisma/client';
+import { MAX_PAGE_SIZE, RequestContext, TenantScope, TenantScopeFactory } from '../authz';
 import { AppError } from '../common/errors';
 import { DeliveriesService, dateRange } from '../deliveries/deliveries.service';
-import { MAX_REPLAY_FAN_OUT } from '../deliveries/delivery-limits';
+import { MAX_REPLAY_DELIVERIES } from '../deliveries/delivery-limits';
 import { DeliveryReplayService } from '../deliveries/delivery-replay.service';
 import {
   DeliveryListDto,
@@ -18,17 +18,18 @@ import {
   toEventDetailDto,
   toEventDto,
 } from './dto';
+import { DeliveryRollup, emptyCounts, rollUp } from './delivery-rollup';
 import { crossTenantNotFound, withCrossTenantNotFound } from './not-found';
 
 /**
  * Events: what was published, and what became of it.
  *
- * An event is written once; the fan-out materialises it into one `deliveries`
+ * An event is written once; the routing materialises it into one `deliveries`
  * row per matching subscription, each with an independent retry chain. That
  * choice - copied deliberately from Convoy, see CLAUDE.md - is what makes
  * per-endpoint replay possible and what makes "did finance ever receive this?"
  * a query rather than an inference. This module exposes both halves: the event,
- * and the fan-out it produced.
+ * and the routing it produced.
  *
  * ## Two rules that shape everything here
  *
@@ -59,17 +60,88 @@ export class EventsService {
    * a bare array cannot say whether the bound was reached.
    */
   async list(context: RequestContext, query: ListEventsQueryDto): Promise<EventListDto> {
-    const page = await this.scopes.for(context).events.findPage({
+    const scope = this.scopes.for(context);
+    const page = await scope.events.findPage({
       where: EventsService.filterWhere(query),
       orderBy: { createdAt: 'desc' },
       take: query.limit,
       skip: query.offset,
     });
+
+    const rollups = await this.rollUpDeliveries(
+      scope,
+      page.rows.map((event) => event.id),
+      page.rows,
+    );
+
     return {
-      data: page.rows.map(toEventDto),
+      data: page.rows.map((event) => toEventDto(event, rollups.get(event.id))),
       has_more: page.hasMore,
       next_offset: page.nextSkip,
     };
+  }
+
+  /**
+   * What became of each event on this page, in one grouped query per 200
+   * groups.
+   *
+   * ## Why the list needs this at all
+   *
+   * `Event.status` is the ingest/routing state: `processed` means the router
+   * ran and committed, and says nothing about whether anyone received
+   * anything. A list built on it reports a project as healthy while every
+   * delivery it produced is failing, and it cannot express `dropped` - routing
+   * completed and matched nobody - which is the state newcomers actually hit.
+   *
+   * ## Why it is paged rather than one query
+   *
+   * `groupBy(['eventId', 'status'])` produces up to nine groups per event, so a
+   * 50-event page is 450 groups against a `MAX_PAGE_SIZE` of 200 - and
+   * `ScopedRepository.groupBy` with an explicit take SLICES. A silently
+   * truncated rollup would show `delivered` on an event whose failures fell off
+   * the end, which is the one error this column must not make. So it walks
+   * pages until one comes back short: three queries for a default page, nine
+   * for the largest one the API allows.
+   *
+   * Never one query per event. That is the N+1 this method exists to avoid.
+   */
+  private async rollUpDeliveries(
+    scope: TenantScope,
+    eventIds: string[],
+    events: Event[],
+  ): Promise<Map<string, DeliveryRollup>> {
+    const rollups = new Map<string, DeliveryRollup>();
+    if (eventIds.length === 0) return rollups;
+
+    const counts = new Map<string, Record<DeliveryStatus, number>>();
+    for (const id of eventIds) counts.set(id, emptyCounts());
+
+    for (let skip = 0; ; skip += MAX_PAGE_SIZE) {
+      const groups = await scope.deliveries.groupBy({
+        by: ['eventId', 'status'],
+        where: { eventId: { in: eventIds } } satisfies Prisma.DeliveryWhereInput,
+        _count: { _all: true },
+        take: MAX_PAGE_SIZE,
+        skip,
+      });
+
+      for (const group of groups) {
+        const eventId = group.eventId;
+        const status = group.status;
+        if (typeof eventId !== 'string' || typeof status !== 'string') continue;
+        const row = counts.get(eventId);
+        if (!row) continue;
+        const count = (group._count as { _all?: number } | undefined)?._all ?? 0;
+        row[status as DeliveryStatus] = count;
+      }
+
+      if (groups.length < MAX_PAGE_SIZE) break;
+    }
+
+    for (const event of events) {
+      rollups.set(event.id, rollUp(event.status, counts.get(event.id) ?? emptyCounts()));
+    }
+    return rollups;
   }
 
   /** One event, with the payload, labelled as raw-versus-jsonb. */
@@ -78,12 +150,12 @@ export class EventsService {
   }
 
   /**
-   * The fan-out: every delivery this event produced, with per-endpoint status.
+   * The routing: every delivery this event produced, with per-endpoint status.
    *
    * This is the "did finance ever receive this?" route. The event is resolved
    * first so a cross-tenant event id 404s rather than returning an empty page -
    * an empty page and "not yours" are genuinely different answers here, and
-   * conflating them would have an operator conclude the fan-out matched nothing
+   * conflating them would have an operator conclude the routing matched nothing
    * when in fact they are looking at the wrong project.
    */
   async listDeliveries(
@@ -180,7 +252,7 @@ export class EventsService {
     // publish.
     throw new AppError(
       'conflict',
-      `Event ${event.id} was never fanned out to endpoint ${endpoint.id}, so there is nothing to replay to it. Sending it there for the first time would be a new delivery, not a replay: add a subscription and publish the event.`,
+      `Event ${event.id} was never routed to endpoint ${endpoint.id}, so there is nothing to replay to it. Sending it there for the first time would be a new delivery, not a replay: add a subscription and publish the event.`,
       { event_id: event.id, endpoint_id: endpoint.id },
     );
   }
@@ -194,7 +266,7 @@ export class EventsService {
    * widened, a subscription can be re-pointed at a different endpoint, disabled
    * or deleted. Re-running the match would therefore silently deliver a
    * three-week-old event to endpoints that were never targeted, and skip ones
-   * that were. The delivery rows are the record of what the fan-out decided at
+   * that were. The delivery rows are the record of what the routing decided at
    * the time, and they are what this replays.
    *
    * `replay_of_delivery_id: null` for the same reason as above, and it also
@@ -206,7 +278,7 @@ export class EventsService {
     const page = await scope.deliveries.findPage({
       where: { eventId: event.id, replayOfDeliveryId: null },
       orderBy: { createdAt: 'asc' },
-      take: MAX_REPLAY_FAN_OUT,
+      take: MAX_REPLAY_DELIVERIES,
     });
 
     if (page.hasMore) {
@@ -219,15 +291,15 @@ export class EventsService {
       });
       throw new AppError(
         'limit_exceeded',
-        `Event ${event.id} was fanned out to ${total} endpoints, and a single replay may create at most ${MAX_REPLAY_FAN_OUT} deliveries. Replay to one endpoint at a time with 'endpoint_id'.`,
-        { limit: MAX_REPLAY_FAN_OUT, current: total, resource: 'replay_fan_out' },
+        `Event ${event.id} was routed to ${total} endpoints, and a single replay may create at most ${MAX_REPLAY_DELIVERIES} deliveries. Replay to one endpoint at a time with 'endpoint_id'.`,
+        { limit: MAX_REPLAY_DELIVERIES, current: total, resource: 'replay_deliveries' },
       );
     }
 
     if (page.rows.length === 0) {
       throw new AppError(
         'conflict',
-        `Event ${event.id} has no deliveries to replay. Either it matched no subscription, or the fan-out has not run yet - check 'status' on the event.`,
+        `Event ${event.id} has no deliveries to replay. Either it matched no subscription, or the routing has not run yet - check 'status' on the event.`,
         { event_id: event.id, event_status: event.status },
       );
     }

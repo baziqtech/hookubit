@@ -21,7 +21,7 @@ import { DeliveryStatus } from '@prisma/client';
  * An operator who genuinely needs to replay to more endpoints than this replays
  * per endpoint; the error says so and names the count.
  */
-export const MAX_REPLAY_FAN_OUT = 50;
+export const MAX_REPLAY_DELIVERIES = 50;
 
 /**
  * How many attempts `GET /deliveries/:id` inlines.

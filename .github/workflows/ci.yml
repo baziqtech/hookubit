@@ -2,8 +2,12 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, staging, dev]
   pull_request:
+    branches: [main, staging, dev]
+  # Lets a branch be re-verified without an empty commit - useful when a run
+  # failed on infrastructure rather than on the code.
+  workflow_dispatch:
 
 concurrency:
   group: ci-${{ github.ref }}
@@ -20,16 +24,34 @@ permissions:
   contents: read
 
 env:
-  # One place for the toolchain version. Keep it in step with the `go` directive
-  # in services/data-plane/go.mod (1.23) and with the builder image in
-  # deployments/docker/data-plane.Dockerfile.
-  GO_VERSION: '1.23'
+  # The Go version CI BUILDS and TESTS with. It is deliberately NOT the `go`
+  # directive in services/data-plane/go.mod, which is 1.21 and stays 1.21: that
+  # directive is a MINIMUM language version, not a pin. A module declaring 1.21
+  # compiles fine under 1.27, and raising it only excludes contributors on an
+  # older toolchain (it was tried, and broke local builds on 1.21.4). Keep this
+  # in step with the builder image in deployments/docker/data-plane.Dockerfile.
+  #
+  # Bumped 1.23 -> 1.27 because 1.23 is out of support and receives no further
+  # standard-library security fixes. Under the go1.23.12 that `1.23` resolved
+  # to, govulncheck found ten stdlib advisories reachable from this code
+  # (GO-2026-6218, -6090, -6089, -6088, -5972, -5856, -5039, -5037, -5026,
+  # -4971). Every one of them is fixed at 1.27.0-rc.3 or earlier - checked
+  # against the fixed-version ranges in vuln.go.dev, not guessed from the
+  # scanner's suggestion. When this is bumped again, pick a release that is
+  # still supported; sitting on an EOL branch is what produced that list.
+  GO_VERSION: '1.27'
   NODE_VERSION: '22'
-  PNPM_VERSION: '9'
+  # There is deliberately no PNPM_VERSION. pnpm/action-setup refuses to run when
+  # a `version:` is given here AND `packageManager` is set in the root
+  # package.json - "Multiple versions of pnpm specified" - which is what took
+  # every pnpm job down on the first run of this workflow. `packageManager`
+  # (pnpm@9.12.3) is the single source of truth; corepack in the Dockerfiles
+  # already reads it, so these steps pass no `version:` at all and there is
+  # exactly one file to edit when pnpm moves.
 
   # CI-only values. Real secrets never live in a workflow file.
-  DATABASE_URL: postgresql://webhook:webhook@localhost:5432/webhook_platform_test?schema=public
-  DIRECT_DATABASE_URL: postgresql://webhook:webhook@localhost:5432/webhook_platform_test?schema=public
+  DATABASE_URL: postgresql://hookubit:hookubit@localhost:5432/hookubit_test?schema=public
+  DIRECT_DATABASE_URL: postgresql://hookubit:hookubit@localhost:5432/hookubit_test?schema=public
   REDIS_URL: redis://localhost:6379/0
   JWT_SECRET: ci-only-jwt-secret-value-at-least-32-chars
   SESSION_SECRET: ci-only-session-secret-value-at-least-32-chars
@@ -39,23 +61,139 @@ jobs:
   data-plane:
     name: Go data plane
     runs-on: ubuntu-latest
+    # WHY THIS JOB HAS A DATABASE:
+    #
+    # internal/db, internal/ingest, internal/queue, internal/router and
+    # internal/worker carry integration tests that run the REAL SQL against a
+    # migrated schema. They `t.Skip` when DATABASE_URL is unset - but the
+    # workflow-level `env:` above sets it for every job, so on the first run of
+    # this workflow they did not skip: they dialled a database this job never
+    # started and the job went red on ten connection-refused failures.
+    #
+    # Deleting DATABASE_URL from this job would also make it green, and would be
+    # the wrong fix. Those tests are the only place drift between the
+    # hand-written pgx SQL and Prisma's schema is caught (the Go side never runs
+    # migrations - ADR-0002). Skipping them everywhere means the first time
+    # anyone learns a column was renamed is in production.
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: hookubit
+          POSTGRES_PASSWORD: hookubit
+          POSTGRES_DB: hookubit_test
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U hookubit"
+          --health-interval 5s --health-timeout 3s --health-retries 10
+      # Redis is the rate limiter's token store and nothing else. It is here so
+      # the live Lua tests run (REDIS_TEST_URL on the Test step); the delivery
+      # path must never depend on it, and the outage suite proves it does not.
+      redis:
+        image: redis:7-alpine
+        ports: ['6379:6379']
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s --health-timeout 3s --health-retries 10
+    env:
+      # Same database, two spellings. pgx forwards unknown URL query parameters
+      # to the server as runtime parameters, so Prisma's `?schema=public` makes
+      # every pgxpool.New in the test suite fail with
+      # `FATAL: unrecognized configuration parameter "schema"` - verified, not
+      # assumed. The Go side therefore overrides the workflow-level value with
+      # its own URL, and the migration step below restores Prisma's. The same
+      # split already exists in the root package.json (`test:db:migrate` uses
+      # ?schema=, `go:test:db` uses ?sslmode=).
+      DATABASE_URL: postgresql://hookubit:hookubit@localhost:5432/hookubit_test?sslmode=disable
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
           go-version: ${{ env.GO_VERSION }}
           cache-dependency-path: services/data-plane/go.sum
+      # Node is here only to run the migrations. Prisma owns all DDL; the Go
+      # tests read and write, they never migrate.
+      # No `version:` - it comes from `packageManager` in the root package.json.
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Apply migrations
+        env:
+          DATABASE_URL: postgresql://hookubit:hookubit@localhost:5432/hookubit_test?schema=public
+          DIRECT_DATABASE_URL: postgresql://hookubit:hookubit@localhost:5432/hookubit_test?schema=public
+        run: pnpm --filter @hookubit/control-api prisma:deploy
       - name: Verify modules are tidy
         working-directory: services/data-plane
         run: |
           go mod tidy
           git diff --exit-code go.mod go.sum
+      # gofmt is not cosmetic here: nothing else in this job catches it, and an
+      # unformatted file means the next contributor whose editor formats on
+      # save ships a diff touching lines they did not change. A rename that
+      # alters identifier length silently breaks struct-literal alignment,
+      # which is exactly how four files landed unformatted once.
+      - name: Format
+        working-directory: services/data-plane
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "These files are not gofmt-clean; run 'gofmt -w services/data-plane/':"
+            echo "$unformatted"
+            exit 1
+          fi
       - name: Vet
         working-directory: services/data-plane
         run: go vet ./...
+      # No -p 1 needed: each integration package now creates its own database
+      # from the migrated hookubit_test template, so packages cannot see each
+      # other's rows. Claim and ClaimOutbox are deliberately GLOBAL queries -
+      # they order the whole ready set with a LIMIT and no tenant predicate -
+      # so on a shared database one stray row silently changed which rows a
+      # batch contained. That was misread as flakiness three times.
       - name: Test
         working-directory: services/data-plane
+        env:
+          # Without this the three live Lua tests skip, and the script that
+          # actually runs against Redis is never exercised anywhere.
+          REDIS_TEST_URL: redis://localhost:6379/1
         run: go test -race -count=1 ./...
+
+      # The failure-injection suites prove ARCHITECTURE.md 57's twenty recovery
+      # scenarios, and every one of them is gated on DATABASE_URL through
+      # testsupport.Pool, which t.Skips rather than fails when it is unset.
+      # That is the right behaviour for a laptop with no database and the worst
+      # possible behaviour here: if this job ever loses its `services:` block or
+      # its DATABASE_URL, `go test ./...` stays GREEN while proving nothing
+      # about crash recovery, tenant fairness, SSRF or double-claim safety.
+      #
+      # So assert they RAN. A skip in these packages fails the build.
+      - name: Failure-injection suites must not skip
+        working-directory: services/data-plane
+        env:
+          REDIS_TEST_URL: redis://localhost:6379/1
+        run: |
+          set -euo pipefail
+          go test -count=1 -v ./internal/failure/... > failure.log 2>&1 || {
+            cat failure.log
+            exit 1
+          }
+          if grep -q -- '--- SKIP' failure.log; then
+            echo '::error::A failure-injection scenario was SKIPPED, so it proved nothing.'
+            grep -- '--- SKIP' failure.log
+            exit 1
+          fi
+          ran=$(grep -c '^=== RUN   TestScenario' failure.log || true)
+          echo "failure-injection scenarios executed: $ran"
+          # Twenty scenarios, several with more than one test. If this count
+          # collapses, a package stopped being compiled in or was renamed out of
+          # the glob, which no other check would notice.
+          if [ "$ran" -lt 20 ]; then
+            echo "::error::only $ran scenario tests ran; expected at least 20"
+            exit 1
+          fi
 
   control-plane:
     name: Control plane and dashboard
@@ -64,12 +202,12 @@ jobs:
       postgres:
         image: postgres:16-alpine
         env:
-          POSTGRES_USER: webhook
-          POSTGRES_PASSWORD: webhook
-          POSTGRES_DB: webhook_platform_test
+          POSTGRES_USER: hookubit
+          POSTGRES_PASSWORD: hookubit
+          POSTGRES_DB: hookubit_test
         ports: ['5432:5432']
         options: >-
-          --health-cmd "pg_isready -U webhook"
+          --health-cmd "pg_isready -U hookubit"
           --health-interval 5s --health-timeout 3s --health-retries 10
       redis:
         image: redis:7-alpine
@@ -79,22 +217,33 @@ jobs:
           --health-interval 5s --health-timeout 3s --health-retries 10
     steps:
       - uses: actions/checkout@v4
+      # No `version:` - it comes from `packageManager` in the root package.json.
       - uses: pnpm/action-setup@v4
-        with:
-          version: ${{ env.PNPM_VERSION }}
       - uses: actions/setup-node@v4
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       - name: Generate Prisma client
-        run: pnpm --filter @webhook/control-api prisma:generate
+        run: pnpm --filter @hookubit/control-api prisma:generate
       - name: Apply migrations
-        run: pnpm --filter @webhook/control-api prisma:deploy
+        run: pnpm --filter @hookubit/control-api prisma:deploy
       - name: Lint
         run: pnpm -r lint
       - name: Build
         run: pnpm -r build
+      # apps/docs/api is GENERATED from the control plane's OpenAPI document by
+      # the docs build that just ran. If that regeneration changed a committed
+      # page, the reference on the site had drifted from the code - a DTO
+      # decorator changed and nobody rebuilt the docs. Fail rather than ship a
+      # reference that disagrees with the product.
+      - name: Generated API reference is committed and current
+        run: |
+          if ! git diff --exit-code --stat -- apps/docs/api; then
+            echo "::error::apps/docs/api is stale relative to apps/control-api/openapi.json. Run 'pnpm docs:build' and commit the result."
+            exit 1
+          fi
+          echo "OK - the committed API reference matches the code"
       - name: Test
         run: pnpm -r test
 
@@ -105,17 +254,17 @@ jobs:
       postgres:
         image: postgres:16-alpine
         env:
-          POSTGRES_USER: webhook
-          POSTGRES_PASSWORD: webhook
-          POSTGRES_DB: webhook_platform_test
+          POSTGRES_USER: hookubit
+          POSTGRES_PASSWORD: hookubit
+          POSTGRES_DB: hookubit_test
         ports: ['5432:5432']
         options: >-
-          --health-cmd "pg_isready -U webhook"
+          --health-cmd "pg_isready -U hookubit"
           --health-interval 5s --health-timeout 3s --health-retries 10
     steps:
       - uses: actions/checkout@v4
+      # No `version:` - it comes from `packageManager` in the root package.json.
       - uses: pnpm/action-setup@v4
-        with: { version: '${{ env.PNPM_VERSION }}' }
       - uses: actions/setup-node@v4
         with: { node-version: '${{ env.NODE_VERSION }}', cache: pnpm }
       - run: pnpm install --frozen-lockfile
@@ -133,19 +282,31 @@ jobs:
       #
       #  `prisma migrate dev` "resolves" that drift by generating a migration
       #  that DROPS deliveries_event_endpoint_original_key - the ON CONFLICT
-      #  arbiter the router names when it materialises fan-out. Drop it and a
+      #  arbiter the router names when it materialises routing. Drop it and a
       #  router that is re-run after a crash re-delivers every event to every
       #  subscriber. The check below fails on any identifier that is NOT in the
       #  fixture, which is the drift that actually means something.
       # ══════════════════════════════════════════════════════════════════
       - name: Migrations match schema.prisma (except the documented, inexpressible drift)
         working-directory: apps/control-api
+        env:
+          # libpq rejects Prisma's ?schema= parameter, so psql gets its own URL.
+          PGURL: postgresql://hookubit:hookubit@localhost:5432/hookubit_test
         run: |
           set -euo pipefail
+          # The shadow database must NOT be the job's own database. `migrate
+          # diff --from-migrations` applies every migration to the shadow as
+          # scratch and leaves the tables behind without a _prisma_migrations
+          # row - so the next step's `migrate deploy` against the same database
+          # met a non-empty schema with no migration history and refused with
+          # P3005 "The database schema is not empty". That failed this job on
+          # every run from the day it was written. The service user owns the
+          # container, so it may create a sibling database for the diff.
+          psql "$PGURL" -v ON_ERROR_STOP=1 -c 'CREATE DATABASE hookubit_shadow'
           npx prisma migrate diff \
             --from-migrations prisma/migrations \
             --to-schema-datamodel prisma/schema.prisma \
-            --shadow-database-url "$DATABASE_URL" \
+            --shadow-database-url "postgresql://hookubit:hookubit@localhost:5432/hookubit_shadow?schema=public" \
             --script > /tmp/drift.sql
 
           echo "--- raw drift script ---"
@@ -170,7 +331,7 @@ jobs:
           done < /tmp/drift.stmts
 
           if [ "$unexpected" -ne 0 ]; then
-            echo "::error::schema.prisma and prisma/migrations genuinely disagree. Write a migration for the difference above. Do NOT run \`prisma migrate dev\` - see deployments/ci/expected-schema-drift.txt, it will drop the fan-out idempotency index."
+            echo "::error::schema.prisma and prisma/migrations genuinely disagree. Write a migration for the difference above. Do NOT run \`prisma migrate dev\` - see deployments/ci/expected-schema-drift.txt, it will drop the routing idempotency index."
             exit 1
           fi
           echo "OK - drift is limited to the documented inexpressible indexes"
@@ -183,7 +344,7 @@ jobs:
         working-directory: apps/control-api
         env:
           # libpq rejects Prisma's ?schema= parameter, so psql gets its own URL.
-          PGURL: postgresql://webhook:webhook@localhost:5432/webhook_platform_test
+          PGURL: postgresql://hookubit:hookubit@localhost:5432/hookubit_test
         run: |
           set -euo pipefail
           npx prisma migrate deploy
@@ -197,7 +358,7 @@ jobs:
             fi
           done
           if [ "$missing" -ne 0 ]; then
-            echo "::error::deliveries_event_endpoint_original_key is the ON CONFLICT arbiter the router names when it materialises fan-out. Without it, a router re-run after a crash delivers every event to every subscriber a second time. Restore the index in a new migration; do not regenerate the history."
+            echo "::error::deliveries_event_endpoint_original_key is the ON CONFLICT arbiter the router names when it materialises routing. Without it, a router re-run after a crash delivers every event to every subscriber a second time. Restore the index in a new migration; do not regenerate the history."
             exit 1
           fi
 
@@ -213,6 +374,30 @@ jobs:
       - name: Egress / SSRF suite
         working-directory: services/data-plane
         run: go test -race -count=1 -v ./internal/egress/ ./internal/signing/
+      # govulncheck reports only what is REACHABLE from this code, and it
+      # reports against the toolchain that built it - so the GO_VERSION at the
+      # top of this file is half of this check. Ten standard-library advisories
+      # were found under go1.23.12 and are cleared by the 1.27 bump.
+      #
+      # TWO ARE NOT, and no toolchain bump can reach them, because they are in
+      # modules rather than the standard library:
+      #
+      #   GO-2026-5004  github.com/jackc/pgx/v5 v5.7.1 -> v5.9.2
+      #                 SQL injection via placeholder confusion with dollar-
+      #                 quoted string literals. Reachable:
+      #                 queue.PostgresQueue.Renew -> pgxpool.Pool.Query ->
+      #                 sanitize.SanitizeSQL.
+      #   GO-2026-5970  golang.org/x/text v0.18.0 -> v0.39.0
+      #                 Infinite loop on invalid input, reachable through
+      #                 pgxpool.NewWithConfig -> norm.Form.
+      #
+      # Both fixed versions declare `go 1.25.0` in their own go.mod, so taking
+      # them forces the data plane's module minimum from 1.21 to 1.25 - the
+      # exact change go.mod's header argues against, because it breaks anyone
+      # building on an older toolchain. That is a call for the module's owner,
+      # not for CI: see deployments/HANDOFF.md, "Outstanding: Go module
+      # advisories". Until it is made, this step stays RED and it is telling
+      # the truth. Do not add an ignore list and do not make it non-blocking.
       - name: Vulnerability scan
         working-directory: services/data-plane
         run: |
@@ -229,8 +414,8 @@ jobs:
           # credential that was committed and then "removed" in a later commit
           # would pass. The whole point of scanning is to find that.
           fetch-depth: 0
+      # No `version:` - it comes from `packageManager` in the root package.json.
       - uses: pnpm/action-setup@v4
-        with: { version: '${{ env.PNPM_VERSION }}' }
       - uses: actions/setup-node@v4
         with: { node-version: '${{ env.NODE_VERSION }}', cache: pnpm }
       - run: pnpm install --frozen-lockfile
@@ -327,6 +512,10 @@ jobs:
         run: gitleaks detect --source . --config .github/gitleaks.toml --no-git --no-banner --redact --verbose
 
   images:
+    # Skipped on a direct push to dev only. Every PR builds them, so nothing
+    # reaches staging or main without the Dockerfiles having been exercised.
+    if: >-
+      github.event_name != 'push' || github.ref != 'refs/heads/dev'
     name: Container images
     runs-on: ubuntu-latest
     strategy:
@@ -392,8 +581,8 @@ jobs:
       K8S_VERSION: '1.29.0'
       # Lint values. Never real credentials - these only have to satisfy the
       # schema so the templates render.
-      CI_DB_URL: 'postgresql://ci:ci@postgres.invalid:6432/webhook_platform?schema=public'
-      CI_DIRECT_DB_URL: 'postgresql://ci:ci@postgres.invalid:5432/webhook_platform?schema=public'
+      CI_DB_URL: 'postgresql://ci:ci@postgres.invalid:6432/hookubit?schema=public'
+      CI_DIRECT_DB_URL: 'postgresql://ci:ci@postgres.invalid:5432/hookubit?schema=public'
     steps:
       - uses: actions/checkout@v4
       - uses: azure/setup-helm@v4
@@ -418,10 +607,11 @@ jobs:
       - name: Chart refuses to install without externalDatabase.url
         run: |
           set +e
-          out=$(helm lint deployments/helm/webhook-platform \
+          out=$(helm lint deployments/helm/hookubit \
             --set secrets.jwtSecret=ci \
             --set secrets.sessionSecret=ci \
-            --set secrets.encryptionKey=ci 2>&1)
+            --set secrets.encryptionKey=ci \
+            --set secrets.smtpUrl=smtp://ci:ci@mail.invalid:587 2>&1)
           rc=$?
           set -e
           echo "$out"
@@ -437,25 +627,27 @@ jobs:
 
       - name: helm lint
         run: |
-          helm lint deployments/helm/webhook-platform \
+          helm lint deployments/helm/hookubit \
             --set externalDatabase.url="$CI_DB_URL" \
             --set externalDatabase.directUrl="$CI_DIRECT_DB_URL" \
             --set secrets.jwtSecret=ci \
             --set secrets.sessionSecret=ci \
-            --set secrets.encryptionKey=ci
+            --set secrets.encryptionKey=ci \
+            --set secrets.smtpUrl=smtp://ci:ci@mail.invalid:587
 
       - name: Render chart and validate against Kubernetes schemas
         run: |
           # Render with every optional feature ON, because /tmp/rendered.yaml is
           # also what the "no bundled database" guard greps.
-          helm template ci deployments/helm/webhook-platform \
-            --namespace webhook-platform \
+          helm template ci deployments/helm/hookubit \
+            --namespace HookuBit \
             --set externalDatabase.url="$CI_DB_URL" \
             --set externalDatabase.directUrl="$CI_DIRECT_DB_URL" \
             --set externalRedis.url="rediss://redis.invalid:6379/0" \
             --set secrets.jwtSecret=ci \
             --set secrets.sessionSecret=ci \
             --set secrets.encryptionKey=ci \
+            --set secrets.smtpUrl=smtp://ci:ci@mail.invalid:587 \
             --set ingress.enabled=true \
             --set migrations.enabled=true > /tmp/rendered.yaml
           kubeconform -strict -summary -ignore-missing-schemas \
@@ -466,6 +658,77 @@ jobs:
           kubeconform -strict -summary -ignore-missing-schemas \
             -kubernetes-version "$K8S_VERSION" deployments/kubernetes/*.yaml
 
+      # The worker decrypts endpoint signing secrets with ENCRYPTION_KEY and
+      # exits at startup without it. The data-plane Secret once omitted it on
+      # the strength of a comment, and every worker pod crash-looped under the
+      # chart's defaults. The least-privilege half of the same Secret must hold
+      # too: no session-forgery key next to the process that talks to customer
+      # URLs. The raw manifests get the same two checks.
+      - name: Data-plane Secret carries the decryption key and nothing it must not
+        run: |
+          set -euo pipefail
+          helm template ci deployments/helm/hookubit \
+            --namespace HookuBit \
+            --set externalDatabase.url="$CI_DB_URL" \
+            --set secrets.jwtSecret=ci \
+            --set secrets.sessionSecret=ci \
+            --set secrets.encryptionKey=ci-enc \
+            --set secrets.smtpUrl=smtp://ci:ci@mail.invalid:587 \
+            --show-only templates/secret.yaml > /tmp/secrets.yaml
+          # The Secret whose name ends in -data-plane-secrets, as one block.
+          dp=$(awk '/-data-plane-secrets$/{f=1} /^---/{f=0} f' /tmp/secrets.yaml)
+          [ -n "$dp" ] || { echo "::error::No data-plane Secret rendered with dataPlane.separateSecret at its default."; exit 1; }
+          echo "$dp" | grep -qE '^\s*ENCRYPTION_KEY: "ci-enc"$' || { echo "::error::The data-plane Secret does not carry ENCRYPTION_KEY - every worker pod would exit with 'build decryption keyring: ENCRYPTION_KEY is required'."; exit 1; }
+          for k in JWT_SECRET SESSION_SECRET SMTP_URL; do
+            if echo "$dp" | grep -qE "^\s*$k:"; then echo "::error::The data-plane Secret carries $k. The worker must never hold it."; exit 1; fi
+          done
+          # Raw manifests: the data-plane Secret template must list the key too.
+          dpraw=$(awk '/name: hookubit-data-plane$/{f=1} /^---/{f=0} f' deployments/kubernetes/02-secret.template.yaml)
+          echo "$dpraw" | grep -qE "^\s*ENCRYPTION_KEY:" || { echo "::error::deployments/kubernetes/02-secret.template.yaml: hookubit-data-plane has no ENCRYPTION_KEY."; exit 1; }
+          for k in JWT_SECRET SESSION_SECRET SMTP_URL; do
+            if echo "$dpraw" | grep -qE "^\s*$k:"; then echo "::error::hookubit-data-plane carries $k."; exit 1; fi
+          done
+          echo "OK - data plane gets ENCRYPTION_KEY and none of JWT_SECRET, SESSION_SECRET, SMTP_URL"
+
+      # Both deployments sit behind a proxy (the chart's Ingress, 41-ingress.yaml)
+      # so both must tell the processes so. At the process default of 0, every
+      # request is attributed to the proxy's own address and per-IP rate
+      # limiting becomes one bucket for the whole internet.
+      - name: Proxy hop counts are set for both planes
+        run: |
+          set -euo pipefail
+          for k in TRUST_PROXY_HOPS INGEST_TRUSTED_PROXY_HOPS; do
+            grep -qE "^\s*$k: \"1\"$" /tmp/rendered.yaml || { echo "::error::Rendered chart does not set $k (ingress.trustedProxyHops)."; exit 1; }
+            grep -qE "^\s*$k: '1'$" deployments/kubernetes/01-configmap.yaml || { echo "::error::01-configmap.yaml does not set $k."; exit 1; }
+          done
+          echo "OK - both planes are told about the proxy in front of them"
+
+      # docker-compose.prod.yml hard-sets APP_ENV=production, and in production
+      # the control API refuses to boot without SMTP_URL. The file once did not
+      # pass SMTP_URL at all, so the documented install crash-looped. `:?` makes
+      # `compose up` fail with a readable message instead; this proves both
+      # halves - refuses without, renders with.
+      - name: Compose production file refuses without mail and renders with it
+        env:
+          DATABASE_URL: postgresql://u:p@db.invalid:5432/hookubit
+          ENCRYPTION_KEY: ci
+          JWT_SECRET: ci
+          SESSION_SECRET: ci
+          DASHBOARD_URL: https://webhooks.invalid
+          MAIL_FROM: HookuBit <no-reply@invalid>
+        run: |
+          set -euo pipefail
+          f=deployments/compose/docker-compose.prod.yml
+          if docker compose -f "$f" config > /dev/null 2>/tmp/compose-err.txt; then
+            echo "::error::$f rendered with SMTP_URL unset. APP_ENV=production there, and the control API refuses to boot without a mail transport - the file must refuse too."; exit 1
+          fi
+          grep -q "SMTP_URL is required" /tmp/compose-err.txt || { echo "::error::compose failed for a reason other than the SMTP_URL guard:"; cat /tmp/compose-err.txt; exit 1; }
+          SMTP_URL=smtp://ci:ci@mail.invalid:587 docker compose -f "$f" config > /tmp/compose.yaml
+          for k in SMTP_URL MAIL_FROM DASHBOARD_URL; do
+            grep -qE "^\s*$k:" /tmp/compose.yaml || { echo "::error::control-api is not given $k."; exit 1; }
+          done
+          echo "OK - compose production file guards SMTP_URL and passes mail configuration"
+
       # Optional configuration must be ABSENT, not empty. envFrom projects every
       # key in a Secret as a SET environment variable, and the control API's env
       # schema takes an optional URL - which accepts undefined and REJECTS "".
@@ -474,13 +737,14 @@ jobs:
       - name: Optional keys are omitted, not emptied
         run: |
           set -euo pipefail
-          helm template ci deployments/helm/webhook-platform \
-            --namespace webhook-platform \
+          helm template ci deployments/helm/hookubit \
+            --namespace HookuBit \
             --set externalDatabase.url="$CI_DB_URL" \
             --set externalDatabase.directUrl="$CI_DIRECT_DB_URL" \
             --set secrets.jwtSecret=ci \
             --set secrets.sessionSecret=ci \
-            --set secrets.encryptionKey=ci > /tmp/rendered-no-redis.yaml
+            --set secrets.encryptionKey=ci \
+            --set secrets.smtpUrl=smtp://ci:ci@mail.invalid:587 > /tmp/rendered-no-redis.yaml
           if grep -nE '^[[:space:]]*(REDIS_URL|S3_ACCESS_KEY|S3_SECRET_KEY):[[:space:]]*("")?[[:space:]]*$' /tmp/rendered-no-redis.yaml; then
             echo "::error::An optional key rendered with an empty value. Wrap it in an {{- if }} so unset means unset."
             exit 1
@@ -527,7 +791,7 @@ jobs:
 
           # 4. Any chart dependency at all. A subchart is the fastest way to
           #    lose delivery history to a `helm uninstall`.
-          if grep -nE '^[[:space:]]*dependencies:' deployments/helm/webhook-platform/Chart.yaml; then
+          if grep -nE '^[[:space:]]*dependencies:' deployments/helm/hookubit/Chart.yaml; then
             echo "::error::Chart.yaml declares dependencies. This chart bundles nothing - least of all a database."
             fail=1
           fi
@@ -569,3 +833,39 @@ jobs:
 
           [ "$fail" -eq 0 ] || exit 1
           echo "OK - default-deny is present and the private ranges are still excluded"
+
+  # One stable check for branch protection to require.
+  #
+  # The matrix jobs produce names that vary with their inputs - "Container
+  # images (control-api, deployments/docker/control-api.Dockerfile, runtime)" -
+  # so requiring them individually means editing the protection rule every time
+  # a matrix entry changes, and a renamed entry silently stops being required.
+  # This job depends on all of them, so protection needs exactly one name and
+  # adding a job to the matrix is automatically covered.
+  #
+  # `if: always()` plus an explicit result check is deliberate: without it a
+  # SKIPPED dependency (images is skipped on a direct push to dev) would make
+  # this job skip too, and a skipped required check is reported as passing.
+  ci-success:
+    name: CI success
+    runs-on: ubuntu-latest
+    needs:
+      - data-plane
+      - control-plane
+      - schema-drift
+      - security
+      - supply-chain
+      - images
+      - dockerfile-lint
+      - manifests
+    if: always()
+    steps:
+      - name: Verify no dependency failed or was cancelled
+        run: |
+          echo "results: ${{ join(needs.*.result, ', ') }}"
+          if [ -n "${{ join(needs.*.result, ' ') }}" ] && \
+             echo "${{ join(needs.*.result, ' ') }}" | grep -qE 'failure|cancelled'; then
+            echo "::error::at least one CI job failed or was cancelled"
+            exit 1
+          fi
+          echo "all required jobs succeeded or were intentionally skipped"

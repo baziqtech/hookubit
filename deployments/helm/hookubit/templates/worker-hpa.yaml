@@ -1,0 +1,60 @@
+{{- if .Values.dataPlane.worker.autoscaling.enabled }}
+{{/*
+CPU and memory are proxies, not the signal. Workers are I/O bound - most of a
+worker's life is waiting on a customer endpoint - so queue depth (delivery rows
+ready to claim, on /metrics) via prometheus-adapter or KEDA is the correct
+trigger. This is what works with nothing extra installed.
+
+maxReplicas is a DATABASE ceiling, not a CPU one. Each worker pod opens
+externalDatabase.maxConnections and calls pool.Ping in db.Open at startup; a pod
+that cannot get its connections exits 1. So a maxReplicas the database cannot
+serve does not buy throughput - it converts a traffic spike into
+CrashLoopBackOff. Before raising it: (maxReplicas + ingest + router + scheduler
+replicas) x maxConnections, plus the control API's Prisma pool, must stay under
+`max_connections` and PgBouncer's `default_pool_size`.
+
+There is deliberately NO memory metric. Nothing has measured this workload's
+memory profile; an unmeasured memory target scales on Go heap retention rather
+than on load, adding pods that do not help and pinning pods that are idle.
+*/}}
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: {{ include "hookubit.fullname" . }}-worker
+  labels:
+    {{- include "hookubit.labels" . | nindent 4 }}
+    app.kubernetes.io/component: worker
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: {{ include "hookubit.fullname" . }}-worker
+  minReplicas: {{ .Values.dataPlane.worker.autoscaling.minReplicas }}
+  maxReplicas: {{ .Values.dataPlane.worker.autoscaling.maxReplicas }}
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: {{ .Values.dataPlane.worker.autoscaling.targetCPUUtilizationPercentage }}
+  behavior:
+    scaleUp:
+      stabilizationWindowSeconds: 30
+      policies:
+        - type: Percent
+          value: 100
+          periodSeconds: 30
+        - type: Pods
+          value: 4
+          periodSeconds: 30
+      selectPolicy: Max
+    scaleDown:
+      # Slow. Every scale-down evicts pods that are mid-delivery, and the queue
+      # is the thing being drained.
+      stabilizationWindowSeconds: 300
+      policies:
+        - type: Pods
+          value: 1
+          periodSeconds: 60
+{{- end }}

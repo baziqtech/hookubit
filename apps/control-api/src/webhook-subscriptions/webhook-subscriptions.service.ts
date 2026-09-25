@@ -195,7 +195,7 @@ export class WebhookSubscriptionsService {
    * members module's last-owner bug had; see the `TenantTransactionRunner`
    * docblock.
    *
-   * The ceiling is not cosmetic here. Subscriptions are the fan-out multiplier:
+   * The ceiling is not cosmetic here. Subscriptions are the delivery multiplier:
    * one event becomes one `deliveries` row PER matching subscription, each with
    * its own retry chain. An unbounded subscription count is an unbounded
    * amplification factor on every event the project ingests.

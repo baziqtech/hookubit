@@ -1,0 +1,107 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "hookubit.fullname" . }}-control-api
+  labels:
+    {{- include "hookubit.labels" . | nindent 4 }}
+    app.kubernetes.io/component: control-api
+spec:
+  replicas: {{ .Values.controlApi.replicaCount }}
+  revisionHistoryLimit: 5
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  selector:
+    matchLabels:
+      {{- include "hookubit.selectorLabels" (dict "ctx" . "component" "control-api") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "hookubit.labels" . | nindent 8 }}
+        app.kubernetes.io/component: control-api
+      annotations:
+        # Roll the pods when configuration changes, so a value edit actually
+        # takes effect instead of waiting for the next unrelated deploy.
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        checksum/secret: {{ include (print $.Template.BasePath "/secret.yaml") . | sha256sum }}
+    spec:
+      serviceAccountName: {{ include "hookubit.serviceAccountName" . }}
+      automountServiceAccountToken: false
+      {{- with .Values.global.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      terminationGracePeriodSeconds: 45
+      securityContext:
+        {{- include "hookubit.podSecurityContext" (dict "uid" 1000) | nindent 8 }}
+        fsGroup: 1000
+      containers:
+        - name: control-api
+          image: {{ include "hookubit.image" (dict "ctx" . "image" .Values.controlApi.image "defaultTag" .Chart.AppVersion) }}
+          imagePullPolicy: {{ .Values.controlApi.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: 3000
+              protocol: TCP
+          envFrom:
+            {{- include "hookubit.envFrom" . | nindent 12 }}
+          # Liveness must never depend on PostgreSQL (ARCHITECTURE.md 46): a
+          # database blip that restarts every pod turns a recoverable incident
+          # into an outage.
+          livenessProbe:
+            httpGet: { path: /health/live, port: http }
+            initialDelaySeconds: 10
+            periodSeconds: 20
+            timeoutSeconds: 3
+            failureThreshold: 3
+          readinessProbe:
+            httpGet: { path: /health/ready, port: http }
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          startupProbe:
+            httpGet: { path: /health/live, port: http }
+            periodSeconds: 5
+            failureThreshold: 24
+          resources:
+            {{- toYaml .Values.controlApi.resources | nindent 12 }}
+          securityContext:
+            {{- include "hookubit.containerSecurityContext" . | nindent 12 }}
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}
+      {{- with (.Values.controlApi.nodeSelector | default .Values.global.nodeSelector) }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with (.Values.controlApi.tolerations | default .Values.global.tolerations) }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.controlApi.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "hookubit.fullname" . }}-control-api
+  labels:
+    {{- include "hookubit.labels" . | nindent 4 }}
+    app.kubernetes.io/component: control-api
+spec:
+  type: ClusterIP
+  ports:
+    - name: http
+      port: 3000
+      targetPort: http
+      protocol: TCP
+  selector:
+    {{- include "hookubit.selectorLabels" (dict "ctx" . "component" "control-api") | nindent 4 }}

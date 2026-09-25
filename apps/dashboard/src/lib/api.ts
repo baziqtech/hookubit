@@ -3,37 +3,114 @@
  *
  * Everything above this file — hooks, features, pages — calls `api.get/post/…`
  * with a path from docs/API.md and never knows which transport served it.
- * Today that is the in-memory mock, because @webhook/control-api is being
+ * Today that is the in-memory mock, because @hookubit/control-api is being
  * built in parallel; tomorrow it is `fetch`.
  *
  * TO SWAP IN THE REAL CLIENT: set `VITE_API_TRANSPORT=http` (or flip the
  * default in `resolveTransport` below) and delete `src/lib/mock/`. Nothing
- * else in the app changes. Request and response types come from the generated
- * OpenAPI client at that point (ARCHITECTURE.md 7); `src/types/api.ts` is the
- * temporary hand-written stand-in and goes with it.
+ * else in the app changes. Request and response types — the error envelope
+ * included — come from the generated OpenAPI document (ARCHITECTURE.md 7);
+ * `src/types/api.ts` only gives them domain names.
  */
 import { mockRequest, MockHttpError } from './mock/server';
-import type { ApiErrorCode } from '../types/api';
+import { isApiErrorCode } from '../types/api';
+import type { ApiErrorCode, ApiErrorDetails, ApiErrorPayload } from '../types/api';
 
 export interface ApiError {
-  code: ApiErrorCode | string;
+  /**
+   * A CLOSED union, not `string`.
+   *
+   * It used to be `ApiErrorCode | string`, which collapses to `string` and made
+   * every consumer's code check a comparison against a free-form value: a typo
+   * compiled, and a code the API had added but the UI did not handle fell
+   * through to a generic "Request failed" at runtime. Now the document declares
+   * the enum, `normaliseApiError` narrows to it, and an unhandled code is a
+   * compile error in `ErrorState`'s title map.
+   */
+  code: ApiErrorCode;
   message: string;
   /**
-   * Structured context the error envelope carries. This is where the throttle
-   * guard puts `retry_after_seconds` and where a resource ceiling puts
-   * `limit`/`current` — the two facts that let the UI tell "slow down" apart
-   * from "you have hit a limit". See `src/lib/api-errors.ts`.
+   * Every message the server sent, in order.
+   *
+   * A 400 from the global `ValidationPipe` carries an ARRAY at `error.message`
+   * — one entry per rejected property, each reading `"<property>: <reason>"`.
+   * That array is the only place the API says WHICH field it refused, and
+   * joining it into one sentence throws that away: a form then has to show a
+   * paragraph next to the submit button instead of an error under the input
+   * that caused it. `message` stays a string so every existing caller keeps
+   * working; `messages` is the structured original.
    */
-  details?: Record<string, unknown>;
+  messages?: string[];
+  /**
+   * Structured context, as the document declares it: `retry_after_seconds` from
+   * the throttle guard, `{ limit, current, resource }` from a resource ceiling
+   * — the facts that let the UI tell "slow down" apart from "you have hit a
+   * limit". Those four are typed; the schema stays open, so anything else is
+   * `unknown`. See `src/lib/api-errors.ts`.
+   */
+  details?: ApiErrorDetails;
   request_id?: string;
 }
 
+/**
+ * An error envelope as it arrives, before normalisation — `message` may still
+ * be the ValidationPipe's array. `ApiError` is the form every caller sees.
+ *
+ * `request_id` is optional HERE ONLY, and that is not a disagreement with the
+ * document, which requires it. This type also covers the envelope the client
+ * SYNTHESISES when a response body could not be parsed at all — a proxy's HTML
+ * 502 — where there is no id to quote because the API never answered.
+ */
+export type RawApiError = Omit<ApiErrorPayload, 'request_id'> &
+  Partial<Pick<ApiErrorPayload, 'request_id'>>;
+
+/**
+ * One shape out, whatever the server sent in.
+ *
+ * Both transports run this, so no caller can accidentally depend on a
+ * `message` that is sometimes an array — which would render as
+ * `"url: loopback address,name: too long"` in a UI that assumed a sentence.
+ */
+export function normaliseApiError(raw: unknown): ApiError {
+  const source = (typeof raw === 'object' && raw !== null ? raw : {}) as {
+    code?: unknown;
+    message?: unknown;
+    details?: unknown;
+    request_id?: unknown;
+  };
+
+  const messages = Array.isArray(source.message)
+    ? source.message.filter((entry): entry is string => typeof entry === 'string')
+    : typeof source.message === 'string'
+      ? [source.message]
+      : [];
+
+  return {
+    // An unrecognised code becomes `internal_error`. Codes are additive on the
+    // server, so a client one version behind WILL meet one it does not know;
+    // folding it into the catch-all is honest, and `API_ERROR_CODES` makes
+    // adding the real handling a compile error rather than a memory.
+    code: isApiErrorCode(source.code) ? source.code : 'internal_error',
+    message: messages.join(' ') || 'An unexpected error occurred.',
+    messages,
+    details:
+      typeof source.details === 'object' && source.details !== null
+        ? (source.details as ApiErrorDetails)
+        : undefined,
+    request_id: typeof source.request_id === 'string' ? source.request_id : undefined,
+  };
+}
+
 export class ApiRequestError extends Error {
+  readonly body: ApiError;
+
   constructor(
     readonly status: number,
-    readonly body: ApiError,
+    body: RawApiError,
   ) {
-    super(body.message);
+    const normalised = normaliseApiError(body);
+    super(normalised.message);
+    this.body = normalised;
     this.name = 'ApiRequestError';
   }
 
@@ -56,10 +133,10 @@ async function httpTransport<T>(method: string, path: string, body?: unknown): P
   });
 
   if (!response.ok) {
-    const payload = (await response.json().catch(() => null)) as { error?: ApiError } | null;
+    const payload = (await response.json().catch(() => null)) as { error?: unknown } | null;
     throw new ApiRequestError(
       response.status,
-      payload?.error ?? { code: 'internal_error', message: response.statusText },
+      normaliseApiError(payload?.error ?? { code: 'internal_error', message: response.statusText }),
     );
   }
   if (response.status === 204) return undefined as T;
@@ -73,7 +150,7 @@ async function mockTransport<T>(method: string, path: string, body?: unknown): P
     // Normalise to the same error type the HTTP transport throws, so no caller
     // can accidentally depend on mock-specific failure shapes.
     if (error instanceof MockHttpError) {
-      throw new ApiRequestError(error.status, error.body.error);
+      throw new ApiRequestError(error.status, normaliseApiError(error.body.error));
     }
     throw error;
   }

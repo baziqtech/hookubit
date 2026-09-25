@@ -3,9 +3,12 @@ import { ConfigService } from '@nestjs/config';
 import { Environment, Prisma, Project, ProjectStatus } from '@prisma/client';
 import { AuditService, RequestContext, ScopedUpdateInput, TenantScopeFactory } from '../authz';
 import { AppError } from '../common/errors';
+import { normaliseAllowedIps } from './allowed-ips';
+import { ProjectTemplateService, type TemplateResult } from './project-template.service';
 import { newId } from '../common/ids';
 import {
   CreateProjectDto,
+  CreatedProjectDto,
   ListProjectsQueryDto,
   ProjectDto,
   ProjectListDto,
@@ -52,6 +55,7 @@ export class ProjectsService {
     private readonly scopes: TenantScopeFactory,
     private readonly audit: AuditService,
     private readonly config: ConfigService,
+    private readonly templates: ProjectTemplateService,
   ) {}
 
   /**
@@ -93,7 +97,7 @@ export class ProjectsService {
     );
   }
 
-  async create(context: RequestContext, dto: CreateProjectDto): Promise<ProjectDto> {
+  async create(context: RequestContext, dto: CreateProjectDto): Promise<CreatedProjectDto> {
     const name = dto.name.trim();
     const slug = dto.slug ?? slugFromName(name);
     if (!slug) {
@@ -113,13 +117,41 @@ export class ProjectsService {
       throw this.translateSlugCollision(err, slug);
     }
 
+    /*
+     * The copy runs AFTER the project exists and is NOT rolled back with it.
+     *
+     * A project that exists with nothing in it is a recoverable state — copy
+     * again, or start from empty. A create that rolled back because one
+     * subscription pointed at a deleted endpoint would lose the project and
+     * explain nothing. So a copy failure is recorded and reported; the project
+     * survives, and `copied` says what actually landed.
+     */
+    let copied: TemplateResult | null = null;
+    let copyError: string | null = null;
+    if (dto.copy_from_project_id) {
+      try {
+        copied = await this.templates.copy(context, dto.copy_from_project_id, project.id);
+      } catch (err) {
+        copyError = err instanceof Error ? err.message : 'The copy failed.';
+        this.logger.error(`Copying into ${project.id} failed: ${copyError}`);
+      }
+    }
+
     await this.audit.recordFor(context, {
       action: 'project.created',
       resourceType: 'project',
       resourceId: project.id,
-      metadata: { name, slug, environment },
+      metadata: {
+        name,
+        slug,
+        environment,
+        ...(dto.copy_from_project_id
+          ? { copied_from: dto.copy_from_project_id, copied: copied ?? 'failed' }
+          : {}),
+      },
     });
-    return toProjectDto(project);
+
+    return { ...toProjectDto(project), copied, copy_error: copyError };
   }
 
   async update(
@@ -130,8 +162,9 @@ export class ProjectsService {
     ProjectsService.assertEnvironmentNotSupplied(dto);
     ProjectsService.assertStatusNotSupplied(dto);
 
-    // Built field by field rather than spread, so a property that is not name
-    // or slug cannot reach the database even if it survives validation.
+    // Built field by field rather than spread, so a property that is not one
+    // of the three writable ones cannot reach the database even if it survives
+    // validation.
     const data: ProjectUpdate = {};
     const changed: Record<string, unknown> = {};
     if (dto.name !== undefined) {
@@ -142,8 +175,30 @@ export class ProjectsService {
       data.slug = dto.slug;
       changed.slug = dto.slug;
     }
+    if (dto.allowed_ips !== undefined) {
+      // REPLACES the list. A merge would make removing an address impossible
+      // through this route, and an allowlist you cannot shrink is not a
+      // security control.
+      data.allowedIps = normaliseAllowedIps(dto.allowed_ips);
+      /*
+       * The audit entry records the COUNT and whether the list went from empty
+       * to non-empty, not the addresses.
+       *
+       * The transition is the event worth being able to find later: an empty
+       * list accepts everything, so adding the first entry is the moment every
+       * other address in the world started being refused — including, quite
+       * often, the customer's own second service. The addresses themselves are
+       * on the project and do not need a second copy in a table with a longer
+       * retention.
+       */
+      changed.allowed_ips_count = data.allowedIps.length;
+      changed.allowed_ips_now_enforcing = data.allowedIps.length > 0;
+    }
     if (Object.keys(data).length === 0) {
-      throw new AppError('invalid_request', 'Supply at least one of "name" or "slug".');
+      throw new AppError(
+        'invalid_request',
+        'Supply at least one of "name", "slug" or "allowed_ips".',
+      );
     }
 
     let project: Project;

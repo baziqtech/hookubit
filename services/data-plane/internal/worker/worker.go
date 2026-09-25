@@ -10,8 +10,10 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/shaq/webhook-platform/services/data-plane/internal/egress"
-	"github.com/shaq/webhook-platform/services/data-plane/internal/queue"
+	"github.com/shaq/hookubit/services/data-plane/internal/egress"
+	"github.com/shaq/hookubit/services/data-plane/internal/metrics"
+	"github.com/shaq/hookubit/services/data-plane/internal/payloadstore"
+	"github.com/shaq/hookubit/services/data-plane/internal/queue"
 )
 
 // DrainTimeout is how long in-flight attempts are given to finish on shutdown
@@ -24,6 +26,19 @@ const DrainTimeout = 15 * time.Second
 // ledger. The egress client already caps what is read from the wire; this caps
 // what is kept forever.
 const DefaultMaxStoredResponseBytes = 8 << 10
+
+// occupancySampleInterval is how often the concurrency gauges are refreshed.
+//
+// A constant rather than a knob, for the same reason queueDepthInterval is one:
+// the cost is a handful of mutex acquisitions and is the same for every
+// deployment, and five seconds is well inside any useful scrape interval while
+// still being short enough to catch the burst the gauges exist to show.
+//
+// It is sampled on a ticker rather than written on the acquire path on purpose.
+// Setting a labelled gauge is a map lookup plus an atomic; doing that four
+// times per acquire and four times per release puts metric bookkeeping on the
+// hottest path in the process to gain resolution nothing scrapes.
+const occupancySampleInterval = 5 * time.Second
 
 // HTTPDoer is the egress client, as an interface so the delivery path can be
 // tested against an httptest server without the real transport, and so a future
@@ -42,6 +57,12 @@ type Options struct {
 	Client  HTTPDoer
 	Keyring *Keyring
 
+	// Payloads reads offloaded payloads (ARCHITECTURE.md 32). Nil is legal and
+	// means this deployment stores every payload inline; a delivery that then
+	// meets a payload_location DEFERS rather than failing, because the fix is
+	// a configuration change and the delivery is still perfectly good.
+	Payloads PayloadFetcher
+
 	// Limiter defaults to an in-process token bucket. Swap in the Redis
 	// implementation when it exists; it must fail open.
 	Limiter RateLimiter
@@ -57,6 +78,13 @@ type Options struct {
 	PollInterval time.Duration
 	Lease        time.Duration
 	DBTimeout    time.Duration
+	// PayloadTimeout bounds ONE object-storage fetch, including the store's own
+	// internal retries. It is SEPARATE from DBTimeout on purpose: the two are
+	// configured by different knobs (PAYLOAD_DOWNLOAD_TIMEOUT_MS and
+	// INGEST_DB_TIMEOUT_MS) and bound different resources, and running the
+	// object fetch on the database budget silently truncated any download
+	// timeout an operator set above it.
+	PayloadTimeout time.Duration
 
 	MaxStoredResponseBytes int
 
@@ -83,14 +111,15 @@ type Options struct {
 //     in front of the slow endpoint, which is the starvation this design exists
 //     to prevent, reintroduced one `<-ch` at a time.
 type Worker struct {
-	queue   queue.Queue
-	store   Store
-	client  HTTPDoer
-	breaker *Breaker
-	limiter RateLimiter
-	gate    *Gate
-	keyring *Keyring
-	keeper  *queue.LeaseKeeper
+	queue    queue.Queue
+	store    Store
+	client   HTTPDoer
+	breaker  *Breaker
+	limiter  RateLimiter
+	gate     *Gate
+	keyring  *Keyring
+	keeper   *queue.LeaseKeeper
+	payloads PayloadFetcher
 
 	workerID        string
 	concurrency     int
@@ -98,8 +127,13 @@ type Worker struct {
 	pollInterval    time.Duration
 	lease           time.Duration
 	dbTimeout       time.Duration
+	payloadTimeout  time.Duration
 	endpointCeiling int
 	maxStoredBody   int
+
+	// gateWatch decides when a delivery that keeps losing at the tenant
+	// concurrency gate has earned a budget read. See tenantGateWatch.
+	gateWatch *tenantGateWatch
 
 	log *slog.Logger
 	now func() time.Time
@@ -159,11 +193,14 @@ func New(opts Options) (*Worker, error) {
 	if dbTimeout <= 0 {
 		dbTimeout = 10 * time.Second
 	}
+	payloadTimeout := opts.PayloadTimeout
+	if payloadTimeout <= 0 {
+		payloadTimeout = payloadstore.DefaultDownloadTimeout
+	}
 	maxBody := opts.MaxStoredResponseBytes
 	if maxBody <= 0 {
 		maxBody = DefaultMaxStoredResponseBytes
 	}
-
 	limits := opts.Limits
 	if limits.Global <= 0 {
 		limits.Global = concurrency
@@ -191,14 +228,17 @@ func New(opts Options) (*Worker, error) {
 		gate:            gate,
 		keyring:         opts.Keyring,
 		keeper:          keeper,
+		payloads:        opts.Payloads,
 		workerID:        opts.WorkerID,
 		concurrency:     concurrency,
 		claimBatch:      claimBatch,
 		pollInterval:    pollInterval,
 		lease:           lease,
 		dbTimeout:       dbTimeout,
+		payloadTimeout:  payloadTimeout,
 		endpointCeiling: limits.Endpoint,
 		maxStoredBody:   maxBody,
+		gateWatch:       newTenantGateWatch(tenantGateBudgetCheckAfter, tenantGateWatchCapacity),
 		log:             log,
 		now:             now,
 		rng:             rng,
@@ -220,8 +260,23 @@ func (w *Worker) Run(ctx context.Context) error {
 	// flight. The keeper runs on it too: it must keep renewing during the
 	// drain, or the leases of the deliveries we are finishing lapse underneath
 	// us and another pod re-delivers them.
-	attemptRoot, cancelAttempts := context.WithCancel(context.WithoutCancel(ctx))
-	defer cancelAttempts()
+	//
+	// The cancellation carries a CAUSE (ErrWorkerShutdown). Without one an
+	// attempt cut short by the drain window closing fails with a bare
+	// context.Canceled, which is indistinguishable from any other transport
+	// fault: it is classified as a retryable network error, written to
+	// delivery_attempts with the message "context canceled", and charged to the
+	// customer's endpoint as a failed attempt. Our restart is not their outage.
+	attemptRoot, cancelAttempts := context.WithCancelCause(context.WithoutCancel(ctx))
+	defer cancelAttempts(ErrWorkerShutdown)
+
+	// The pool ceiling is published once and never changes: it is the REAL
+	// bound on in-flight attempts in this process, and at the shipped defaults
+	// it sits eight times BELOW MAX_CONCURRENCY_GLOBAL - so the gate that reads
+	// as the process ceiling can never bind and this is the number to alarm on.
+	// See docs/FAILURE_RECOVERY.md, G13.
+	metrics.WorkerPoolSlotsCapacity.Set(float64(w.concurrency))
+	w.publishOccupancy()
 
 	var keeperWG sync.WaitGroup
 	keeperWG.Add(1)
@@ -244,16 +299,43 @@ func (w *Worker) Run(ctx context.Context) error {
 	var wg sync.WaitGroup
 	ticker := time.NewTicker(w.pollInterval)
 	defer ticker.Stop()
+	occupancy := time.NewTicker(occupancySampleInterval)
+	defer occupancy.Stop()
 
 	for {
 		select {
 		case <-ctx.Done():
 			w.drain(&wg, cancelAttempts)
 			keeperWG.Wait()
+			// One last reading, after the drain, so the gauges settle at the
+			// truth rather than freezing at whatever the last sample said and
+			// leaving a dashboard showing a dead pod holding slots.
+			w.publishOccupancy()
 			return ctx.Err()
+		case <-occupancy.C:
+			w.publishOccupancy()
 		case <-ticker.C:
 			w.poll(ctx, attemptRoot, &wg)
 		}
+	}
+}
+
+// publishOccupancy refreshes the pool and gate gauges (G13).
+//
+// This is the answer to "who is eating the pool", which nothing could answer
+// before: rate_limit_hits_total counts refusals, and a refusal tells you
+// something was turned away, not what was holding the capacity. The label set
+// is the four gate scopes and nothing else - no endpoint id, no project id, no
+// organisation id. An unbounded label set on a busy platform is its own
+// outage, and the per-key question is answered by the busiest-key gauge with
+// the key left out.
+func (w *Worker) publishOccupancy() {
+	metrics.WorkerPoolSlotsInUse.Set(float64(w.inFlight.Load()))
+	for scope, o := range w.gate.Occupancy() {
+		metrics.GateSlotsInUse.WithLabelValues(scope).Set(float64(o.InUse))
+		metrics.GateSlotsCapacity.WithLabelValues(scope).Set(float64(o.Capacity))
+		metrics.GateKeysActive.WithLabelValues(scope).Set(float64(o.Keys))
+		metrics.GateBusiestKeySlots.WithLabelValues(scope).Set(float64(o.BusiestKey))
 	}
 }
 
@@ -290,10 +372,10 @@ func (w *Worker) poll(claimCtx, attemptRoot context.Context, wg *sync.WaitGroup)
 }
 
 // drain waits for in-flight attempts, then cancels whatever is left.
-func (w *Worker) drain(wg *sync.WaitGroup, cancelAttempts context.CancelFunc) {
+func (w *Worker) drain(wg *sync.WaitGroup, cancelAttempts context.CancelCauseFunc) {
 	inFlight := int(w.inFlight.Load())
 	if inFlight == 0 {
-		cancelAttempts()
+		cancelAttempts(ErrWorkerShutdown)
 		return
 	}
 	w.log.Info("draining in-flight deliveries",
@@ -314,9 +396,9 @@ func (w *Worker) drain(wg *sync.WaitGroup, cancelAttempts context.CancelFunc) {
 		w.log.Warn("drain window expired; cancelling in-flight attempts",
 			"worker_id", w.workerID,
 			"in_flight", w.inFlight.Load(),
-			"reason", "their results are still recorded on a detached context; the endpoint may see a duplicate")
+			"reason", "they are put back for another worker without being charged an attempt; the endpoint may see a duplicate")
 	}
-	cancelAttempts()
+	cancelAttempts(ErrWorkerShutdown)
 	<-done
 }
 

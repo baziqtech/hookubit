@@ -1,7 +1,9 @@
 package router
 
 import (
-	"github.com/shaq/webhook-platform/services/data-plane/internal/retry"
+	"time"
+
+	"github.com/shaq/hookubit/services/data-plane/internal/retry"
 )
 
 // Event is the routing-relevant projection of an events row. It carries no
@@ -14,6 +16,13 @@ type Event struct {
 	EventType      string
 	// OrderingKey is stored on the delivery but NOT enforced (ADR-0004).
 	OrderingKey string
+	// CreatedAt is when the event was ACCEPTED, and it is what pins the
+	// subscription set - see loadCandidatesSQL. A routing wider than one batch
+	// spans several transactions and therefore several snapshots, so without a
+	// pin the answer to "do I receive events published before I subscribed?"
+	// would be "only if the project is wider than ROUTER_MAX_SUBSCRIPTIONS_PER_EVENT",
+	// which is not a rule a customer can reason about.
+	CreatedAt time.Time
 }
 
 // Candidate is one webhook_subscriptions row joined to everything that decides
@@ -72,7 +81,7 @@ const (
 	SkipEndpointDisabled      = "endpoint_disabled"
 	SkipEventTypeUnmatched    = "event_type_unmatched"
 	SkipDuplicateEndpoint     = "duplicate_endpoint"
-	SkipFanOutCapExceeded     = "fan_out_cap_exceeded"
+	SkipRoutingCapExceeded    = "routing_cap_exceeded"
 )
 
 // statusActive is the only project/endpoint/organisation status that receives
@@ -87,7 +96,7 @@ type Plan struct {
 	// Skipped counts candidates by reason. Only non-zero reasons appear.
 	Skipped map[string]int
 	// Truncated is how many matching, deduplicated targets were dropped by the
-	// fan-out cap. Any value above zero is a correctness-visible event: those
+	// routing cap. Any value above zero is a correctness-visible event: those
 	// endpoints will not receive this event at all.
 	Truncated int
 }
@@ -106,7 +115,7 @@ type Plan struct {
 // here makes the outcome deterministic (lowest subscription id wins, and ids
 // are ULIDs, so that is the oldest subscription) and testable without a
 // database.
-func BuildPlan(ev Event, candidates []Candidate, fanOutCap int) Plan {
+func BuildPlan(ev Event, candidates []Candidate, routingCap int) Plan {
 	p := Plan{Skipped: make(map[string]int)}
 
 	eligible := make([]Subscription, 0, len(candidates))
@@ -150,10 +159,10 @@ func BuildPlan(ev Event, candidates []Candidate, fanOutCap int) Plan {
 		})
 	}
 
-	if fanOutCap > 0 && len(p.Targets) > fanOutCap {
-		p.Truncated = len(p.Targets) - fanOutCap
-		p.Skipped[SkipFanOutCapExceeded] += p.Truncated
-		p.Targets = p.Targets[:fanOutCap]
+	if routingCap > 0 && len(p.Targets) > routingCap {
+		p.Truncated = len(p.Targets) - routingCap
+		p.Skipped[SkipRoutingCapExceeded] += p.Truncated
+		p.Targets = p.Targets[:routingCap]
 	}
 	return p
 }
@@ -195,7 +204,7 @@ func gate(ev Event, c Candidate) (string, bool) {
 // the endpoint's own retry policy, else the project's default policy, else the
 // built-in default.
 //
-// It is resolved HERE, at fan-out time, and denormalised onto the row rather
+// It is resolved HERE, at routing time, and denormalised onto the row rather
 // than joined at delivery time. That is deliberate: an endpoint's policy can be
 // edited while a delivery is mid-retry, and a budget that changes underneath an
 // in-flight retry chain makes "why did this stop after 3 attempts" unanswerable

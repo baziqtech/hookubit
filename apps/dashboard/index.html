@@ -3,7 +3,29 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Webhook Platform</title>
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <script>
+      /*
+       * Theme, before first paint. Deliberately inline and blocking: a module
+       * script is deferred until the document has parsed, which is after the
+       * body has painted, so a dark user would see a white flash on every
+       * load. Wrapped because localStorage THROWS in a private window rather
+       * than returning null, and an exception here would leave the page
+       * unstyled. The key must match THEME_STORAGE_KEY in src/lib/theme.ts.
+       */
+      (function () {
+        try {
+          var stored = window.localStorage.getItem('hookubit.theme.v1');
+        } catch (e) {
+          stored = null;
+        }
+        var dark =
+          stored === 'dark' ||
+          (stored !== 'light' && window.matchMedia('(prefers-color-scheme: dark)').matches);
+        if (dark) document.documentElement.dataset.theme = 'dark';
+      })();
+    </script>
+    <title>HookuBit</title>
   </head>
   <body>
     <div id="root"></div>
