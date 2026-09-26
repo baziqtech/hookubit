@@ -1455,6 +1455,15 @@ export interface components {
              *     ]
              */
             allowed_ips: string[];
+            /**
+             * @description How many endpoints in this project would actually be sent a delivery right now: `status = active` AND `enabled = true`, counted in the database. Both halves are needed - `enabled` is operator intent and `status` is the circuit breaker's verdict, so an endpoint auto-disabled after its failure window still reads `enabled: true` and is NOT counted here. Soft-deleted endpoints are never counted.
+             *
+             *     WHAT IT DOES NOT SAY. It is not a health number: an endpoint can be active, enabled and failing every attempt for as long as it takes the breaker to trip, and it is counted the whole time. It is a count of CONFIGURATION, not of successful deliveries - read the analytics routes for those.
+             *
+             *     It also describes the endpoints, not the project: a project whose own `status` is `deleted` can report a count above zero, because deleting a project leaves its endpoints exactly as they were (so undeleting it resumes them) while the ingest path refuses the project's API keys. Read `status` alongside this, or a deleted project reads as though it were still delivering.
+             * @example 3
+             */
+            active_endpoint_count: number;
             /** Format: date-time */
             created_at: string;
             /** Format: date-time */
@@ -1526,6 +1535,15 @@ export interface components {
              *     ]
              */
             allowed_ips: string[];
+            /**
+             * @description How many endpoints in this project would actually be sent a delivery right now: `status = active` AND `enabled = true`, counted in the database. Both halves are needed - `enabled` is operator intent and `status` is the circuit breaker's verdict, so an endpoint auto-disabled after its failure window still reads `enabled: true` and is NOT counted here. Soft-deleted endpoints are never counted.
+             *
+             *     WHAT IT DOES NOT SAY. It is not a health number: an endpoint can be active, enabled and failing every attempt for as long as it takes the breaker to trip, and it is counted the whole time. It is a count of CONFIGURATION, not of successful deliveries - read the analytics routes for those.
+             *
+             *     It also describes the endpoints, not the project: a project whose own `status` is `deleted` can report a count above zero, because deleting a project leaves its endpoints exactly as they were (so undeleting it resumes them) while the ingest path refuses the project's API keys. Read `status` alongside this, or a deleted project reads as though it were still delivering.
+             * @example 3
+             */
+            active_endpoint_count: number;
             /** Format: date-time */
             created_at: string;
             /** Format: date-time */

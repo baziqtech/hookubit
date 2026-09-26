@@ -1,8 +1,16 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { Environment, Prisma, Project, ProjectStatus } from '@prisma/client';
-import { AuditService, RequestContext, ScopedUpdateInput, TenantScopeFactory } from '../authz';
+import {
+  AuditService,
+  MAX_PAGE_SIZE,
+  RequestContext,
+  ScopedUpdateInput,
+  TenantScope,
+  TenantScopeFactory,
+} from '../authz';
 import { AppError } from '../common/errors';
+import { DELIVERABLE_ENDPOINT_WHERE } from '../endpoints/deliverable';
 import { normaliseAllowedIps } from './allowed-ips';
 import { ProjectTemplateService, type TemplateResult } from './project-template.service';
 import { newId } from '../common/ids';
@@ -75,26 +83,40 @@ export class ProjectsService {
       ? { status: query.status }
       : { status: { not: ProjectStatus.deleted } };
 
-    const page = await this.scopes.for(context).projects.findPage({
+    const scope = this.scopes.for(context);
+    const page = await scope.projects.findPage({
       where,
       orderBy: { createdAt: 'desc' },
       take: query.limit,
       skip: query.offset,
     });
+
+    // ONE grouped query for the whole page, never one per project. See
+    // `activeEndpointCounts`.
+    const active = await ProjectsService.activeEndpointCounts(
+      scope,
+      page.rows.map((project) => project.id),
+    );
+
     return {
-      data: page.rows.map(toProjectDto),
+      // A project absent from the rollup has no deliverable endpoints, which is
+      // a real zero: `groupBy` returns no group for a project with no matching
+      // rows, so the map is sparse by construction and not by failure.
+      data: page.rows.map((project) => toProjectDto(project, active.get(project.id) ?? 0)),
       has_more: page.hasMore,
       next_offset: page.nextSkip,
     };
   }
 
   async get(context: RequestContext, projectId: string): Promise<ProjectDto> {
+    const scope = this.scopes.for(context);
     // requireById, not findUnique-then-check: the tenant predicate is in the
     // WHERE clause, so another organization's id matches zero rows and answers
     // the same 404 as an id that never existed.
-    return toProjectDto(
-      await withCrossTenantNotFound(this.scopes.for(context).projects.requireById(projectId)),
-    );
+    const project = await withCrossTenantNotFound(scope.projects.requireById(projectId));
+    // AFTER the project is proved to be in this tenant, so a cross-tenant id
+    // costs a 404 and not a count.
+    return toProjectDto(project, await ProjectsService.activeEndpointCount(scope, project.id));
   }
 
   async create(context: RequestContext, dto: CreateProjectDto): Promise<CreatedProjectDto> {
@@ -151,7 +173,20 @@ export class ProjectsService {
       },
     });
 
-    return { ...toProjectDto(project), copied, copy_error: copyError };
+    /*
+     * Counted rather than assumed to be 0.
+     *
+     * A project created from empty has no endpoints, and a copy deliberately
+     * lands every endpoint PAUSED and secretless, so this is 0 in both cases
+     * today - which is exactly why hardcoding it would be a fact that stops
+     * being true the first time the copy rules change, in a response nobody
+     * would think to re-read.
+     */
+    const active = await ProjectsService.activeEndpointCount(
+      this.scopes.for(context),
+      project.id,
+    );
+    return { ...toProjectDto(project, active), copied, copy_error: copyError };
   }
 
   async update(
@@ -216,7 +251,10 @@ export class ProjectsService {
       resourceId: project.id,
       metadata: changed,
     });
-    return toProjectDto(project);
+    return toProjectDto(
+      project,
+      await ProjectsService.activeEndpointCount(this.scopes.for(context), project.id),
+    );
   }
 
   /**
@@ -239,7 +277,97 @@ export class ProjectsService {
       resourceId: project.id,
       metadata: { slug: project.slug, soft_delete: true },
     });
-    return toProjectDto(project);
+    /*
+     * Deliberately still the real count, on a project that is now deleted.
+     *
+     * Deleting a project does not touch its endpoints - that is what makes an
+     * accidental delete recoverable - so the honest answer is "these N endpoints
+     * are still configured to deliver, and the project they are in no longer
+     * accepts events". Zeroing it here would report a state no row is in, and
+     * the client already has `status` in the same body to read it with.
+     */
+    return toProjectDto(
+      project,
+      await ProjectsService.activeEndpointCount(this.scopes.for(context), project.id),
+    );
+  }
+
+  /**
+   * How many endpoints in each of these projects would actually be delivered to,
+   * in ONE query for the whole page.
+   *
+   * ## Why this is not an N+1
+   *
+   * The Usage screen already spends two throttled analytics requests per
+   * project. A third per-project round trip - or a `count` per row inside the
+   * list handler, which is the same thing wearing a repository - is what makes a
+   * 50-project page 50 extra statements. `groupBy(['projectId'])` over
+   * `projectId IN (<the page>)` is one statement whose cost does not grow with
+   * the page, on the index `endpoints` already has (`endpoints_project_id_idx`).
+   *
+   * ## Why it counts in the database
+   *
+   * `MAX_ENDPOINTS_PER_PROJECT` is 500 and `MAX_PAGE_SIZE` is 200, so counting
+   * by fetching rows would be both a truncated answer and up to 100,000 rows
+   * pulled out of PostgreSQL to produce a handful of integers.
+   *
+   * ## Why one grouped query is enough
+   *
+   * `by: ['projectId']` produces AT MOST one group per project id, and the ids
+   * come from a page that `ScopedRepository.findPage` has already clamped to
+   * `MAX_PAGE_SIZE` - so the rollup can never be the silently-sliced kind
+   * `ScopedRepository.groupBy` warns about. That clamp is the whole argument, so
+   * it is asserted rather than assumed: a future caller handing this more ids
+   * than a page can hold gets a loud error instead of a quietly missing count.
+   *
+   * The predicate is `scope.endpoints`' own, so an id belonging to another
+   * tenant contributes nothing even if it is passed in - and passing one is not
+   * reachable, because the ids come from a tenant-scoped page of projects.
+   */
+  private static async activeEndpointCounts(
+    scope: TenantScope,
+    projectIds: readonly string[],
+  ): Promise<Map<string, number>> {
+    const counts = new Map<string, number>();
+    // No ids, no statement: an `IN ()` over an empty page is a round trip that
+    // can only answer nothing.
+    if (projectIds.length === 0) return counts;
+    if (projectIds.length > MAX_PAGE_SIZE) {
+      throw new AppError(
+        'internal_error',
+        `activeEndpointCounts was given ${projectIds.length} project ids, more than the ${MAX_PAGE_SIZE}-group ceiling one grouped query can return, so some projects would silently report 0 active endpoints. Page the callers' projects first.`,
+      );
+    }
+
+    const groups = await scope.endpoints.groupBy({
+      by: ['projectId'],
+      where: {
+        ...DELIVERABLE_ENDPOINT_WHERE,
+        projectId: { in: [...projectIds] },
+      } satisfies Prisma.EndpointWhereInput,
+      _count: { _all: true },
+      take: MAX_PAGE_SIZE,
+    });
+
+    for (const group of groups) {
+      const projectId = group.projectId;
+      if (typeof projectId !== 'string') continue;
+      counts.set(projectId, (group._count as { _all?: number } | undefined)?._all ?? 0);
+    }
+    return counts;
+  }
+
+  /**
+   * The same count for one project, for the routes that return a single one.
+   *
+   * A `count`, not a `groupBy` of one: it is the same predicate and the same
+   * index, and `count` says what it does. The caller must have proved the
+   * project is in this tenant first - the scope's predicate would refuse a
+   * foreign id anyway, but a count of zero and a 404 are different answers and
+   * the 404 is the one a cross-tenant id deserves.
+   */
+  private static async activeEndpointCount(scope: TenantScope, projectId: string): Promise<number> {
+    return scope.endpoints.count({ ...DELIVERABLE_ENDPOINT_WHERE, projectId });
   }
 
   /**

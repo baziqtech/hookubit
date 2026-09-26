@@ -52,6 +52,27 @@ export class ProjectDto {
   })
   allowed_ips!: string[];
 
+  @ApiProperty({
+    type: Number,
+    example: 3,
+    description:
+      'How many endpoints in this project would actually be sent a delivery right now: ' +
+      '`status = active` AND `enabled = true`, counted in the database. Both halves are ' +
+      'needed - `enabled` is operator intent and `status` is the circuit breaker\'s verdict, ' +
+      'so an endpoint auto-disabled after its failure window still reads `enabled: true` and ' +
+      'is NOT counted here. Soft-deleted endpoints are never counted.\n\n' +
+      'WHAT IT DOES NOT SAY. It is not a health number: an endpoint can be active, enabled and ' +
+      'failing every attempt for as long as it takes the breaker to trip, and it is counted the ' +
+      'whole time. It is a count of CONFIGURATION, not of successful deliveries - read the ' +
+      'analytics routes for those.\n\n' +
+      'It also describes the endpoints, not the project: a project whose own `status` is ' +
+      '`deleted` can report a count above zero, because deleting a project leaves its ' +
+      'endpoints exactly as they were (so undeleting it resumes them) while the ingest path ' +
+      'refuses the project\'s API keys. Read `status` alongside this, or a deleted project ' +
+      'reads as though it were still delivering.',
+  })
+  active_endpoint_count!: number;
+
   @ApiProperty({ format: 'date-time' })
   created_at!: string;
 
@@ -130,7 +151,20 @@ export class CreatedProjectDto extends ProjectDto {
   copy_error!: string | null;
 }
 
-export function toProjectDto(project: Project): ProjectDto {
+/**
+ * `activeEndpointCount` is a REQUIRED SECOND ARGUMENT, not an optional one and
+ * not a default of zero.
+ *
+ * The count cannot be derived from the `projects` row, so it has to be supplied
+ * by whoever already knows it - and every route that returns a project is a
+ * route that can afford one bounded aggregate (see
+ * `ProjectsService.activeEndpointCounts`, which takes ONE grouped query for a
+ * whole page). Defaulting it would make the honest case and the forgotten case
+ * indistinguishable on the wire: `0` is a real answer that a dashboard renders
+ * as "nothing is delivering here", and a mapper that produces it by omission
+ * turns a missed query into a customer-visible lie rather than a compile error.
+ */
+export function toProjectDto(project: Project, activeEndpointCount: number): ProjectDto {
   return {
     id: project.id,
     organization_id: project.organizationId,
@@ -139,6 +173,7 @@ export function toProjectDto(project: Project): ProjectDto {
     environment: project.environment,
     status: project.status,
     allowed_ips: project.allowedIps ?? [],
+    active_endpoint_count: activeEndpointCount,
     created_at: project.createdAt.toISOString(),
     updated_at: project.updatedAt.toISOString(),
   };

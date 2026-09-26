@@ -3,6 +3,7 @@ import { Delivery, Endpoint, EndpointStatus } from '@prisma/client';
 import { AuditAction, RequestContext, TenantScope } from '../authz';
 import { AppError } from '../common/errors';
 import { newId } from '../common/ids';
+import { isDeliverable } from '../endpoints/deliverable';
 import { TenantTransactionRunner } from '../organizations/tenant-transaction';
 import { MAX_REPLAY_DELIVERIES } from './delivery-limits';
 import { crossTenantNotFound } from './not-found';
@@ -259,6 +260,11 @@ export class DeliveryReplayService {
  * In every case the worker would abandon the delivery on pickup and the
  * operator would have watched an accepted replay become a second failure. A 409
  * naming the current status is a better answer than a 202 that is not true.
+ *
+ * The active-and-enabled half is `isDeliverable`, shared with the per-project
+ * `active_endpoint_count` on `ProjectDto`: "the worker would deliver to this"
+ * and "this endpoint is counted as active" have to be the same sentence, or the
+ * Usage screen counts endpoints a replay is refused for.
  */
 export function assertReplayable(endpoint: Endpoint): void {
   if (endpoint.status === EndpointStatus.deleted) {
@@ -268,7 +274,7 @@ export function assertReplayable(endpoint: Endpoint): void {
       { endpoint_id: endpoint.id, endpoint_status: endpoint.status },
     );
   }
-  if (endpoint.status !== EndpointStatus.active || !endpoint.enabled) {
+  if (!isDeliverable(endpoint)) {
     throw new AppError(
       'conflict',
       `Endpoint ${endpoint.id} is ${endpoint.status} and is not accepting deliveries. Re-enable it first, or the replay would be abandoned by the worker as 'endpoint_disabled'.`,

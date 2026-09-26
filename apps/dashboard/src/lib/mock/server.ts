@@ -1457,6 +1457,13 @@ const handlers: Handler[] = [
         // A new project permits every address, which is the default and what
         // the settings panel calls out as fine until a key leaks.
         allowed_ips: [],
+        /*
+         * Nothing can deliver yet, and that survives the copy below: copied
+         * endpoints arrive `status: 'paused', enabled: false` with no signing
+         * secret, so none of them is deliverable either. A fresh project reads
+         * zero until an endpoint is created and resumed.
+         */
+        active_endpoint_count: 0,
         created_at: now,
         updated_at: now,
       };

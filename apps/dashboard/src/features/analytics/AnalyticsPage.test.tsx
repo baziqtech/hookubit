@@ -30,6 +30,10 @@ function project(id: string, name: string, slug: string): Project {
     environment: 'live',
     status: 'active',
     allowed_ips: [],
+    // One deliverable endpoint: every project in these fixtures reports
+    // deliveries in the window, so a zero here would contradict the figures the
+    // same fixture seeds. Nothing on this page asserts the number itself.
+    active_endpoint_count: 1,
     created_at: '2026-01-01T00:00:00.000Z',
     updated_at: '2026-01-01T00:00:00.000Z',
   };

@@ -108,12 +108,19 @@ export function seedWorld(): FakeTenantPrisma {
   project(IDS.projectB1, IDS.orgB);
   project(IDS.projectS1, IDS.orgSuspended);
 
+  // `enabled: true` is stated because Prisma applies it from `@default(true)`
+  // and this fake applies no column defaults. Without it these rows are
+  // `enabled: undefined`, which no row in PostgreSQL can be - and every
+  // predicate that reads the flag (`isDeliverable`, and the active-endpoint
+  // count built on it) would answer "not delivering" for a perfectly live
+  // endpoint, in the fake only.
   db.insert('endpoint', {
     id: IDS.endpointA1,
     projectId: IDS.projectA1,
     name: 'a1',
     url: 'https://a.example.com/hook',
     status: 'active',
+    enabled: true,
   });
   db.insert('endpoint', {
     id: IDS.endpointB1,
@@ -121,6 +128,7 @@ export function seedWorld(): FakeTenantPrisma {
     name: 'b1',
     url: 'https://b.example.com/hook',
     status: 'active',
+    enabled: true,
   });
 
   db.insert('retryPolicy', {

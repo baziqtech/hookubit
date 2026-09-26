@@ -315,6 +315,11 @@ export const projects: Project[] = [
     status: 'active',
     // Empty means every address may publish, which is the default.
     allowed_ips: [],
+    // TRUE OF `endpoints` BELOW: two of the six named endpoints are active AND
+    // enabled (finance-api, ledger-service) — partner-reconciliation is
+    // breaker-disabled, analytics-sink and warehouse-sync are paused,
+    // old-recon-endpoint is soft-deleted — plus all 56 filler rows.
+    active_endpoint_count: 58,
     created_at: minutesAgo(60 * 24 * 118),
     updated_at: minutesAgo(60 * 24 * 2),
   },
@@ -327,6 +332,9 @@ export const projects: Project[] = [
     status: 'active',
     // Empty means every address may publish, which is the default.
     allowed_ips: [],
+    // No endpoints in the fixture belong to this project, so nothing here can
+    // deliver. Zero is the answer, not a placeholder.
+    active_endpoint_count: 0,
     created_at: minutesAgo(60 * 24 * 118),
     updated_at: minutesAgo(60 * 24 * 118),
   },
@@ -339,6 +347,8 @@ export const projects: Project[] = [
     status: 'active',
     // Empty means every address may publish, which is the default.
     allowed_ips: [],
+    // No endpoints in the fixture belong to this project.
+    active_endpoint_count: 0,
     created_at: minutesAgo(60 * 24 * 41),
     updated_at: minutesAgo(60 * 24 * 41),
   },
@@ -351,6 +361,8 @@ export const projects: Project[] = [
     status: 'active',
     // Empty means every address may publish, which is the default.
     allowed_ips: [],
+    // No endpoints in the fixture belong to this project.
+    active_endpoint_count: 0,
     created_at: minutesAgo(60 * 24 * 29),
     updated_at: minutesAgo(60 * 24 * 29),
   },
