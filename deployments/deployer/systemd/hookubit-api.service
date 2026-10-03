@@ -1,0 +1,49 @@
+# HookuBit control API.
+#
+# This unit replaces the one in apps/docs/self-hosting/09-bare-metal-ubuntu.md §7.
+# The only substantive change is the path: the guide runs /opt/hookubit/src,
+# which a Deployer release layout never writes to. Everything here points at
+# /opt/hookubit/current, the symlink the deploy swaps atomically, so a restart
+# picks up the new release and `dep rollback` actually rolls back.
+#
+# Install once, by hand, as root — the deploy user's sudo rights stop at
+# start/stop/restart and deliberately do not include writing to /etc:
+#
+#   sudo install -m 0644 -o root -g root hookubit-api.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable hookubit-api
+#
+# If deploy_path in hosts.yml is not /opt/hookubit, change both together:
+# hookubit:systemd:check refuses to deploy when this unit does not reference
+# <deploy_path>/current, because with a fixed path the atomic swap changes
+# nothing and the deploy reports success while the old code keeps running.
+
+[Unit]
+Description=HookuBit control API
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=hookubit
+Group=hookubit
+WorkingDirectory=/opt/hookubit/current/apps/control-api
+EnvironmentFile=/etc/hookubit/hookubit.env
+ExecStart=/usr/bin/node dist/main.js
+Restart=on-failure
+RestartSec=5
+# Above the Nest shutdown path, so in-flight requests finish instead of being
+# killed mid-response.
+TimeoutStopSec=30
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+# The release tree is read-only to the service: it is written by the deploy
+# user, not by the process that runs it. Nothing under /opt/hookubit needs to be
+# writable at runtime, so nothing is.
+ReadOnlyPaths=/opt/hookubit
+
+[Install]
+WantedBy=multi-user.target

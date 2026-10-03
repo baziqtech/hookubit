@@ -1,0 +1,48 @@
+# HookuBit data plane — ingest, router, scheduler, worker in one process.
+#
+# This unit replaces the one in apps/docs/self-hosting/09-bare-metal-ubuntu.md §7.
+# The guide's ExecStart is /opt/hookubit/bin/webhookd, a fixed path outside any
+# release. The deploy builds the binary into the release
+# (<release>/bin/webhookd) so the symlink swap and `dep rollback` carry the
+# binary with the code that matches it — a Go binary and a schema are a matched
+# pair, and rolling one without the other is how the fan_out_cursor stall
+# happens.
+#
+# Install once, by hand, as root:
+#
+#   sudo install -m 0644 -o root -g root hookubit-data-plane.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable hookubit-data-plane
+#
+# Do NOT add the deploy to an `enable --now`: the deploy stops this unit across
+# the migration on purpose, and systemd must not race it back up.
+
+[Unit]
+Description=HookuBit data plane (ingest, router, scheduler, worker)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=hookubit
+Group=hookubit
+WorkingDirectory=/opt/hookubit/current
+EnvironmentFile=/etc/hookubit/hookubit.env
+ExecStart=/opt/hookubit/current/bin/webhookd all
+Restart=on-failure
+RestartSec=5
+# webhookd drains for 25s in process, and one outbound attempt can take a full
+# EGRESS_TOTAL_TIMEOUT_MS (30s) on top. systemd's 90s default is fine; this is
+# explicit so nobody "tidies" it down to 10.
+TimeoutStopSec=90
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+# Written by the deploy user, executed by the service user. The process cannot
+# rewrite the binary it is running.
+ReadOnlyPaths=/opt/hookubit
+
+[Install]
+WantedBy=multi-user.target

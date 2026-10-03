@@ -1,0 +1,37 @@
+# HookuBit — the only privileged thing a deploy does is control two units.
+#
+# Install as root, and validate before you trust it (a broken file in
+# /etc/sudoers.d can lock you out of sudo entirely):
+#
+#   sudo install -m 0440 -o root -g root hookubit-deploy /etc/sudoers.d/hookubit-deploy
+#   sudo visudo -c -f /etc/sudoers.d/hookubit-deploy
+#
+# Why this and not "deploy as root": a deploy runs pnpm install, which executes
+# third-party package scripts from the network. Doing that as root means every
+# transitive dependency in the lockfile gets one free root shell on the box, and
+# every file it writes into the release is root-owned where a non-root service
+# user has to read it. The deploy user needs exactly seven commands.
+#
+# Each entry matches the full command line, arguments included, so this grants
+# start/stop/restart of these two units and nothing else. No wildcards: a
+# trailing * would let `systemctl stop anything` through.
+#
+# Not here, on purpose:
+#   · `systemctl enable` and writing to /etc/systemd/system — a one-time install
+#     you do by hand, so a compromised deploy key cannot redefine what runs.
+#   · `systemctl is-active` and `status` — unprivileged, no sudo needed.
+#   · journalctl — grant it with group membership instead:
+#       sudo usermod -aG systemd-journal deploy
+#
+# Replace `deploy` if hosts.yml uses a different remote_user.
+
+Cmnd_Alias HOOKUBIT_SERVICES = \
+    /usr/bin/systemctl start hookubit-api, \
+    /usr/bin/systemctl stop hookubit-api, \
+    /usr/bin/systemctl restart hookubit-api, \
+    /usr/bin/systemctl start hookubit-data-plane, \
+    /usr/bin/systemctl stop hookubit-data-plane, \
+    /usr/bin/systemctl restart hookubit-data-plane, \
+    /usr/bin/systemctl daemon-reload
+
+deploy ALL=(root) NOPASSWD: HOOKUBIT_SERVICES
