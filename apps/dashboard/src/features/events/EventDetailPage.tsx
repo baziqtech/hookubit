@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
 import {
   Async,
+  Badge,
   Button,
   CodeBlock,
   DeliveryStatusBadge,
@@ -14,16 +15,36 @@ import {
   Tabs,
   type Column,
 } from '../../components';
-import { describeDelivery } from '../../lib/delivery-status';
-import { formatBytes, formatRelativeTime, formatTimestamp, truncateId } from '../../lib/format';
-import type { Delivery } from '../../types/api';
+import {
+  deliveryOutcome,
+  describeDelivery,
+  summarizeDeliveries,
+} from '../../lib/delivery-status';
+import { formatBytes, formatTimestamp, truncateId } from '../../lib/format';
+import type { Delivery, DeliveryCounts } from '../../types/api';
+import { nextAttemptLabel } from '../deliveries/next-attempt';
+import { useEndpoints } from '../endpoints/api';
+import { ParkedEventNotice } from '../outbox/ParkedEventNotice';
 import { useEvent, useEventDeliveries, useReplayEvent } from './api';
+import { EventPayloadView } from './EventPayloadView';
 
 export function EventDetailPage() {
   const { orgId = '', projectId = '', eventId = '' } = useParams();
-  const event = useEvent(eventId);
-  const deliveries = useEventDeliveries(eventId);
-  const replay = useReplayEvent(eventId);
+  const event = useEvent(projectId, eventId);
+  const deliveries = useEventDeliveries(projectId, eventId);
+  const replay = useReplayEvent(projectId, eventId);
+  // A delivery row carries `endpoint_id` and no name; the name is joined here.
+  const endpoints = useEndpoints(projectId);
+  const endpointNames = new Map(
+    (endpoints.data?.rows ?? []).map((endpoint) => [endpoint.id, endpoint.name]),
+  );
+  /*
+   * The routing roll-up is DERIVED from the delivery rows, not read off the
+   * event. `EventDto` has no `delivery_counts` — that object was invented — and
+   * deriving it is better anyway: a denormalised counter can disagree with the
+   * table printed directly beneath it, and this one cannot.
+   */
+  const counts = summarizeDeliveries(deliveries.data?.rows ?? []);
   const [tab, setTab] = useState('deliveries');
   const [confirming, setConfirming] = useState(false);
 
@@ -55,14 +76,39 @@ export function EventDetailPage() {
               }
             />
 
-            <dl className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
-              <Meta label="Payload size" value={formatBytes(data.payload_size_bytes)} />
-              <Meta label="Idempotency key" value={data.idempotency_key ?? '—'} mono />
-              <Meta label="Ordering key" value={data.ordering_key ?? '—'} mono />
+            {/*
+              The 2am path. A `failed` event PARKED before it routed — the
+              publisher got 202, no delivery rows exist, replay has nothing to
+              work from — and the only way back is a requeue. That row, its
+              reason and the requeue live here rather than behind a menu.
+            */}
+            {data.status === 'failed' && (
+              <ParkedEventNotice orgId={orgId} projectId={projectId} eventId={data.id} />
+            )}
+
+            <RoutingSummary counts={counts} pending={deliveries.isPending} />
+
+            <dl className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
+              <Meta label="Payload size" value={formatBytes(data.payload_size)} />
               <Meta
-                label="Fan-out"
-                value={`${data.delivery_counts.total} deliveries`}
-                hint={`${data.delivery_counts.succeeded} succeeded · ${data.delivery_counts.exhausted} exhausted`}
+                label="Idempotency key"
+                value={data.idempotency_key ?? 'None sent'}
+                hint={
+                  data.idempotency_key
+                    ? 'Re-publishing with this key returns this event instead of creating another.'
+                    : 'Without one, a publisher that retries creates a second event.'
+                }
+                mono={Boolean(data.idempotency_key)}
+              />
+              <Meta
+                label="Ordering key"
+                value={data.ordering_key ?? 'None'}
+                hint={
+                  data.ordering_key
+                    ? 'Stored, but per-key serialisation is not enforced yet.'
+                    : 'Deliveries for this event are unordered.'
+                }
+                mono={Boolean(data.ordering_key)}
               />
             </dl>
 
@@ -71,7 +117,7 @@ export function EventDetailPage() {
               value={tab}
               onChange={setTab}
               items={[
-                { value: 'deliveries', label: 'Deliveries', badge: data.delivery_counts.total },
+                { value: 'deliveries', label: 'Deliveries', badge: counts.total },
                 { value: 'payload', label: 'Payload' },
                 { value: 'headers', label: 'Headers' },
               ]}
@@ -81,7 +127,7 @@ export function EventDetailPage() {
                   <Panel flush>
                     <Async
                       query={deliveries}
-                      isEmpty={(rows) => rows.length === 0}
+                      isEmpty={(page) => page.rows.length === 0}
                       empty={
                         <EmptyState
                           title="No matching subscriptions"
@@ -89,21 +135,21 @@ export function EventDetailPage() {
                         />
                       }
                     >
-                      {(rows) => (
+                      {(page) => (
                         <Table
                           caption="Deliveries for this event"
-                          columns={deliveryColumns(orgId, projectId)}
-                          rows={rows}
+                          columns={deliveryColumns(orgId, projectId, endpointNames)}
+                          rows={page.rows}
                           rowKey={(row) => row.id}
                         />
                       )}
                     </Async>
                   </Panel>
                 )}
-                {tab === 'payload' && (
-                  <CodeBlock value={data.payload} label="payload" showLineNumbers maxHeight="34rem" />
+                {tab === 'payload' && <EventPayloadView payload={data.payload} />}
+                {tab === 'headers' && (
+                  <CodeBlock value={data.headers ?? {}} label="ingest headers" />
                 )}
-                {tab === 'headers' && <CodeBlock value={data.headers} label="request headers" />}
               </div>
             </Tabs>
 
@@ -111,7 +157,7 @@ export function EventDetailPage() {
               open={confirming}
               onClose={() => setConfirming(false)}
               title="Replay this event?"
-              description="Every matching subscription is fanned out again."
+              description="The event is routed again to every matching subscription."
               footer={
                 <>
                   <Button onClick={() => setConfirming(false)}>Cancel</Button>
@@ -119,7 +165,7 @@ export function EventDetailPage() {
                     variant="primary"
                     loading={replay.isPending}
                     onClick={async () => {
-                      await replay.mutateAsync();
+                      await replay.mutateAsync({});
                       setConfirming(false);
                     }}
                   >
@@ -138,6 +184,76 @@ export function EventDetailPage() {
         )}
       </Async>
     </div>
+  );
+}
+
+
+/**
+ * Routing, stated as the sentence it is.
+ *
+ * The tile this replaces read "1 deliveries" — a grammar bug, but the real
+ * problem was that a bare count does not explain WHY there is more than one
+ * row. One publish becomes one delivery per matching subscription, and someone
+ * meeting that for the first time needs it said out loud rather than inferred
+ * from a number.
+ */
+function RoutingSummary({ counts, pending }: { counts: DeliveryCounts; pending: boolean }) {
+  const noun = counts.total === 1 ? 'delivery' : 'deliveries';
+  // Counted from the rows below. Until they arrive, say so rather than showing
+  // a confident zero that is about to change.
+  if (pending) {
+    return (
+      <section aria-label="Routing" className="rounded-lg border border-line bg-panel px-4 py-3">
+        <p className="text-sm text-ink">Counting the deliveries this event routed to…</p>
+      </section>
+    );
+  }
+  const outstanding = counts.exhausted + counts.failed;
+
+  return (
+    <section
+      aria-label="Routing"
+      className="rounded-lg border border-line bg-panel px-4 py-3"
+    >
+      <p className="text-sm text-ink">
+        Published once, routed to{' '}
+        <strong className="font-semibold">
+          {counts.total} {noun}
+        </strong>{' '}
+        — one per matching subscription.
+      </p>
+      <p className="mt-1 text-xs leading-relaxed text-ink-muted">
+        Each has an independent retry chain, so one endpoint failing does not hold up the others,
+        and replaying one does not re-send to the rest.
+      </p>
+
+      <div className="mt-2.5 flex flex-wrap items-center gap-1.5">
+        <Badge tone={counts.succeeded > 0 ? 'ok' : 'neutral'} dot>
+          {counts.succeeded} succeeded
+        </Badge>
+        {counts.pending > 0 && (
+          <Badge tone="warn" dot>
+            {counts.pending} still going
+          </Badge>
+        )}
+        {counts.failed > 0 && (
+          <Badge tone="danger" dot>
+            {counts.failed} failing
+          </Badge>
+        )}
+        {counts.exhausted > 0 && (
+          <Badge tone="danger" dot>
+            {counts.exhausted} exhausted
+          </Badge>
+        )}
+      </div>
+
+      {outstanding > 0 && (
+        <p className="mt-2 text-2xs text-ink-subtle">
+          Open a delivery below to see its attempts and why it stopped.
+        </p>
+      )}
+    </section>
   );
 }
 
@@ -161,7 +277,11 @@ function Meta({
   );
 }
 
-function deliveryColumns(orgId: string, projectId: string): Column<Delivery>[] {
+function deliveryColumns(
+  orgId: string,
+  projectId: string,
+  endpointNames: Map<string, string>,
+): Column<Delivery>[] {
   return [
     {
       key: 'endpoint',
@@ -171,7 +291,9 @@ function deliveryColumns(orgId: string, projectId: string): Column<Delivery>[] {
           to={`/orgs/${orgId}/projects/${projectId}/deliveries/${row.id}`}
           className="flex flex-col hover:underline"
         >
-          <span className="text-xs font-medium text-ink">{row.endpoint_name}</span>
+          <span className="text-xs font-medium text-ink">
+            {endpointNames.get(row.endpoint_id) ?? truncateId(row.endpoint_id)}
+          </span>
           <span className="font-mono text-2xs text-ink-subtle">{truncateId(row.id)}</span>
         </Link>
       ),
@@ -185,7 +307,10 @@ function deliveryColumns(orgId: string, projectId: string): Column<Delivery>[] {
       key: 'outcome',
       header: 'Outcome',
       secondary: true,
-      render: (row) => <span className="text-xs text-ink-muted">{describeDelivery(row)}</span>,
+      // No status code: it lives on an attempt, and this list carries none.
+      render: (row) => (
+        <span className="text-xs text-ink-muted">{describeDelivery(deliveryOutcome(row))}</span>
+      ),
     },
     {
       key: 'attempts',
@@ -202,9 +327,12 @@ function deliveryColumns(orgId: string, projectId: string): Column<Delivery>[] {
       header: 'Next attempt',
       align: 'right',
       secondary: true,
+      // Gated on `terminal`, as the delivery page already is. `next_attempt_at`
+      // is becoming NOT NULL and a terminal row carries a meaningless one; a
+      // succeeded delivery must never read "2 minutes ago" here.
       render: (row) => (
-        <span className="text-xs text-ink-subtle">
-          {row.next_attempt_at ? formatRelativeTime(row.next_attempt_at) : '—'}
+        <span className="text-xs text-ink-subtle" data-testid="next-attempt">
+          {nextAttemptLabel(row)}
         </span>
       ),
     },

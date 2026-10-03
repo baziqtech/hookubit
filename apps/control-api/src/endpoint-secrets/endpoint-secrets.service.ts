@@ -347,12 +347,71 @@ export class EndpointSecretsService {
    * `EndpointsService.enable` asks before resuming deliveries. It reads the same
    * rows through the same tenant scope, so an endpoint in another tenant is
    * "no" for the same reason everything else about it is a 404.
+   *
+   * One case of `liveSecretEndpointIds` rather than its own read, so the answer
+   * `enable` refuses on and the `has_live_secret` the dashboard reads to decide
+   * whether to OFFER enabling are the same predicate, evaluated the same way.
+   * Two implementations of "is this endpoint signable" is exactly the pair that
+   * drifts, and the failure mode of drift here is a button that 409s.
    */
   async hasLiveSecret(context: RequestContext, endpointId: string): Promise<boolean> {
-    const scope = this.scopes.for(context);
-    const now = new Date();
-    const secrets = await this.secretsFor(scope, endpointId);
-    return secrets.some((secret) => isEffectivelyActive(secret, now));
+    return (await this.liveSecretEndpointIds(context, [endpointId])).has(endpointId);
+  }
+
+  /**
+   * Which of these endpoints have a secret signing right now - ONE statement,
+   * however many endpoints are asked about.
+   *
+   * This exists because `has_live_secret` is on every row of the endpoint
+   * listing. Asked per endpoint it is a page of 200 turning into 200 round
+   * trips against the busiest read in the operator UI; asked here it is a
+   * single grouped read keyed by `(endpoint_id, active)`, which is the index
+   * `endpoint_secrets` already carries.
+   *
+   * The predicate is `isEffectivelyActive` moved into SQL - `active = true AND
+   * (expires_at IS NULL OR expires_at > now())`, the contract with the data
+   * plane's loader (see `isEffectivelyActive`). It must stay that pair:
+   * `active` alone reports an endpoint as signable through the whole window
+   * between a secret expiring and the lazy sweep flipping its column, and
+   * `expires_at` alone resurrects a secret that was explicitly revoked.
+   *
+   * `groupBy` rather than `findMany`: the rows are never wanted, only which
+   * endpoint ids appear, and the aggregate keeps a busy endpoint's hundreds of
+   * historical secrets from crossing the wire to be reduced to one boolean.
+   * There is at most one group per endpoint asked about, so the explicit `take`
+   * cannot truncate.
+   *
+   * Scoped like everything else: the repository's `viaEndpoint` predicate joins
+   * `endpoint_secrets -> endpoints -> projects`, so an id from another tenant
+   * simply produces no group and comes back false - never a leak, and never a
+   * distinguishable error either.
+   */
+  async liveSecretEndpointIds(
+    context: RequestContext,
+    endpointIds: readonly string[],
+    now: Date = new Date(),
+  ): Promise<ReadonlySet<string>> {
+    const wanted = [...new Set(endpointIds)];
+    if (wanted.length === 0) return new Set();
+
+    const groups = await this.scopes.for(context).endpointSecrets.groupBy({
+      by: ['endpointId'],
+      where: {
+        endpointId: { in: wanted },
+        active: true,
+        OR: [{ expiresAt: null }, { expiresAt: { gt: now } }],
+      },
+      // Stated, so `groupBy` does not refuse an unbounded rollup. One group per
+      // endpoint at most, so this is the exact ceiling rather than a guess.
+      take: wanted.length,
+    });
+
+    const live = new Set<string>();
+    for (const group of groups) {
+      const endpointId = group.endpointId;
+      if (typeof endpointId === 'string') live.add(endpointId);
+    }
+    return live;
   }
 
   // ---------------------------------------------------------------------------
@@ -403,10 +462,16 @@ export class EndpointSecretsService {
    *
    * Exhaustive, not a page, and that is a correctness requirement rather than
    * thoroughness: the next version number, the survivor count `revoke` refuses
-   * on, and `hasLiveSecret` are all computed from this array. Read as a single
-   * capped page, each of those is wrong past `MAX_PAGE_SIZE` - the next version
-   * would collide with an existing row, and a survivor sitting on page two
-   * would be invisible to the check that exists to find it.
+   * on, and the rotation's live-before snapshot are all computed from this
+   * array. Read as a single capped page, each of those is wrong past
+   * `MAX_PAGE_SIZE` - the next version would collide with an existing row, and
+   * a survivor sitting on page two would be invisible to the check that exists
+   * to find it.
+   *
+   * `hasLiveSecret` no longer comes through here: it asks a grouped, filtered
+   * question (`liveSecretEndpointIds`) that PostgreSQL answers in one statement
+   * regardless of how many dead secrets an endpoint has accumulated. Same
+   * answer, and immune to the paging concern above by construction.
    *
    * `forEachPage` is the sanctioned way to say "I processed everything"; it
    * pages by primary key, so nothing is skipped or repeated.

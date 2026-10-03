@@ -10,11 +10,16 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/shaq/webhook-platform/services/data-plane/internal/egress"
-	"github.com/shaq/webhook-platform/services/data-plane/internal/metrics"
-	"github.com/shaq/webhook-platform/services/data-plane/internal/queue"
-	"github.com/shaq/webhook-platform/services/data-plane/internal/retry"
-	"github.com/shaq/webhook-platform/services/data-plane/internal/signing"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
+
+	"github.com/shaq/hookubit/services/data-plane/internal/egress"
+	"github.com/shaq/hookubit/services/data-plane/internal/metrics"
+	"github.com/shaq/hookubit/services/data-plane/internal/queue"
+	"github.com/shaq/hookubit/services/data-plane/internal/retry"
+	"github.com/shaq/hookubit/services/data-plane/internal/signing"
+	"github.com/shaq/hookubit/services/data-plane/internal/tracing"
 )
 
 // deferBaseDelay is how long a delivery waits after being turned away by a
@@ -28,7 +33,17 @@ const deferBaseDelay = 2 * time.Second
 // could only log it would add nothing.
 func (w *Worker) handle(ctx context.Context, lease queue.Lease) {
 	job := lease.Job
-	log := w.log.With(
+
+	// The stage root for this attempt. It covers the gates and the deferrals as
+	// well as the request, because "why has this delivery not moved" is a
+	// question about the gates. See startAttemptSpan.
+	ctx, span := startAttemptSpan(ctx, lease)
+	defer span.End()
+
+	// trace_id on every line of this delivery's story. ARCHITECTURE.md 63 wants
+	// both; this is the seam between them, and it is absent - leaving the lines
+	// byte-identical - when tracing is off.
+	log := tracing.Logger(ctx, w.log).With(
 		"delivery_id", job.DeliveryID,
 		"event_id", job.EventID,
 		"endpoint_id", job.EndpointID,
@@ -41,10 +56,35 @@ func (w *Worker) handle(ctx context.Context, lease queue.Lease) {
 	releaseTenant, scope, ok := w.gate.AcquireTenant(job.OrganizationID, job.ProjectID)
 	if !ok {
 		metrics.RateLimitHits.WithLabelValues(scope).Inc()
-		w.deferDelivery(ctx, job.DeliveryID, ReasonConcurrencyLimited, w.spread(deferBaseDelay), log,
-			slog.String("scope", scope))
+		// The row has not been read yet, so ordinarily there is no policy to
+		// judge against, and that is deliberate: a tenant concurrency ceiling
+		// is a momentary condition that clears on its own, and putting a query
+		// in front of every refusal would put load on the one path that is
+		// already saturated.
+		//
+		// "Momentary" is a good argument for the common case and a weak one
+		// under sustained saturation - a project whose pool is held by slow
+		// endpoints can refuse the SAME delivery on every claim for hours, and
+		// with unknownBudget nothing ever consults its clock, so it is
+		// rescheduled forever and never reaches max_retry_duration. That is the
+		// exact hole the breaker path had, surviving on one path.
+		//
+		// So: cheap for the momentary case, correct for the sustained one. The
+		// first few refusals of a delivery cost nothing extra; once one has
+		// lost here repeatedly, ONE budget-only read decides whether it still
+		// has time left. See tenantGateWatch and Store.LoadBudget.
+		budget := unknownBudget
+		if w.gateWatch.persistent(job.DeliveryID) {
+			budget = w.tenantGateBudget(ctx, job.DeliveryID, log)
+		}
+		w.deferDelivery(ctx, job.DeliveryID, budget, ReasonConcurrencyLimited,
+			w.spread(deferBaseDelay), log, slog.String("scope", scope))
 		return
 	}
+	// It got in, so whatever streak it had at this gate is over. Forgetting is
+	// what keeps the tracker's memory proportional to deliveries that are
+	// actually stuck rather than to deliveries that have ever been refused.
+	w.gateWatch.forget(job.DeliveryID)
 	defer releaseTenant()
 
 	// From here on the attempt runs under the lease keeper's context. If the
@@ -75,10 +115,31 @@ func (w *Worker) deliver(ctx context.Context, j queue.DeliveryJob, log *slog.Log
 		// spinning on it: without a delay the next poll re-claims it
 		// immediately and a database blip becomes a hot loop.
 		log.Error("load delivery failed", "error", err)
-		w.deferDelivery(ctx, j.DeliveryID, ReasonRetryScheduled, w.spread(deferBaseDelay), log)
+		// unknownBudget for the same reason as above, and a sharper one: the
+		// read that would tell us the budget is the read that just failed.
+		w.deferDelivery(ctx, j.DeliveryID, unknownBudget, ReasonRetryScheduled,
+			w.spread(deferBaseDelay), log)
 		return
 	}
 	log = log.With("endpoint_url_host", hostOf(job.Endpoint.URL))
+	// HOST ONLY, never the URL. A customer's endpoint URL can carry a token in
+	// its query string; this is the same reduction the log line above makes and
+	// it is not negotiable for a span either (engineering rule 12).
+	if span := spanOf(ctx); span.IsRecording() {
+		attrs := []attribute.KeyValue{
+			tracing.AttrServerAddress.String(tracing.EndpointHost(job.Endpoint.URL)),
+			tracing.AttrEventType.String(job.EventType),
+			tracing.AttrMaxAttempts.Int(job.Policy.MaxAttempts),
+			tracing.AttrPayloadStored.Bool(job.PayloadLocation != ""),
+		}
+		if !job.EventCreatedAt.IsZero() {
+			// End-to-end age at the moment this attempt starts. It is the
+			// number the linked ingest span cannot give, because the two spans
+			// are deliberately in different traces.
+			attrs = append(attrs, tracing.AttrEventAgeMS.Int64(w.now().Sub(job.EventCreatedAt).Milliseconds()))
+		}
+		span.SetAttributes(attrs...)
+	}
 
 	if deliverable, reason := job.Endpoint.Deliverable(); !deliverable {
 		// Not a failure of this delivery - the operator switched the endpoint
@@ -91,10 +152,66 @@ func (w *Worker) deliver(ctx context.Context, j queue.DeliveryJob, log *slog.Log
 	releaseEndpoint, ok := w.gate.AcquireEndpoint(job.Endpoint.ID, job.Endpoint.MaxConcurrency, w.endpointCeiling)
 	if !ok {
 		metrics.RateLimitHits.WithLabelValues("endpoint_concurrency").Inc()
-		w.deferDelivery(ctx, job.DeliveryID, ReasonConcurrencyLimited, w.spread(deferBaseDelay), log)
+		w.deferDelivery(ctx, job.DeliveryID, budgetOf(job), ReasonConcurrencyLimited,
+			w.spread(deferBaseDelay), log)
 		return
 	}
 	defer releaseEndpoint()
+
+	// The endpoint's own rate limit is checked HERE: after the cheap
+	// concurrency gate, and before both the payload fetch and the breaker.
+	//
+	// It used to sit between the breaker and the request, and that was a bug
+	// rather than an ordering preference. breaker.Allow CLAIMS the half-open
+	// probe slot, so a recovering endpoint that also had endpoints.rate_limit
+	// set could have its one probe consumed by a delivery that then deferred
+	// here and never reached the network - delaying recovery by a whole
+	// HalfOpenTTL each time, indefinitely if the bucket stayed saturated. The
+	// rule the comment below states for the payload fetch applies to every
+	// gate: nothing that can defer may sit between claiming the probe and
+	// making the request.
+	if job.Endpoint.RateLimit > 0 {
+		allowed, wait := w.limiter.Allow(ctx, "endpoint:"+job.Endpoint.ID,
+			job.Endpoint.RateLimit, job.Endpoint.RateLimitWindow)
+		if !allowed {
+			metrics.RateLimitHits.WithLabelValues("endpoint").Inc()
+			w.deferDelivery(ctx, job.DeliveryID, budgetOf(job), ReasonRateLimited, w.spread(wait), log)
+			return
+		}
+	}
+
+	// Resolve the payload HERE, after both cheap gates and before the breaker,
+	// and the position is deliberate on both sides.
+	//
+	// After the gates, because an object storage fetch for a delivery that a
+	// concurrency ceiling or a rate limit is about to turn away is wasted
+	// bandwidth on the one path that is already saturated.
+	//
+	// Before the breaker, because Allow CLAIMS the half-open probe slot for a
+	// recovering endpoint. Claiming that slot and then deferring because OUR
+	// bucket is down would spend a recovering endpoint's one probe on a
+	// delivery that never reaches the network, and delay its recovery by a
+	// whole cooldown for a reason that has nothing to do with it.
+	payload, err := w.resolvePayload(ctx, job)
+	if err != nil {
+		if errors.Is(err, ErrPayloadStoreUnavailable) {
+			// The endpoint is fine; we are not. Defer WITHOUT recording an
+			// attempt: no request was made, so nothing may be charged against
+			// the retry budget, and the delivery drains on its own once the
+			// bucket comes back.
+			log.Error("payload could not be fetched from object storage; deferring", "error", err)
+			w.deferDelivery(ctx, job.DeliveryID, budgetOf(job), ReasonPayloadUnavailable,
+				w.spread(deferBaseDelay), log)
+			return
+		}
+		// ErrPayloadGone / ErrPayloadCorrupt / ErrNoPayload: definitive, and
+		// recorded as an attempt so the ledger can answer for it.
+		w.recordNonHTTP(ctx, job, w.now(), err, log)
+		return
+	}
+	// From here the delivery signs and sends exactly these bytes and nothing
+	// derived from them.
+	job.Payload = payload
 
 	breakerCtx, cancelBreaker := w.dbContext(ctx)
 	verdict := w.breaker.Allow(breakerCtx, job.Endpoint.ID)
@@ -105,20 +222,22 @@ func (w *Worker) deliver(ctx context.Context, j queue.DeliveryJob, log *slog.Log
 		if delay < time.Second {
 			delay = time.Second
 		}
-		w.deferDelivery(ctx, job.DeliveryID, verdict.Reason, delay, log,
+		w.deferDelivery(ctx, job.DeliveryID, budgetOf(job), verdict.Reason, delay, log,
 			slog.String("breaker_state", string(verdict.State)))
 		return
 	}
 
-	if job.Endpoint.RateLimit > 0 {
-		allowed, wait := w.limiter.Allow(ctx, "endpoint:"+job.Endpoint.ID, job.Endpoint.RateLimit, job.Endpoint.RateLimitWindow)
-		if !allowed {
-			metrics.RateLimitHits.WithLabelValues("endpoint").Inc()
-			w.deferDelivery(ctx, job.DeliveryID, ReasonRateLimited, w.spread(wait), log)
-			return
-		}
-	}
-
+	// From here to w.client.Do, nothing may defer for a reason attributable to
+	// the ENDPOINT or to this platform's load: the probe slot is already
+	// claimed, and spending it on a request that is never made costs the
+	// endpoint a whole cooldown of recovery. That is why the rate-limit and
+	// payload-fetch gates sit above breaker.Allow rather than here.
+	//
+	// The one exemption is worker shutdown (attempt() checks it before the
+	// request), and it costs nothing: on an already-cancelled context
+	// w.client.Do returns immediately and lands in the identical shutdown defer
+	// on the far side, so the probe is spent either way. The early check only
+	// saves a futile syscall.
 	w.attempt(ctx, job, verdict, log)
 }
 
@@ -136,9 +255,9 @@ func (w *Worker) attempt(ctx context.Context, job *Job, verdict Verdict, log *sl
 		return
 	}
 	if len(job.Payload) == 0 {
-		// events.payload_raw is authoritative. The jsonb column is a
-		// normalised projection, so signing or sending it would produce a
-		// payload the consumer cannot verify - see ErrNoPayload.
+		// Unreachable: resolvePayload has already established the bytes and
+		// verified them against events.payload_hash. Kept because the cost of
+		// being wrong is signing and shipping an empty body - see ErrNoPayload.
 		w.recordNonHTTP(ctx, job, started,
 			fmt.Errorf("%w (payload_location=%q)", ErrNoPayload, job.PayloadLocation), log)
 		return
@@ -162,6 +281,14 @@ func (w *Worker) attempt(ctx context.Context, job *Job, verdict Verdict, log *sl
 		metrics.LeasesLost.WithLabelValues("attempt").Inc()
 		return
 	}
+	// And the same for our own shutdown. The drain window has closed, so this
+	// request would be cancelled the moment it started; sending it anyway costs
+	// the endpoint a duplicate and costs the delivery an attempt.
+	if errors.Is(context.Cause(ctx), ErrWorkerShutdown) {
+		w.deferDelivery(ctx, job.DeliveryID, budgetOf(job), ReasonWorkerShutdown,
+			w.spread(deferBaseDelay), log)
+		return
+	}
 
 	// endpoints.timeout_ms can only SHORTEN the attempt: the egress client
 	// applies EGRESS_TOTAL_TIMEOUT_MS of its own, and letting a customer's
@@ -174,8 +301,40 @@ func (w *Worker) attempt(ctx context.Context, job *Job, verdict Verdict, log *sl
 		defer cancelCall()
 	}
 
-	resp, doErr := w.client.Do(callCtx, http.MethodPost, job.Endpoint.URL, headers, job.Payload)
+	// The one irreversible step, and the one worth its own span: everything
+	// above it is bookkeeping measured in microseconds, and this is where a
+	// slow endpoint holds a worker slot for thirty seconds.
+	//
+	// NOTE FOR ANYONE ADDING INSTRUMENTATION HERE: this is a MANUAL span around
+	// the call, not otelhttp.NewTransport around the client. That is
+	// deliberate and load-bearing. egress.Client's transport carries the SSRF
+	// guarantee - Dialer.Control runs per RESOLVED ADDRESS, after resolution,
+	// immediately before connect, with no cached verdict - and any wrapper that
+	// replaced or re-created the transport would move or lose it. A span is
+	// worth nothing next to that.
+	httpCtx, httpSpan := tracing.Start(callCtx, "webhook.delivery.http",
+		trace.WithSpanKind(trace.SpanKindClient),
+		trace.WithAttributes(
+			tracing.AttrHTTPMethod.String(http.MethodPost),
+			// Host only. Never the URL, never the headers (they carry the
+			// signature), never the body.
+			tracing.AttrServerAddress.String(tracing.EndpointHost(job.Endpoint.URL)),
+			tracing.AttrPayloadBytes.Int(len(job.Payload)),
+		))
+	resp, doErr := w.client.Do(httpCtx, http.MethodPost, job.Endpoint.URL, headers, job.Payload)
 	finished := w.now()
+	if httpSpan.IsRecording() {
+		if resp != nil {
+			httpSpan.SetAttributes(tracing.AttrHTTPStatus.Int(resp.StatusCode))
+		}
+		if doErr != nil {
+			// The CLASSIFICATION, not the message. A transport error's text can
+			// contain the full URL it failed to reach, query string included.
+			httpSpan.SetAttributes(tracing.AttrErrorType.String(ErrorCode(0, doErr)))
+			httpSpan.SetStatus(codes.Error, ErrorCode(0, doErr))
+		}
+	}
+	httpSpan.End()
 
 	// THE crash-safety check, and it must come before any write.
 	//
@@ -190,16 +349,41 @@ func (w *Worker) attempt(ctx context.Context, job *Job, verdict Verdict, log *sl
 		return
 	}
 
+	// The OTHER reason this request may have died with nothing to show for it:
+	// we cancelled it. A graceful shutdown whose drain window expired must not
+	// be recorded as the endpoint failing to answer - that writes `context
+	// canceled` into the customer's ledger, advances attempt_count, and moves
+	// their circuit breaker one failure closer to open, for a restart of ours.
+	//
+	// Only when the request actually failed. A response that arrived before the
+	// cancellation landed is a real outcome and is recorded as one; throwing it
+	// away would guarantee the duplicate that deferring only risks.
+	if doErr != nil && errors.Is(context.Cause(ctx), ErrWorkerShutdown) {
+		log.Warn("attempt cancelled by worker shutdown; putting the delivery back unattempted",
+			"reason", "our drain window closed, so this is not the endpoint's failure and is not charged to it")
+		w.deferDelivery(ctx, job.DeliveryID, budgetOf(job), ReasonWorkerShutdown,
+			w.spread(deferBaseDelay), log)
+		return
+	}
+
 	status := 0
 	if resp != nil {
 		status = resp.StatusCode
+	}
+	outcome := Outcome{HTTPStatus: status, Err: doErr}
+	if resp != nil {
+		// The endpoint's own answer to "when should we come back". Parsed here
+		// rather than in Decide so the state machine stays free of HTTP.
+		if wait, ok := ParseRetryAfter(resp.Headers.Get("Retry-After"), finished); ok {
+			outcome.RetryAfter, outcome.HasRetryAfter = wait, true
+		}
 	}
 	decision := w.rng.decide(DecisionInput{
 		Attempt:        job.AttemptNumber,
 		Policy:         job.Policy,
 		FirstAttemptAt: job.FirstAttemptAt,
 		Now:            finished,
-		Outcome:        Outcome{HTTPStatus: status, Err: doErr},
+		Outcome:        outcome,
 	})
 
 	attempt := &AttemptRecord{
@@ -212,6 +396,7 @@ func (w *Worker) attempt(ctx context.Context, job *Job, verdict Verdict, log *sl
 		ErrorCode:      decision.ErrorCode,
 		Duration:       finished.Sub(started),
 		WorkerID:       w.workerID,
+		TraceID:        tracing.SampledTraceID(ctx),
 	}
 	if resp != nil {
 		attempt.ResponseHeaders = RedactHeaders(resp.Headers)
@@ -283,6 +468,12 @@ func (w *Worker) recordNonHTTP(ctx context.Context, job *Job, started time.Time,
 	if errors.Is(cause, ErrNoPayload) {
 		decision.Reason = ReasonPayloadUnavailable
 	}
+	if errors.Is(cause, ErrPayloadGone) {
+		decision.Reason = ReasonPayloadGone
+	}
+	if errors.Is(cause, ErrPayloadCorrupt) {
+		decision.Reason = ReasonPayloadCorrupt
+	}
 
 	log.Error("delivery could not be attempted", "error", cause, "next_state", string(decision.State))
 	metrics.AttemptLatency.WithLabelValues(string(decision.AttemptStatus)).Observe(0)
@@ -295,6 +486,7 @@ func (w *Worker) recordNonHTTP(ctx context.Context, job *Job, started time.Time,
 		ErrorCode:    decision.ErrorCode,
 		ErrorMessage: truncate(cause.Error(), 1024),
 		WorkerID:     w.workerID,
+		TraceID:      tracing.SampledTraceID(ctx),
 	}, decision, log)
 }
 
@@ -345,6 +537,8 @@ func (w *Worker) finish(ctx context.Context, job *Job, attempt *AttemptRecord, d
 	writeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), w.dbTimeout)
 	defer cancel()
 
+	recordTransition(ctx, decision, attempt)
+
 	if err := w.store.Complete(writeCtx, w.workerID, job.DeliveryID, attempt, next); err != nil {
 		if errors.Is(err, ErrLeaseNotHeld) {
 			metrics.LeasesLost.WithLabelValues("complete").Inc()
@@ -372,6 +566,10 @@ func (w *Worker) finish(ctx context.Context, job *Job, attempt *AttemptRecord, d
 			"http_status", attemptStatusCode(attempt),
 			"error_code", decision.ErrorCode,
 			"retry_in", next.Delay.String(),
+			// Which schedule produced retry_in. Without it an operator staring
+			// at a 3600s gap under a 60s policy has no way to tell an honoured
+			// Retry-After from a broken backoff calculation.
+			"retry_after_honoured", decision.RetryAfterHonoured,
 			"reason", string(decision.Reason))
 	default:
 		metrics.DeliveriesCompleted.WithLabelValues(string(decision.State)).Inc()
@@ -383,6 +581,56 @@ func (w *Worker) finish(ctx context.Context, job *Job, attempt *AttemptRecord, d
 	}
 }
 
+// Budget is the wall-clock half of a delivery's retry budget, carried into
+// deferDelivery so that a delivery which is only ever DEFERRED can still end.
+//
+// The zero value means "not known here" - see unknownBudget.
+type Budget struct {
+	Policy         retry.Policy
+	FirstAttemptAt time.Time
+}
+
+// budgetOf reads the budget off a loaded delivery.
+func budgetOf(job *Job) Budget {
+	return Budget{Policy: job.Policy, FirstAttemptAt: job.FirstAttemptAt}
+}
+
+// unknownBudget is the budget of a delivery whose row has not been read.
+//
+// Two paths use it. The load failure genuinely cannot know: the read that would
+// tell us the budget is the read that just failed, and a database that never
+// answers is not a state in which anything is being delivered. The tenant
+// concurrency gate uses it only for the first few refusals of a given delivery;
+// see tenantGateWatch for why, and for what happens after that.
+var unknownBudget = Budget{}
+
+// expired reports whether the delivery's wall-clock budget has run out.
+func (b Budget) expired(now time.Time) bool {
+	return b.Policy.DurationExhausted(b.FirstAttemptAt, now)
+}
+
+// tenantGateBudget reads the wall-clock budget of a delivery that keeps losing
+// at the tenant gate.
+//
+// Failure is not an error here, it is a return to the previous behaviour: an
+// unknown budget defers, which is what the gate did on every refusal before
+// this existed. A database blip must not terminate a delivery, and it must not
+// stop the deferral either.
+func (w *Worker) tenantGateBudget(ctx context.Context, deliveryID string, log *slog.Logger) Budget {
+	readCtx, cancel := w.dbContext(context.WithoutCancel(ctx))
+	defer cancel()
+
+	budget, err := w.store.LoadBudget(readCtx, deliveryID)
+	if err != nil {
+		if !errors.Is(err, ErrDeliveryGone) {
+			log.Warn("could not read the retry budget of a delivery stuck at the tenant gate; deferring it anyway",
+				"error", err)
+		}
+		return unknownBudget
+	}
+	return budget
+}
+
 // deferDelivery puts a delivery back WITHOUT recording an attempt, because
 // none was made. The retry budget is for endpoints that answered badly, not for
 // moments when this process declined to ask.
@@ -391,12 +639,49 @@ func (w *Worker) finish(ctx context.Context, job *Job, attempt *AttemptRecord, d
 // column is the only free-text field the operator UI has, and "why is this
 // delivery not moving" is the question it exists to answer; the alternative is
 // a delivery sitting in `scheduled` with no explanation anywhere a human looks.
+//
+// WHY THE BUDGET CHECK LIVES HERE rather than at the call sites. The two halves
+// of the retry budget are spent by different things, and a defer spends exactly
+// one of them:
+//
+//   - attempt_count is spent by a REQUEST. A defer makes none, so it charges
+//     none. That is deliberate and is preserved: this function never writes a
+//     positive AttemptCount.
+//   - MaxRetryDuration is spent by the CLOCK, which runs whether or not we
+//     asked. A delivery that is deferred and re-claimed forever is a delivery
+//     whose wall-clock budget is running down with nothing ever consulting it.
+//
+// retry.Policy.Exhausted was reachable from exactly one place - Decide, on a
+// COMPLETED attempt - so a delivery behind a permanently open breaker never
+// reached any budget check at all. It was re-claimed every cooldown forever,
+// and under the default FIFO claim (a strict global ordering, no tenant
+// predicate) those ever-older rows sort AHEAD of live traffic: one dead
+// endpoint degrades the whole queue. There is no reaper in either plane to
+// catch it later.
+//
+// Putting the check in this function rather than at each `if !ok` means a
+// future defer path cannot forget it - the budget is a parameter it has to
+// think about, not a call it can omit.
 func (w *Worker) deferDelivery(
-	ctx context.Context, deliveryID string, reason Reason, delay time.Duration, log *slog.Logger, extra ...slog.Attr,
+	ctx context.Context, deliveryID string, budget Budget, reason Reason,
+	delay time.Duration, log *slog.Logger, extra ...slog.Attr,
 ) {
+	if budget.expired(w.now()) {
+		w.expireDelivery(ctx, deliveryID, reason, log, extra...)
+		return
+	}
+	// A defer that happened because WE are going away is named as such,
+	// whatever the proximate reason was. A payload fetch cancelled by the drain
+	// window is not an object-storage outage, and last_error must not send an
+	// operator looking for one.
+	if errors.Is(context.Cause(ctx), ErrWorkerShutdown) {
+		reason = ReasonWorkerShutdown
+	}
 	if delay <= 0 {
 		delay = time.Second
 	}
+	recordDeferred(ctx, reason, delay)
+
 	writeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), w.dbTimeout)
 	defer cancel()
 
@@ -421,6 +706,44 @@ func (w *Worker) deferDelivery(
 	log.LogAttrs(writeCtx, slog.LevelDebug, "delivery deferred without an attempt", attrs...)
 }
 
+// expireDelivery ends a delivery whose wall-clock retry budget ran out while it
+// was being deferred, rather than deferring it again.
+//
+// It writes a TERMINAL transition with no attempt row and no attempt count.
+// That combination is the honest one: `exhausted` because we gave up rather
+// than the endpoint rejecting us, reason `retry_duration_exhausted` because it
+// was the clock and not the attempt count that ran out (which is the difference
+// between an operator raising max_attempts and raising max_retry_duration), and
+// no delivery_attempts row because no request was ever made. `deferred_for`
+// records what had been holding it up, so the answer to "why did this never go
+// out" is one query rather than a reconstruction.
+func (w *Worker) expireDelivery(
+	ctx context.Context, deliveryID string, deferredFor Reason, log *slog.Logger, extra ...slog.Attr,
+) {
+	writeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), w.dbTimeout)
+	defer cancel()
+
+	next := Transition{State: StateExhausted, Reason: ReasonBudgetExhausted}
+	recordTransition(ctx, Decision{State: StateExhausted, Reason: ReasonBudgetExhausted}, nil)
+	attrs := append([]slog.Attr{
+		slog.String("reason", string(ReasonBudgetExhausted)),
+		slog.String("deferred_for", string(deferredFor)),
+	}, extra...)
+
+	if err := w.store.Complete(writeCtx, w.workerID, deliveryID, nil, next); err != nil {
+		if errors.Is(err, ErrLeaseNotHeld) {
+			metrics.LeasesLost.WithLabelValues("defer").Inc()
+			return
+		}
+		log.LogAttrs(writeCtx, slog.LevelError, "expiring an out-of-budget delivery failed",
+			append(attrs, slog.String("error", err.Error()))...)
+		return
+	}
+	metrics.DeliveriesCompleted.WithLabelValues(string(StateExhausted)).Inc()
+	log.LogAttrs(writeCtx, slog.LevelWarn,
+		"delivery exhausted its retry duration without ever being attempted", attrs...)
+}
+
 // spread jitters a delay so deliveries turned away together do not return
 // together. It is the same anti-stampede argument as retry jitter, applied to
 // the paths that never reach the retry policy.
@@ -439,23 +762,41 @@ func (w *Worker) dbContext(parent context.Context) (context.Context, context.Can
 	return context.WithTimeout(parent, w.dbTimeout)
 }
 
-// storableBody bounds and sanitises a response body for the ledger.
-//
-// Two hazards, both real: PostgreSQL text cannot hold a NUL byte, and a 64 KB
+// storableBody bounds and sanitises a response body for the ledger. A 64 KB
 // body on every attempt of every delivery is a table that grows faster than the
-// deliveries themselves. Truncation is marked so nobody debugs a JSON parse
-// error against a body we cut in half.
+// deliveries themselves; the hazards it is made safe against are in
+// storableText.
 func (w *Worker) storableBody(resp *egress.Response) string {
 	if resp == nil || len(resp.Body) == 0 {
 		return ""
 	}
-	body := resp.Body
-	truncated := resp.Truncated
-	if len(body) > w.maxStoredBody {
-		body = body[:w.maxStoredBody]
+	// resp.Truncated carries in: the egress client may already have stopped
+	// reading at its own ceiling, and the marker belongs on the row either way.
+	return storableText(resp.Body, w.maxStoredBody, resp.Truncated)
+}
+
+// storableText is the one place bytes are made safe for a text column of the
+// ledger.
+//
+// Three hazards, all of them real and all of them survivable only here:
+//
+//   - PostgreSQL text cannot hold a NUL byte, and `jsonb` rejects \u0000. An
+//     endpoint's bytes are arbitrary, and failing the INSERT that records an
+//     attempt loses the ledger row, which is far worse than losing some bytes.
+//   - The bytes need not be valid UTF-8 (a gzipped or binary body, or a cut that
+//     lands mid-rune), and an invalid string is not storable text. Repaired
+//     rather than rejected: Go's own ToValidUTF8, not a regex - the equivalent
+//     trap in the sibling PHP code is a /u-flagged preg_replace returning null on
+//     malformed input, which turns a body into nothing at all.
+//   - Length. Kept forever, on the largest table in the system.
+//
+// Truncation is MARKED so nobody debugs a JSON parse error against a prefix.
+func storableText(b []byte, max int, truncated bool) string {
+	if max > 0 && len(b) > max {
+		b = b[:max]
 		truncated = true
 	}
-	s := strings.ReplaceAll(string(body), "\x00", "")
+	s := strings.ReplaceAll(string(b), "\x00", "")
 	if !utf8.ValidString(s) {
 		s = strings.ToValidUTF8(s, "�")
 	}

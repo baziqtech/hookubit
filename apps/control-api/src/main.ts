@@ -2,13 +2,15 @@ import { Logger as NestLogger, ValidationPipe } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { NestFactory } from '@nestjs/core';
 import { NestExpressApplication } from '@nestjs/platform-express';
-import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
+import { SwaggerModule } from '@nestjs/swagger';
 import cookieParser from 'cookie-parser';
 import helmet from 'helmet';
 import { Logger } from 'nestjs-pino';
 import { AppModule } from './app.module';
 import { assertRoutesAreGuarded } from './authz';
 import { AppExceptionFilter } from './common/errors';
+import { GLOBAL_PREFIX, GLOBAL_PREFIX_EXCLUDE, buildOpenApiDocument } from './common/openapi-document';
+import { corsOptions } from './config/cors';
 import { applyTrustProxy } from './config/trust-proxy';
 
 async function bootstrap(): Promise<void> {
@@ -30,28 +32,26 @@ async function bootstrap(): Promise<void> {
 
   app.use(helmet());
   app.use(cookieParser(process.env.SESSION_SECRET));
-  app.setGlobalPrefix('v1', { exclude: ['health/live', 'health/ready'] });
+  app.setGlobalPrefix(GLOBAL_PREFIX, { exclude: GLOBAL_PREFIX_EXCLUDE });
   app.useGlobalPipes(
     new ValidationPipe({ whitelist: true, forbidNonWhitelisted: true, transform: true }),
   );
   app.useGlobalFilters(new AppExceptionFilter());
 
-  const origins = (process.env.CORS_ORIGINS ?? '').split(',').filter(Boolean);
-  app.enableCors({ origin: origins.length ? origins : false, credentials: true });
+  // exposedHeaders matters as much as origin here: a browser drops every
+  // response header that is not CORS-safelisted or on that list, silently, so
+  // `Retry-After` and `x-request-id` were being set and then discarded before
+  // any cross-origin client could read them. See config/cors.ts.
+  app.enableCors(corsOptions(process.env.CORS_ORIGINS));
 
   // Never in production (FIX 4). /docs served the full route inventory, every
   // DTO shape and every validation constraint of the production control plane
   // to anyone who asked, unauthenticated - a free reconnaissance map. The
   // OpenAPI document is still generated for clients by `pnpm openapi`.
   if (appEnv !== 'production') {
-    const openapi = new DocumentBuilder()
-      .setTitle('Webhook Platform Control API')
-      .setDescription('Control plane for the webhook delivery platform.')
-      .setVersion('1.0')
-      .addBearerAuth({ type: 'http', scheme: 'bearer' }, 'apiKey')
-      .addCookieAuth('session')
-      .build();
-    SwaggerModule.setup('docs', app, SwaggerModule.createDocument(app, openapi));
+    // Built by the same function `pnpm openapi` uses, so /docs and the emitted
+    // file cannot disagree. See common/openapi-document.ts.
+    SwaggerModule.setup('docs', app, buildOpenApiDocument(app));
   } else {
     bootLogger.log('APP_ENV=production: /docs and the OpenAPI JSON are not mounted.');
   }

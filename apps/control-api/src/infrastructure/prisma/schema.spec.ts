@@ -27,10 +27,28 @@ function flatten(sql: string): string {
 const schema = read('schema.prisma');
 const init = read('migrations', '20260906000000_init', 'migration.sql');
 const fixes = read('migrations', '20260906010000_review_fixes', 'migration.sql');
+const outboxRecovery = read(
+  'migrations',
+  '20260909000000_outbox_fan_out_resume_and_recovery',
+  'migration.sql',
+);
+const flatOutboxRecovery = flatten(outboxRecovery);
+const flatRenameToRouting = flatten(
+  read('migrations', '20260923000000_rename_fan_out_to_routing', 'migration.sql'),
+);
+/**
+ * The DDL with `--` comments removed. These migrations carry long rationale
+ * comments that legitimately NAME the statements they are explaining ("what
+ * still blocks NOT NULL is..."), so a check for a forbidden statement has to
+ * read the SQL rather than the prose about it.
+ */
+function statementsOnly(sql: string): string {
+  return flatten(sql.replace(/--[^\n]*/g, ' '));
+}
 const flatFixes = flatten(fixes);
 const allMigrations = flatten(`${init}\n${fixes}`);
 
-describe('FIX 1 - fan-out cannot double-deliver', () => {
+describe('FIX 1 - routing cannot double-deliver', () => {
   it('has a unique index on (event_id, endpoint_id) for the router to name as an ON CONFLICT arbiter', () => {
     expect(flatFixes).toContain(
       'CREATE UNIQUE INDEX "deliveries_event_endpoint_original_key" ON "deliveries" ("event_id", "endpoint_id")',
@@ -160,6 +178,77 @@ describe('FIX 8 - sessions are revocable', () => {
   });
 });
 
+describe('the outbox can resume a routing, and a parked row can be recovered', () => {
+  it('adds the resume cursor that turns the routing cap into a BATCH bound', () => {
+    // Without this column the router took the first `cap` subscriptions
+    // ORDER BY s.id, dropped the rest and COMMITTED - marking the event
+    // `processed` while the newest endpoints (ULIDs sort by creation) held no
+    // delivery row, permanently, with replay unable to reach them.
+    // The column was ADDED as `fan_out_cursor` and RENAMED by
+    // 20260923000000_rename_fan_out_to_routing. Applied migrations are
+    // checksummed, so the original keeps the original name for ever; this
+    // asserts the pair, because either half alone would pass against a
+    // database whose column does not exist.
+    expect(flatOutboxRecovery).toContain('ADD COLUMN IF NOT EXISTS "fan_out_cursor" TEXT');
+    expect(flatRenameToRouting).toContain(
+      'ALTER TABLE "event_outbox" RENAME COLUMN "fan_out_cursor" TO "routing_cursor"',
+    );
+    expect(schema).toContain('routingCursor String?     @map("routing_cursor")');
+  });
+
+  it('splits the poison bound off the monotonic claim count', () => {
+    // `attempts` increments on CLAIM, which is right - a row that kills the
+    // process never reaches a failure handler. But it meant a degraded-Postgres
+    // window burned the whole budget on rows whose routing was never attempted.
+    expect(flatOutboxRecovery).toContain(
+      'ADD COLUMN IF NOT EXISTS "unaccounted_attempts" INTEGER NOT NULL DEFAULT 0',
+    );
+    expect(flatOutboxRecovery).toContain('ADD COLUMN IF NOT EXISTS "failing_since" TIMESTAMP(3)');
+    expect(schema).toContain('unaccountedAttempts Int   @default(0) @map("unaccounted_attempts")');
+    expect(schema).toContain('failingSince DateTime?   @map("failing_since")');
+  });
+
+  it('indexes the tenant path the control plane reaches parked rows through', () => {
+    // event_outbox carries no organization_id/project_id - deliberately - so the
+    // scoped listing is `event_id IN (SELECT id FROM events WHERE ...)`, and
+    // PostgreSQL does not index a foreign key for you.
+    expect(flatOutboxRecovery).toContain(
+      'CREATE INDEX IF NOT EXISTS "event_outbox_event_id_idx" ON "event_outbox" ("event_id")',
+    );
+  });
+
+  it('indexes the operator\'s "what is stuck?" page, partially', () => {
+    expect(flatOutboxRecovery).toMatch(
+      /CREATE INDEX IF NOT EXISTS "event_outbox_attention_idx" ON "event_outbox" \("status", "created_at" DESC\) WHERE "status" IN \('failed', 'pending'\);/,
+    );
+  });
+
+  it('is additive only - no column changes type or nullability', () => {
+    // The dev database is live and a load test may be running against it. An
+    // ADD COLUMN with a non-volatile default is catalogue-only on PostgreSQL
+    // 11+; an ALTER TYPE or SET NOT NULL here would rewrite or lock the table.
+    const ddl = statementsOnly(outboxRecovery);
+    expect(ddl).not.toMatch(/ALTER COLUMN/);
+    expect(ddl).not.toMatch(/DROP COLUMN/);
+    expect(ddl).not.toMatch(/SET NOT NULL/);
+  });
+
+  it('records the next_attempt_at correction here rather than editing an applied migration', () => {
+    // Prisma checksums each migration.sql into `_prisma_migrations`; editing an
+    // applied one - even only its comments - makes `migrate deploy` refuse to
+    // run against every environment that already has it. Corrections append.
+    const handoff = read('migrations', '20260907000000_handoff_schema_requests', 'migration.sql');
+    // The stale claim, still on disk and deliberately not edited.
+    expect(handoff).toContain('NOT NULL would fail every succeed');
+    expect(flatOutboxRecovery).toContain('CORRECTION to a comment in 20260907000000');
+    // Superseded in turn by 20260911000000_next_attempt_at_not_null, which
+    // ALSO appended rather than editing: the constraint landed, and the schema
+    // says where the stale sentence is and why it is still there.
+    expect(schema).toContain('NOT NULL, and it was made so by APPENDING a migration');
+    expect(schema).toContain('nextAttemptAt  DateTime       @default(now()) @map("next_attempt_at")');
+  });
+});
+
 describe('migration hygiene', () => {
   it('does not modify the already-applied initial migration', () => {
     // 20260906000000_init is checked in and may already be applied; every fix
@@ -169,6 +258,8 @@ describe('migration hygiene', () => {
     expect(init).not.toContain('deliveries_event_endpoint_original_key');
     // deliveries.ordering_key was always there; events.ordering_key was not.
     expect(flatten(init)).not.toContain('ALTER TABLE "events" ADD COLUMN');
+    expect(flatten(init)).not.toContain('unaccounted_attempts');
+    expect(flatFixes).not.toContain('unaccounted_attempts');
   });
 
   it('says out loud that `prisma migrate diff` will report drift here', () => {

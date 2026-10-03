@@ -10,8 +10,8 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"github.com/shaq/webhook-platform/services/data-plane/internal/ids"
-	"github.com/shaq/webhook-platform/services/data-plane/internal/retry"
+	"github.com/shaq/hookubit/services/data-plane/internal/ids"
+	"github.com/shaq/hookubit/services/data-plane/internal/retry"
 )
 
 // ErrDeliveryGone reports that the delivery row named by a lease no longer
@@ -76,8 +76,15 @@ type Job struct {
 
 	// Payload is events.payload_raw: the EXACT bytes the customer sent. This
 	// is what is signed and what is delivered. Never the jsonb projection.
+	// It is NULL when the payload was offloaded, in which case
+	// PayloadLocation names the object holding the equally exact bytes.
 	Payload         []byte
 	PayloadLocation string
+	// PayloadHash is events.payload_hash: SHA-256 of the exact request bytes,
+	// computed by ingest before either storage path was chosen. It is what
+	// makes the two paths comparable - whatever the worker ends up holding
+	// must hash to this or it is not what the customer sent.
+	PayloadHash string
 
 	EventCreatedAt time.Time
 	FirstAttemptAt time.Time
@@ -103,6 +110,17 @@ type AttemptRecord struct {
 	ErrorMessage    string
 	Duration        time.Duration
 	WorkerID        string
+	// TraceID is the trace of the span for THIS attempt, and it is the seam
+	// between the delivery ledger and the trace backend: the attempt row an
+	// operator is already looking at names the trace of that exact attempt.
+	//
+	// It is set ONLY when the span was actually sampled - see
+	// tracing.SampledTraceID. Recording the id of a dropped span would put a
+	// link in the operator UI that leads to an empty page, from which the
+	// operator concludes the backend is broken rather than that this attempt
+	// was not recorded. Empty writes NULL, which honestly means "no trace was
+	// kept for this attempt".
+	TraceID string
 }
 
 // Transition is one move of the delivery state machine, with its reason.
@@ -135,6 +153,19 @@ type Store interface {
 	// limit or a concurrency ceiling said no, so no attempt was made and none
 	// may be charged against the retry budget.
 	Defer(ctx context.Context, workerID, deliveryID string, next Transition) error
+
+	// LoadBudget reads ONLY the delivery's wall-clock retry budget, for the one
+	// caller that needs it before it is entitled to pay for Load: the tenant
+	// concurrency gate, which refuses before the row has been read.
+	//
+	// It exists as its own method rather than as a call to Load because the
+	// difference in cost is the whole point. Load joins the event, carries the
+	// payload bytes and runs a second query for the encrypted secrets; this is
+	// two primary-key lookups and the policy lateral. See loadBudgetSQL.
+	//
+	// It returns ErrDeliveryGone for a row that no longer exists, which the
+	// caller treats as "nothing to judge" rather than as a failure.
+	LoadBudget(ctx context.Context, deliveryID string) (Budget, error)
 }
 
 // HealthStore is the circuit breaker's database surface, split from Store so a
@@ -167,30 +198,31 @@ var _ HealthStore = (*PostgresStore)(nil)
 // creation: it is the origin of the max_retry_duration budget, and taking it
 // from the ledger rather than from a column means a replayed or reclaimed
 // delivery cannot quietly reset its own clock.
-const loadJobSQL = `
-SELECT d.event_id, d.organization_id, d.project_id,
-       d.attempt_count, d.max_attempts,
-       e.id, e.url, e.status::text, e.enabled, e.timeout_ms, e.max_concurrency,
-       COALESCE(e.rate_limit, 0), e.rate_limit_window_seconds,
-       COALESCE(e.custom_headers::text, ''),
-       ev.event_type, ev.payload_raw, COALESCE(ev.payload_location, ''),
-       COALESCE(ev.ordering_key, ''), ev.created_at,
-       COALESCE(
+// firstAttemptAtSQL is the instant a delivery's WALL-CLOCK budget started
+// running: the first attempt if one was ever made, and the row's own creation
+// otherwise, so a delivery that has only ever been deferred still has a clock.
+const firstAttemptAtSQL = `COALESCE(
          (SELECT MIN(a.started_at) FROM delivery_attempts a WHERE a.delivery_id = d.id),
-         d.created_at),
-       rp.strategy, rp.max_attempts, rp.initial_delay_ms, rp.max_delay_ms,
-       rp.multiplier, rp.jitter_ratio, rp.max_retry_duration_ms
-FROM deliveries d
-JOIN endpoints e ON e.id = d.endpoint_id
-JOIN events ev   ON ev.id = d.event_id
--- Resolve the retry policy the SAME way the router resolves max_attempts:
--- the endpoint's own policy if it has one, otherwise the project default,
--- otherwise the built-in (rp is NULL and the caller falls back).
---
--- Joining only on e.retry_policy_id skipped the project default entirely, so an
--- operator who set a default policy got its max_attempts honoured by the router
--- and its backoff ignored here - half a policy, silently. Observed in a live
--- run as 5s/10s/20s gaps under a policy that specified 1s capped at 5s.
+         d.created_at)`
+
+// retryPolicyColumns and retryPolicyJoin resolve the delivery's retry policy.
+// They are constants rather than two copies of the same SQL because two queries
+// need the answer - the full load and the budget-only read - and a divergence
+// between them would be a delivery judged against a policy it is not being
+// delivered under. Scanned by policyColumns.dest, resolved by
+// policyColumns.policy; the three move together.
+const retryPolicyColumns = `rp.strategy, rp.max_attempts, rp.initial_delay_ms, rp.max_delay_ms,
+       rp.multiplier, rp.jitter_ratio, rp.max_retry_duration_ms`
+
+// Resolve the retry policy the SAME way the router resolves max_attempts:
+// the endpoint's own policy if it has one, otherwise the project default,
+// otherwise the built-in (rp is NULL and the caller falls back).
+//
+// Joining only on e.retry_policy_id skipped the project default entirely, so an
+// operator who set a default policy got its max_attempts honoured by the router
+// and its backoff ignored here - half a policy, silently. Observed in a live
+// run as 5s/10s/20s gaps under a policy that specified 1s capped at 5s.
+const retryPolicyJoin = `
 LEFT JOIN LATERAL (
     SELECT p.*
     FROM retry_policies p
@@ -198,9 +230,100 @@ LEFT JOIN LATERAL (
        OR (e.retry_policy_id IS NULL AND p.project_id = d.project_id AND p.is_default)
     ORDER BY (p.id = e.retry_policy_id) DESC
     LIMIT 1
-) rp ON true
+) rp ON true`
+
+const loadJobSQL = `
+SELECT d.event_id, d.organization_id, d.project_id,
+       d.attempt_count, d.max_attempts,
+       e.id, e.url, e.status::text, e.enabled, e.timeout_ms, e.max_concurrency,
+       COALESCE(e.rate_limit, 0), e.rate_limit_window_seconds,
+       COALESCE(e.custom_headers::text, ''),
+       ev.event_type, ev.payload_raw, COALESCE(ev.payload_location, ''),
+       COALESCE(ev.payload_hash, ''),
+       COALESCE(ev.ordering_key, ''), ev.created_at,
+       ` + firstAttemptAtSQL + `,
+       ` + retryPolicyColumns + `
+FROM deliveries d
+JOIN endpoints e ON e.id = d.endpoint_id
+JOIN events ev   ON ev.id = d.event_id` + retryPolicyJoin + `
 WHERE d.id = $1
 `
+
+// loadBudgetSQL is loadJobSQL with everything the wall-clock budget does not
+// need taken out: no events join, so no payload_raw bytes cross the wire, and
+// no second query for the encrypted secrets. What is left is two primary-key
+// lookups and the policy lateral.
+//
+// That cheapness is the entire reason the tenant concurrency gate is allowed to
+// consult a budget at all. The gate deliberately runs BEFORE the delivery row
+// is read, so a delivery that cannot run costs one UPDATE rather than a join
+// and a decrypt; putting Load in front of every refusal would undo that on the
+// one path that is already saturated. This is the read that answers only the
+// question the gate has to ask.
+const loadBudgetSQL = `
+SELECT d.max_attempts,
+       ` + firstAttemptAtSQL + `,
+       ` + retryPolicyColumns + `
+FROM deliveries d
+JOIN endpoints e ON e.id = d.endpoint_id` + retryPolicyJoin + `
+WHERE d.id = $1
+`
+
+// policyColumns holds the nullable retry_policies row as scanned. Every field
+// is a pointer because the lateral join produces NULLs when no policy applies,
+// which is the signal to fall back to retry.DefaultPolicy.
+type policyColumns struct {
+	strategy         *string
+	maxAttempts      *int
+	initialDelayMS   *int
+	maxDelayMS       *int
+	multiplier       *float64
+	jitterRatio      *float64
+	maxRetryDuration *int
+}
+
+func (p *policyColumns) dest() []any {
+	return []any{
+		&p.strategy, &p.maxAttempts, &p.initialDelayMS, &p.maxDelayMS,
+		&p.multiplier, &p.jitterRatio, &p.maxRetryDuration,
+	}
+}
+
+// policy applies the scanned row over the built-in default.
+//
+// deliveryMaxAttempts is deliveries.max_attempts: the budget FROZEN onto this
+// delivery when the router created it. It wins over the endpoint's current
+// policy so that editing a retry policy mid-flight cannot extend or truncate
+// deliveries that are already in progress - the ledger says what this delivery
+// was promised, and that is what it gets.
+func (p *policyColumns) policy(deliveryMaxAttempts int) retry.Policy {
+	out := retry.DefaultPolicy()
+	if p.strategy != nil {
+		out.Strategy = *p.strategy
+	}
+	if p.maxAttempts != nil && *p.maxAttempts > 0 {
+		out.MaxAttempts = *p.maxAttempts
+	}
+	if p.initialDelayMS != nil {
+		out.InitialDelay = time.Duration(*p.initialDelayMS) * time.Millisecond
+	}
+	if p.maxDelayMS != nil {
+		out.MaxDelay = time.Duration(*p.maxDelayMS) * time.Millisecond
+	}
+	if p.multiplier != nil {
+		out.Multiplier = *p.multiplier
+	}
+	if p.jitterRatio != nil {
+		out.JitterRatio = *p.jitterRatio
+	}
+	if p.maxRetryDuration != nil {
+		out.MaxRetryDuration = time.Duration(*p.maxRetryDuration) * time.Millisecond
+	}
+	if deliveryMaxAttempts > 0 {
+		out.MaxAttempts = deliveryMaxAttempts
+	}
+	return out
+}
 
 // loadSecretsSQL returns the secrets that may sign RIGHT NOW, newest first.
 //
@@ -229,28 +352,21 @@ func (s *PostgresStore) Load(ctx context.Context, deliveryID string) (*Job, erro
 		rateWindowSeconds  int
 		customHeadersJSON  string
 
-		strategy         *string
-		policyMaxAttempt *int
-		initialDelayMS   *int
-		maxDelayMS       *int
-		multiplier       *float64
-		jitterRatio      *float64
-		maxDurationMS    *int
+		pol policyColumns
 	)
 
-	err := s.pool.QueryRow(ctx, loadJobSQL, deliveryID).Scan(
+	dest := []any{
 		&job.EventID, &job.OrganizationID, &job.ProjectID,
 		&attemptCount, &deliveryMaxAttempt,
 		&job.Endpoint.ID, &job.Endpoint.URL, &job.Endpoint.Status, &job.Endpoint.Enabled,
 		&timeoutMS, &job.Endpoint.MaxConcurrency,
 		&job.Endpoint.RateLimit, &rateWindowSeconds,
 		&customHeadersJSON,
-		&job.EventType, &job.Payload, &job.PayloadLocation,
+		&job.EventType, &job.Payload, &job.PayloadLocation, &job.PayloadHash,
 		&job.OrderingKey, &job.EventCreatedAt,
 		&job.FirstAttemptAt,
-		&strategy, &policyMaxAttempt, &initialDelayMS, &maxDelayMS,
-		&multiplier, &jitterRatio, &maxDurationMS,
-	)
+	}
+	err := s.pool.QueryRow(ctx, loadJobSQL, deliveryID).Scan(append(dest, pol.dest()...)...)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrDeliveryGone
 	}
@@ -266,36 +382,7 @@ func (s *PostgresStore) Load(ctx context.Context, deliveryID string) (*Job, erro
 	}
 	job.Endpoint.CustomHeaders = parseCustomHeaders(customHeadersJSON)
 
-	job.Policy = retry.DefaultPolicy()
-	if strategy != nil {
-		job.Policy.Strategy = *strategy
-	}
-	if policyMaxAttempt != nil && *policyMaxAttempt > 0 {
-		job.Policy.MaxAttempts = *policyMaxAttempt
-	}
-	if initialDelayMS != nil {
-		job.Policy.InitialDelay = time.Duration(*initialDelayMS) * time.Millisecond
-	}
-	if maxDelayMS != nil {
-		job.Policy.MaxDelay = time.Duration(*maxDelayMS) * time.Millisecond
-	}
-	if multiplier != nil {
-		job.Policy.Multiplier = *multiplier
-	}
-	if jitterRatio != nil {
-		job.Policy.JitterRatio = *jitterRatio
-	}
-	if maxDurationMS != nil {
-		job.Policy.MaxRetryDuration = time.Duration(*maxDurationMS) * time.Millisecond
-	}
-	// deliveries.max_attempts is the budget FROZEN onto this delivery when the
-	// router created it. It wins over the endpoint's current policy so that
-	// editing a retry policy mid-flight cannot extend or truncate deliveries
-	// that are already in progress - the ledger says what this delivery was
-	// promised, and that is what it gets.
-	if deliveryMaxAttempt > 0 {
-		job.Policy.MaxAttempts = deliveryMaxAttempt
-	}
+	job.Policy = pol.policy(deliveryMaxAttempt)
 
 	rows, err := s.pool.Query(ctx, loadSecretsSQL, job.Endpoint.ID)
 	if err != nil {
@@ -313,6 +400,25 @@ func (s *PostgresStore) Load(ctx context.Context, deliveryID string) (*Job, erro
 		return nil, fmt.Errorf("iterate endpoint secrets: %w", err)
 	}
 	return job, nil
+}
+
+// LoadBudget implements Store.
+func (s *PostgresStore) LoadBudget(ctx context.Context, deliveryID string) (Budget, error) {
+	var (
+		deliveryMaxAttempt int
+		firstAttemptAt     time.Time
+		pol                policyColumns
+	)
+	dest := append([]any{&deliveryMaxAttempt, &firstAttemptAt}, pol.dest()...)
+
+	err := s.pool.QueryRow(ctx, loadBudgetSQL, deliveryID).Scan(dest...)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return Budget{}, ErrDeliveryGone
+	}
+	if err != nil {
+		return Budget{}, fmt.Errorf("load retry budget for delivery %s: %w", deliveryID, err)
+	}
+	return Budget{Policy: pol.policy(deliveryMaxAttempt), FirstAttemptAt: firstAttemptAt}, nil
 }
 
 // advanceSQL is the guarded state transition.
@@ -334,17 +440,16 @@ func (s *PostgresStore) Load(ctx context.Context, deliveryID string) (*Job, erro
 // considers status IN ('pending','scheduled','queued','retrying','processing'),
 // so for a terminal row the column carries no scheduling meaning at all.
 //
-// It is written as now() rather than left NULL because the column is on its way
-// to NOT NULL (see HANDOFF.md). The claim query orders by
-// `next_attempt_at NULLS FIRST`, so NULL is not a neutral value - it is the
-// FRONT of the queue. A nullable column means any single write of NULL silently
-// promotes that row ahead of retries that are actually due; making it NOT NULL
-// turns that latent ordering hazard into a constraint violation at the moment
-// the mistake is made, and this ELSE branch is the one write that stood in the
-// way. now() is the harmless representation: it sorts the completed row among
-// the other work finishing at the same instant, in an ordering nothing consults
-// for it, and it needs no prior value - so a legacy row that is still NULL is
-// repaired the moment it goes terminal.
+// It is written as now() rather than left NULL because the column is NOT NULL
+// (20260911000000_next_attempt_at_not_null): a NULL here is a constraint
+// violation that fails the transition. The constraint exists because, while the
+// column was nullable and the claim ordered NULLS FIRST, NULL was not a neutral
+// value - it was the FRONT of the queue, and any single write of NULL silently
+// promoted that row ahead of retries that were actually due. This ELSE branch
+// was the one write that stood in the constraint's way. now() is the harmless
+// representation: it sorts the completed row among the other work finishing at
+// the same instant, in an ordering nothing consults for it, and it needs no
+// prior value.
 const advanceSQL = `
 UPDATE deliveries
 SET status          = $3::text::"DeliveryStatus",
@@ -365,9 +470,10 @@ const insertAttemptSQL = `
 INSERT INTO delivery_attempts (
     id, delivery_id, attempt_number, started_at, completed_at, status,
     http_status, request_headers, response_headers, response_body,
-    response_size, error_code, error_message, duration_ms, worker_id, created_at)
+    response_size, error_code, error_message, duration_ms, worker_id, created_at,
+    trace_id)
 VALUES ($1, $2, $3, $4, $5, $6::text::"AttemptStatus", $7, $8::jsonb, $9::jsonb,
-        $10, $11, $12, $13, $14, $15, now())
+        $10, $11, $12, $13, $14, $15, now(), $16)
 `
 
 // Complete implements Store.
@@ -462,6 +568,7 @@ func insertAttempt(ctx context.Context, tx pgx.Tx, deliveryID string, a *Attempt
 		textOrNil(a.ErrorMessage),
 		int(a.Duration.Milliseconds()),
 		textOrNil(a.WorkerID),
+		textOrNil(a.TraceID),
 	)
 	if err != nil {
 		return fmt.Errorf("record attempt %d for delivery %s: %w", a.Number, deliveryID, err)

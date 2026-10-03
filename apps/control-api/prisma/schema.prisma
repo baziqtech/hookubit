@@ -1,5 +1,5 @@
 // ---------------------------------------------------------------------------
-// Webhook Platform - PostgreSQL schema
+// HookuBit - PostgreSQL schema
 //
 // Prisma owns all DDL for this database (ADR-0002). The Go data plane reads and
 // writes these tables with hand-written SQL via pgx; it never runs migrations.
@@ -56,6 +56,14 @@ model User {
   emailVerifiedAt DateTime? @map("email_verified_at")
   lastLoginAt     DateTime? @map("last_login_at")
   disabledAt      DateTime? @map("disabled_at")
+  /// When this person finished OR skipped the product tour. NULL means "never
+  /// seen it", which is the safe direction: the tour is skippable and
+  /// re-openable, so showing it once more costs a keystroke while wrongly
+  /// suppressing it leaves a new user with no orientation at all. Deliberately
+  /// a nullable timestamp and not a boolean - a boolean cannot answer "when",
+  /// which is the question asked when a cohort churns - and not a per-step
+  /// blob, which would make the tour's own layout a schema migration.
+  onboardingCompletedAt DateTime? @map("onboarding_completed_at")
   createdAt       DateTime  @default(now()) @map("created_at")
   updatedAt       DateTime  @updatedAt @map("updated_at")
 
@@ -168,6 +176,18 @@ model Project {
   slug           String
   environment    Environment   @default(test)
   status         ProjectStatus @default(active)
+  /// Addresses permitted to PUBLISH events to this project. Empty means every
+  /// address may, which is the default and is fine until a key leaks.
+  ///
+  /// Entries are IPv4/IPv6 addresses or CIDR blocks. The data plane checks this
+  /// list before it judges whether the API key is valid, so an address that is
+  /// not on it learns nothing about the credential it presented
+  /// (services/data-plane/internal/ingest/allowlist.go).
+  ///
+  /// PUBLISHING ONLY. It is deliberately not consulted for reading the record
+  /// or for signing in, so nobody can lock themselves out of the dashboard with
+  /// it - which is the failure mode that makes IP allowlists dangerous.
+  allowedIps     String[]      @default([]) @map("allowed_ips")
   createdAt      DateTime      @default(now()) @map("created_at")
   updatedAt      DateTime      @updatedAt @map("updated_at")
 
@@ -179,6 +199,7 @@ model Project {
   retryPolicies     RetryPolicy[]
   rateLimitPolicies RateLimitPolicy[]
   idempotencyKeys   IdempotencyKey[]
+  notificationDestinations NotificationDestination[]
 
   @@unique([organizationId, slug])
   @@map("projects")
@@ -453,7 +474,7 @@ model Event {
   /// SHA-256 of payloadRaw (the exact raw request bytes).
   payloadHash    String      @map("payload_hash")
   /// Opt-in serialisation key carried from the ingest API (docs/API.md) onto
-  /// every delivery this event fans out to. Null means unordered.
+  /// every delivery this event routes to. Null means unordered.
   orderingKey    String?     @map("ordering_key")
   headers        Json?
   status         EventStatus @default(received)
@@ -505,17 +526,74 @@ model EventOutbox {
   /// event.created | event.replay
   type        String
   status      OutboxStatus @default(pending)
+  /// Total claims, MONOTONIC. Incremented by the router's claim, never lowered.
+  /// This is the honest "how many times has this been picked up?" for the
+  /// operator UI; it is NOT the poison bound. See `unaccountedAttempts`.
+  ///
+  /// "Never lowered" includes the operator requeue in `src/outbox`, which
+  /// resets the two BUDGETS (`unaccountedAttempts`, `failingSince`) and leaves
+  /// this column alone. A requeue that zeroed it would make the operator UI's
+  /// claim count restart at zero, and the number quoted in the next park
+  /// message with it - erasing exactly the history that distinguishes a row
+  /// requeued four times that keeps dying from one being tried for the first
+  /// time.
   attempts    Int          @default(0)
+  /// THE POISON BOUND (`ROUTER_MAX_OUTBOX_ATTEMPTS`), and a different number
+  /// from `attempts` on purpose.
+  ///
+  /// Incremented by the same claim - a row whose event kills the process never
+  /// reaches a failure handler, so an increment on the failure path would let it
+  /// be reclaimed and re-run forever - but DECREMENTED by every write the lease
+  /// holder commits: a recorded release, or a routing batch that made progress.
+  /// What survives is exactly "claims that ended with the router writing nothing
+  /// at all", which is the crash signal and nothing else. Before the split, a
+  /// degraded-Postgres window burned the whole budget on rows whose routing was
+  /// never attempted and parked events that had already been answered 202.
+  unaccountedAttempts Int   @default(0) @map("unaccounted_attempts")
+  /// When this row's first RECORDED failure since the last progress happened;
+  /// null when it is not currently failing. Recorded failures are bounded by
+  /// ELAPSED TIME (`MaxOutboxRetryDuration`, 1h) rather than by a count, because
+  /// no count distinguishes "the database was unavailable for twenty minutes"
+  /// from "this row errors every time" - and time does.
+  failingSince DateTime?   @map("failing_since")
+  /// Resume point for a routing wider than one transaction: the
+  /// `webhook_subscriptions.id` the last committed batch stopped at. Null means
+  /// the routing has not started.
+  ///
+  /// This column is what makes `ROUTER_MAX_SUBSCRIPTIONS_PER_EVENT` a BATCH
+  /// bound rather than a ceiling on the event. It used to be a ceiling: every
+  /// subscription past it was dropped, the event was marked `processed` anyway,
+  /// and - because ids are ULIDs and the walk is `ORDER BY s.id` - the endpoints
+  /// dropped were always the newest, permanently, with no replay path (replay is
+  /// built on delivery rows and they had none).
+  routingCursor String?     @map("routing_cursor")
   availableAt DateTime     @default(now()) @map("available_at")
   lockedBy    String?      @map("locked_by")
   lockedUntil DateTime?    @map("locked_until")
   lastError   String?      @map("last_error")
   processedAt DateTime?    @map("processed_at")
   createdAt   DateTime     @default(now()) @map("created_at")
+  /// W3C `traceparent` of the INGEST request that committed this row, written
+  /// inside that same transaction (ARCHITECTURE.md 44). The router reads it and
+  /// LINKS its routing span to it - it does not become a child of it, because
+  /// the routing happens an arbitrary time later on a different pod and a
+  /// parent-child edge across that gap reports six-hour ingest latencies.
+  ///
+  /// A fixed 55 characters; `tracestate` is deliberately not stored. Null means
+  /// tracing was off, or the row predates it: the router then starts an
+  /// unlinked root, so nothing in the delivery path depends on this being set.
+  traceContext String?     @map("trace_context")
 
   event Event @relation(fields: [eventId], references: [id], onDelete: Cascade)
 
   @@index([status, availableAt])
+  /// The tenant path for the control plane's parked-row listing and requeue
+  /// (`src/outbox`). `event_outbox` carries no organization_id/project_id and
+  /// must not - the router claims globally, and a denormalised tenant column on
+  /// a queue table is a column that can disagree with the row it points at - so
+  /// the tenancy is reached through the event, and PostgreSQL does not index a
+  /// foreign key for you.
+  @@index([eventId])
   /// NOTE: `event_outbox_ready_idx` - (available_at, created_at) WHERE status IN
   /// ('pending', 'processing') - is created by hand in
   /// 20260907000000_handoff_schema_requests. It covers the router's
@@ -523,6 +601,12 @@ model EventOutbox {
   /// neither of which the index above serves without a sort or a full scan.
   /// `processing` is in the predicate deliberately: a leased row IS processing,
   /// and a crashed router's rows must be reclaimable cheaply.
+  ///
+  /// NOTE: `event_outbox_attention_idx` - (status, created_at DESC) WHERE status
+  /// IN ('failed', 'pending') - is created by hand in
+  /// 20260909000000_outbox_fan_out_resume_and_recovery. Prisma has no
+  /// partial-index syntax. It serves the operator's "what is stuck in this
+  /// project?" page.
   @@map("event_outbox")
 }
 
@@ -542,7 +626,7 @@ enum DeliveryStatus {
   cancelled
 }
 
-/// Materialised fan-out: one row per (event, endpoint) match, each with its own
+/// Materialised routing: one row per (event, endpoint) match, each with its own
 /// independent retry chain. Written BEFORE any delivery is attempted, so this
 /// table is the record of what should be delivered - which is what makes replay
 /// and "did finance ever receive this?" answerable.
@@ -556,7 +640,13 @@ model Delivery {
   status         DeliveryStatus @default(pending)
   attemptCount   Int            @default(0) @map("attempt_count")
   maxAttempts    Int            @map("max_attempts")
-  nextAttemptAt  DateTime?      @map("next_attempt_at")
+  /// NOT NULL since 20260911000000_next_attempt_at_not_null, defaulted to the
+  /// insert time. The claim orders by it, and while it was nullable NULL sorted
+  /// FIRST - ahead of every retry that was actually due - so one stray NULL
+  /// silently jumped the queue. A terminal row keeps a value too (the worker
+  /// writes now() on every terminal transition); it has no scheduling meaning
+  /// there, because status alone keeps a terminal row out of the ready set.
+  nextAttemptAt  DateTime       @default(now()) @map("next_attempt_at")
   lastAttemptAt  DateTime?      @map("last_attempt_at")
   completedAt    DateTime?      @map("completed_at")
   /// Opt-in serialisation key. Stored from day one; enforcement is deferred
@@ -573,6 +663,30 @@ model Delivery {
   lastError      String?        @map("last_error")
   createdAt      DateTime       @default(now()) @map("created_at")
   updatedAt      DateTime       @updatedAt @map("updated_at")
+  /// When the retention sweep deleted this delivery's `delivery_attempts` rows.
+  /// Null means the attempt history is still here.
+  ///
+  /// Two horizons, not one: the attempt rows carry the bytes (two header maps
+  /// and a truncated response body each) and this row carries the answers, so
+  /// the detail is reclaimed sooner than the summary
+  /// (services/data-plane/internal/retention). This column is what makes that
+  /// possible - deleting from `delivery_attempts` changes nothing the sweep's
+  /// candidate query can see, so without a marker every pass would re-select the
+  /// same deliveries forever and delete nothing.
+  ///
+  /// It is also the difference between an honest ledger and a misleading one:
+  /// `attempt_count: 5` with an empty attempt list is indistinguishable from
+  /// "we never tried" unless something says the detail was pruned.
+  attemptsPrunedAt DateTime?    @map("attempts_pruned_at")
+  /// W3C `traceparent` of the ROUTER's routing span, written in the same
+  /// transaction that materialised this row. The worker reads it and links each
+  /// attempt to it.
+  ///
+  /// It is the router's context and not the event's because a delivery is a
+  /// SEPARATE RETRY CHAIN from its event: one event becomes N deliveries, each
+  /// living and failing independently. Null means tracing was off, or the row
+  /// predates it.
+  traceContext   String?        @map("trace_context")
 
   /// Restrict, not Cascade. `delivery_attempts` is append-only and this table is
   /// the answer to "did finance ever receive this?"; a single
@@ -589,11 +703,19 @@ model Delivery {
   /// (event_id, endpoint_id) WHERE replay_of_delivery_id IS NULL - is created by
   /// hand in migration 20260906010000_review_fixes. Prisma cannot express a
   /// partial unique index, so it is invisible here and to `migrate diff`.
-  /// It is the ON CONFLICT arbiter the fan-out router names; without it a
-  /// re-run router double-fans-out. Replays are exempt by design.
+  /// It is the ON CONFLICT arbiter the router names; without it a
+  /// re-run router double-routes. Replays are exempt by design.
   @@index([eventId])
   @@index([endpointId, createdAt(sort: Desc)])
   @@index([projectId, status, createdAt(sort: Desc)])
+  /// The analytics window index (20260908010000_analytics_delivery_window_index).
+  /// `status` sits between the two columns an "everything in this project over
+  /// this window" query constrains, so the index above cannot serve one:
+  /// created_at can never be a boundary condition and the rows never come back
+  /// in created_at order. Measured on 1M rows, the difference for the latency
+  /// sample at the 30-day ceiling is a 226 ms parallel sequential scan versus a
+  /// 0.35 ms index scan that stops at the LIMIT.
+  @@index([projectId, createdAt(sort: Desc)])
   /// NOTE: `deliveries_ready_idx` and `deliveries_ready_fifo_idx` - partial
   /// indexes over the claim's ready set - are created by hand in
   /// 20260907000000_handoff_schema_requests. Prisma has no partial-index
@@ -602,9 +724,29 @@ model Delivery {
   /// excluding it would put an abandoned delivery outside the index and make a
   /// dead worker's rows recoverable only by a sequential scan.
   ///
-  /// `next_attempt_at` stays NULLABLE. internal/worker's advanceSQL writes NULL
-  /// on every TERMINAL transition; NOT NULL would fail every succeed/exhaust/
-  /// cancel write. See apps/control-api/HANDOFF.md.
+  /// `next_attempt_at` is NOT NULL, and it was made so by APPENDING a migration
+  /// (20260911000000_next_attempt_at_not_null) rather than by editing the two
+  /// earlier files that discuss it. 20260907000000 still says on disk that
+  /// "NOT NULL would fail every succeed" - that was true when it was written and
+  /// stopped being true when internal/worker's advanceSQL began writing now()
+  /// on its terminal branch; Prisma checksums applied migrations, so the stale
+  /// sentence stays and the correction lives here and in the new file.
+  ///
+  /// The same migration REBUILT `deliveries_ready_idx` and
+  /// `deliveries_ready_fifo_idx` without `NULLS FIRST` and with `id` appended
+  /// as the claim's tiebreaker, because the claim's ORDER BY dropped NULLS FIRST
+  /// at the same time and the planner does not treat a NULLS FIRST index as
+  /// delivering a NULLS LAST ordering, NOT NULL or not. Both indexes keep their
+  /// names, their predicate and their entry in
+  /// deployments/ci/expected-schema-drift.txt.
+  ///
+  /// NOTE: `deliveries_retention_idx` and `deliveries_attempt_pruning_idx` -
+  /// partial indexes over the TERMINAL set, ordered by created_at - are created
+  /// by hand in 20260909100000_delivery_retention, for the same reason: Prisma
+  /// has no partial-index syntax. They serve the two retention sweeps. Neither
+  /// is written on the routing INSERT (a delivery is inserted 'pending', so it
+  /// enters neither index there); both entries are made by the single UPDATE
+  /// that takes the delivery terminal.
   @@map("deliveries")
 }
 
@@ -635,6 +777,20 @@ model DeliveryAttempt {
   durationMs      Int?          @map("duration_ms")
   workerId        String?       @map("worker_id")
   createdAt       DateTime      @default(now()) @map("created_at")
+  /// Trace id (32 hex) of the span for THIS attempt, and the seam between the
+  /// delivery ledger and the trace backend: the row an operator is already
+  /// looking at names the trace of that exact attempt.
+  ///
+  /// Written ONLY when the span was actually sampled. A trace id for a dropped
+  /// span is a link that leads to an empty page, from which an operator
+  /// concludes the backend is broken rather than that this attempt was not
+  /// recorded - so null honestly means "no trace was kept for this attempt".
+  ///
+  /// Each attempt has its OWN trace rather than sharing one with the delivery:
+  /// attempts are up to an hour apart on different pods, and nothing can hold a
+  /// span open across a process restart. The retry chain is reassembled by
+  /// querying the backend for webhook.delivery.id, not by the span tree.
+  traceId         String?       @map("trace_id")
 
   delivery Delivery @relation(fields: [deliveryId], references: [id], onDelete: Cascade)
 
@@ -646,6 +802,98 @@ model DeliveryAttempt {
 // ===========================================================================
 // Audit, usage, billing
 // ===========================================================================
+
+enum NotificationKind {
+  email
+  slack
+}
+
+enum NotificationStatus {
+  /// Created, and waiting for whoever reads the address to say yes. Receives
+  /// nothing at all until they do.
+  pending
+  confirmed
+  /// Stopped delivering and the platform gave up on it. A human has to look.
+  failing
+  disabled
+}
+
+/// Where HookuBit tells a human that something went wrong, PER PROJECT.
+///
+/// Per project and not per organization, and the UI says so at the top: an
+/// on-call channel for payments is not the on-call channel for the archive
+/// project, and one list for both is one list nobody trusts.
+model NotificationDestination {
+  id        String             @id
+  projectId String             @map("project_id")
+  kind      NotificationKind
+  /// The address. Unique per (project, kind) so one channel cannot be added
+  /// twice and then receive everything twice.
+  target    String
+  /// What to call it on screen. Defaults to the target.
+  label     String
+  status    NotificationStatus @default(pending)
+  /// Which triggers this destination has asked for. Empty receives nothing,
+  /// which is a legal and deliberate state - it is how you mute one channel
+  /// without deleting it and losing its confirmation.
+  events    String[]           @default([])
+  /// CONFIRMATION. Nobody is signed up to receive mail without saying yes:
+  /// a group address exists precisely so one person can put everyone else on
+  /// it, and this is what stops that being a way to mail somebody forever.
+  confirmedAt DateTime?        @map("confirmed_at")
+  /// SHA-256 of the confirmation link's token. The raw token is in exactly one
+  /// place — the message that was sent — which is the property that makes the
+  /// link proof that whoever clicked it can read the address.
+  ///
+  /// Not a `UserToken`: that table is keyed by user, and the whole point of a
+  /// group address is that the person who confirms it may have no account here.
+  confirmationTokenHash String?   @unique @map("confirmation_token_hash")
+  confirmationExpiresAt DateTime? @map("confirmation_expires_at")
+  lastSentAt  DateTime?        @map("last_sent_at")
+  lastError   String?          @map("last_error")
+  createdAt   DateTime         @default(now()) @map("created_at")
+  updatedAt   DateTime         @updatedAt @map("updated_at")
+
+  project       Project                @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  notifications NotificationDispatch[]
+
+  @@unique([projectId, kind, target])
+  @@index([projectId])
+  @@map("notification_destinations")
+}
+
+/// One message sent, or deliberately not sent.
+///
+/// It exists for GROUPING, which is the rule that stops a bad afternoon
+/// becoming four hundred messages: the same subject within the grouping window
+/// updates this row's count instead of producing a new message. Without a
+/// record of what was already said, "do not repeat yourself" is not
+/// expressible.
+///
+/// `subject` is the DEDUPLICATION KEY, not the email subject line - it names
+/// the thing that happened ("endpoint:ep_123:stopped"), so two different
+/// endpoints failing are two messages and one endpoint failing twice is one.
+model NotificationDispatch {
+  id            String   @id
+  destinationId String   @map("destination_id")
+  event         String
+  subject       String
+  /// How many occurrences this message covers. Starts at 1 and grows while the
+  /// grouping window is open.
+  occurrences   Int      @default(1)
+  firstAt       DateTime @map("first_at")
+  lastAt        DateTime @map("last_at")
+  /// Null while held for quiet hours; set when it actually went out.
+  sentAt        DateTime? @map("sent_at")
+  createdAt     DateTime @default(now()) @map("created_at")
+  updatedAt     DateTime @updatedAt @map("updated_at")
+
+  destination NotificationDestination @relation(fields: [destinationId], references: [id], onDelete: Cascade)
+
+  @@unique([destinationId, subject])
+  @@index([destinationId, lastAt])
+  @@map("notification_dispatches")
+}
 
 model AuditLog {
   id             String   @id

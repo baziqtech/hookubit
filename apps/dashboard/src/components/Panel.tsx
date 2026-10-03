@@ -16,7 +16,7 @@ export function Panel({ title, description, actions, children, flush, className 
   return (
     <section
       className={cn(
-        'overflow-hidden rounded-lg border border-line bg-panel shadow-panel',
+        'overflow-hidden rounded-[0.625rem] border border-line bg-panel shadow-panel',
         className,
       )}
     >
@@ -78,7 +78,7 @@ const STAT_TONES = {
 
 export function Stat({ label, value, hint, tone = 'default' }: StatProps) {
   return (
-    <div className="rounded-lg border border-line bg-panel px-3.5 py-3 shadow-panel">
+    <div className="rounded-[0.625rem] border border-line bg-panel px-3.5 py-3 shadow-panel">
       <p className="text-2xs font-medium uppercase tracking-wider text-ink-subtle">{label}</p>
       <p className={cn('mt-1.5 text-xl font-semibold tabular tracking-tight', STAT_TONES[tone])}>
         {value}

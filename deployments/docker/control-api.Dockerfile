@@ -29,7 +29,7 @@ RUN apk add --no-cache openssl \
  && corepack enable
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
 COPY apps/control-api/package.json apps/control-api/
-RUN pnpm install --frozen-lockfile --filter @webhook/control-api...
+RUN pnpm install --frozen-lockfile --filter @hookubit/control-api...
 COPY apps/control-api/ apps/control-api/
 
 # WHY THE SECOND `prisma generate`:
@@ -60,10 +60,10 @@ COPY apps/control-api/ apps/control-api/
 # The permanent fix is one line in a file this Dockerfile does not own: move
 # `prisma` from devDependencies to dependencies in apps/control-api/package.json.
 # See deployments/HANDOFF.md.
-RUN pnpm --filter @webhook/control-api prisma:generate \
- && pnpm --filter @webhook/control-api build \
- && pnpm deploy --filter @webhook/control-api --prod /app/deploy \
- && pnpm --filter @webhook/control-api exec prisma generate --schema=/app/deploy/prisma/schema.prisma \
+RUN pnpm --filter @hookubit/control-api prisma:generate \
+ && pnpm --filter @hookubit/control-api build \
+ && pnpm deploy --filter @hookubit/control-api --prod /app/deploy \
+ && pnpm --filter @hookubit/control-api exec prisma generate --schema=/app/deploy/prisma/schema.prisma \
  && node --eval "const {PrismaClient} = require('/app/deploy/node_modules/@prisma/client'); new PrismaClient(); console.log('prisma client present in deploy tree');"
 
 # Migration image (ARCHITECTURE.md 41). Kept BEFORE the runtime stage so that a

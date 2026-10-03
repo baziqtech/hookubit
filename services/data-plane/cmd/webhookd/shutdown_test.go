@@ -9,9 +9,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/shaq/webhook-platform/services/data-plane/internal/httpx"
-	"github.com/shaq/webhook-platform/services/data-plane/internal/ingest"
-	"github.com/shaq/webhook-platform/services/data-plane/internal/logging"
+	"github.com/shaq/hookubit/services/data-plane/internal/httpx"
+	"github.com/shaq/hookubit/services/data-plane/internal/ingest"
+	"github.com/shaq/hookubit/services/data-plane/internal/logging"
 )
 
 // freePort binds :0, reads the port and releases it. Racy in principle, fine

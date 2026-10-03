@@ -1,0 +1,37 @@
+{{- if .Values.observability.grafanaDashboard.enabled }}
+{{/*
+The delivery dashboard, shipped as a ConfigMap for the Grafana sidecar
+(kiwigrid/k8s-sidecar, which both the Grafana chart and kube-prometheus-stack
+run) to discover by label.
+
+TWO WAYS THIS DOES NOTHING, AND BOTH ARE SILENT:
+
+ 1. No sidecar is watching. Without one, this is a ConfigMap and nothing else -
+    Grafana does not read the cluster on its own.
+ 2. The label does not match. The sidecar only picks up ConfigMaps carrying the
+    label IT was configured with (`sidecar.dashboards.label` in the Grafana
+    chart, default `grafana_dashboard`). A mismatch produces no error anywhere:
+    the object exists, the dashboard never appears.
+
+Which is why this is off by default. Check the label your Grafana watches before
+turning it on, then look for the dashboard rather than assuming it arrived.
+
+The JSON is read verbatim with .Files.Get, which does NOT evaluate templates -
+so the Grafana legend syntax inside it survives intact.
+*/}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "hookubit.fullname" . }}-grafana-dashboard
+  labels:
+    {{- include "hookubit.labels" . | nindent 4 }}
+    app.kubernetes.io/component: observability
+    {{ .Values.observability.grafanaDashboard.label }}: {{ .Values.observability.grafanaDashboard.labelValue | quote }}
+  {{- with .Values.observability.grafanaDashboard.folder }}
+  annotations:
+    {{ $.Values.observability.grafanaDashboard.folderAnnotation }}: {{ . | quote }}
+  {{- end }}
+data:
+  hookubit.json: |-
+    {{- .Files.Get "dashboards/hookubit.json" | nindent 4 }}
+{{- end }}

@@ -40,4 +40,26 @@ describe('LoginError', () => {
   it('renders nothing before a submission fails', () => {
     expect(renderToStaticMarkup(<LoginError error={null} />)).toBe('');
   });
+
+  it('renders the resend action inside the unverified panel, and nowhere else', () => {
+    const unverified = new ApiRequestError(403, {
+      code: 'email_not_verified',
+      message: 'Email address is not verified.',
+    });
+    const action = <button data-testid="resend-action">Resend</button>;
+
+    const html = renderToStaticMarkup(<LoginError error={unverified} action={action} />);
+    expect(html).toContain('data-testid="login-email-not-verified"');
+    expect(html).toContain('data-testid="resend-action"');
+
+    // A wrong password gets no resend: the account may not even exist, and
+    // offering to mail it would say otherwise.
+    const generic = renderToStaticMarkup(
+      <LoginError
+        error={new ApiRequestError(401, { code: 'unauthenticated', message: GENERIC_MESSAGE })}
+        action={action}
+      />,
+    );
+    expect(generic).not.toContain('data-testid="resend-action"');
+  });
 });

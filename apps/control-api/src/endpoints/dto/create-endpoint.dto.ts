@@ -115,6 +115,7 @@ export class CreateEndpointDto {
   max_concurrency?: number;
 
   @ApiPropertyOptional({
+    type: Number,
     minimum: ENDPOINT_LIMITS.rateLimit.min,
     maximum: ENDPOINT_LIMITS.rateLimit.max,
     nullable: true,
@@ -138,6 +139,7 @@ export class CreateEndpointDto {
   rate_limit_window_seconds?: number;
 
   @ApiPropertyOptional({
+    type: String,
     description: 'Retry policy in THIS project. Resolved through the tenant scope.',
     maxLength: 64,
     nullable: true,

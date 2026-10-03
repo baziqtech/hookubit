@@ -1,0 +1,9 @@
+
+# Playwright
+/test-results/
+/playwright-report/
+/e2e/.shared-account.json
+/e2e/.auth-state.json
+
+# wrangler local state and `pnpm cf:check` output
+/.wrangler/

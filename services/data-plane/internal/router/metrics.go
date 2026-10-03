@@ -31,14 +31,35 @@ var (
 	EventsRouted = promauto.NewCounterVec(prometheus.CounterOpts{
 		Name: "router_events_routed_total",
 		Help: "Outbox rows resolved by the router, by outcome.",
-	}, []string{"outcome"}) // routed | no_subscriptions | event_missing | lease_lost | parked | retried
+	}, []string{"outcome"}) // routed | routing_continued | no_subscriptions | event_missing | lease_lost | parked | retried
 
-	// FanOutSize is deliveries created per event. The p99 is what turns
-	// materialised fan-out from cheap into expensive: at 10 subscribers this
-	// is free, at 10,000 it is the dominant write on the system.
-	FanOutSize = promauto.NewHistogram(prometheus.HistogramOpts{
-		Name:    "router_fan_out_size",
-		Help:    "Delivery rows created for one event.",
+	// BatchContinuations counts routing batches that committed with subscriptions
+	// still to walk - i.e. events wider than ROUTER_MAX_SUBSCRIPTIONS_PER_EVENT.
+	//
+	// This is the metric that used to be an ERROR log saying endpoints had been
+	// dropped. Nothing is dropped now; a non-zero rate simply means some events
+	// take several transactions to route, which is a capacity signal (raise
+	// the batch, or expect the outbox to carry those events for a few extra
+	// polls), not a data-loss one.
+	BatchContinuations = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "router_batch_continuations_total",
+		Help: "Routing batches that committed with more subscriptions still to walk.",
+	})
+
+	// DeliveriesPerRoutingBatch is deliveries created per routing BATCH, and the
+	// name says BATCH because the observation is per committed transaction, not
+	// per event: an event wider than ROUTER_MAX_SUBSCRIPTIONS_PER_EVENT
+	// contributes one observation per batch it takes. So this histogram CANNOT
+	// exceed the batch cap, and reading its p99 as "the widest event we have"
+	// is wrong by construction - pair it with router_batch_continuations_total,
+	// which is the signal that events are wider than one transaction.
+	//
+	// Within the cap the two are the same number, and that is the common case.
+	// The p99 is what turns materialised routing from cheap into expensive: at
+	// 10 subscribers this is free, at 10,000 it is the dominant write.
+	DeliveriesPerRoutingBatch = promauto.NewHistogram(prometheus.HistogramOpts{
+		Name:    "router_deliveries_per_routing_batch",
+		Help:    "Delivery rows created by one routing batch (not per event - see router_batch_continuations_total).",
 		Buckets: []float64{0, 1, 2, 5, 10, 25, 50, 100, 250, 500, 1000, 2500},
 	})
 
@@ -53,16 +74,22 @@ var (
 	// OutboxParked counts rows removed from the queue without being routed.
 	// Every increment is an event that will never be delivered until a human
 	// intervenes, so this should alert at any non-zero rate.
+	//
+	// The intervention is now an API call, not a psql session: parked rows are
+	// listed and requeued through
+	// GET/POST /v1/projects/:projectId/outbox (apps/control-api/src/outbox).
 	OutboxParked = promauto.NewCounterVec(prometheus.CounterOpts{
 		Name: "router_outbox_parked_total",
 		Help: "Outbox rows parked as failed and removed from the queue, by reason.",
+		// unknown_outbox_type | attempts_exhausted | retry_duration_exceeded |
+		// event_missing
 	}, []string{"reason"})
 
-	// RouteDuration is the cost of one event's fan-out transaction: load,
+	// RouteDuration is the cost of one event's routing transaction: load,
 	// match, insert N deliveries, mark the event and the outbox row, commit.
 	RouteDuration = promauto.NewHistogram(prometheus.HistogramOpts{
 		Name:    "router_route_duration_seconds",
-		Help:    "Duration of one event's fan-out transaction.",
+		Help:    "Duration of one event's routing transaction.",
 		Buckets: prometheus.ExponentialBuckets(0.001, 2, 14), // 1ms .. ~8s
 	})
 )

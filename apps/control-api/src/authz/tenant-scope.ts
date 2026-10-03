@@ -27,6 +27,7 @@ export type TenantScopeKind =
   | 'project'
   | 'projectAndOrganization'
   | 'viaEndpoint'
+  | 'viaEvent'
   | 'delivery'
   | 'viaDelivery';
 
@@ -53,6 +54,16 @@ export function tenantPredicate(kind: TenantScopeKind, context: RequestContext):
       return projectId
         ? { endpoint: { projectId } }
         : { endpoint: { project: { organizationId } } };
+    case 'viaEvent':
+      // `event_outbox` is the only table here, and it carries NO tenant columns
+      // on purpose: the router claims globally, and a denormalised
+      // organization_id/project_id on a queue table is a column that can
+      // disagree with the row it points at. The event is where the tenancy
+      // lives, so the event is what the predicate traverses - the same reading
+      // `delivery` takes of its ownership chain.
+      return projectId
+        ? { event: { organizationId, projectId } }
+        : { event: { organizationId } };
     case 'delivery':
       // Chain first (authoritative), denormalised columns second (selective:
       // they are what `deliveries_project_id_status_created_at_idx` is on).
@@ -86,6 +97,7 @@ function tenantColumns(
       };
     case 'organizationSelf':
     case 'viaEndpoint':
+    case 'viaEvent':
     case 'viaDelivery':
       return null;
   }
@@ -107,6 +119,7 @@ function tenantColumns(
  */
 const PARENT_KEY: Partial<Record<TenantScopeKind, string>> = {
   viaEndpoint: 'endpointId',
+  viaEvent: 'eventId',
   viaDelivery: 'deliveryId',
 };
 

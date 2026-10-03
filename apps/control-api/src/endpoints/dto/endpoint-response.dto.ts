@@ -1,4 +1,4 @@
-import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
+import { ApiProperty } from '@nestjs/swagger';
 import { Endpoint, EndpointStatus } from '@prisma/client';
 
 /**
@@ -9,32 +9,80 @@ import { Endpoint, EndpointStatus } from '@prisma/client';
  * because nobody thought about it. `endpoints` has no secret column today; the
  * signing secrets live in `endpoint_secrets` behind `endpoint-secrets.read`,
  * which is owner/admin only and deliberately NOT implied by `endpoints.read`.
+ *
+ * `has_live_secret` is the one thing about those secrets this shape carries, and
+ * it is a bare boolean for that reason. Without it the dashboard offered
+ * "Resume deliveries" on every paused endpoint, including the ones a developer
+ * had just created - which is the COMMON case, since `endpoint-secrets.*` is
+ * owner/admin only, so a developer's endpoint is deliberately left paused with
+ * `secret_pending` - and `POST /enable` answered 409 every time. The operator
+ * learned that by clicking. Nothing about the secret ITSELF widens: no id, no
+ * version, no prefix, no expiry timestamp, because a `viewer` holds
+ * `endpoints.read` and holds nothing at all on `endpoint_secrets`.
  */
 export class EndpointDto {
   @ApiProperty() id!: string;
   @ApiProperty() project_id!: string;
   @ApiProperty() name!: string;
   @ApiProperty() url!: string;
-  @ApiPropertyOptional({ nullable: true }) description!: string | null;
+  @ApiProperty({ type: String, nullable: true }) description!: string | null;
   @ApiProperty({ enum: ['active', 'paused', 'disabled', 'deleted'] }) status!: EndpointStatus;
   @ApiProperty({ description: 'Operator intent. The circuit breaker uses `status` instead.' })
   enabled!: boolean;
-  @ApiPropertyOptional({ nullable: true, description: 'Set by the circuit breaker.' })
+  @ApiProperty({
+    type: String,
+    nullable: true,
+    description:
+      'Why the PLATFORM disabled this endpoint, as a sentence, starting with `auto-disabled`. ' +
+      'Set when the circuit breaker has been open past the configured window; cleared by ' +
+      '`POST .../enable`. Null for an endpoint a human paused - that reason is in the audit ' +
+      'log - so `status === "disabled" && disabled_reason !== null` is how the two are told apart.',
+  })
   disabled_reason!: string | null;
-  @ApiPropertyOptional({ nullable: true }) disabled_at!: string | null;
+  @ApiProperty({
+    type: String,
+    nullable: true,
+    description: 'When the platform disabled it. Null unless `disabled_reason` is set.',
+  })
+  disabled_at!: string | null;
   @ApiProperty() timeout_ms!: number;
   @ApiProperty() max_concurrency!: number;
-  @ApiPropertyOptional({ nullable: true }) rate_limit!: number | null;
+  @ApiProperty({ type: Number, nullable: true }) rate_limit!: number | null;
   @ApiProperty() rate_limit_window_seconds!: number;
-  @ApiPropertyOptional({ nullable: true }) retry_policy_id!: string | null;
-  @ApiPropertyOptional({ type: 'object', additionalProperties: { type: 'string' }, nullable: true })
+  @ApiProperty({ type: String, nullable: true }) retry_policy_id!: string | null;
+  @ApiProperty({ type: 'object', additionalProperties: { type: 'string' }, nullable: true })
   custom_headers!: Record<string, string> | null;
+  @ApiProperty({
+    description:
+      'Whether this endpoint has at least one signing secret that is signing RIGHT NOW - ' +
+      'one that is active and either has no expiry or has not reached it yet, which is the ' +
+      'same test the delivery workers apply when they sign. False means `POST /enable` will ' +
+      'refuse with 409: an enabled endpoint with nothing to sign with delivers nothing, ' +
+      "because signing fails closed rather than sending an unsigned request. Read a secret's " +
+      '`active` flag alone and the two answers disagree for the window between a secret ' +
+      'expiring and its flag being swept, which is exactly when an operator is looking.\n\n' +
+      'A BOOLEAN, deliberately: no id, version, prefix or expiry. This field is visible to ' +
+      'anyone with `endpoints.read` (a viewer included), and reading signing secrets is ' +
+      '`endpoint-secrets.read` - owner and admin only.',
+    example: true,
+  })
+  has_live_secret!: boolean;
   @ApiProperty() created_at!: string;
   @ApiProperty() updated_at!: string;
+
+  @ApiProperty({
+    type: () => EndpointHealthDto,
+    nullable: true,
+    description:
+      'How this endpoint has been doing, over a fixed trailing hour. Null when it could not be ' +
+      'computed - never an invented zero.',
+  })
+  health!: EndpointHealthDto | null;
 }
 
 export class CreatedEndpointDto extends EndpointDto {
-  @ApiPropertyOptional({
+  @ApiProperty({
+    type: String,
     nullable: true,
     description:
       'The version 1 signing secret, in plaintext, returned HERE AND NOWHERE ELSE. ' +
@@ -95,7 +143,62 @@ function customHeaders(value: Endpoint['customHeaders']): Record<string, string>
   return Object.keys(out).length === 0 ? null : out;
 }
 
-export function toEndpointDto(endpoint: Endpoint): EndpointDto {
+/**
+ * `hasLiveSecret` is a REQUIRED second argument rather than an optional one.
+ *
+ * The secret state lives in another table, so this mapper cannot derive it, and
+ * a default would silently answer for every caller who did not think about it -
+ * on a field the dashboard uses to decide whether to offer "Resume deliveries".
+ * Stating it forces each call site to say where its answer came from.
+ */
+/**
+ * How this endpoint has been doing, over a fixed trailing hour.
+ *
+ * Present on both the list and the single-endpoint read: the list answers
+ * "which of these is the problem?" and the detail answers "how bad, and for how
+ * long?". Null only when computing it failed, which never fails the read — the
+ * configuration is what you came for and the rate is what you came for second.
+ */
+export class EndpointHealthDto {
+  @ApiProperty({
+    type: Number,
+    nullable: true,
+    description:
+      'Successes over SETTLED deliveries in the last hour. NULL, never 0, when nothing settled — ' +
+      'an endpoint with no traffic reads "no data", and 0 means every delivery we attempted ' +
+      'failed. Rendering the null as 0% turns a new endpoint into an outage.',
+  })
+  success_rate_1h!: number | null;
+
+  @ApiProperty({ description: 'Deliveries created in the last hour. Context for the rate.' })
+  deliveries_1h!: number;
+
+  @ApiProperty({
+    description:
+      'Created and still moving, at ANY age — not hour-bounded, because "what is queued behind ' +
+      'this problem?" is not a question about the last hour.',
+  })
+  deliveries_waiting!: number;
+
+  @ApiProperty({ description: 'From the circuit breaker. Zero when it has not been failing.' })
+  consecutive_failures!: number;
+
+  @ApiProperty({
+    type: String,
+    nullable: true,
+    description: 'When the breaker opened. Null when it is not open.',
+  })
+  opened_at!: string | null;
+
+  @ApiProperty({ type: String, nullable: true })
+  last_delivery_at!: string | null;
+}
+
+export function toEndpointDto(
+  endpoint: Endpoint,
+  hasLiveSecret: boolean,
+  health?: EndpointHealthDto,
+): EndpointDto {
   return {
     id: endpoint.id,
     project_id: endpoint.projectId,
@@ -112,7 +215,9 @@ export function toEndpointDto(endpoint: Endpoint): EndpointDto {
     rate_limit_window_seconds: endpoint.rateLimitWindowSeconds,
     retry_policy_id: endpoint.retryPolicyId ?? null,
     custom_headers: customHeaders(endpoint.customHeaders),
+    has_live_secret: hasLiveSecret,
     created_at: new Date(endpoint.createdAt).toISOString(),
     updated_at: new Date(endpoint.updatedAt).toISOString(),
+    health: health ?? null,
   };
 }

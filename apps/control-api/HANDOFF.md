@@ -29,7 +29,7 @@ consumer. Section 32 mentions jsonb; **section 28 governs**.
 `docs/API.md` documents the ingest API accepting `ordering_key` and
 `deliveries.ordering_key` already existed; `events` had nowhere to put it. It is
 now `events.ordering_key TEXT`. Carry it from the event onto each delivery the
-fan-out creates. Enforcement stays deferred (ADR-0004).
+routing creates. Enforcement stays deferred (ADR-0004).
 
 **3. API key convention — confirmed against your code, unchanged.**
 
@@ -47,7 +47,7 @@ Generated secrets are 32 characters over `[A-Za-z0-9]` (~190 bits), so no key
 contains `-` or `_` in its secret half and `strings.Cut` splits it correctly.
 `apikey.go` was not modified.
 
-### Fan-out router — the ON CONFLICT arbiter now exists
+### Router — the ON CONFLICT arbiter now exists
 
 ```sql
 CREATE UNIQUE INDEX deliveries_event_endpoint_original_key
@@ -612,7 +612,7 @@ denormalised `organization_id`/`project_id` columns, because that is what the
 disagreed with its endpoint's real owner would therefore appear in a *listing*.
 Id-addressed access does not have this weakness: `@ResolveTenantFrom('delivery',
 …)` walks the real chain and refuses on any mismatch, logging it at error level.
-The columns are written by the fan-out router from the endpoint's own project, so
+The columns are written by the router from the endpoint's own project, so
 a mismatch is a data-integrity bug, not an attack path — but if that ever becomes
 untrue, switch the two predicates to relation filters and accept the index loss.
 
@@ -1061,7 +1061,7 @@ Three that will surprise a client written against a normal CRUD API:
 
 ### Verified
 
-`lint`, `build` and `test` all pass for `@webhook/control-api`: **671 tests, 32
+`lint`, `build` and `test` all pass for `@hookubit/control-api`: **671 tests, 32
 suites** across the whole package, of which **85 in 4 suites** are new here
 (`organizations.service.spec.ts`, `organizations.http.spec.ts`,
 `members.service.spec.ts`, `members.http.spec.ts`). Still no live database —
@@ -1361,7 +1361,7 @@ the consumer a signature the platform never computed, next to one it did.
 
 ### Verified
 
-`pnpm --filter @webhook/control-api lint`, `build` and `test` all pass with
+`pnpm --filter @hookubit/control-api lint`, `build` and `test` all pass with
 everything in the tree — **671 tests, 32 suites**, of which 112 in 5 new suites
 here: `endpoints/endpoint-url.spec.ts` (40 cases, lifted from
 `egress/ssrf_test.go`), `endpoints/endpoint-headers.spec.ts`,
@@ -1691,7 +1691,7 @@ added here, the idiom is
 
 ### Verified
 
-`pnpm --filter @webhook/control-api lint && build && test` — all three pass,
+`pnpm --filter @hookubit/control-api lint && build && test` — all three pass,
 once the concurrent `src/organizations`, `src/members`, `src/endpoints` and
 `src/endpoint-secrets` work had landed. **33 suites, 724 tests, all passing.**
 
@@ -1937,7 +1937,7 @@ depth 5, 64 conditions, 8 path segments, 200-char paths, 50 `$in` values,
 ### Config
 
 `MAX_SUBSCRIPTIONS_PER_PROJECT` (default 500, clamped to [1, 10000], warns and
-falls back rather than refusing to boot). Subscriptions are the fan-out
+falls back rather than refusing to boot). Subscriptions are the routing
 multiplier — one event becomes one `deliveries` row per matching subscription —
 so the ceiling is enforced INSIDE the create's SERIALIZABLE transaction, not
 advisorily beside it like the endpoint and API-key ceilings.
@@ -2185,7 +2185,7 @@ whole ingest budget.
 
 ### Verified
 
-`pnpm --filter @webhook/control-api lint`, `build` and `test` all pass with
+`pnpm --filter @hookubit/control-api lint`, `build` and `test` all pass with
 everything in the tree — **1091 tests, 48 suites**, of which 170 in 7 new suites
 here:
 
@@ -2248,9 +2248,9 @@ found in `apps/control-api/HANDOFF.md`, `services/data-plane/HANDOFF.md` and
 ### To apply
 
 ```bash
-pnpm --filter @webhook/control-api prisma:generate
+pnpm --filter @hookubit/control-api prisma:generate
 DATABASE_URL=... DIRECT_DATABASE_URL=... \
-  pnpm --filter @webhook/control-api prisma:deploy
+  pnpm --filter @hookubit/control-api prisma:deploy
 ```
 
 `prisma:deploy` applies `20260906000000_init`, then `20260906010000_review_fixes`,
@@ -2286,7 +2286,7 @@ column goes NOT NULL.
 
 ### Deliberately NOT done
 
-1. **`deliveries.next_attempt_at` NOT NULL** (ADR-0007, data-plane item 7).
+1. **`deliveries.next_attempt_at` NOT NULL** (ADR-0007, data-plane item 7). **Since done** — `20260911000000_next_attempt_at_not_null`, with both ready-set indexes rebuilt without `NULLS FIRST`. The reasoning below is kept as the record of why it had to wait for the data-plane fix.
    **It would break the data plane on the first terminal delivery.**
    `internal/worker/store.go` `advanceSQL` writes
    `next_attempt_at = CASE WHEN $5::bool THEN now() + $6::interval ELSE NULL END`
@@ -2371,9 +2371,9 @@ second loop. Do not paste constraint names into the existing one.
 
 ### Verified, and not
 
-- `pnpm --filter @webhook/control-api prisma:generate` — **passes** (client v5.22.0).
+- `pnpm --filter @hookubit/control-api prisma:generate` — **passes** (client v5.22.0).
 - `npx prisma validate` — **passes**.
-- `pnpm --filter @webhook/control-api build` — **passes**.
+- `pnpm --filter @hookubit/control-api build` — **passes**.
 - `src/infrastructure/prisma/schema.spec.ts` — 21 tests, **pass** (it asserts the
   `review_fixes` SQL text; nothing there was touched).
 - **The SQL has NOT been executed.** No database is reachable: Docker is down and
@@ -2578,7 +2578,7 @@ Every route is `@Authorized(...)` + `@Tenant()`, every read goes through
 `TenantScopeFactory`/`ScopedRepository`, every list returns
 `{ data, has_more, next_offset }` from `findPage()`, and both replay routes carry
 a `@Throttle` (events 10/5min, deliveries 30/5min — the event route is tighter
-because one request there can create up to `MAX_REPLAY_FAN_OUT` real HTTP calls
+because one request there can create up to `MAX_REPLAY_DELIVERIES` real HTTP calls
 rather than one). `PrismaService` is not imported anywhere in either module.
 
 ### Replay — the invariant, and the index that carries half of it
@@ -2587,7 +2587,7 @@ rather than one). `PrismaService` is not imported anywhere in either module.
 replay is an INSERT and only an INSERT: `replay_of_delivery_id` names the row
 being replayed, `replayed_by` names the actor, `attempt_count` restarts at 0 with
 the ORIGINAL's `max_attempts`, and `status = 'pending'` with
-`next_attempt_at = now()` — which is exactly what the fan-out router writes and
+`next_attempt_at = now()` — which is exactly what the router writes and
 what `queue/postgres.go`'s ready predicate claims, so **the insert is the
 enqueue**. No UPDATE and no DELETE is issued against `deliveries` or
 `delivery_attempts` on any path.
@@ -2616,14 +2616,14 @@ Four more decisions worth arguing with:
 - **A deleted, disabled or paused endpoint is refused with its current status in
   `details`.** The worker would abandon such a delivery with `endpoint_deleted` /
   `endpoint_disabled`, so accepting it would turn a 201 into a second failure.
-  All-or-nothing across a fan-out: one dead endpoint refuses the whole request.
+  All-or-nothing across a routing: one dead endpoint refuses the whole request.
 - **`subscription_id` is carried over only if that subscription still exists.**
   `webhook_subscriptions` rows are hard-deletable while the ledger is not, and
   `ScopedRepository` proves every declared FK before writing — blindly copying
   the id would fail a months-old replay with a 404 about a resource the operator
   never mentioned. `replay_of_delivery_id` is the provenance that cannot vanish.
 
-`MAX_REPLAY_FAN_OUT = 50` bounds one request, for egress and because each insert
+`MAX_REPLAY_DELIVERIES = 50` bounds one request, for egress and because each insert
 is five statements (four FK proofs) inside a SERIALIZABLE transaction. Over the
 cap is `limit_exceeded` with `{ limit, current, resource }`, and `current` is a
 real COUNT so an operator can plan the split.
@@ -2694,7 +2694,7 @@ twice.
 
 ### Verified
 
-`pnpm --filter @webhook/control-api lint`, `build` and `test` all pass with
+`pnpm --filter @hookubit/control-api lint`, `build` and `test` all pass with
 everything in the tree — **1321 tests, 57 suites**, of which 130 in 5 new suites
 here:
 
@@ -2704,8 +2704,8 @@ here:
 - `events/events.service.spec.ts` — filters, the case-insensitive idempotency
   search still fenced by the tenant, page-boundary exactness, the three payload
   situations, and the replay rules: **historical endpoints not a re-match**
-  (subscriptions are mutated between the fan-out and the replay, in both
-  directions), originals-only so replaying twice does not compound, the fan-out
+  (subscriptions are mutated between the routing and the replay, in both
+  directions), originals-only so replaying twice does not compound, the routing
   cap with a real count, and all-or-nothing when one endpoint is deleted.
 - `deliveries/deliveries.service.spec.ts` — isolation across four shapes
   (another org, another project, the deliberately corrupt fixture row, absent)
@@ -2739,7 +2739,7 @@ here:
   of two colliding replays" is argued, not executed;
   `SerializableTransactionRunner` models it as a serial schedule and never
   aborts, so the runner's retry loop is unexercised here too.
-- `MAX_REPLAY_FAN_OUT` (50) and `MAX_INLINE_ATTEMPTS` (100) are compile-time
+- `MAX_REPLAY_DELIVERIES` (50) and `MAX_INLINE_ATTEMPTS` (100) are compile-time
   constants, not `ConfigService`-driven. Worth aligning with
   `MAX_PROJECTS_PER_ORGANIZATION` if an operator ever needs to raise one without
   a deploy.
@@ -2855,3 +2855,434 @@ Rules the Go side must hold, which are the same ones `effective-scopes.ts` holds
 
 `ApiKeyDto.effective_scopes` is the same derivation over HTTP, so an operator and
 the data plane read one answer.
+
+---
+
+# Onboarding state, resend-verification, and the headers a browser could not read
+
+Three gaps the dashboard work surfaced. All three are in `src/auth` and
+`src/config`; nothing outside auth changed.
+
+## `users.onboarding_completed_at`
+
+The dashboard's product tour kept "has this person seen it?" in `localStorage`
+(`hookubit.tour.v1`). That is per-browser, so the tour replayed on a second
+device, in a private window and after a site-data clear — including for someone
+who had deliberately *skipped* it — and support could not answer "was this user
+ever onboarded?" at all.
+
+**One nullable timestamp on `users`**, added by
+`prisma/migrations/20260908000000_user_onboarding_completed_at`. Nullable with
+no default and no backfill, so the migration writes a catalog row and does not
+rewrite the table, and `DROP COLUMN` is a complete rollback. NULL means "has not
+seen it", which is the safe direction: the tour is skippable and re-openable, so
+showing it once more costs a keystroke while wrongly suppressing it leaves a new
+user with no orientation. Backfilling `now()` over existing rows would have done
+exactly that.
+
+Deliberately **not** a boolean — a boolean cannot answer *when*, which is the
+question asked when a cohort churns — and **not** a per-step progress blob,
+which would make the tour's own layout a schema migration.
+
+**Read it** on `user.onboarding_completed_at`, an ISO-8601 string or `null`,
+carried on **every** response that returns a user: `GET /v1/auth/session`,
+`POST /v1/auth/login`, `POST /v1/auth/verify-email`. The client decides whether
+to show the tour without a second request.
+
+**Write it** with:
+
+```
+POST /v1/auth/onboarding-completed   →  204 No Content
+```
+
+Exactly the shape `apps/dashboard/HANDOFF.md` asked for, and it is right.
+
+- **Idempotent by SQL, not by read-then-write.** A conditional
+  `UPDATE ... WHERE id = $1 AND onboarding_completed_at IS NULL`. Two tabs, or
+  a retried request, race inside PostgreSQL and exactly one writes — so the
+  recorded instant is the **first** completion and never drifts forward on a
+  replay. A second call is 204, not 409: the client's question is "is this
+  person onboarded", and after either call the answer is yes.
+- **The user id comes off the verified session and from nowhere else.** No
+  body, no path parameter, no field naming a user — so one account cannot
+  complete another's, and that is a property of the signature as much as of the
+  query. `auth.http.spec.ts` pins it by posting `{ user_id: <someone else> }`
+  and asserting the other row is untouched (the validation pipe's
+  `forbidNonWhitelisted` makes it a 400, which is also fine — what must never
+  happen is the other row moving).
+- **Audited once**, on the transition only (`user.onboarding_completed`), so a
+  retrying client cannot flood `audit_logs`. It uses `AuthService.audit()`, not
+  `AuditService.recordFor` — `recordFor` derives the organization from a
+  resolved tenant context and an auth route has no tenant in its path;
+  `audit()` resolves the user's own first membership, which is what every other
+  user-level event in this class already does.
+
+## `POST /v1/auth/resend-verification`
+
+Registration ended on "check your email" with no way to ask for another link.
+
+**Always 202, with an identical body**, whether or not the address is
+registered, whether or not it is already verified, whether or not the account is
+disabled, and **whether or not the mail transport is up**. That last clause is
+the one that costs something: a failure escaping from here would answer 500 for
+an unverified registered address and 202 for an unknown one — an enumeration
+oracle assembled out of an error handler, which is precisely the bug that was
+found and fixed in forgot-password. The try/catch covers the token writes either
+side of the send, not just the mailer, because a transient database error on the
+token write leaks the same bit.
+
+Reuses the existing machinery rather than inventing any: `UserToken` of type
+`email_verification` (hashed, single-use, 24h) via `TokenService`, and
+`@Throttle` on the existing `ThrottleGuard`. Requesting a link **revokes the
+previous one**, so the newest email is the one that works.
+
+Throttled at **5/hour per IP and 5/hour per address, both enforced** — the same
+numbers as forgot-password, the other mail-sending route reachable without
+credentials. Unlike `verify-email`, the per-IP bucket here *refuses*: this route
+sends mail to an address the caller typed, so an unlimited version is a
+mail-bomb relay pointed at any unverified account and a way to burn the
+deployment's sending reputation.
+
+## `Access-Control-Expose-Headers`
+
+`main.ts` set `origin` and `credentials` and nothing else, so a cross-origin
+browser could read neither header this API relies on. Nothing errored — a
+browser drops every response header that is not CORS-safelisted or on that list,
+silently — which is why it went unnoticed.
+
+CORS config moved to `src/config/cors.ts` (`corsOptions`, with `cors.spec.ts`)
+and now exposes:
+
+- **`Retry-After`**, set by `ThrottleGuard` on every 429. Without it the
+  dashboard could only read `details.retry_after_seconds` out of the error body,
+  so a 429 raised by anything that is *not* this guard — an ingress limit, a
+  WAF, a load balancer — arrived with no usable "try again in N" at all.
+- **`x-request-id`**, minted or accepted per request in `app.module.ts` and
+  repeated in every error body as `request_id`. The header is the only way to
+  get it off a **successful** response, which is what an operator needs when a
+  request went through and did the wrong thing.
+
+Nothing else is missing. The only other header this API sets is `Set-Cookie`,
+which browsers refuse to expose to script whatever the list says. `origin` still
+fails **closed** (`false`, never a reflected origin) when `CORS_ORIGINS` is
+unset — this API is credentialed.
+
+## Correction to `apps/dashboard/HANDOFF.md`
+
+That document's "Still needed from the control API" list, item 2, says
+**"Endpoints (`endpoints.service.ts:401`) and organizations
+(`organizations.service.ts:134`) attach nothing but prose"**. That was true when
+it was written and **is not true now**. All four ceilings — organizations per
+user, projects per organization, API keys per project, endpoints per project —
+raise `limit_exceeded` with `details: { limit, current, resource }`. See
+`endpoints.service.ts:407` and `organizations.service.ts:140`. Items 1 and 2 of
+that list are both closed; item 3 (`Retry-After` reachable from the browser) is
+closed by the section above; item 4 (`resend-verification`) is closed by the
+section above that.
+
+## `EndpointDto.has_live_secret`
+
+The dashboard added a "Resume deliveries" action on paused endpoints. `EndpointDto`
+exposed nothing about signing secrets, and `POST /enable` refuses with 409 when
+there is no live one — so the button was offered where it was **guaranteed to
+fail**, and the operator found out by clicking.
+
+That is not an edge case. `endpoints.write` is a `developer` permission and
+`endpoint-secrets.*` is owner/admin, so an endpoint a developer creates is
+deliberately left **paused with `secret_pending`** — the common path, and exactly
+where the button 409s.
+
+**The field means what `enable` checks**, because it is now literally the same
+query: `active = true AND (expires_at IS NULL OR expires_at > now())`, the pair
+the data plane's secret loader uses (`isEffectivelyActive`).
+`EndpointSecretsService.hasLiveSecret` is one case of the new
+`liveSecretEndpointIds`, so the answer the dashboard reads and the answer
+`enable` refuses on cannot drift.
+
+**Not `active` alone.** The control plane flips `active` off lazily after a
+rotation, so between a secret expiring and the sweep running, `active` says
+signable and the data plane has already stopped emitting it — the window an
+operator is most likely to be staring at.
+
+**No N+1.** `ScopedRepository.groupBy` (`by: ['endpointId']`, the live predicate,
+`endpointId IN (<page>)`) answers the whole page in ONE statement, on the
+existing `@@index([endpointId, active])`. The count is asserted constant across
+page sizes rather than merely small, so it cannot decay back into a loop. The
+scope needed nothing new — `groupBy` was already there, and `PrismaService` (which
+is eslint-banned here) was never reached for.
+
+**It is a boolean and nothing else.** No id, version, prefix or expiry:
+`endpoints.read` includes `viewer`, `endpoint-secrets.read` is owner/admin. A
+test pins the DTO's complete key set so a future secret-derived field fails
+there rather than shipping quietly.
+
+## Analytics (2026-09-08) — `src/analytics`
+
+Read-only operator analytics. Nothing in this module writes, and nothing caches:
+every number is read from the delivery ledger at request time through
+`ScopedRepository`, so it cannot disagree with `GET /deliveries`. That is the
+property that matters at 2am, when someone reads a failure count here and then
+goes looking for the rows behind it.
+
+### Module registration — the line I could not add myself
+
+`src/app.module.ts`:
+
+```ts
+import { AnalyticsModule } from './analytics';
+// ...
+imports: [ /* ... */, AnalyticsModule ],
+```
+
+It imports nothing and provides one service. `AuthzModule` is `@Global`, so
+`TenantScopeFactory` is already injectable; there is no transaction runner
+(nothing is written) and no audit call (reading an aggregate of rows the caller
+may already list one by one is not an auditable event).
+
+### Routes
+
+All under `/v1/projects/:projectId/analytics`, all `GET`, all taking
+`window_hours` (integer, 1..720, default 24).
+
+| Route | Permission | Answers |
+|---|---|---|
+| `/deliveries` | `deliveries.read` | Outcome mix over the window **and the window before it** |
+| `/endpoints` | `deliveries.read` | Which endpoints are failing, ranked worst first (`limit`, 1..50, default 10) |
+| `/latency` | `deliveries.read` | p50/p95/p99 of `delivery_attempts.duration_ms` |
+| `/events` | `events.read` | Event volume and the busiest event types (`limit`, 1..50, default 10) |
+
+Shapes are in `src/analytics/dto/analytics-response.dto.ts` and every field
+carries an `@ApiProperty` description, because the dashboard client is generated
+from that document. The three that are worth knowing before reading a response:
+
+- **`success_rate` is `null`, never `0`, when nothing settled.** Zero is a real
+  and alarming value — everything we tried failed — and using it for "we have
+  not tried anything" is the difference between a quiet night and a pager. Same
+  rule for `success_rate_delta`: a change from unknown is not a change.
+- **`by_status` always carries all nine statuses.** `GROUP BY` returns no row
+  for a status with no deliveries, and a response that omitted `exhausted`
+  because there were none is indistinguishable, to a client, from one that
+  omitted it because this build does not report it.
+- **`latency.exact`.** See "the one dishonest number, made honest" below.
+
+### The permission choice: `deliveries.read` and `events.read`, no new row
+
+No permission was added to the matrix. Three reasons, in order of weight:
+
+1. **An aggregate is strictly weaker than the rows it aggregates.** Everything
+   `/analytics/deliveries` returns is derivable by a caller who can already page
+   `GET /deliveries`. A new permission would gate a summary of data the holder
+   of `deliveries.read` can already read one row at a time, which is theatre.
+2. **Per-TABLE, not per-module.** `/events` uses `events.read` and the other
+   three use `deliveries.read`, even though the two grants are identical in
+   today's matrix. That is the point: the day they diverge, each route moves
+   with the table it reads rather than with the module it happens to live in.
+3. The matrix's own comment about `billing` — "sees no events and no
+   deliveries" — settles the interesting case. `billing` gets a **403** on all
+   four routes: it is in the tenant, so the answer is forbidden, not not-found.
+   `viewer` gets **200** on all four.
+
+`TENANT_SCOPE_PERMISSIONS` needed no change; this module adds no `TenantScope`
+accessor.
+
+### The window: refused, never clamped
+
+`window_hours` is `1..720` (30 days), default 24. Above the ceiling is a **400**,
+not a shortened window. This is the one design decision in the module I would
+argue for hardest: a clamp answers a question the caller did not ask and labels
+the answer with the period they asked for. "Deliveries in the last 90 days:
+4,102" as a 30-day number wearing a 90-day label is worse than an error,
+because the person reading it is deciding whether something is getting worse.
+
+The ceiling is enforced twice, deliberately: `@Max` on the DTO (the HTTP edge)
+and again inside `resolveWindow` (the function another module would call). A
+validation rule that only exists on a decorator is one non-HTTP caller away from
+being absent.
+
+`ValidationPipe` runs with `forbidNonWhitelisted`, so `?window=30d` — the
+dashboard's current shorthand — is a **400** rather than a silently ignored
+parameter that returns the 24h default under a 30-day label.
+
+### EXPLAIN — run against live PostgreSQL 16.2, not guessed
+
+Plans were captured on a copy of the real migrated schema seeded to **1,000,000
+deliveries (800,000 in the project under test, over 90 days), 800,000
+delivery_attempts, 600,000 events, 3 projects across 2 organizations**. The dev
+database has ten deliveries in it; every plan there is a sequential scan of one
+page and proves nothing, so a scratch database (`hookubit_explain`) built from
+the same four migration files was used instead. `EXPLAIN (ANALYZE, BUFFERS)`
+output for each query is summarised in the docblock above the method that issues
+it.
+
+| Query | Window | Plan | Time |
+|---|---|---|---|
+| status roll-up | 24h | Nested Loop over the project's endpoints → Bitmap Index Scan `deliveries_endpoint_id_created_at_idx` → HashAggregate, 8,874 rows | 13.7 ms |
+| status roll-up | 168h | Bitmap Index Scan `deliveries_project_id_created_at_idx`, 62k rows | 22.7 ms |
+| status roll-up | 720h | **Parallel Seq Scan**, 266k rows (33% of the table) | 207 ms |
+| endpoint ranking | 24h | Bitmap Index Scan `deliveries_project_id_status_created_at_idx` → GroupAggregate → top-N | 9.8 ms |
+| latency: delivery sample | 720h | Index Scan `deliveries_project_id_created_at_idx`, 201 tuples, stops | **0.35 ms** |
+| latency: attempts | 24h | 200 × Index Scan `delivery_attempts_delivery_id_idx` | 37 ms |
+| event count | 24h | Index Scan `events_organization_id_created_at_idx`, 4,431 rows | 24.5 ms |
+| event count | 720h | Parallel Bitmap Heap Scan `events_project_id_created_at_idx`, 133k rows | 209 ms |
+| events by type | 24h | same index → HashAggregate | 2.9 ms |
+
+Three findings worth carrying forward:
+
+**1. One index was missing and is now added.**
+`20260908010000_analytics_delivery_window_index` creates
+`deliveries (project_id, created_at DESC)`. `deliveries_project_id_status_created_at_idx`
+cannot serve "everything in this project over this window" — `status` sits
+*between* the two constrained columns, so `created_at` can never be a boundary
+condition and rows never come back in `created_at` order. Measured, the latency
+sample at the 720h ceiling is **226.6 ms (Parallel Seq Scan + top-N heapsort)
+without it and 0.35 ms with it**, and — the part that actually matters — without
+it the cost grows with the *window*, so the response gets slower every day the
+table grows; with it the cost is fixed at the LIMIT and does not grow at all.
+`INCLUDE (status, endpoint_id)` was tried and rejected: no index-only scan
+resulted and the covering variant was *slower* on the 168h roll-up (48.4 ms vs
+22.7 ms) for a larger index. Cost: 27 MB against a 118 MB table at 1M rows, plus
+one more btree write on the hottest INSERT path in the product. **On a large
+populated `deliveries` table, build it `CONCURRENTLY` by hand first** — the
+migration is `IF NOT EXISTS` and will then skip it; the exact statement is in the
+migration's header comment. It is also in `schema.prisma`, so unlike the partial
+indexes it is **not** drift and needs no entry in
+`deployments/ci/expected-schema-drift.txt`.
+
+**2. The 720h ceiling is a sequential scan, and that is the correct plan.**
+A third of the table matches; no index beats a scan at that selectivity. This is
+why 720h is a hard ceiling with a 24h default rather than an open parameter, and
+why the routes are throttled.
+
+**3. `events` may not use the index you expect.** The `projectAndOrganization`
+scope puts *both* columns in the predicate, and at 24h the planner chose
+`events_organization_id_created_at_idx` and filtered by project (1,108 rows
+removed, ~20% waste). Cheap for an organization with a handful of projects; it
+degrades linearly with the number of sibling projects. Not "fixed" with a hint,
+because the fix is a planner-statistics question, not a code one.
+
+### The one dishonest number, made honest
+
+**p50/p95/p99 are computed over a bounded SAMPLE, and the response says so.**
+
+An exact percentile is `percentile_cont`, which is raw SQL, which is
+`PrismaService` — banned outside the allowlist, for the reason that makes this
+whole layer worth having. `ScopedRepository` exposes `aggregate` and `groupBy`;
+neither can express an ordered-set aggregate, and grouping by `duration_ms`
+itself would produce thousands of groups and be refused by the repository's own
+ceiling, correctly.
+
+So: the most recent 200 deliveries in the window, and up to 200 of their measured
+attempts. `exact` is `true` only when neither bound was reached — the common case
+for a normal project on a 24h window, always the case for a quiet one. When it is
+`false`, **the percentiles describe the most recent traffic in the window rather
+than the whole of it**, and `sample_size` / `sampled_deliveries` say how much was
+measured. That recency bias is real. Hiding it would be worse than having it.
+
+Nearest-rank, not linear interpolation: every value returned is a duration that
+was actually observed. An interpolated p95 of 412.5 ms is a number no request
+ever took, and someone will go looking for the attempt that produced it.
+
+The fix, when it is worth doing, is one of: a `percentile_cont` escape hatch on
+`ScopedRepository` (a `rawAggregate` that still builds the tenant predicate); a
+`duration_bucket` column on `delivery_attempts` written by the data plane, which
+makes an exact histogram a plain `groupBy`; or the rollup below.
+
+### Where this stops scaling, and what comes next
+
+Stated as row counts, because "it depends" is not an answer anyone can act on.
+
+| Table | Comfortable | Degraded | Unusable |
+|---|---|---|---|
+| `deliveries` (per project) | < 1M in the window | 1M–5M — the 720h roll-up is already a 200 ms+ parallel scan at 266k | > 5M: every wide-window request occupies a worker for seconds; concurrent dashboards exhaust the pool |
+| `delivery_attempts` | any, while the sample stays at 200 | — | the sample is O(1); this table never becomes the bottleneck for *this* module |
+| `events` (per project) | < 500k in the window | 500k–2M | > 2M |
+
+The first thing to break is **not** latency — it is the 720h status roll-up
+under concurrency. One 200 ms parallel scan is fine; ten dashboards refreshing
+on a 30-second timer is a third of the connection pool permanently occupied
+scanning the same 266k rows.
+
+Three steps, in the order I would take them:
+
+1. **Cache the wide windows, not the narrow ones.** 168h and 720h roll-ups
+   change by fractions of a percent per minute. A 60-second cache keyed by
+   (project, window) removes the whole problem for a year, and the honesty cost
+   is bounded and expressible: return the timestamp the numbers were computed
+   at. 24h stays live — that is the window someone is staring at during an
+   incident.
+2. **Write `usage_records`.** The table exists, is organization-scoped, is
+   already mapped in `TenantScope` (`billing.read`), and **nothing writes to
+   it**. An hourly rollup of (project, hour, status) → count is exactly what a
+   time series needs and what this module could not build, and it makes the
+   90-day question a hundred-row read instead of a million-row scan. It also
+   gives the dashboard back the hourly chart this module declined to fake.
+3. **Only then, a materialised view.** It is the tempting first move and it is
+   the wrong one: `REFRESH MATERIALIZED VIEW CONCURRENTLY` over a table this
+   size is its own operational problem, and it buys nothing that (2) does not,
+   at the cost of a refresh schedule nobody owns.
+
+### Divergence from the dashboard's speculative shape — and what it needs to change
+
+`apps/dashboard/src/features/analytics/AnalyticsPage.tsx` was built against a
+mock `GET /v1/projects/:id/analytics` returning
+`{ window: '24h'|'7d'|'30d', points: AnalyticsPoint[], totals, p95_latency_ms,
+success_rate }`. It says on itself that it is provisional. It was read as a hint,
+not a specification, and it diverges in three places:
+
+1. **Four routes, not one payload.** The four questions cost different amounts.
+   One combined route makes the cheapest tile on the page wait for the dearest
+   query and blanks the whole panel when one is slow. Four requests render as
+   they land, are throttled separately, and can be cached separately (see step 1
+   above). Call all four in parallel.
+2. **No hourly `points[]`.** Bucketing a timestamp needs `date_trunc` → raw SQL
+   → `PrismaService`. The alternative, one grouped query per bucket, is 24 index
+   range scans of the same range to answer one question. **What replaced it is
+   better for the actual question:** every count is returned for the window *and*
+   the immediately preceding window of equal length, with the delta. "Is it
+   getting worse?" is a comparison, and this answers it in a number rather than
+   asking a human to eyeball the slope of a bar chart — for the cost of two index
+   range scans instead of twenty-four. The chart comes back with `usage_records`.
+3. **`window: '24h'` → `window_hours: 24`.** An enum cannot express a ceiling,
+   and the ceiling is the interesting part. Map the shorthands 24 / 168 / 720.
+   Note that `?window=30d` is now a **400**, not an ignored parameter.
+
+Also: `totals.pending` on the page is labelled "In retry". Those are different
+things and the new response separates them — `in_flight` is the roll-up (pending,
+scheduled, queued, processing, retrying), `by_status.retrying` is the real one.
+
+### Verified
+
+`prisma:generate`, `lint`, `build`, `test` all pass — **1497 tests, 64 suites**
+(was 1417/62). Two new suites:
+
+- `analytics.service.spec.ts` (27) — every count asserted as an **exact
+  integer** against a fixture whose numbers are written down by hand in
+  `EXPECTED`, with decoys one step outside every boundary: the previous window,
+  rows older than both, a sibling project in the same organization, and another
+  organization entirely. A shape assertion would pass on a response carrying the
+  whole platform's totals. Also: the window ceiling refused rather than clamped,
+  an empty project returning zeroes and `null` rather than erroring, an
+  unmeasured (`duration_ms IS NULL`) attempt not counting as zero milliseconds.
+- `analytics.http.spec.ts` (53) — a real Nest app on a real port with the real
+  guards. Cross-tenant is **404 with `CROSS_TENANT_MESSAGE`** on all four routes,
+  identical for an absent project id and a foreign one, and the 404 body is
+  asserted to carry none of the other tenant's numbers. `viewer` 200, `billing`
+  403 (in the tenant, so forbidden, not not-found), `developer` 200. The ceiling
+  is 200 at exactly 720 and 400 at 721, with no `window` in the failed body.
+  Every route asserted to carry `@Throttle`.
+
+Both run against `FakeTenantPrisma` like every other module, wrapped by
+`src/analytics/testing/aggregate-fake.ts`. That wrapper exists for one honest
+reason: the shared fake **ignores `orderBy` and `take` on `groupBy`** — nothing
+before this module passed either. The endpoint ranking is `ORDER BY count DESC
+LIMIT n` *in PostgreSQL*, and against a fake that ignored both, "the worst
+endpoint is first" would pass because the fixture happened to be inserted
+worst-first. The wrapper applies exactly the two argument shapes this service
+sends and **throws on anything else**, so a query it cannot model faithfully
+fails the suite rather than being quietly mis-answered.
+
+**Not covered by the suite**, and worth knowing: the fake's `findMany` sorts
+dates as strings, so the *recency* of the latency sample (`ORDER BY created_at
+DESC LIMIT 200`) is not asserted — the fixture is small enough that the sample is
+the whole window. The ordering itself is what the new index makes cheap and is
+verified by the EXPLAIN above, not by a test.

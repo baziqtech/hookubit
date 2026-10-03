@@ -22,16 +22,18 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"sync/atomic"
 	"syscall"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"github.com/shaq/webhook-platform/services/data-plane/internal/config"
-	"github.com/shaq/webhook-platform/services/data-plane/internal/db"
-	"github.com/shaq/webhook-platform/services/data-plane/internal/httpx"
-	"github.com/shaq/webhook-platform/services/data-plane/internal/ids"
-	"github.com/shaq/webhook-platform/services/data-plane/internal/logging"
+	"github.com/shaq/hookubit/services/data-plane/internal/config"
+	"github.com/shaq/hookubit/services/data-plane/internal/db"
+	"github.com/shaq/hookubit/services/data-plane/internal/httpx"
+	"github.com/shaq/hookubit/services/data-plane/internal/ids"
+	"github.com/shaq/hookubit/services/data-plane/internal/logging"
+	"github.com/shaq/hookubit/services/data-plane/internal/tracing"
 )
 
 // shutdownGrace bounds the whole shutdown, from signal to exit. The arithmetic
@@ -59,18 +61,50 @@ func run() error {
 	log := logging.New(cfg.LogLevel, "webhookd-"+role)
 	instanceID := ids.New(ids.Worker)
 
+	// Telemetry is started BEFORE the probe server and the pool, and its
+	// failure is a warning rather than a refusal to start.
+	//
+	// Both halves of that are deliberate. Before, so that the database retry
+	// loop below - the slowest and most interesting part of a bad boot - is
+	// inside whatever tracing this deployment has. A warning, because a typo in
+	// a collector URL taking the data plane down is a far worse outage than the
+	// missing traces, and because ARCHITECTURE.md's whole position on
+	// observability is that it must never be load-bearing. With
+	// OTEL_EXPORTER_OTLP_ENDPOINT unset this builds nothing at all: no
+	// exporter, no goroutine, no provider. See internal/tracing.
+	// context.Background, not the signal context: building the exporter is a
+	// few microseconds of struct assembly with no network in it, and handing it
+	// a context that SIGTERM can cancel would leave a process signalled during
+	// boot with no telemetry for its own drain.
+	traces, err := tracing.Setup(context.Background(), tracing.FromEnv(role, instanceID, cfg.AppEnv), log)
+	if err != nil {
+		log.Warn("tracing could not be started; continuing without it",
+			"error", err,
+			"effect", "no spans are exported; deliveries and metrics are unaffected")
+		traces = nil
+	}
+
 	// SIGTERM cancels this context, which every loop below selects on
 	// (ARCHITECTURE.md 47).
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	pool, err := db.Open(ctx, cfg.DatabaseURL, cfg.DatabaseMaxConnections, cfg.DatabaseStatementTimeout)
-	if err != nil {
-		return fmt.Errorf("connect to PostgreSQL: %w", err)
-	}
-	defer pool.Close()
+	// The pool is opened AFTER the probe server binds, so the readiness check
+	// reaches it through a holder rather than a captured variable. Ordering
+	// matters more than it looks: opening the pool first meant a PostgreSQL
+	// outage exited the process before :9090 ever bound, so every pod
+	// crash-looped and recovery waited on kubelet's backoff instead of on the
+	// database. A startupProbe cannot help a process that has already exited.
+	var poolRef atomic.Pointer[pgxpool.Pool]
 
 	health := httpx.NewHealth(func(ctx context.Context) map[string]string {
+		pool := poolRef.Load()
+		if pool == nil {
+			// Distinct from "down" on purpose: the pool has not been opened
+			// yet, which is a different operator story from one that opened and
+			// then failed.
+			return map[string]string{"postgres": "connecting"}
+		}
 		state := "up"
 		if err := pool.Ping(ctx); err != nil {
 			state = "down"
@@ -96,6 +130,26 @@ func run() error {
 		"metrics_port", cfg.MetricsPort,
 		"shutdown_readiness_delay", cfg.ShutdownReadinessDelay,
 	)
+	pool, err := db.OpenWithRetry(
+		ctx, cfg.DatabaseURL, cfg.DatabaseMaxConnections, cfg.DatabaseStatementTimeout,
+		func(attempt int, err error, retryIn time.Duration) {
+			log.Warn("PostgreSQL is not reachable; waiting",
+				"attempt", attempt,
+				"retry_in", retryIn,
+				"error", err,
+			)
+		},
+	)
+	if err != nil {
+		// The probe server is already listening, so close it rather than
+		// leaving the deferred shutdown below unreachable on this path.
+		stopProbes(probes, log)
+		flushTraces(traces, log)
+		return fmt.Errorf("connect to PostgreSQL: %w", err)
+	}
+	defer pool.Close()
+	poolRef.Store(pool)
+
 	health.SetReady(true)
 
 	runCtx, cancelRun, drainStartedAt := beginDrain(ctx, health, cfg.ShutdownReadinessDelay, log, role)
@@ -125,12 +179,41 @@ func run() error {
 	if err := probes.Shutdown(probeCtx); err != nil {
 		log.Warn("probe server did not shut down cleanly", "error", err)
 	}
+	// Step 6 of ARCHITECTURE.md 47, and it runs LAST on purpose: the spans
+	// worth keeping from a shutdown are the ones describing the drain that has
+	// just finished. Shutdown takes its own bounded context rather than the
+	// cancelled one - see tracing.Provider.Shutdown - so the final batch is not
+	// dropped by the very signal it describes.
+	flushTraces(traces, log)
+
 	log.Info("data plane stopped", "role", role)
 
 	if runErr != nil && !errors.Is(runErr, context.Canceled) {
 		return runErr
 	}
 	return nil
+}
+
+// flushTraces exports whatever is queued and stops the provider. Failing to
+// flush is logged and otherwise ignored: nothing about the correctness of what
+// this process already committed depends on a span reaching a collector.
+func flushTraces(traces *tracing.Provider, log *slogLogger) {
+	if traces == nil {
+		return
+	}
+	if err := traces.Shutdown(); err != nil {
+		log.Warn("tracing did not flush cleanly; some spans were dropped", "error", err)
+	}
+}
+
+// stopProbes closes the probe server on the boot-failure path, where the
+// ordinary shutdown sequence below is never reached.
+func stopProbes(probes *http.Server, log *slogLogger) {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if err := probes.Shutdown(ctx); err != nil {
+		log.Warn("probe server did not shut down cleanly", "error", err)
+	}
 }
 
 // beginDrain orders the shutdown so readiness stops advertising BEFORE anything

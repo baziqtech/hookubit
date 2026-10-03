@@ -16,6 +16,7 @@ export class CreateRateLimitDto {
   scope!: RateLimitScope;
 
   @ApiPropertyOptional({
+    type: String,
     nullable: true,
     maxLength: 64,
     description:
@@ -62,6 +63,7 @@ export class CreateRateLimitDto {
   window_seconds?: number;
 
   @ApiPropertyOptional({
+    type: Number,
     nullable: true,
     minimum: RATE_LIMIT_LIMITS.burst.min,
     maximum: RATE_LIMIT_LIMITS.burst.max,

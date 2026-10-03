@@ -10,7 +10,7 @@
   <component name="TemplatesService">
     <option name="TEMPLATE_FOLDERS">
       <list>
-        <option value="$MODULE_DIR$/deployments/helm/webhook-platform/templates" />
+        <option value="$MODULE_DIR$/deployments/helm/hookubit/templates" />
       </list>
     </option>
   </component>

@@ -5,16 +5,40 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"io"
+	"log/slog"
 	"net/http"
 	"strings"
+	"sync"
 	"testing"
 )
 
 type fakePayloadStore struct {
+	mu       sync.Mutex
 	stored   []byte
 	location string
 	err      error
 	calls    int
+	// deleted records the compensating deletes, which is the whole orphan
+	// story: an object uploaded by a request that then wrote no events row.
+	deleted   []string
+	deleteErr error
+}
+
+func (f *fakePayloadStore) Delete(_ context.Context, location string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.deleteErr != nil {
+		return f.deleteErr
+	}
+	f.deleted = append(f.deleted, location)
+	return nil
+}
+
+func (f *fakePayloadStore) deletedLocations() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.deleted...)
 }
 
 func (f *fakePayloadStore) Put(_ context.Context, projectID, eventID string, body []byte) (string, error) {
@@ -150,5 +174,21 @@ func TestPlanPayloadStorageFaultIsInternalError(t *testing.T) {
 func TestHashPayloadOfEmptyBody(t *testing.T) {
 	if got := HashPayload(nil); got != "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855" {
 		t.Fatalf("HashPayload(nil) = %s", got)
+	}
+}
+
+// A store that cannot delete must still be usable: disposal is housekeeping,
+// not a requirement of the write path.
+func TestDisposeOrphanToleratesAStoreThatCannotDelete(t *testing.T) {
+	log := slog.New(slog.NewJSONHandler(io.Discard, nil))
+	DisposeOrphan(NewUnconfiguredPayloadStore(), "s3://b/k", log)
+	// No panic, no requirement. The sweep reclaims it.
+}
+
+func TestDisposeOrphanIsANoOpWithoutALocation(t *testing.T) {
+	store := &fakePayloadStore{}
+	DisposeOrphan(store, "", slog.New(slog.NewJSONHandler(io.Discard, nil)))
+	if got := store.deletedLocations(); len(got) != 0 {
+		t.Fatalf("deleted %v for an inline payload", got)
 	}
 }

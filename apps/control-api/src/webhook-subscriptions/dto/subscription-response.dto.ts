@@ -1,4 +1,4 @@
-import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
+import { ApiProperty } from '@nestjs/swagger';
 import { WebhookSubscription } from '@prisma/client';
 
 /**
@@ -19,7 +19,7 @@ export class SubscriptionDto {
   @ApiProperty() id!: string;
   @ApiProperty() project_id!: string;
   @ApiProperty() endpoint_id!: string;
-  @ApiPropertyOptional({ nullable: true }) name!: string | null;
+  @ApiProperty({ type: String, nullable: true }) name!: string | null;
 
   @ApiProperty({
     type: [String],
@@ -27,7 +27,7 @@ export class SubscriptionDto {
   })
   event_types!: string[];
 
-  @ApiPropertyOptional({
+  @ApiProperty({
     type: 'object',
     additionalProperties: true,
     nullable: true,
@@ -62,7 +62,8 @@ export class SubscriptionListDto {
   @ApiProperty({ description: 'More subscriptions match than this page carries.' })
   has_more!: boolean;
 
-  @ApiPropertyOptional({
+  @ApiProperty({
+    type: Number,
     nullable: true,
     description: 'Pass back as `offset` for the next page. Null when this page was the last.',
   })

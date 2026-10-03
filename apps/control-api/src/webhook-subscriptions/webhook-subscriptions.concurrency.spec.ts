@@ -43,7 +43,7 @@ function assertUnderCeiling(harness: Harness): void {
  * DIFFERENT rows, so at READ COMMITTED there is no row lock to contend on,
  * neither transaction blocks, and both commit.
  *
- * It matters more here than it looks. Subscriptions are the fan-out multiplier:
+ * It matters more here than it looks. Subscriptions are the delivery multiplier:
  * one ingested event becomes one `deliveries` row PER matching subscription,
  * each with its own retry chain and its own share of the endpoint's concurrency
  * budget. A ceiling that concurrent writers can walk past is not a ceiling on

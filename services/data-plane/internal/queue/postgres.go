@@ -12,7 +12,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"github.com/shaq/webhook-platform/services/data-plane/internal/metrics"
+	"github.com/shaq/hookubit/services/data-plane/internal/metrics"
 )
 
 // claimStatuses is the ready set.
@@ -35,13 +35,15 @@ const claimStatuses = `('pending', 'scheduled', 'queued', 'retrying', 'processin
 
 // readyPredicate is the shared definition of "this row wants a worker".
 //
-// The `next_attempt_at IS NULL` half is a workaround for a nullable column
-// whose null means "due immediately"; ADR-0007 asks the control plane to make
-// it NOT NULL, after which this collapses to a plain range predicate. See
-// HANDOFF.md.
+// next_attempt_at is NOT NULL (20260911000000_next_attempt_at_not_null), so
+// this is a plain range predicate. It used to carry `next_attempt_at IS NULL
+// OR`, a workaround for a nullable column whose NULL meant "due immediately"
+// and - under the NULLS FIRST ordering the claim then used - sorted ahead of
+// every retry that was actually due. The constraint rejects that write at the
+// source now, so nothing here has to tolerate it.
 const readyPredicate = `
       status IN ` + claimStatuses + `
-      AND (next_attempt_at IS NULL OR next_attempt_at <= now())
+      AND next_attempt_at <= now()
       AND (locked_until IS NULL OR locked_until < now())`
 
 // claimedColumns is the RETURNING list shared by both claim strategies.
@@ -52,9 +54,10 @@ const readyPredicate = `
 // not happened yet.
 const claimedColumns = `
           d.id, d.event_id, d.endpoint_id, d.organization_id, d.project_id,
-          d.attempt_count, COALESCE(d.next_attempt_at, d.created_at),
+          d.attempt_count, d.next_attempt_at,
           COALESCE(d.ordering_key, ''), d.locked_until,
-          GREATEST(EXTRACT(EPOCH FROM (now() - COALESCE(d.next_attempt_at, d.created_at))), 0)::double precision`
+          GREATEST(EXTRACT(EPOCH FROM (now() - d.next_attempt_at)), 0)::double precision,
+          COALESCE(d.trace_context, '')`
 
 // claimFIFOSQL leases the globally oldest ready deliveries.
 //
@@ -63,20 +66,52 @@ const claimedColumns = `
 //     crashed worker's in-flight deliveries come back - see claimStatuses.
 //   - The row is moved to `processing` in the same statement, so a claim is
 //     visible to the operator UI immediately.
+//
+// claimFIFOSQL picks the batch in a MATERIALIZED CTE and only then updates.
+//
+// It used to be `UPDATE ... WHERE id IN (SELECT ... FOR UPDATE SKIP LOCKED
+// LIMIT $3)`, which is the textbook shape and is WRONG under one planner
+// choice. When the statistics say the table is tiny - relpages high,
+// reltuples near zero, which is exactly what autovacuum leaves behind after a
+// burst is drained or a retention sweep empties the table - the planner runs
+// the IN-subquery on the INNER side of a nested-loop semi join, re-executing
+// Sort -> LockRows -> Limit once per outer row. On each re-execution LockRows
+// re-locks the first sorted row; a row this same UPDATE already modified is
+// TM_SelfModified, which LockRows treats as deleted and skips, so the NEXT tied
+// row becomes that turn's LIMIT-1 winner and matches the next outer row. With
+// a routing batch every row ties on (next_attempt_at, created_at), so a claim
+// of LIMIT 1 returned every ready row: measured 5 of 5, ten times out of ten,
+// against relpages=14 reltuples=1, and reproduced inside the failure suite at
+// relpages=6 reltuples=0. Under any other statistics state the planner hashes
+// the subquery once and the LIMIT holds - which is why it read as flakiness.
+//
+// A MATERIALIZED CTE is evaluated exactly once into a tuplestore before the
+// UPDATE joins to it, so the batch is bounded by construction, whatever plan
+// the join takes. The id tiebreaker makes the order deterministic among rows
+// that tie, which a routing batch always does.
+//
+// The ORDER BY is, column for column, the key of deliveries_ready_fifo_idx
+// (next_attempt_at, created_at, id; no NULLS FIRST since 20260911000000), so
+// the index delivers the claim's order and the plan carries no sort node.
+// TestClaimStatementsCanUseTheReadySetIndexes pins that; change one side
+// without the other and the planner silently sorts the whole ready set on
+// every poll.
 const claimFIFOSQL = `
+WITH picked AS MATERIALIZED (
+    SELECT id AS picked_id
+    FROM deliveries
+    WHERE ` + readyPredicate + `
+    ORDER BY next_attempt_at, created_at, id
+    FOR UPDATE SKIP LOCKED
+    LIMIT $3
+)
 UPDATE deliveries d
 SET status        = 'processing',
     locked_by     = $1,
     locked_until  = now() + $2::interval,
     updated_at    = now()
-WHERE d.id IN (
-    SELECT id
-    FROM deliveries
-    WHERE ` + readyPredicate + `
-    ORDER BY next_attempt_at NULLS FIRST, created_at
-    FOR UPDATE SKIP LOCKED
-    LIMIT $3
-)
+FROM picked
+WHERE d.id = picked.picked_id
 RETURNING ` + claimedColumns
 
 // claimTenantFairSQL is the ADR-0007 claim: one bounded pick per tenant in the
@@ -86,14 +121,13 @@ RETURNING ` + claimedColumns
 // per-tenant cap, $6 the overall claim limit. FOR UPDATE SKIP LOCKED sits
 // inside the LATERAL, which is an inner join, so per-row locking and skipping
 // behave exactly as in the FIFO statement.
+// Same MATERIALIZED shape as claimFIFOSQL, for the same reason: a FROM-subquery
+// with LIMIT can land on the inner side of a nested loop and be re-run per outer
+// row, and LockRows skipping self-modified rows would then over-claim across
+// the whole batch. See the comment on claimFIFOSQL.
 const claimTenantFairSQL = `
-UPDATE deliveries d
-SET status        = 'processing',
-    locked_by     = $1,
-    locked_until  = now() + $2::interval,
-    updated_at    = now()
-FROM (
-    SELECT c.id
+WITH picked AS MATERIALIZED (
+    SELECT c.id AS picked_id
     FROM unnest($3::text[], $4::text[]) AS t(organization_id, project_id)
     CROSS JOIN LATERAL (
         SELECT dd.id
@@ -101,15 +135,21 @@ FROM (
         WHERE dd.organization_id = t.organization_id
           AND dd.project_id      = t.project_id
           AND dd.status IN ` + claimStatuses + `
-          AND (dd.next_attempt_at IS NULL OR dd.next_attempt_at <= now())
+          AND dd.next_attempt_at <= now()
           AND (dd.locked_until IS NULL OR dd.locked_until < now())
-        ORDER BY dd.next_attempt_at NULLS FIRST, dd.created_at
+        ORDER BY dd.next_attempt_at, dd.created_at, dd.id
         LIMIT $5
         FOR UPDATE SKIP LOCKED
     ) c
     LIMIT $6
-) picked
-WHERE d.id = picked.id
+)
+UPDATE deliveries d
+SET status        = 'processing',
+    locked_by     = $1,
+    locked_until  = now() + $2::interval,
+    updated_at    = now()
+FROM picked
+WHERE d.id = picked.picked_id
 RETURNING ` + claimedColumns
 
 // tenantSnapshotSQL is PostgreSQL's missing loose index scan, written by hand.
@@ -197,9 +237,10 @@ type tenant struct {
 // NewPostgresQueue builds a queue using the given claim strategy.
 //
 // The default is StrategyFIFO, deliberately inverting the default stated in
-// ADR-0007. Nothing has been measured yet, the prerequisite index and NOT NULL
-// migration have not been applied, and ARCHITECTURE.md's own rule is to prefer
-// the simplest production-grade option. StrategyTenantFair is fully implemented
+// ADR-0007. Nothing has been measured yet, and ARCHITECTURE.md's own rule is to
+// prefer the simplest production-grade option. (The prerequisite index and the
+// NOT NULL migration ADR-0007 asked for are both applied now, so neither is a
+// reason to hold the default any more; the missing measurement is.) StrategyTenantFair is fully implemented
 // and opt-in via CLAIM_STRATEGY; it becomes the default when
 // queue_head_of_line_delay_seconds actually shows starvation. See HANDOFF.md.
 func NewPostgresQueue(pool *pgxpool.Pool, strategy Strategy) *PostgresQueue {
@@ -391,6 +432,7 @@ func scanLeases(rows pgx.Rows, workerID string) ([]Lease, error) {
 			&job.DeliveryID, &job.EventID, &job.EndpointID,
 			&job.OrganizationID, &job.ProjectID,
 			&job.Attempt, &job.ScheduledAt, &job.OrderingKey, &expiresAt, &delaySecs,
+			&job.TraceContext,
 		); err != nil {
 			return nil, fmt.Errorf("scan claimed delivery: %w", err)
 		}
@@ -488,11 +530,13 @@ func (q *PostgresQueue) Release(ctx context.Context, workerID, deliveryID string
 // the ready-set predicate rather than leaving them as `processing` outliers
 // that every index and every operator query has to special-case.
 //
-// One coupling to keep in view: ADR-0007's `deliveries_ready_idx` is partial on
-// a status list that excludes `processing`. Until that predicate is widened to
-// include it (recorded in HANDOFF.md), expired leases are outside the index and
-// the indexed claim path will not find them cheaply. That makes this sweep the
-// efficient route back into the ready set, not a UI nicety.
+// The coupling this comment used to describe is gone: `deliveries_ready_idx`
+// and `deliveries_ready_fifo_idx` both now include `processing` in their
+// partial predicate (migration 20260907000000), so an expired lease IS inside
+// the index and the indexed claim path finds it cheaply. This sweep is
+// therefore a convenience - it normalises abandoned rows back to `pending` so
+// they stop being `processing` outliers that every operator query special-cases
+// - and not the only efficient route back into the ready set.
 const reclaimSQL = `
 UPDATE deliveries
 SET status       = 'pending',

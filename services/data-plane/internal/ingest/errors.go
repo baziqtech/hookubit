@@ -10,6 +10,8 @@ import (
 	"encoding/json"
 	"log/slog"
 	"net/http"
+	"strconv"
+	"time"
 )
 
 // Stable machine-readable error codes (ARCHITECTURE.md 48, docs/API.md).
@@ -33,6 +35,15 @@ type apiError struct {
 	Status  int
 	Code    string
 	Message string
+	// Details is an optional machine-readable object. It is the only place a
+	// client is given a NUMBER to act on rather than prose to parse, so the
+	// keys are contract: today the sole key is retry_after_seconds, which the
+	// dashboard reads off a 429.
+	Details map[string]any
+	// Headers are set on the response alongside the body. Retry-After has to
+	// be a header as well as a body field: an HTTP client library backs off on
+	// the header without knowing anything about our error envelope.
+	Headers map[string]string
 }
 
 func (e *apiError) Error() string { return e.Code + ": " + e.Message }
@@ -69,11 +80,26 @@ func errPayloadTooLarge(msg string) *apiError {
 	return &apiError{Status: http.StatusRequestEntityTooLarge, Code: CodePayloadTooLarge, Message: msg}
 }
 
-func errRateLimited() *apiError {
+// errRateLimited builds the 429 contract the clients already expect: the
+// `rate_limited` code, a `Retry-After` header in whole seconds, and the same
+// number as `details.retry_after_seconds`. The control plane's own throttle
+// sets both; a data plane that set neither would make the dashboard special
+// case which service refused it.
+//
+// The retry hint is rounded UP and floored at one second. Rounding down, or
+// advertising zero, invites an immediate retry - which is the single behaviour
+// a rate limit exists to stop.
+func errRateLimited(retryAfter time.Duration) *apiError {
+	seconds := int64(1)
+	if retryAfter > time.Second {
+		seconds = int64((retryAfter + time.Second - 1) / time.Second)
+	}
 	return &apiError{
 		Status:  http.StatusTooManyRequests,
 		Code:    CodeRateLimited,
-		Message: "Rate limit exceeded for this project",
+		Message: "Rate limit exceeded",
+		Details: map[string]any{"retry_after_seconds": seconds},
+		Headers: map[string]string{"Retry-After": strconv.FormatInt(seconds, 10)},
 	}
 }
 
@@ -91,9 +117,10 @@ type ErrorBody struct {
 }
 
 type ErrorDetail struct {
-	Code      string `json:"code"`
-	Message   string `json:"message"`
-	RequestID string `json:"request_id"`
+	Code      string         `json:"code"`
+	Message   string         `json:"message"`
+	RequestID string         `json:"request_id"`
+	Details   map[string]any `json:"details,omitempty"`
 }
 
 // AcceptedBody is the 202 response. `accepted` means durably persisted, not
@@ -114,9 +141,14 @@ func writeJSON(w http.ResponseWriter, status int, body any, log *slog.Logger) {
 }
 
 func writeError(w http.ResponseWriter, requestID string, e *apiError, log *slog.Logger) {
+	// Headers must be set before WriteHeader; writeJSON writes the status line.
+	for name, value := range e.Headers {
+		w.Header().Set(name, value)
+	}
 	writeJSON(w, e.Status, ErrorBody{Error: ErrorDetail{
 		Code:      e.Code,
 		Message:   e.Message,
 		RequestID: requestID,
+		Details:   e.Details,
 	}}, log)
 }

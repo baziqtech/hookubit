@@ -1,10 +1,10 @@
 apiVersion: v1
 kind: Namespace
 metadata:
-  name: webhook-platform
+  name: hookubit
   labels:
-    app.kubernetes.io/name: webhook-platform
-    app.kubernetes.io/part-of: webhook-platform
+    app.kubernetes.io/name: hookubit
+    app.kubernetes.io/part-of: hookubit
     pod-security.kubernetes.io/enforce: restricted
     pod-security.kubernetes.io/audit: restricted
     pod-security.kubernetes.io/warn: restricted

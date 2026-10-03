@@ -35,7 +35,7 @@ Apply with `kubectl apply -k deployments/kubernetes`.
 | `41-ingress.yaml` | Two Ingresses: app host and ingest host |
 | `50-networkpolicy.yaml` | Default-deny + five allow policies. **In the kustomization** — read its header before applying |
 
-All four Go roles run **one image**, `ghcr.io/shaq/webhook-data-plane`, and
+All four Go roles run **one image**, `ghcr.io/shaq/hookubit-data-plane`, and
 differ only by argv (ADR-0005).
 
 Security posture on every pod: `runAsNonRoot`, explicit uid (1000 node, 101
@@ -56,7 +56,7 @@ Grace periods sit above the 25s in-process drain in `cmd/webhookd/main.go`:
 delivery waits out `DELIVERY_LEASE_SECONDS` before another worker reclaims it),
 45s control API, 30s dashboard.
 
-### `deployments/helm/webhook-platform/` — Helm chart
+### `deployments/helm/hookubit/` — Helm chart
 
 `Chart.yaml` (v0.1.0, `kubeVersion >=1.25`, **no dependencies** — a bundled
 PostgreSQL subchart is the fastest way to lose delivery history to a
@@ -117,32 +117,32 @@ The workflow carries a top-level `permissions: { contents: read }`.
 #    Production topology: app -> PgBouncer -> PostgreSQL.
 # 2 + 3. DATABASE_URL, and optionally Redis.
 # 4. Secrets - there are no defaults.
-kubectl create namespace webhook-platform
-kubectl -n webhook-platform create secret generic webhook-secrets \
+kubectl create namespace hookubit
+kubectl -n hookubit create secret generic hookubit-secrets \
   --from-literal=JWT_SECRET="$(openssl rand -base64 48)" \
   --from-literal=SESSION_SECRET="$(openssl rand -base64 48)" \
   --from-literal=ENCRYPTION_KEY="$(openssl rand -base64 32)"
 
-helm upgrade --install webhooks deployments/helm/webhook-platform \
-  -n webhook-platform \
-  --set externalDatabase.url='postgresql://u:p@pgbouncer:6432/webhook_platform?schema=public&sslmode=require' \
-  --set externalDatabase.directUrl='postgresql://u:p@db:5432/webhook_platform?schema=public&sslmode=require' \
+helm upgrade --install webhooks deployments/helm/hookubit \
+  -n hookubit \
+  --set externalDatabase.url='postgresql://u:p@pgbouncer:6432/hookubit?schema=public&sslmode=require' \
+  --set externalDatabase.directUrl='postgresql://u:p@db:5432/hookubit?schema=public&sslmode=require' \
   --set externalRedis.url='rediss://redis:6379/0' \
-  --set secrets.existingSecret=webhook-secrets \
+  --set secrets.existingSecret=hookubit-secrets \
   --set ingress.enabled=true \
   --set ingress.appHost=webhooks.example.com \
   --set ingress.ingestHost=ingest.example.com
 
 # 5. Migrations - explicit, separate, never on app start.
-helm upgrade webhooks deployments/helm/webhook-platform -n webhook-platform \
+helm upgrade webhooks deployments/helm/hookubit -n hookubit \
   --reuse-values --set migrations.enabled=true
-kubectl -n webhook-platform wait --for=condition=complete --timeout=10m \
+kubectl -n hookubit wait --for=condition=complete --timeout=10m \
   job -l app.kubernetes.io/component=migrate
-helm upgrade webhooks deployments/helm/webhook-platform -n webhook-platform \
+helm upgrade webhooks deployments/helm/hookubit -n hookubit \
   --reuse-values --set migrations.enabled=false
 
 # 6. Verify, then create the first owner explicitly (ADR-0006).
-kubectl -n webhook-platform rollout status deploy/webhooks-webhook-platform-control-api
+kubectl -n hookubit rollout status deploy/webhooks-hookubit-control-api
 # bootstrap.js reads BOOTSTRAP_EMAIL / BOOTSTRAP_PASSWORD / BOOTSTRAP_ORG from
 # its environment and exits without them, so `kubectl exec` alone cannot work -
 # and passing them as `exec -- env VAR=...` puts the owner password in shell
@@ -158,7 +158,7 @@ in `kustomization.yaml`, then
 
 ```bash
 kubectl apply -k deployments/kubernetes
-kubectl -n webhook-platform create -f deployments/kubernetes/10-migration-job.yaml
+kubectl -n hookubit create -f deployments/kubernetes/10-migration-job.yaml
 ```
 
 ### Scaling
@@ -227,7 +227,7 @@ index and two `NULLS NOT DISTINCT` indexes that Prisma's datamodel cannot
 express, so `migrate diff --exit-code` returned 2 by construction on every
 commit. The natural response — `prisma migrate dev` — generates a migration that
 DROPS `deliveries_event_endpoint_original_key`, the `ON CONFLICT` arbiter that
-stops a re-run router from fanning every event out to every subscriber twice.
+stops a re-run router from routing every event to every subscriber twice.
 
 The job now diffs to a `--script` and fails only on identifiers **not** in
 `deployments/ci/expected-schema-drift.txt`, a committed fixture whose header
@@ -313,8 +313,8 @@ deleted afterwards.
 `SESSION_SECRET`,** which `internal/config/config.go` never reads. The worker
 makes arbitrary outbound HTTP to customer-controlled URLs and is the worst place
 in the system to hold the session-forgery key. The data plane now has its own
-`secretRef` (`webhook-platform.dataPlaneEnvFrom`, chart value
-`dataPlane.separateSecret: true`; `webhook-platform-data-plane` in the raw
+`secretRef` (`hookubit.dataPlaneEnvFrom`, chart value
+`dataPlane.separateSecret: true`; `hookubit-data-plane` in the raw
 manifests) carrying only `DATABASE_URL`, `REDIS_URL` and the S3 credentials.
 
 > If the data plane ever gains payload encryption or endpoint-secret decryption,
@@ -331,11 +331,11 @@ v0.6.7 were downloaded to a scratch directory and really ran; so did `pnpm`,
 Actually executed:
 
 - **The Prisma defect was reproduced and the fix proven at the pnpm level.**
-  `pnpm deploy --filter @webhook/control-api --prod <tmp>` built a real deploy
+  `pnpm deploy --filter @hookubit/control-api --prod <tmp>` built a real deploy
   tree; `require('@prisma/client')` in it threw
   `Cannot find module '.prisma/client/default'`, and there was no `prisma` CLI
   anywhere in the tree to regenerate with. Running
-  `pnpm --filter @webhook/control-api exec prisma generate --schema=<tmp>/prisma/schema.prisma`
+  `pnpm --filter @hookubit/control-api exec prisma generate --schema=<tmp>/prisma/schema.prisma`
   wrote the client into that tree's virtual store, after which
   `new PrismaClient()` constructed successfully — including under `env -i`, with
   no `DATABASE_URL` and no cwd, which is what the Dockerfile's build-time
@@ -453,14 +453,14 @@ Re-verified against the current control API (six new modules, a new authz
 layer), by reproducing the deploy tree with pnpm exactly as the earlier review
 did:
 
-- `pnpm deploy --filter @webhook/control-api --prod <tmp>` — the tree contains
+- `pnpm deploy --filter @hookubit/control-api --prod <tmp>` — the tree contains
   **no `prisma` CLI** (`node_modules/.bin` has none), confirming `--prod` still
   strips it.
 - `require('@prisma/client')` in that tree still throws
   `Cannot find module '.prisma/client/default'`. **The defect is unchanged and
   the Dockerfile's second `prisma generate` is still load-bearing.**
 - Running the Dockerfile's exact repair —
-  `pnpm --filter @webhook/control-api exec prisma generate --schema=<tmp>/prisma/schema.prisma`
+  `pnpm --filter @hookubit/control-api exec prisma generate --schema=<tmp>/prisma/schema.prisma`
   — then `new PrismaClient()` under `env -i` with cwd `/` (no `DATABASE_URL`,
   no cwd, which is what the build-time `node --eval` assertion does):
   **constructs, with 24 model delegates.**
@@ -474,7 +474,7 @@ separate migrate image in compose.
 ### 4. NetworkPolicies — default-deny, on by default
 
 Was follow-up 5. `deployments/kubernetes/50-networkpolicy.yaml` (in the
-kustomization) and `deployments/helm/webhook-platform/templates/networkpolicy.yaml`
+kustomization) and `deployments/helm/hookubit/templates/networkpolicy.yaml`
 (`networkPolicy.enabled: true`).
 
 **Why on by default.** `internal/egress/ssrf.go` is good code and it is one
@@ -666,7 +666,7 @@ looking. The only path entries are `dist/`, `node_modules/`, `.pnpm-store/` and
    publishing must push that target too, not just `runtime`.
 4. **No image publishing.** CI builds but never pushes. Someone has to decide
    the registry, the tagging scheme and the release trigger. The manifests
-   currently reference `ghcr.io/shaq/webhook-*:0.1.0`, which does not exist yet.
+   currently reference `ghcr.io/shaq/hookubit-*:0.1.0`, which does not exist yet.
 5. ~~**No NetworkPolicies.**~~ **DONE, but never applied to a cluster** — see
    "NetworkPolicies" above. Six policies in both the raw manifests and the
    chart, on by default, with a CI guard that stops the metadata range being
@@ -696,7 +696,7 @@ looking. The only path entries are `dist/`, `node_modules/`, `.pnpm-store/` and
 
 10. **The data plane's Secret is scoped to what it reads today.** If
     `services/data-plane` ever gains payload encryption or endpoint-secret
-    decryption, `ENCRYPTION_KEY` must be added to `webhook-platform-data-plane`
+    decryption, `ENCRYPTION_KEY` must be added to `hookubit-data-plane`
     and to the chart's `-data-plane-secrets`. `JWT_SECRET` and `SESSION_SECRET`
     should never go back in.
 11. **`deployments/ci/expected-schema-drift.txt` is a fixture with teeth but no
@@ -871,3 +871,265 @@ are in modules, not the standard library, and no toolchain can reach them.**
 
     and then say so in go.mod's header, because the header currently argues the
     opposite and every contributor on an older toolchain will hit it.
+
+---
+
+## Dashboard build-time configuration (this pass)
+
+### The gap
+
+The get-started page renders a real publish `curl`. That request goes to the
+**ingest** service (Go, `:8080`), not to the control API the dashboard itself
+talks to (NestJS, `:3000`) — different service, different host in every real
+deployment. `ingestBaseUrl()` in
+`apps/dashboard/src/features/onboarding/publish-request.ts` reads
+`VITE_INGEST_BASE_URL` and falls back to `http://localhost:8080`. **Nothing on
+the deployment side passed it**, so a deployed dashboard handed every operator a
+curl aimed at their own laptop.
+
+`deployments/docker/dashboard.Dockerfile` now takes `ARG VITE_INGEST_BASE_URL`,
+plumbed exactly like `VITE_API_TRANSPORT`: declared as an `ARG` and passed on the
+`RUN` line rather than through `ENV FOO=${FOO}` (self-referential `ENV` is
+hadolint DL3044, and the `dockerfile-lint` job fails at `warning`).
+
+### The default is empty, and empty means *not passed at all*
+
+Not `http://localhost:8080`. A localhost default is plausible-looking and wrong
+in every deployment; an unset one lets the bundle use its own documented
+fallback and lets the page keep saying so.
+
+The subtlety that decides the implementation: `ingestBaseUrl()` is
+
+```ts
+import.meta.env.VITE_INGEST_BASE_URL ?? 'http://localhost:8080'
+```
+
+and `??` only fires on `undefined`. Vite's `loadEnv` **keeps an empty-string
+env var as `""`** — verified on this machine:
+
+```
+VITE_INGEST_BASE_URL='' -> ""        (inlined; `??` does NOT fire)
+unset                   -> undefined (fallback fires)
+```
+
+So exporting an empty value would defeat the fallback and produce a host-less
+`curl POST /v1/events` — a worse failure than localhost, because nothing in the
+UI explains it. The `RUN` line therefore passes the variable **only when it is
+non-empty**:
+
+```dockerfile
+RUN echo "..." \
+ && env VITE_API_TRANSPORT="${VITE_API_TRANSPORT}" \
+        ${VITE_INGEST_BASE_URL:+VITE_INGEST_BASE_URL="${VITE_INGEST_BASE_URL}"} \
+        pnpm --filter @hookubit/dashboard build
+```
+
+`env` rather than a bare command prefix on purpose: a `NAME=value` prefix
+produced by expansion is not recognised as an assignment — `sh` would treat it
+as the command name. Verified under `/bin/sh`: unset stays unset in the build
+environment, set is passed through.
+
+### What the dashboard would have to change for a true "not configured" state
+
+**This is the dashboard's call, not the deployment's, and it needs one change
+there before an empty default can be made honest.** Today the empty case
+degrades to `http://localhost:8080` plus the existing hint on the page
+("Ingest is a separate service … Set `VITE_INGEST_BASE_URL` at build time if
+yours is elsewhere"), which is truthful but easy to copy past. To get a real
+*not configured* state, the dashboard would need to:
+
+1. treat an empty string as unset —
+   `import.meta.env.VITE_INGEST_BASE_URL || undefined` rather than `?? `, so a
+   build that passes an empty value cannot produce a host-less URL; and
+2. distinguish *fell back* from *configured* — e.g. have `ingestBaseUrl()`
+   return `{ url, configured: boolean }`, and when `configured` is false render
+   the snippet with an obvious placeholder host (`https://<your-ingest-host>`)
+   plus a warning line, instead of a localhost URL that looks runnable.
+
+With (1) and (2) in place, the Dockerfile's `ARG` default can pass the empty
+string straight through and the UI becomes self-explaining. Until then, leaving
+the variable unset is the honest behaviour and is what the Dockerfile does.
+
+### Why the Helm chart cannot set this — and what it does instead
+
+The dashboard is a **static build**. Vite inlines `VITE_*` at image build time
+and the runtime container is nginx serving files, which reads no environment. A
+ConfigMap key, a `--set`, or an `env:` entry on the Deployment would configure
+**nothing** while looking like it did. The same is true of `VITE_API_TRANSPORT`
+— checked as part of this pass; the chart never claimed to set it, and now says
+explicitly that it cannot.
+
+So the chart does not ship a value that silently has no effect. It ships two
+values that are **assertions about the image**, clearly labelled as such:
+
+```yaml
+dashboard:
+  build:
+    ingestBaseUrl: ''      # what the image was built with; NOT a setting
+    apiTransport: 'mock'
+```
+
+They do exactly three things, all documentation:
+
+- render as annotations on the dashboard Deployment
+  (`hookubit.shaq.io/built-with-ingest-base-url` and
+  `…-api-transport`), so `kubectl describe deploy …-dashboard` answers "why
+  does the curl point at localhost" without unpacking the image;
+- drive three `NOTES.txt` warnings — empty `ingestBaseUrl`, an `ingestBaseUrl`
+  that disagrees with `ingress.ingestHost`, and an `apiTransport` still on
+  `mock`;
+- print the exact `docker build --build-arg …` command, with the release's own
+  `ingress.ingestHost` substituted in.
+
+`deployments/kubernetes/21-dashboard.yaml` carries the same annotations and a
+comment saying why the Deployment has no `envFrom`, and
+`deployments/compose/docker-compose.prod.yml` says the same in three lines.
+
+### Verified / not verified
+
+- Vite's empty-vs-unset behaviour: **run**, via `loadEnv` from the repo's own
+  Vite (output above).
+- The `${VAR:+…}` guard: **run** under `/bin/sh`, both branches.
+- `NOTES.txt` and `templates/dashboard.yaml`: parsed and rendered with a
+  `text/template` harness stubbing the sprig helpers (`dig`, `default`, `quote`,
+  `include`, `nindent`, `dict`), exercising the empty, mismatched and matching
+  branches. `values.yaml`, `21-dashboard.yaml` and the compose file parse as
+  YAML.
+- **`helm lint`, `helm template` and `kubeconform` were NOT run — neither binary
+  is installed on this machine** (searched; `which helm kubeconform` finds
+  nothing). CI's `manifests` job installs both and is the real check.
+- **No image was built: Docker's daemon is down.** The `--build-arg` plumbing
+  itself is therefore untested end to end; what is tested is the shell semantics
+  it relies on and the Vite behaviour it is designed around.
+- hadolint was not run (it segfaults on this machine). The new lines avoid
+  `ENV`, which is the rule that constrained the existing pattern.
+- Helm value references use `dig "build" … .Values.dashboard`, so an operator
+  who overrides `dashboard:` wholesale gets the documented default rather than a
+  nil-pointer render error.
+
+## Images built and verified — 2026-09-09
+
+Docker's daemon was unavailable for this project's entire history, so every
+Dockerfile fix until now was reasoned about and never executed. All four
+targets now build locally, and the two bugs that had only ever been found by
+READING are confirmed fixed by running them:
+
+| image | size | verified |
+|---|---|---|
+| `data-plane` | 33.8 MB | builds; distroless static |
+| `control-api` | 440 MB | **`new PrismaClient()` constructs inside the image** |
+| `control-api:migrate` | 1.07 GB | **`npx prisma --version` works; engine is `libquery_engine-linux-musl-openssl-3.0.x.so.node`** |
+| `dashboard` | 76.8 MB | builds; nginx-unprivileged |
+
+The control-api check is the one that mattered. `pnpm deploy --prod` rebuilds
+`node_modules` from the content-addressable store, and `prisma generate` writes
+into the virtual store — so the generated client was NOT carried into the deploy
+tree, and every pod would have crash-looped on boot with `maxUnavailable: 0`
+meaning the rollout never completed. The second `generate` against the deploy
+tree fixes it, and the constructor call proves it.
+
+The migrate image's engine name confirms the other fix: `node:22-alpine` ships
+no openssl, so Prisma had been defaulting to the OpenSSL-1.1 musl engine, which
+cannot `dlopen` on an OpenSSL-3-only base. Adding openssl to the stage makes
+detection pick `openssl-3.0.x`.
+
+### Worth revisiting: the migrate image is 1.07 GB
+
+It is `FROM builder`, so it carries the whole build tree — full `node_modules`,
+sources, the pnpm store links — to run one command. That is defensible for a
+one-shot Job that runs once per release and is never in the request path, and it
+guarantees the CLI and the engine match the client exactly, which is the failure
+mode this whole area has already produced twice.
+
+But it is ~25x the runtime image. If it becomes a problem (registry cost, pull
+time on a cold node before migrations can run), the shape to aim for is a slim
+stage carrying only the prisma CLI, the engine binary and `prisma/`. Do NOT do
+that speculatively: the two bugs above both came from a deploy tree that was
+missing something it needed, and this image's size is the reason it has never
+had that class of failure.
+
+---
+
+## Startup probes and observability — 2026-09-09
+
+Two findings from the failure-injection audit landed in `deployments/`.
+
+### 1. The data plane had no startup probe
+
+**Symptom the audit named:** a PostgreSQL outage at boot becomes fleet-wide
+`CrashLoopBackOff`, and recovery is then gated on kubelet's exponential backoff
+(up to 5 minutes) rather than on the database coming back.
+
+All four Go roles now carry a `startupProbe` on `/health/live` — in the chart
+(`dataPlane.startupProbe`, on by default, with `values.schema.json` entries) and
+in the raw manifests. While it runs, liveness is suspended, so a pod that is
+slow to bind (cold node, throttled CPU limit, freshly pulled image) is given
+150s at the defaults instead of being restarted by a liveness check that starts
+counting at five seconds.
+
+It targets **liveness, not readiness**, on purpose. A startup probe that waited
+for PostgreSQL would exhaust its threshold during an outage and kill every pod —
+which is the fleet-wide restart ARCHITECTURE.md 46 keeps liveness off the
+database to avoid, reintroduced at a different point in the lifecycle.
+
+**The Go half has since landed**, which is what makes this probe load-bearing
+rather than merely correct. `cmd/webhookd/main.go` used to call `db.Open` —
+which pings — *before* starting the probe server, so with PostgreSQL down the
+process exited 1 having never bound `:9090`, and no probe can rescue a container
+that has already exited. All three changes are now in:
+
+- the probe server binds **before** the pool is opened,
+- `db.OpenWithRetry` waits out an unreachable database with capped backoff
+  (250ms doubling to 10s), cancellable, so SIGTERM mid-wait still exits
+  promptly — while a malformed `DATABASE_URL` still fails on the first attempt,
+  because retrying a configuration error looks identical from outside to
+  waiting out an outage and those need telling apart,
+- readiness stays false through the wait and reports `starting` rather than
+  `draining`, so the two 503s are distinguishable to an operator.
+
+Neither half works alone: without the Go change the container exits before any
+probe runs, and without this probe a process that stays up retrying is killed by
+liveness at five seconds. Verified by running `webhookd router` against a closed
+port — `/health/live` served 200 throughout while the process retried and stayed
+up; `internal/db/retry_test.go` and `internal/httpx/health_lifecycle_test.go`
+pin the semantics.
+
+The liveness/readiness split itself is right and was left alone. Readiness
+checking PostgreSQL is correct — only ingest is behind a Service, so for the
+other three roles it is a status signal, not a traffic one.
+
+### 2. Prometheus and Grafana (ARCHITECTURE.md Phase 6)
+
+New: `deployments/observability/` (scrape config, alert rules, README) and
+`deployments/helm/hookubit/dashboards/hookubit.json`, rendered as
+a ConfigMap for the Grafana sidecar when
+`observability.grafanaDashboard.enabled=true` (off by default — it is inert
+without a sidecar and invisible if the label does not match the one your Grafana
+watches).
+
+The dashboard JSON lives inside the chart because `.Files.Get` cannot read above
+the chart directory, and one copy that both install paths share beats two that
+drift.
+
+Every panel and every rule is backed by a series the data plane actually writes.
+Two absences are deliberate:
+
+- **No "breakers currently open" panel.** `circuit_breaker_open_total` counts
+  transitions *into* open; no gauge of live breaker state exists, and a panel for
+  one would be a flat zero forever.
+- **`queue_depth` needs a collector running.** `metrics.NewQueueDepthCollector`
+  refreshes it; until a role starts one the gauge is absent, and the
+  `WebhookQueueDepthNotExported` rule fires to say so — because a backlog gauge
+  reading a confident, permanent zero is indistinguishable from a healthy queue.
+
+Nothing installs Prometheus or Grafana, for the same reason nothing installs
+PostgreSQL.
+
+### Verified
+
+`helm lint` and `helm template` (3.16.3), `kubeconform -strict` 0.6.7 against
+Kubernetes 1.29 on both the rendered chart (29 resources) and the raw manifests,
+and the four CI guardrail greps (missing-database lint, no bundled database in
+rendered output or sources, no empty optional keys). Not verified: anything
+requiring a cluster — probe behaviour under a real database outage, and whether
+the Grafana sidecar picks the ConfigMap up.

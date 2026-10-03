@@ -5,21 +5,27 @@ import { ForgotPasswordPage } from '../features/auth/ForgotPasswordPage';
 import { LoginPage } from '../features/auth/LoginPage';
 import { RegisterPage } from '../features/auth/RegisterPage';
 import { ResetPasswordPage } from '../features/auth/ResetPasswordPage';
+import { VerifyEmailPage } from '../features/auth/VerifyEmailPage';
 import { DeliveriesPage } from '../features/deliveries/DeliveriesPage';
 import { DeliveryDetailPage } from '../features/deliveries/DeliveryDetailPage';
+import { OutboxPage } from '../features/outbox/OutboxPage';
+import { EndpointDetailPage } from '../features/endpoints/EndpointDetailPage';
 import { EndpointsPage } from '../features/endpoints/EndpointsPage';
+import { ConfirmNotificationsPage } from '../features/notifications/ConfirmNotificationsPage';
+import { NotificationsPage } from '../features/notifications/NotificationsPage';
 import { EventDetailPage } from '../features/events/EventDetailPage';
 import { EventsPage } from '../features/events/EventsPage';
+import { GetStartedPage } from '../features/onboarding/GetStartedPage';
 import { OverviewPage } from '../features/overview/OverviewPage';
-import {
-  BillingPage,
-  OrganizationSettingsPage,
-  ProjectAnalyticsPage,
-  ProjectSettingsPage,
-} from '../features/settings/placeholders';
+import { PoliciesPage } from '../features/policies/PoliciesPage';
+import { AnalyticsPage } from '../features/analytics/AnalyticsPage';
+import { UsageRedirect } from '../features/analytics/UsageRedirect';
+import { OrganizationSettingsPage } from '../features/settings/OrganizationSettingsPage';
+import { ProjectSettingsPage } from '../features/settings/ProjectSettingsPage';
+import { BillingPage } from '../features/settings/BillingPage';
 import { SubscriptionsPage } from '../features/subscriptions/SubscriptionsPage';
+import { AcceptInvitationPage } from '../features/team/AcceptInvitationPage';
 import { TeamPage } from '../features/team/TeamPage';
-import { UsagePage } from '../features/usage/UsagePage';
 import { AppLayout } from '../layouts/AppLayout';
 import { AuthLayout } from '../layouts/AuthLayout';
 import { NotFoundPage, OrganizationLanding, RootRedirect } from './LandingRoutes';
@@ -41,6 +47,18 @@ export const router = createBrowserRouter([
       { path: '/register', element: <RegisterPage /> },
       { path: '/forgot-password', element: <ForgotPasswordPage /> },
       { path: '/reset-password', element: <ResetPasswordPage /> },
+      // Where the verification email lands: `${DASHBOARD_URL}/verify-email?token=…`.
+      { path: '/verify-email', element: <VerifyEmailPage /> },
+      // Where the invitation email lands: `${DASHBOARD_URL}/accept-invitation?token=…`.
+      // Outside `RequireSession` on purpose: an invitee often has no session yet,
+      // and the page itself decides whether to redeem or to send them to sign in
+      // with the token kept.
+      { path: '/accept-invitation', element: <AcceptInvitationPage /> },
+      // Where a notification-confirmation link lands. Outside RequireSession
+      // deliberately: the person who can read a group address is very often
+      // not a member of the organization that added it, and that is the whole
+      // point of using one.
+      { path: '/confirm-notifications', element: <ConfirmNotificationsPage /> },
     ],
   },
   {
@@ -56,22 +74,30 @@ export const router = createBrowserRouter([
           { path: '/orgs/:orgId/settings', element: <OrganizationSettingsPage /> },
           { path: '/orgs/:orgId/team', element: <TeamPage /> },
           { path: '/orgs/:orgId/billing', element: <BillingPage /> },
-          { path: '/orgs/:orgId/usage', element: <UsagePage /> },
+          // Usage is a tab on Analytics now. The address is kept because it was
+          // bookmarked and is linked from billing; `UsageRedirect` resolves a
+          // project and forwards to it. Removing it would 404 those links.
+          { path: '/orgs/:orgId/usage', element: <UsageRedirect /> },
           { path: '/orgs/:orgId/audit', element: <AuditPage /> },
 
           {
             path: '/orgs/:orgId/projects/:projectId',
             children: [
               { index: true, element: <Navigate to="overview" replace /> },
+              { path: 'get-started', element: <GetStartedPage /> },
               { path: 'overview', element: <OverviewPage /> },
               { path: 'events', element: <EventsPage /> },
               { path: 'events/:eventId', element: <EventDetailPage /> },
               { path: 'deliveries', element: <DeliveriesPage /> },
               { path: 'deliveries/:deliveryId', element: <DeliveryDetailPage /> },
+              { path: 'outbox', element: <OutboxPage /> },
               { path: 'endpoints', element: <EndpointsPage /> },
+              { path: 'endpoints/:endpointId', element: <EndpointDetailPage /> },
               { path: 'subscriptions', element: <SubscriptionsPage /> },
+              { path: 'policies', element: <PoliciesPage /> },
               { path: 'api-keys', element: <ApiKeysPage /> },
-              { path: 'analytics', element: <ProjectAnalyticsPage /> },
+              { path: 'analytics', element: <AnalyticsPage /> },
+              { path: 'notifications', element: <NotificationsPage /> },
               { path: 'settings', element: <ProjectSettingsPage /> },
             ],
           },

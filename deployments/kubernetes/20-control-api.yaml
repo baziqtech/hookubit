@@ -5,11 +5,11 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: control-api
-  namespace: webhook-platform
+  namespace: hookubit
   labels: &labels
-    app.kubernetes.io/name: webhook-platform
+    app.kubernetes.io/name: hookubit
     app.kubernetes.io/component: control-api
-    app.kubernetes.io/part-of: webhook-platform
+    app.kubernetes.io/part-of: hookubit
 spec:
   replicas: 2
   revisionHistoryLimit: 5
@@ -18,7 +18,7 @@ spec:
     rollingUpdate: { maxSurge: 1, maxUnavailable: 0 }
   selector:
     matchLabels:
-      app.kubernetes.io/name: webhook-platform
+      app.kubernetes.io/name: hookubit
       app.kubernetes.io/component: control-api
   template:
     metadata:
@@ -40,18 +40,18 @@ spec:
           whenUnsatisfiable: ScheduleAnyway
           labelSelector:
             matchLabels:
-              app.kubernetes.io/name: webhook-platform
+              app.kubernetes.io/name: hookubit
               app.kubernetes.io/component: control-api
       containers:
         - name: control-api
-          image: ghcr.io/shaq/webhook-control-api:0.1.0
+          image: ghcr.io/shaq/hookubit-control-api:0.1.0
           imagePullPolicy: IfNotPresent
           ports:
             - { name: http, containerPort: 3000, protocol: TCP }
           envFrom:
-            - configMapRef: { name: webhook-platform-config }
-            - secretRef: { name: webhook-platform-database }
-            - secretRef: { name: webhook-platform-app }
+            - configMapRef: { name: hookubit-config }
+            - secretRef: { name: hookubit-database }
+            - secretRef: { name: hookubit-app }
           env:
             - name: CORS_ORIGINS
               value: 'https://webhooks.example.com'
@@ -93,15 +93,15 @@ apiVersion: v1
 kind: Service
 metadata:
   name: control-api
-  namespace: webhook-platform
+  namespace: hookubit
   labels:
-    app.kubernetes.io/name: webhook-platform
+    app.kubernetes.io/name: hookubit
     app.kubernetes.io/component: control-api
-    app.kubernetes.io/part-of: webhook-platform
+    app.kubernetes.io/part-of: hookubit
 spec:
   type: ClusterIP
   ports:
     - { name: http, port: 3000, targetPort: http, protocol: TCP }
   selector:
-    app.kubernetes.io/name: webhook-platform
+    app.kubernetes.io/name: hookubit
     app.kubernetes.io/component: control-api

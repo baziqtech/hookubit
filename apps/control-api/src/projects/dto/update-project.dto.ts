@@ -1,5 +1,5 @@
 import { ApiPropertyOptional } from '@nestjs/swagger';
-import { IsOptional, IsString, Length, Matches, MaxLength } from 'class-validator';
+import { IsArray, IsOptional, IsString, Length, Matches, MaxLength } from 'class-validator';
 import { SLUG_MAX_LENGTH, SLUG_MIN_LENGTH, SLUG_PATTERN } from '../slug';
 import { PROJECT_NAME_MAX_LENGTH } from './create-project.dto';
 
@@ -38,4 +38,20 @@ export class UpdateProjectDto {
     message: 'slug must be lowercase alphanumeric segments separated by single hyphens',
   })
   slug?: string;
+
+  @ApiPropertyOptional({
+    type: [String],
+    example: ['203.0.113.0/24', '198.51.100.7'],
+    description:
+      'Addresses permitted to PUBLISH events to this project. An EMPTY list means every address ' +
+      'may, which is the default. Entries are IPv4/IPv6 addresses or CIDR blocks; a malformed ' +
+      'one is REFUSED rather than dropped, because silently discarding it would lock out the ' +
+      'service it was for at the moment you believed you had permitted it. ' +
+      'Sending this field REPLACES the list. Publishing only: it is never consulted for reading ' +
+      'the record or for signing in, so it cannot lock anyone out of the dashboard.',
+  })
+  @IsOptional()
+  @IsArray()
+  @IsString({ each: true })
+  allowed_ips?: string[];
 }

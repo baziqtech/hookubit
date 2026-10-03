@@ -63,6 +63,7 @@ export class FakePrisma {
         emailVerifiedAt: args.data.emailVerifiedAt ?? null,
         lastLoginAt: null,
         disabledAt: null,
+        onboardingCompletedAt: args.data.onboardingCompletedAt ?? null,
         createdAt: new Date(),
         updatedAt: new Date(),
       };
@@ -75,6 +76,29 @@ export class FakePrisma {
       const updated: User = { ...user, ...args.data, updatedAt: new Date() };
       this.users.set(updated.id, updated);
       return { ...updated };
+    },
+    /**
+     * Mirrors the conditional UPDATE onboarding completion relies on:
+     * `... WHERE id = $1 AND onboarding_completed_at IS NULL AND disabled_at IS
+     * NULL`. The NULL predicates are the whole point - they are what makes a
+     * second completion touch zero rows instead of moving the timestamp
+     * forward - so a fake that ignored the WHERE would let a broken
+     * read-then-write pass.
+     */
+    updateMany: async (args: {
+      where: { id?: string; onboardingCompletedAt?: null; disabledAt?: null };
+      data: Partial<User>;
+    }): Promise<{ count: number }> => {
+      const { where, data } = args;
+      let count = 0;
+      for (const [id, user] of this.users) {
+        if (where.id !== undefined && user.id !== where.id) continue;
+        if (where.onboardingCompletedAt === null && user.onboardingCompletedAt !== null) continue;
+        if (where.disabledAt === null && user.disabledAt !== null) continue;
+        this.users.set(id, { ...user, ...data, updatedAt: new Date() });
+        count += 1;
+      }
+      return { count };
     },
   };
 

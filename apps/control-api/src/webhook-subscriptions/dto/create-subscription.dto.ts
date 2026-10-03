@@ -64,6 +64,7 @@ export class PayloadFilterConstraint implements ValidatorConstraintInterface {
 
 export class CreateSubscriptionDto {
   @ApiPropertyOptional({
+    type: String,
     maxLength: MAX_SUBSCRIPTION_NAME_LENGTH,
     nullable: true,
     example: 'Finance ledger - settlements only',
@@ -124,8 +125,8 @@ export class CreateSubscriptionDto {
   @ApiPropertyOptional({
     default: true,
     description:
-      'A disabled subscription never matches - `Match()` skips it before the event-type test. ' +
-      'This is how you stop deliveries without touching the filter.',
+      'A disabled subscription never matches: it is skipped before its event-type filter is ' +
+      'even evaluated. This is how you stop deliveries without touching the filter.',
   })
   @IsOptional()
   @IsBoolean()

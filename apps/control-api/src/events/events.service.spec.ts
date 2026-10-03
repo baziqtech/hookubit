@@ -1,7 +1,7 @@
 import { CROSS_TENANT_MESSAGE, MAX_PAGE_SIZE } from '../authz';
 import { IDS } from '../authz/testing/fixtures';
 import { AppError } from '../common/errors';
-import { MAX_REPLAY_FAN_OUT } from '../deliveries/delivery-limits';
+import { MAX_REPLAY_DELIVERIES } from '../deliveries/delivery-limits';
 import {
   BINARY_PAYLOAD,
   LEDGER,
@@ -110,6 +110,77 @@ describe('listing events', () => {
   });
 });
 
+/**
+ * The rollup: what became of the event, as opposed to what became of the
+ * ingest.
+ *
+ * `Event.status` answers "did we store it and work out who wanted it?" and
+ * stops there. Every assertion below is about the difference between that and
+ * "did anybody receive it?", which is the question the list is actually asked.
+ */
+describe('the delivery rollup on a listing', () => {
+  const rollupOf = async (eventId: string) => {
+    const { events, context } = await ledgerHarness();
+    const page = await events.list(context, ALL);
+    return page.data.find((event) => event.id === eventId)?.deliveries;
+  };
+
+  it('an event whose routing matched nothing is DROPPED, not delivered', async () => {
+    // `status: processed` and zero deliveries. Read off `status` alone this
+    // event looks finished and fine; it reached nobody. This is the state
+    // newcomers actually hit, and it is invisible in every other column
+    // because there is no delivery row to be absent from.
+    const rollup = await rollupOf(LEDGER.eventOrphan);
+    expect(rollup?.state).toBe('dropped');
+    expect(rollup?.total).toBe(0);
+  });
+
+  it('an event with one success and one exhausted is PARTLY DELIVERED', async () => {
+    const rollup = await rollupOf(LEDGER.eventOrder);
+    expect(rollup?.state).toBe('partly_delivered');
+    expect(rollup?.succeeded).toBe(1);
+    expect(rollup?.failed).toBe(1);
+    expect(rollup?.total).toBe(2);
+  });
+
+  it('an event with a delivery still retrying is IN PROGRESS', async () => {
+    const rollup = await rollupOf(LEDGER.eventSettled);
+    expect(rollup?.state).toBe('in_progress');
+    expect(rollup?.in_flight).toBeGreaterThan(0);
+  });
+
+  it('counts only this event, never the neighbour above it in the page', async () => {
+    // The whole rollup is one grouped query over the page's ids. An off-by-a-
+    // key here would attribute one event's failures to another, which is the
+    // one error this column must not make.
+    const { events, context } = await ledgerHarness();
+    const page = await events.list(context, ALL);
+
+    for (const event of page.data) {
+      const rollup = event.deliveries;
+      expect(rollup).not.toBeNull();
+      expect(rollup!.total).toBe(
+        rollup!.succeeded + rollup!.failed + rollup!.in_flight + rollup!.cancelled,
+      );
+    }
+  });
+
+  it('does not issue one query per event', async () => {
+    // The N+1 the paged grouped query exists to avoid. A page of 50 events
+    // costing 50 round trips is how a list route becomes the slowest thing in
+    // the product.
+    const { events, context, db } = await ledgerHarness();
+    db.queries.length = 0;
+    const page = await events.list(context, ALL);
+
+    const groupBys = db.queries.filter(
+      (query) => query.table === 'delivery' && query.op === 'groupBy',
+    );
+    expect(groupBys.length).toBeLessThan(page.data.length);
+    expect(groupBys.length).toBeGreaterThan(0);
+  });
+});
+
 describe('fetching one event', () => {
   it('returns the AUTHORITATIVE raw bytes as the payload, and labels the jsonb copy', async () => {
     const { events, context } = await ledgerHarness();
@@ -188,7 +259,7 @@ describe('fetching one event', () => {
   });
 });
 
-describe('the fan-out of one event - "did finance ever receive this?"', () => {
+describe('the routing of one event - "did finance ever receive this?"', () => {
   it('lists one row per endpoint the event reached, with per-endpoint status', async () => {
     const { events, context } = await ledgerHarness();
 
@@ -253,7 +324,7 @@ describe('replaying an event to all originally matched endpoints', () => {
   it('uses the endpoints that ACTUALLY matched, not a fresh subscription match', async () => {
     const harness = await ledgerHarness();
 
-    // The subscriptions have moved on since the fan-out, in both directions:
+    // The subscriptions have moved on since the routing, in both directions:
     // the one that produced the original delivery is gone, and a new endpoint
     // now subscribes to everything. A re-match would deliver to `ep_a_new` -
     // which was never targeted - and skip `ep_a1`, which was.
@@ -308,7 +379,7 @@ describe('replaying an event to all originally matched endpoints', () => {
     expect(harness.db.all('delivery').filter((row) => row.replayOfDeliveryId !== null)).toEqual([]);
   });
 
-  it('refuses the whole fan-out when ONE endpoint has been deleted', async () => {
+  it('refuses the whole routing when ONE endpoint has been deleted', async () => {
     const harness = await ledgerHarness();
     const before = allDeliveries(harness.db);
 
@@ -323,7 +394,7 @@ describe('replaying an event to all originally matched endpoints', () => {
     expect(allDeliveries(harness.db)).toEqual(before);
   });
 
-  it('refuses a fan-out wider than the cap, and names the real number', async () => {
+  it('refuses a routing wider than the cap, and names the real number', async () => {
     const harness = await ledgerHarness();
 
     const error = await harness.events
@@ -332,9 +403,9 @@ describe('replaying an event to all originally matched endpoints', () => {
 
     expect((error as AppError).code).toBe('limit_exceeded');
     expect((error as AppError).details).toEqual({
-      limit: MAX_REPLAY_FAN_OUT,
+      limit: MAX_REPLAY_DELIVERIES,
       current: WIDE_ENDPOINTS,
-      resource: 'replay_fan_out',
+      resource: 'replay_deliveries',
     });
     expect(harness.db.all('delivery').filter((row) => row.replayOfDeliveryId !== null)).toEqual([]);
   });
@@ -407,7 +478,7 @@ describe('replaying an event to one endpoint', () => {
       .catch((err: AppError) => err);
 
     expect((error as AppError).code).toBe('conflict');
-    expect((error as AppError).message).toContain('never fanned out');
+    expect((error as AppError).message).toContain('never routed');
     expect((error as AppError).details).toMatchObject({
       event_id: LEDGER.eventSettled,
       endpoint_id: LEDGER.endpointFinance,

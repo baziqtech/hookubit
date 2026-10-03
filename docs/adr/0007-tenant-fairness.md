@@ -130,6 +130,11 @@ Two statements. Both depend on one schema change and one index.
 
 ### Prerequisite schema change (control-plane / Prisma task)
 
+> **Done** — migration `20260911000000_next_attempt_at_not_null`. The predicate
+> is a plain range, the `NULLS FIRST` is gone from every ORDER BY, and both
+> ready-set indexes were rebuilt without it (with `id` appended for the claim
+> tiebreaker) so the claim reads straight off the index with no Sort node.
+
 `deliveries.next_attempt_at` becomes `NOT NULL`, defaulted to `created_at` at
 insert. Every ready-set predicate and every `ORDER BY` in the delivery path
 currently carries `IS NULL OR <= now()` / `NULLS FIRST` to work around a

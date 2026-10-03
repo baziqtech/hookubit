@@ -59,7 +59,7 @@ import { WebhookSubscriptionsService } from './webhook-subscriptions.service';
  */
 @ApiTags('subscriptions')
 @ApiCookieAuth('session')
-@ApiParam({ name: 'projectId', example: 'proj_01J8ZK...' })
+@ApiParam({ name: 'projectId', type: String, example: 'proj_01J8ZK...', description: 'Project id, `proj_…`.' })
 @ApiNotFoundResponse({
   description:
     'The project, subscription or endpoint is not visible to this caller - absent, or another ' +
@@ -135,7 +135,7 @@ export class WebhookSubscriptionsController {
 
   @Get(':subscriptionId')
   @Authorized('subscriptions.read')
-  @ApiParam({ name: 'subscriptionId', example: 'sub_01J8ZK...' })
+  @ApiParam({ name: 'subscriptionId', type: String, example: 'sub_01J8ZK...', description: 'Subscription id, `sub_…`.' })
   @ApiOperation({ summary: 'Fetch one subscription' })
   @ApiOkResponse({ type: SubscriptionDto })
   get(
@@ -148,7 +148,7 @@ export class WebhookSubscriptionsController {
   @Patch(':subscriptionId')
   @Authorized('subscriptions.write')
   @Throttle(SUBSCRIPTION_MUTATE_THROTTLE)
-  @ApiParam({ name: 'subscriptionId', example: 'sub_01J8ZK...' })
+  @ApiParam({ name: 'subscriptionId', type: String, example: 'sub_01J8ZK...', description: 'Subscription id, `sub_…`.' })
   @ApiOperation({
     summary: 'Update a subscription',
     description:
@@ -172,7 +172,7 @@ export class WebhookSubscriptionsController {
   @Authorized('subscriptions.write')
   @Throttle(SUBSCRIPTION_MUTATE_THROTTLE)
   @HttpCode(HttpStatus.OK)
-  @ApiParam({ name: 'subscriptionId', example: 'sub_01J8ZK...' })
+  @ApiParam({ name: 'subscriptionId', type: String, example: 'sub_01J8ZK...', description: 'Subscription id, `sub_…`.' })
   @ApiOperation({
     summary: 'Resume matching for a subscription',
     description: 'Idempotent. The filter is untouched.',
@@ -189,7 +189,7 @@ export class WebhookSubscriptionsController {
   @Authorized('subscriptions.write')
   @Throttle(SUBSCRIPTION_MUTATE_THROTTLE)
   @HttpCode(HttpStatus.OK)
-  @ApiParam({ name: 'subscriptionId', example: 'sub_01J8ZK...' })
+  @ApiParam({ name: 'subscriptionId', type: String, example: 'sub_01J8ZK...', description: 'Subscription id, `sub_…`.' })
   @ApiOperation({
     summary: 'Stop matching, keep the filter',
     description:
@@ -211,7 +211,7 @@ export class WebhookSubscriptionsController {
   @Authorized('subscriptions.write')
   @Throttle(SUBSCRIPTION_MUTATE_THROTTLE)
   @HttpCode(HttpStatus.NO_CONTENT)
-  @ApiParam({ name: 'subscriptionId', example: 'sub_01J8ZK...' })
+  @ApiParam({ name: 'subscriptionId', type: String, example: 'sub_01J8ZK...', description: 'Subscription id, `sub_…`.' })
   @ApiOperation({
     summary: 'Remove a subscription (hard delete)',
     description:

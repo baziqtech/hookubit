@@ -6,10 +6,12 @@ export {
   DeliveryEndpointRefDto,
   DeliveryEventRefDto,
   DeliveryListDto,
+  DeliveryListItemDto,
   ReplayResultDto,
   isTerminal,
   toAttemptDto,
   toDeliveryDto,
+  toDeliveryListItemDto,
   toEndpointRef,
   toEventRef,
 } from './delivery-response.dto';

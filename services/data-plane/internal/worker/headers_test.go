@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/shaq/webhook-platform/services/data-plane/internal/signing"
+	"github.com/shaq/hookubit/services/data-plane/internal/signing"
 )
 
 func headerInput() HeaderInput {

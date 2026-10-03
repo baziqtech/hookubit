@@ -1,0 +1,27 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <!--
+    The HookuBit mark: the "16 favicon" variant from the brand sheet, authored
+    here in the design's native 64x64 space. Every value is the 16px variant
+    multiplied by 4, which lands on integers (strokeWidth 1.75 to 7, bit
+    3.25/2.75 to 13/11, radius 1 to 4) - the 16px numbers are the rounded ones,
+    so this is the faithful copy and the browser does the downscaling.
+
+    One path, not several: a shank that turns into the bend in a single stroke,
+    with the bit held clear at the top left. There is no eye and no barb - at
+    16px those became specks, and the bit alone carries the product name.
+
+    The bit is filled rather than stroked because a 7-unit stroke closes up at
+    favicon size, and it is a lighter violet so it separates from the field
+    instead of disappearing into it.
+
+    Violet here is the light-theme accent token (c-accent) rendered opaque,
+    because a favicon has no access to the page's custom properties. That token
+    is written here WITHOUT its two leading dashes on purpose: an XML comment
+    may not contain a double hyphen, and spelling it in full silently made this
+    file invalid XML, so no browser would render it. Do not "restore" them.
+  -->
+  <rect width="64" height="64" rx="16" fill="#6B38D4"/>
+  <path d="M43 12v22a10 10 0 1 1-20 0" fill="none" stroke="#fff" stroke-width="7"
+        stroke-linecap="round" stroke-linejoin="round"/>
+  <rect x="13" y="11" width="12" height="12" rx="4" fill="#DCCDF7"/>
+</svg>

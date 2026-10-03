@@ -4,7 +4,7 @@ import { AppError } from '../common/errors';
 import { AuthService } from './auth.service';
 import { AuthMailer } from './mailer.port';
 import { PasswordService } from './password.service';
-import { SessionService } from './session.service';
+import { SessionService, SessionUser } from './session.service';
 import { FakePrisma } from './testing/prisma.fake';
 import { TOKEN_TTL_MS, TokenService } from './token.service';
 
@@ -631,5 +631,179 @@ describe('AuthService session issuance', () => {
       expect.objectContaining({ email: EMAIL }),
       ctx,
     );
+  });
+});
+
+describe('AuthService resend verification', () => {
+  /**
+   * The property this route exists to hold. A caller must not be able to tell
+   * these four apart, and the failure mode that historically broke it was not
+   * the happy path but the DEGRADED one: forgot-password used to 500 for a
+   * registered address and 202 for an unknown one whenever SMTP was down,
+   * assembling an oracle out of an error handler.
+   */
+  it('answers identically for unknown, unverified, already-verified and mailer-down', async () => {
+    const h = build(true);
+    await registerUser(h, 'unverified@example.com');
+    await registerVerifiedUser(h, 'verified@example.com');
+
+    await expect(h.service.resendVerification('nobody@example.com')).resolves.toBeUndefined();
+    await expect(h.service.resendVerification('unverified@example.com')).resolves.toBeUndefined();
+    await expect(h.service.resendVerification('verified@example.com')).resolves.toBeUndefined();
+
+    h.mailer.fail = true;
+    await expect(h.service.resendVerification('unverified@example.com')).resolves.toBeUndefined();
+    await expect(h.service.resendVerification('nobody@example.com')).resolves.toBeUndefined();
+  });
+
+  it('REGRESSION: a token-store failure is swallowed too, not just the mailer', async () => {
+    const h = build(true);
+    await registerUser(h);
+    // A dead mailer is not the only way this can throw. If the token write
+    // failed, an unhandled error here would 500 for a registered address and
+    // 202 for an unknown one - the identical oracle, reached by a different
+    // route.
+    jest
+      .spyOn(h.tokens, 'revokeOutstanding')
+      .mockRejectedValueOnce(new Error('connection terminated'));
+
+    await expect(h.service.resendVerification(EMAIL)).resolves.toBeUndefined();
+  });
+
+  it('mails a fresh, working link to an unverified address', async () => {
+    const h = build(true);
+    await registerUser(h);
+    const fromRegistration = h.mailer.verifications.length;
+
+    await h.service.resendVerification(EMAIL.toUpperCase());
+
+    // Also proves the address is normalised: the caller typed it in caps.
+    expect(h.mailer.verifications).toHaveLength(fromRegistration + 1);
+    const user = await h.service.verifyEmail({ token: h.mailer.verifications[1] });
+    expect(user.email).toBe(EMAIL);
+  });
+
+  it('kills the previous link, so only the newest email works', async () => {
+    const h = build(true);
+    await registerUser(h);
+    await h.service.resendVerification(EMAIL);
+
+    const [first, second] = h.mailer.verifications;
+    await expect(h.service.verifyEmail({ token: first })).rejects.toMatchObject({
+      code: 'invalid_request',
+    });
+    await expect(h.service.verifyEmail({ token: second })).resolves.toMatchObject({
+      email_verified: true,
+    });
+  });
+
+  it('a consumed resend token cannot be replayed', async () => {
+    const h = build(true);
+    await registerUser(h);
+    await h.service.resendVerification(EMAIL);
+    const token = h.mailer.verifications[1];
+
+    await h.service.verifyEmail({ token });
+    await expect(h.service.verifyEmail({ token })).rejects.toMatchObject({
+      code: 'invalid_request',
+    });
+  });
+
+  it('sends nothing for a verified or an unknown address', async () => {
+    const h = build(true);
+    await registerVerifiedUser(h);
+    const sent = h.mailer.verifications.length;
+
+    await h.service.resendVerification(EMAIL);
+    await h.service.resendVerification('nobody@example.com');
+
+    expect(h.mailer.verifications).toHaveLength(sent);
+  });
+});
+
+describe('AuthService onboarding completion', () => {
+  async function sessionFor(h: Harness, email: string): Promise<SessionUser> {
+    const user = await h.prisma.user.findUnique({ where: { email } });
+    if (!user) throw new Error(`no such test user: ${email}`);
+    return { userId: user.id, email: user.email, sessionId: `ses_${user.id}` };
+  }
+
+  it('records the instant and exposes it on the session response', async () => {
+    const h = build(true);
+    await registerVerifiedUser(h);
+    const session = await sessionFor(h, EMAIL);
+
+    expect((await h.service.currentUser(session)).onboarding_completed_at).toBeNull();
+
+    const at = await h.service.completeOnboarding(session);
+
+    expect(at).toBeInstanceOf(Date);
+    // ISO-8601, which is what the client is promised - not a Date, not epoch ms.
+    expect((await h.service.currentUser(session)).onboarding_completed_at).toBe(
+      at?.toISOString(),
+    );
+  });
+
+  it('is idempotent, and the recorded instant does not drift forward', async () => {
+    const h = build(true);
+    await registerVerifiedUser(h);
+    const session = await sessionFor(h, EMAIL);
+
+    const first = await h.service.completeOnboarding(session);
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    const second = await h.service.completeOnboarding(session);
+
+    // Completing twice is a success, not a conflict, and the FIRST completion
+    // is the one on record - a retrying client must not rewrite history.
+    expect(second?.toISOString()).toBe(first?.toISOString());
+  });
+
+  it('audits the transition once, however many times it is called', async () => {
+    const h = build(true);
+    await registerVerifiedUser(h);
+    const session = await sessionFor(h, EMAIL);
+
+    await h.service.completeOnboarding(session);
+    await h.service.completeOnboarding(session);
+    await h.service.completeOnboarding(session);
+
+    const entries = h.prisma.auditLogs.filter(
+      (row) => row.action === 'user.onboarding_completed',
+    );
+    // A replay must not be able to flood audit_logs.
+    expect(entries).toHaveLength(1);
+  });
+
+  it('touches only the calling user - one account cannot complete another’s', async () => {
+    const h = build(true);
+    await registerVerifiedUser(h, 'ada@example.com');
+    await registerVerifiedUser(h, 'grace@example.com');
+    const ada = await sessionFor(h, 'ada@example.com');
+    const grace = await sessionFor(h, 'grace@example.com');
+
+    await h.service.completeOnboarding(ada);
+
+    // The id comes off the verified session and nowhere else; there is no body
+    // or path parameter naming a user, so this is a property of the signature
+    // as much as of the query. Assert the row, not just the response.
+    expect((await h.service.currentUser(grace)).onboarding_completed_at).toBeNull();
+    const graceRow = await h.prisma.user.findUnique({ where: { id: grace.userId } });
+    expect(graceRow?.onboardingCompletedAt).toBeNull();
+  });
+
+  it('lets two concurrent completions race, and exactly one writes', async () => {
+    const h = build(true);
+    await registerVerifiedUser(h);
+    const session = await sessionFor(h, EMAIL);
+
+    const [a, b] = await Promise.all([
+      h.service.completeOnboarding(session),
+      h.service.completeOnboarding(session),
+    ]);
+
+    expect(a?.toISOString()).toBe(b?.toISOString());
+    expect(
+      h.prisma.auditLogs.filter((row) => row.action === 'user.onboarding_completed'),
+    ).toHaveLength(1);
   });
 });
