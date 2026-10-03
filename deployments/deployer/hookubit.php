@@ -56,13 +56,17 @@
  *   3. hookubit:toolchain         node/go/pnpm/env-file on the host
  *      hookubit:systemd:check     units exist AND point at current/
  *   4. hookubit:build:*           install, generate, api, data-plane, dashboard
- *   5. hookubit:migrate:status    PRINTS pending migrations, names exceptions
+ *   5. hookubit:migrate:status    PRINTS pending migrations, names exceptions,
+ *                                 and COMPARES _prisma_migrations against the
+ *                                 release's own migration directories — see
+ *                                 below
  *   6. hookubit:data-plane:stop
  *   7. hookubit:migrate:deploy    from the NEW release
  *   8. deploy:symlink             the atomic swap
  *   9. hookubit:api:restart
  *  10. hookubit:data-plane:start
  *  11. hookubit:health            /health/live + /health/ready, fails loudly
+ *      hookubit:dashboard:check  nginx really serves THIS release's bundle
  *  12. deploy:unlock, cleanup, success
  *
  * ---------------------------------------------------------------------------
@@ -87,6 +91,30 @@
  * FORWARD with a fix is almost always the better move. If a migration genuinely
  * has to be undone, restore from backup and read the duplicate-delivery warning
  * in apps/docs/self-hosting/08-backup-restore-and-upgrades.md.
+ *
+ * `hookubit:rollback:failed` is registered with fail('rollback', ...) and reports
+ * the half-state if the run dies between the data-plane stop and the restart:
+ * which release current/ actually points at, and whether the data plane is up.
+ * It starts the data plane again when the code that is live is the code this
+ * schema matches, and refuses to — in capitals — when it is not.
+ *
+ * ---------------------------------------------------------------------------
+ * AND THE SAME TRAP WHEN DEPLOYING AN OLDER REF
+ * ---------------------------------------------------------------------------
+ *
+ * `dep deploy --tag v1.3.0` is the documented way to put an older release back
+ * after a bad one, so it is the RECOVERY path. The release's prisma/migrations
+ * is then a strict PREFIX of what is applied, which Prisma 5.22 classifies
+ * migrationsDirectoryIsBehind — a diagnostic `migrate status` has NO handler
+ * for. It falls through to "Database schema is up to date!" and exit 0.
+ *
+ * So `prisma migrate status` cannot be the only question asked.
+ * hookubit:migrate:status compares the applied set against the release's own
+ * migration directories and refuses when the database is ahead, because
+ * everything downstream of it would otherwise go green: no migrations pending,
+ * symlink swapped, old router started, BOTH health probes 200 — readiness opens
+ * a pg pool, it never runs the router's claim query — while nothing at all is
+ * delivered.
  */
 
 namespace Deployer;
@@ -175,9 +203,17 @@ set('check_path', '{{release_or_current_path}}');
 // The repository root on the operator's machine, for the staleness guard.
 set('local_repo', dirname(__DIR__, 2));
 
-// Escape hatches, both off. `dep deploy -o allow_stale_ref=true`.
+// Escape hatches, all off. `dep deploy -o allow_stale_ref=true`.
 set('allow_stale_ref', false);
 set('migration_exceptions_ack', false);
+
+// hookubit:dashboard:check fetches the dashboard over its PUBLIC hostname,
+// which the server itself has to be able to resolve and reach — split-horizon
+// DNS, a Cloudflare-only record or an outbound firewall all break that without
+// anything being wrong with the deploy. Hence the skip, and hence the override
+// for an internal URL that reaches the same nginx vhost.
+set('skip_dashboard_check', false);
+set('dashboard_check_url', '');
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -227,6 +263,276 @@ if (!function_exists('Deployer\\hb_required')) {
             throw error("`$key` in deployments/deployer/hosts.yml is still a placeholder — $what.");
         }
         return $value;
+    }
+}
+
+if (!function_exists('Deployer\\hb_env_sh')) {
+    /**
+     * A shell prelude defining `hb_env KEY`, which reads one key out of the
+     * systemd EnvironmentFile the way systemd itself reads it.
+     *
+     * Why not source the file, and why not the guide's
+     * `env $(grep -v '^#' file | xargs)`: `MAIL_FROM=HookuBit <no-reply@example.com>`
+     * is valid for `EnvironmentFile` and a redirection to /bin/sh. So we anchor
+     * on `^KEY=` and take the LAST definition, which is also systemd's rule when
+     * a key appears twice.
+     *
+     * And then three things plain `sed` gets wrong where systemd does not. Each
+     * one hands Prisma a connection string that cannot connect, which before the
+     * exit-code handling in hookubit:migrate:status read back as "no pending
+     * migrations":
+     *
+     *   · Surrounding quotes. `DATABASE_URL="postgresql://..."` is valid, and
+     *     systemd strips the quotes; sed does not, so the quote travels into the
+     *     connection string.
+     *   · CRLF. An env file edited on Windows leaves a trailing \r on every value.
+     *   · Trailing blanks, which survive the match.
+     *
+     * The one place it deliberately does NOT follow systemd: a value whose line
+     * ends in a backslash. systemd joins it with the next line; this reads ONE
+     * physical line, and a connection string truncated at a `\` usually still
+     * parses, so the migration would run against a different database than the
+     * services do. Rather than differ in silence, hb_env REFUSES such a value --
+     * it writes to stderr and returns non-zero, so the value arrives empty and
+     * every caller's empty-value guard fires. hookubit:toolchain checks the file
+     * up front, where the message can name the key.
+     */
+    function hb_env_sh(): string
+    {
+        return str_replace(
+            '__HB_ENV_FILE__',
+            escapeshellarg(parse('{{env_file}}')),
+            <<<'SH'
+            HB_ENV_FILE=__HB_ENV_FILE__
+            hb_env() {
+              hb_env_value=$(sed -n "s|^$1=||p" "$HB_ENV_FILE" \
+                | tail -n1 \
+                | tr -d '\r' \
+                | sed -e 's/[[:space:]]*$//' -e 's/^"\(.*\)"$/\1/' -e "s/^'\(.*\)'\$/\1/")
+              case "$hb_env_value" in
+                *\\)
+                  echo "hb_env: $1 in $HB_ENV_FILE ends in a backslash. systemd joins that with the next line; this reads one physical line only, so the services and this deploy would use different values. Put the value on a single line." >&2
+                  return 65
+                  ;;
+              esac
+              printf '%s\n' "$hb_env_value"
+            }
+            SH,
+        );
+    }
+}
+
+if (!function_exists('Deployer\\hb_migration_drift')) {
+    /**
+     * Is the database ahead of $releasePath?
+     *
+     * By DIRECT COMPARISON, not by reading Prisma's prose. Two reasons the
+     * prose cannot answer this:
+     *
+     *   · The phrases do not exist. Prisma 5.22's bundled CLI contains no
+     *     "applied to the database but missing from the local migrations
+     *     directory", no "not found in the local migrations directory" and no
+     *     "database schema is not in sync". The only thing it says in that
+     *     neighbourhood is "not found locally in prisma/migrations", and only
+     *     on the historiesDiverge path.
+     *   · The case that matters does not print anything at all. When the local
+     *     prisma/migrations is a strict PREFIX of what is applied — which is
+     *     exactly a rollback — the diagnostic is migrationsDirectoryIsBehind,
+     *     which `migrate status` does not handle: it falls through to
+     *     "Database schema is up to date!" and exit 0.
+     *
+     * So: list the applied migrations out of _prisma_migrations, list the
+     * migration directories in the release, and diff them. The query goes
+     * through the release's own @prisma/client (resolved from the release, so a
+     * pruned or half-built release reports a failed probe rather than a clean
+     * bill) and uses DIRECT_DATABASE_URL, because a pooler is the wrong place
+     * to ask.
+     *
+     * Returns ['status' => ..., 'applied' => [...], 'disk' => [...],
+     * 'unfinished' => [...], 'rolled_back' => [...], 'detail' => [...]].
+     * Status is 'ok' only when the comparison was actually made against a
+     * history that says something. EVERY other status means "could not prove
+     * the database is not ahead", and the caller must read that as drift:
+     *
+     *   no-release             the release has no prisma/migrations directory
+     *   no-url                 DIRECT_DATABASE_URL came back empty
+     *   no-client              @prisma/client did not resolve, or would not construct
+     *   probe-failed           the query did not run
+     *   no-migrations-table    there is no _prisma_migrations table at all
+     *   no-migrations-on-disk  the release's prisma/migrations is empty
+     *   no-migrations-applied  _prisma_migrations records nothing applied, so
+     *                          nothing whatever is known about this schema
+     *   unfinished-migration   a row with finished_at IS NULL and no
+     *                          rolled_back_at: Prisma's own definition of a
+     *                          FAILED migration. It cannot appear in the
+     *                          applied list, so without this the set
+     *                          difference comes back empty and reports a clean
+     *                          bill over a half-applied schema
+     */
+    function hb_migration_drift(string $releasePath): array
+    {
+        $probe = str_replace(
+            '__HB_REL__',
+            escapeshellarg($releasePath),
+            <<<'SH'
+            HB_REL=__HB_REL__
+            HB_API="$HB_REL/apps/control-api"
+            if [ ! -d "$HB_API/prisma/migrations" ]; then
+              echo 'HB_RESULT=no-release'
+              exit 0
+            fi
+            for d in "$HB_API"/prisma/migrations/*/; do
+              [ -f "$d/migration.sql" ] || continue
+              n=${d%/}
+              printf 'HB_DISK %s\n' "${n##*/}"
+            done
+            DATABASE_URL="$(hb_env DATABASE_URL)"
+            DIRECT_DATABASE_URL="$(hb_env DIRECT_DATABASE_URL)"
+            if [ -z "$DIRECT_DATABASE_URL" ]; then
+              echo 'HB_RESULT=no-url'
+              exit 0
+            fi
+            export DATABASE_URL DIRECT_DATABASE_URL
+            HB_TMP="$(mktemp -d)" || { echo 'HB_RESULT=probe-failed'; exit 0; }
+            cat > "$HB_TMP/drift.cjs" <<'HB_JS'
+            const apiDir = process.env.HB_API_DIR;
+            // Prisma's initialisation errors quote the datasource URL, and that
+            // URL carries the database password. Everything printed from here
+            // reaches the operator's terminal and any CI log, so every message
+            // goes through redact() first.
+            const redact = (v) =>
+              String((v && v.message) || v).replace(/[a-zA-Z][a-zA-Z0-9+.-]*:\/\/[^\s'"]*/g, '<url redacted>');
+            let prisma;
+            try {
+              const { PrismaClient } = require(require.resolve('@prisma/client', { paths: [apiDir] }));
+              // The constructor belongs INSIDE the try. run() hands back stdout
+              // only and no_throw swallows the exception that stderr rides on,
+              // so a constructor throw -- a client generated for another
+              // platform, a missing query engine -- would be discarded and read
+              // back as the far vaguer "the query did not run".
+              prisma = new PrismaClient({
+                datasources: { db: { url: process.env.DIRECT_DATABASE_URL } },
+              });
+            } catch (err) {
+              console.log('HB_DETAIL ' + redact(err).split('\n')[0]);
+              console.log('HB_RESULT=no-client');
+              process.exit(0);
+            }
+            prisma
+              // to_regclass returns NULL instead of raising for a name that does
+              // not exist, so this distinguishes "no history table" from "the
+              // query failed". A pristine database has no table, and that is not
+              // the same unknown as a table with nothing in it.
+              .$queryRawUnsafe("SELECT to_regclass('_prisma_migrations') IS NOT NULL AS present")
+              .then((probe) => {
+                if (!probe || !probe[0] || probe[0].present !== true) {
+                  console.log('HB_RESULT=no-migrations-table');
+                  return;
+                }
+                return prisma
+                  .$queryRawUnsafe(
+                    'SELECT migration_name, finished_at, rolled_back_at FROM _prisma_migrations ORDER BY migration_name',
+                  )
+                  .then((rows) => {
+                    for (const row of rows) {
+                      // finished_at wins: a row Prisma finished counts as
+                      // applied even if someone also marked it rolled back, and
+                      // counting it applied is the side that errs towards
+                      // REPORTING drift. `!= null` also catches undefined, so a
+                      // column that did not come back lands on 'unfinished'.
+                      const state =
+                        row.finished_at != null
+                          ? 'applied'
+                          : row.rolled_back_at != null
+                            ? 'rolledback'
+                            : 'unfinished';
+                      console.log('HB_ROW ' + state + ' ' + row.migration_name);
+                    }
+                    console.log('HB_RESULT=ok');
+                  });
+              })
+              .catch((err) => {
+                console.log('HB_DETAIL ' + redact(err).split('\n').join(' / '));
+                console.log('HB_RESULT=probe-failed');
+              })
+              .finally(() => prisma.$disconnect());
+            HB_JS
+            HB_API_DIR="$HB_API" {{bin/node}} "$HB_TMP/drift.cjs" || echo 'HB_RESULT=probe-failed'
+            rm -rf "$HB_TMP"
+            SH,
+        );
+
+        $raw = (string) run("set -u\n" . hb_env_sh() . "\n" . $probe, no_throw: true);
+
+        $status = 'probe-failed';
+        $disk = [];
+        $applied = [];
+        $unfinished = [];
+        $rolledBack = [];
+        $detail = [];
+        foreach (preg_split('/\R/', $raw) as $line) {
+            $line = trim($line);
+            if (str_starts_with($line, 'HB_DISK ')) {
+                $disk[] = substr($line, 8);
+            } elseif (str_starts_with($line, 'HB_ROW ')) {
+                $parts = explode(' ', substr($line, 7), 2);
+                if (count($parts) !== 2 || trim($parts[1]) === '') {
+                    // Unparseable row: show it and leave the status alone, so
+                    // the 'ok' path below cannot be reached on a guess.
+                    $detail[] = $line;
+                    $unfinished[] = '(unparseable row)';
+                } elseif ($parts[0] === 'applied') {
+                    $applied[] = $parts[1];
+                } elseif ($parts[0] === 'rolledback') {
+                    $rolledBack[] = $parts[1];
+                } else {
+                    $unfinished[] = $parts[1];
+                }
+            } elseif (str_starts_with($line, 'HB_DETAIL ')) {
+                $detail[] = substr($line, 10);
+            } elseif (str_starts_with($line, 'HB_RESULT=')) {
+                $status = substr($line, 10);
+            } elseif ($line !== '') {
+                $detail[] = $line;
+            }
+        }
+
+        // An 'ok' with nothing on disk is not an answer: every applied
+        // migration would read as drift for the wrong reason.
+        if ($status === 'ok' && $disk === []) {
+            $status = 'no-migrations-on-disk';
+        }
+
+        // A row with finished_at IS NULL and no rolled_back_at is Prisma's own
+        // definition of a FAILED migration, and it cannot appear in $applied --
+        // so the set difference below would come back empty and this function
+        // would hand back 'ok' over a half-applied schema. Fail-OPEN, in the one
+        // function whose 'ok' is supposed to mean "the comparison was made".
+        // It matters most for 20260911000000_next_attempt_at_not_null, whose
+        // header prescribes CREATE INDEX CONCURRENTLY: that cannot run inside a
+        // transaction, so a failure part-way through leaves DDL behind that this
+        // probe would otherwise report as not applied at all.
+        if ($status === 'ok' && $unfinished !== []) {
+            $status = 'unfinished-migration';
+        }
+
+        // And an 'ok' with nothing APPLIED proves nothing either: a dump
+        // restored without _prisma_migrations' rows, or a hand baseline, leaves
+        // an empty history against a populated schema. That is the same "not
+        // managed by Prisma Migrate" condition hookubit:migrate:status already
+        // refuses -- not a clean bill over zero rows.
+        if ($status === 'ok' && $applied === []) {
+            $status = 'no-migrations-applied';
+        }
+
+        return [
+            'status' => $status,
+            'applied' => $applied,
+            'disk' => $disk,
+            'unfinished' => $unfinished,
+            'rolled_back' => $rolledBack,
+            'detail' => $detail,
+        ];
     }
 }
 
@@ -358,27 +664,62 @@ task('hookubit:guard:ref', function () {
         return;
     }
 
-    try {
-        $lsRemote = runLocally(
-            "$git ls-remote " . escapeshellarg($repo) . ' '
-            . escapeshellarg("refs/heads/$target") . ' ' . escapeshellarg("refs/tags/$target"),
-            env: $env,
-        );
-    } catch (\Throwable $e) {
+    // Resolve the branch and the tag SEPARATELY. Asking for both namespaces in
+    // one `git ls-remote` and taking the first 40-hex line silently prefers the
+    // branch, because git advertises refs/heads/ before refs/tags/ — so
+    // `--tag v1.4.0` with a leftover branch of the same name would deploy the
+    // BRANCH tip, which is the one invariant this guard exists to hold.
+    $readRef = function (string ...$patterns) use ($git, $repo, $env, $target): string {
+        $args = implode(' ', array_map(static fn (string $ref): string => escapeshellarg($ref), $patterns));
+        try {
+            return runLocally("$git ls-remote " . escapeshellarg($repo) . " $args", env: $env);
+        } catch (\Throwable $e) {
+            throw error(
+                "Could not read `$target` from $repo.\n" .
+                "The guard cannot tell whether you are about to deploy stale code, so it refuses.\n" .
+                "Check your credentials for the remote, then retry.\n\n" . $e->getMessage(),
+            );
+        }
+    };
+
+    $branchSha = preg_match('/^([0-9a-f]{40})\s+refs\/heads\//m', $readRef("refs/heads/$target"), $m) ? $m[1] : null;
+
+    // An annotated tag's ref points at the tag OBJECT; `refs/tags/X^{}` is the
+    // commit it peels to, and that is what we want to deploy and to compare
+    // ancestry against. A lightweight tag has no peeled line and its ref is
+    // already the commit.
+    $tagOut = $readRef("refs/tags/$target", "refs/tags/$target^{}");
+    $tagSha = null;
+    if (preg_match('/^([0-9a-f]{40})\s+refs\/tags\/\S+\^\{\}$/m', $tagOut, $m)) {
+        $tagSha = $m[1];
+    } elseif (preg_match('/^([0-9a-f]{40})\s+refs\/tags\//m', $tagOut, $m)) {
+        $tagSha = $m[1];
+    }
+
+    if ($branchSha !== null && $tagSha !== null) {
         throw error(
-            "Could not read `$target` from $repo.\n" .
-            "The guard cannot tell whether you are about to deploy stale code, so it refuses.\n" .
-            "Check your credentials for the remote, then retry.\n\n" . $e->getMessage(),
+            "`$target` exists on $repo as BOTH a branch and a tag:\n" .
+            "  refs/heads/$target  $branchSha\n" .
+            "  refs/tags/$target   $tagSha\n" .
+            "Which one you meant is not guessable, and git advertises the branch first, so the\n" .
+            "guard would have silently pinned the branch tip. Delete the one you do not want\n" .
+            "(`git push origin :refs/heads/$target`), or deploy the commit explicitly with\n" .
+            "`--revision <sha> -o allow_stale_ref=true`.",
         );
     }
 
-    if (!preg_match('/^([0-9a-f]{40})\s/m', $lsRemote, $m)) {
+    if ($branchSha === null && $tagSha === null) {
         throw error(
-            "`$target` does not exist on $repo.\n" .
-            "Deployer deploys what the SERVER can clone. Push the branch (or pick another with --branch) first.",
+            "`$target` exists on $repo as neither a branch nor a tag.\n" .
+            "Deployer deploys what the SERVER can clone. Push the branch or the tag (or pick\n" .
+            "another with --branch / --tag) first.",
         );
     }
-    $remote = $m[1];
+
+    $remote = $branchSha ?? $tagSha;
+    if ($tagSha !== null) {
+        info("`$target` resolved as a TAG: $remote");
+    }
 
     $localRef = trim(runLocally("$git rev-parse --verify --quiet " . escapeshellarg("refs/heads/$target") . ' || true'));
 
@@ -496,13 +837,38 @@ task('hookubit:toolchain', function () {
             "$envFile is not readable as " . get('remote_user') . ".\n" .
             "The migration step needs DATABASE_URL and DIRECT_DATABASE_URL from it.\n" .
             "Make it root:hookubit mode 0640 and put the deploy user in the hookubit group\n" .
-            "(see deployments/deployer/README.md, 'Privileges').",
+            "(see deployments/deployer/README.md, 'One-time server setup').",
         );
     }
     foreach (['DATABASE_URL', 'DIRECT_DATABASE_URL'] as $key) {
         if (!test("grep -q " . escapeshellarg("^$key=") . ' ' . escapeshellarg($envFile))) {
             throw error("$key is not set in $envFile. Prisma needs both URLs; with no pooler they are the same string.");
         }
+    }
+
+    // systemd joins a value whose line ends in a backslash with the next line.
+    // hb_env reads ONE physical line (see its docblock), and a connection string
+    // truncated at the backslash usually still parses -- so the migration would
+    // run against a different database than the services, quietly. Refuse here,
+    // where the message can name the key, rather than at the point of use where
+    // all that is left is "the URL came back empty".
+    //
+    // Only the key is printed, never the value: these lines carry the database
+    // password and this output goes to a terminal and into CI logs.
+    $continued = trim((string) run(
+        'grep -v ' . escapeshellarg('^[[:space:]]*#') . ' ' . escapeshellarg($envFile) .
+        ' | grep ' . escapeshellarg('\\\\[[:space:]]*$') .
+        ' | sed -e ' . escapeshellarg('s/=.*/=<value>/') . ' || true',
+    ));
+    if ($continued !== '') {
+        hb_raw($continued);
+        throw error(
+            "The value(s) above in $envFile are continued onto a second line with a trailing\n" .
+            "backslash. systemd's EnvironmentFile joins those lines; this recipe reads one\n" .
+            "physical line, so the services and the migration would use DIFFERENT values -- and\n" .
+            "a connection string cut at the backslash usually still parses, so the difference\n" .
+            "would not announce itself. Put each value on a single line.",
+        );
     }
 
     info("node $nodeVersion · pnpm $pnpmVersion · $goVersion");
@@ -545,6 +911,188 @@ task('hookubit:systemd:check', function () {
 
     hb_stage('checked');
     info('systemd units point at ' . $current);
+});
+
+desc('Checks the HTML nginx serves references an asset from THIS release');
+task('hookubit:dashboard:check', function () {
+    // The sibling of hookubit:systemd:check, for the half of the platform that
+    // systemd does not start. The deploy's health probes go straight to
+    // 127.0.0.1:{{control_api_port}} and :{{data_plane_metrics_port}} — never
+    // through nginx — so nothing else here notices that nginx is serving a
+    // different tree than the one just deployed. Two ways that happens, both of
+    // them a green deploy:
+    //
+    //   · nginx was left on the guide's §8 `root /opt/hookubit/web`, which the
+    //     release layout never writes to. The bundle never changes, for ever.
+    //   · nginx can reach the release root but cannot traverse into it, so every
+    //     visitor gets 403 while /v1/* keeps working because it is proxied.
+    //
+    // So: take an asset filename out of the release's own index.html and look
+    // for it in what the public hostname actually returns.
+    if (hb_flag('skip_dashboard_check')) {
+        warning(
+            'hookubit:dashboard:check SKIPPED (-o skip_dashboard_check=true). Nothing has verified ' .
+            'that nginx serves this release; a 403 or a stale bundle will not fail this deploy.',
+        );
+        return;
+    }
+
+    $dist = parse('{{release_or_current_path}}/apps/dashboard/dist');
+    if (!test('[ -f ' . escapeshellarg("$dist/index.html") . ' ]')) {
+        throw error(
+            "$dist/index.html does not exist on the host, so there is nothing to compare what\n" .
+            "nginx serves against. During a deploy hookubit:build:dashboard would already have\n" .
+            "failed; outside one, this release has no dashboard build.",
+        );
+    }
+    $html = run('cat ' . escapeshellarg("$dist/index.html"));
+
+    // WHICH asset is anchored on matters. Vite content-hashes per chunk, so a
+    // stylesheet that did not change keeps its filename across releases — and a
+    // check that accepted any ONE referenced asset would pass on a stale bundle
+    // whose CSS happened to be identical while its JavaScript was a release
+    // old. The entry module IS the application, so that is what has to match,
+    // and every entry has to, not one of them.
+    $assets = [];
+    if (preg_match_all('~<script\b[^>]*>~i', $html, $tags)) {
+        foreach ($tags[0] as $tag) {
+            if (!preg_match('~\btype\s*=\s*["\x27]module["\x27]~i', $tag)) {
+                continue;
+            }
+            if (preg_match('~\bsrc\s*=\s*["\x27]([^"\x27]*assets/[A-Za-z0-9][A-Za-z0-9._-]*\.js)["\x27]~i', $tag, $sm)) {
+                $assets[] = ltrim($sm[1], '/');
+            }
+        }
+    }
+    $assets = array_values(array_unique($assets));
+
+    if ($assets === []) {
+        // No module entry to anchor on — a different bundler output, or the
+        // file is not what we think. Fall back to every hashed asset the
+        // document references, and still require all of them.
+        preg_match_all('~assets/[A-Za-z0-9][A-Za-z0-9._-]*\.(?:js|css)~', $html, $m);
+        $assets = array_values(array_unique($m[0]));
+    }
+    if ($assets === []) {
+        throw error(
+            "$dist/index.html references no hashed asset under assets/.\n" .
+            "Either the build emitted something this check cannot read, or the file is not the\n" .
+            "dashboard's index.html at all. Look before deciding.",
+        );
+    }
+
+    $url = trim((string) get('dashboard_check_url'));
+    if ($url === '') {
+        $url = 'https://' . get('app_domain') . '/';
+    }
+
+    $script = str_replace('__HB_URL__', escapeshellarg($url), <<<'SH'
+        set -u
+        HB_TMP="$(mktemp)" || { echo 'HB_HTTP=000'; exit 0; }
+        code="$(curl -sS -L --max-time 15 -H 'Cache-Control: no-cache' -H 'Pragma: no-cache' \
+                 -o "$HB_TMP" -w '%{http_code}' __HB_URL__ 2>/dev/null)" || code=000
+        [ -n "$code" ] || code=000
+        echo "HB_HTTP=$code"
+        echo 'HB_BODY_BEGIN'
+        head -c 65536 "$HB_TMP"
+        echo
+        echo 'HB_BODY_END'
+        rm -f "$HB_TMP"
+        SH);
+
+    $out = (string) run($script, timeout: 60, no_throw: true);
+    if (!preg_match('/^HB_HTTP=(\d+)/m', $out, $m)) {
+        hb_raw($out);
+        throw error("The dashboard check did not run on the host — curl produced no status at all (output above).");
+    }
+    $code = $m[1];
+
+    $body = '';
+    $begin = strpos($out, "HB_BODY_BEGIN\n");
+    $end = strrpos($out, 'HB_BODY_END');
+    if ($begin !== false && $end !== false && $end > $begin) {
+        $body = substr($out, $begin + 14, $end - ($begin + 14));
+    }
+
+    if ($code === '000') {
+        throw error(
+            "Nothing answered at $url from the server itself.\n" .
+            "That is usually DNS or egress, not the deploy: the box may not resolve its own\n" .
+            "public hostname, or cannot reach it from inside. Two ways out:\n" .
+            "  · give the check a URL the box CAN reach that lands on the same nginx vhost —\n" .
+            "    an internal name, not plain 127.0.0.1, which may answer from a different\n" .
+            "    server block and so prove nothing:\n" .
+            "      -o dashboard_check_url=https://hookubit.lan/\n" .
+            "  · or skip it, and then look at the dashboard in a browser yourself:\n" .
+            "      -o skip_dashboard_check=true\n" .
+            "Add the flag to whichever command you ran — `dep deploy`, `dep hookubit:verify` or\n" .
+            "`dep hookubit:dashboard:check`. They are ordinary config overrides, not deploy-only.",
+        );
+    }
+
+    if ($code === '403') {
+        // TWO causes, and this check cannot tell them apart from the status code
+        // alone. The default URL is the PUBLIC hostname, which normally sits
+        // behind Cloudflare, and a managed challenge or error 1020 answers curl
+        // — no browser UA, no JavaScript — with exactly this 403. Prescribing
+        // `chmod 2755` for that would be loosening permissions to fix something
+        // that is not a permissions problem, so the WAF reading comes first.
+        throw error(
+            "$url returned 403, and that has two quite different causes.\n\n" .
+            "1. A WAF OR CDN IN FRONT, not nginx at all. This URL is the public hostname, which\n" .
+            "   normally sits behind Cloudflare: a managed challenge, a bot-fight rule or error\n" .
+            "   1020 answers curl with 403 because curl sends no browser user-agent and runs no\n" .
+            "   JavaScript. The dashboard is then fine in a browser. Point the check at a URL\n" .
+            "   that reaches the same nginx vhost directly, bypassing the edge:\n" .
+            "     -o dashboard_check_url=https://<internal-name>/\n" .
+            "   An internal name, not plain 127.0.0.1, which may answer from a different server\n" .
+            "   block and so prove nothing. Check the response body printed above — Cloudflare\n" .
+            "   says so in its HTML, and a Cf-Ray or Server: cloudflare header settles it:\n" .
+            "     curl -sSI " . escapeshellarg($url) . "\n\n" .
+            "2. NGINX CANNOT TRAVERSE INTO THE RELEASE. Still the likelier cause on a FIRST\n" .
+            "   deploy. nginx workers run as www-data, which is in neither `" . get('remote_user') . "`\n" .
+            '   nor `hookubit`. Without the search bit for OTHER on ' . get('deploy_path') . " they\n" .
+            "   cannot open index.html, and only the proxied /v1/* paths keep working — which is\n" .
+            "   why the health check passed. Confirm it is really this before changing any mode:\n" .
+            '     namei -l ' . parse('{{current_path}}') . "/apps/dashboard/dist/index.html\n" .
+            "     sudo -u www-data cat " . escapeshellarg(parse('{{current_path}}') . '/apps/dashboard/dist/index.html') . " >/dev/null\n" .
+            "   If that is the fault, fix the mode on the deploy root:\n" .
+            '     sudo chmod 2755 ' . get('deploy_path') . "\n" .
+            "   and check nothing in the release tree is group/other-unreadable (the deploy\n" .
+            "   user's umask must leave world-read on: 022, not 027).\n" .
+            "   See deployments/deployer/README.md, 'One-time server setup'.",
+        );
+    }
+
+    if ($code !== '200') {
+        throw error(
+            "$url returned HTTP $code, so nothing here can confirm the new bundle is being\n" .
+            "served. Check the nginx vhost and its error log before calling this deploy done.",
+        );
+    }
+
+    $absent = [];
+    foreach ($assets as $asset) {
+        if (!str_contains($body, $asset)) {
+            $absent[] = $asset;
+        }
+    }
+
+    if ($absent !== []) {
+        throw error(
+            "$url answered 200, but its HTML does not reference what this release built:\n" .
+            '  ' . implode("\n  ", $absent) . "\n\n" .
+            "nginx is serving a DIFFERENT tree. The usual cause is the guide's §8 layout, still\n" .
+            "in place: `root /opt/hookubit/web`, which nothing in a release deploy ever writes\n" .
+            "to — so the bundle never changes and every deploy looks green. Point it at the\n" .
+            "symlink instead:\n" .
+            '  root ' . parse('{{current_path}}') . "/apps/dashboard/dist;\n" .
+            "The other cause is a cache in front: index.html must be served `Cache-Control:\n" .
+            "no-store` (guide §8) or browsers keep requesting asset names that no longer exist.",
+        );
+    }
+
+    info("nginx at $url serves this release (" . implode(', ', $assets) . ')');
 });
 
 // ---------------------------------------------------------------------------
@@ -598,21 +1146,40 @@ task('hookubit:build:dashboard', function () {
         throw error('The dashboard build produced no dist/index.html.');
     }
 
-    // Prove the ingest URL actually reached Vite. --include='*.js' keeps the
-    // sourcemaps out of it: dist/**/*.js.map carries the original source, which
-    // contains the localhost fallback whether or not it was used.
-    $assets = "$dist/assets";
-    if (!test("grep -rqF -- " . escapeshellarg($ingest) . " --include='*.js' $assets")) {
+    // Prove the ingest URL actually reached Vite, and prove the localhost
+    // fallback did not survive. BOTH greps have to skip the sourcemaps:
+    // vite.config.ts sets `sourcemap: true`, so dist/assets/*.js.map always
+    // carries the original source line
+    //
+    //     return import.meta.env.VITE_INGEST_BASE_URL ?? 'http://localhost:8080'
+    //
+    // whether or not the fallback was taken. A map file matching the negative
+    // check fails every deploy with a message saying the opposite of the truth.
+    //
+    // Two rules, and the option order is one of them:
+    //
+    //   · `--include`/`--exclude` must come BEFORE `--`, or before the pattern
+    //     with no `--` at all. `grep -rqF -- PATTERN --include='*.js' dir` ends
+    //     option parsing at `--`, so `--include='*.js'` becomes a FILENAME
+    //     operand, grep warns that it does not exist, and the filter never
+    //     applies — the maps get scanned anyway.
+    //   · --exclude='*.js.map' as well as --include='*.js', because `*.js.map`
+    //     does not match `*.js` on GNU grep but the two together are explicit
+    //     and survive someone widening the include later.
+    $assets = escapeshellarg(parse("$dist/assets"));
+    $filter = "--include='*.js' --exclude='*.js.map'";
+    if (!test("grep -rqF $filter " . escapeshellarg($ingest) . " $assets")) {
         throw error(
             "The built bundle does not contain $ingest.\n" .
             "VITE_INGEST_BASE_URL did not reach the build, so the get-started page will tell\n" .
             "people to publish somewhere else. Refusing to ship it.",
         );
     }
-    if (test("grep -rqF -- 'http://localhost:8080' --include='*.js' $assets")) {
+    if (test("grep -rqF $filter 'http://localhost:8080' $assets")) {
         throw error(
             "The built bundle still contains http://localhost:8080 — the VITE_INGEST_BASE_URL\n" .
-            "fallback. The build did not pick up the configured ingest origin.",
+            "fallback — in emitted JavaScript, not just in a sourcemap. The build did not pick\n" .
+            "up the configured ingest origin.",
         );
     }
 
@@ -635,39 +1202,238 @@ task('hookubit:build', [
 
 desc('Prints the pending migrations and names the two ordering exceptions');
 task('hookubit:migrate:status', function () {
-    $out = run(<<<'SH'
-        set -u
-        DATABASE_URL="$(sed -n 's|^DATABASE_URL=||p' {{env_file}} | tail -n1)"
-        DIRECT_DATABASE_URL="$(sed -n 's|^DIRECT_DATABASE_URL=||p' {{env_file}} | tail -n1)"
+    // This task's output is the single line an operator reads to decide whether
+    // the two ordering-exception migrations are in play. So it must never
+    // confuse "Prisma says nothing is pending" with "Prisma never got to
+    // speak". `|| true` under `set -u` did exactly that: a failed cd, an
+    // unusable DATABASE_URL, a Prisma crash or any wording change all produced
+    // an empty pending list and a confident "No pending migrations".
+    //
+    // The exit code alone does not classify the run either: `migrate status`
+    // exits 1 for the perfectly ordinary "there are migrations to apply". So we
+    // capture BOTH the code and the text, and refuse on anything the parser
+    // does not positively recognise.
+    $script = "set -u\n" . hb_env_sh() . "\n" . <<<'SH'
+        DATABASE_URL="$(hb_env DATABASE_URL)"
+        DIRECT_DATABASE_URL="$(hb_env DIRECT_DATABASE_URL)"
+        if [ -z "$DATABASE_URL" ] || [ -z "$DIRECT_DATABASE_URL" ]; then
+          echo 'HB_STATUS_EXIT=64'
+          exit 0
+        fi
         export DATABASE_URL DIRECT_DATABASE_URL
-        cd {{migrate_path}}/apps/control-api
-        {{bin/pnpm}} exec prisma migrate status 2>&1 || true
-        SH);
+        if ! cd {{migrate_path}}/apps/control-api 2>/dev/null; then
+          echo 'HB_STATUS_EXIT=65'
+          exit 0
+        fi
+        out="$({{bin/pnpm}} exec prisma migrate status 2>&1)"
+        rc=$?
+        printf '%s\n' "$out"
+        echo "HB_STATUS_EXIT=$rc"
+        SH;
 
-    hb_raw($out);
+    $raw = run($script);
 
-    if (preg_match('/failed migrations?|in a failed state/i', $out)) {
+    if (!preg_match('/^HB_STATUS_EXIT=(\d+)\s*$/m', $raw, $m)) {
+        hb_raw($raw);
+        throw error(
+            "`prisma migrate status` produced no exit marker, so the command itself did not run\n" .
+            "to completion on the host (an SSH or shell failure, not a Prisma one).\n" .
+            "Nothing here knows whether migrations are pending. Refusing to continue.",
+        );
+    }
+    $rc = (int) $m[1];
+    $out = trim((string) preg_replace('/^HB_STATUS_EXIT=\d+\s*$/m', '', $raw));
+    if ($out !== '') {
+        hb_raw($out);
+    }
+
+    if ($rc === 64) {
+        throw error(
+            'DATABASE_URL or DIRECT_DATABASE_URL came back EMPTY from ' . get('env_file') . ".\n" .
+            "Either the key is absent, or its value did not survive extraction. Prisma would be\n" .
+            "run against nothing, and \"no pending migrations\" would be a lie. Refusing.",
+        );
+    }
+    if ($rc === 65) {
+        throw error(
+            'Could not enter ' . parse('{{migrate_path}}') . "/apps/control-api on the host.\n" .
+            "Prisma never ran, so the pending list would be empty for the wrong reason. Refusing.",
+        );
+    }
+
+    if (preg_match('/have failed|failed migrations?|in a failed state/i', $out)) {
         throw error(
             "Prisma reports a FAILED migration in the history. Resolve it by hand before\n" .
             "deploying — `prisma migrate deploy` will refuse, and a half-applied migration is\n" .
             "exactly the state the ordering rules exist to avoid.",
         );
     }
+    if (str_contains($out, 'not found locally in prisma/migrations')) {
+        throw error(
+            "Prisma reports migrations applied in the database that this release does not have\n" .
+            "on disk: the histories have DIVERGED. Deploying would run this code against a\n" .
+            "schema it does not know. Read the names above and reconcile before deploying.",
+        );
+    }
+    if (str_contains($out, 'not managed by Prisma Migrate')) {
+        throw error(
+            "Prisma says this database is not managed by Prisma Migrate (no _prisma_migrations\n" .
+            "table, or an empty one against a non-empty schema). That needs a baseline, by hand.\n" .
+            "See https://pris.ly/d/migrate-baseline. Refusing to deploy into it.",
+        );
+    }
 
-    $pending = [];
-    if (preg_match('/have not yet been applied:?\s*(.*?)(?:\n\s*\n|$)/s', $out, $m)) {
+    // Positively recognised, or nothing. `$pending === null` means unknown, and
+    // unknown is NOT "none".
+    $pending = null;
+    if (preg_match('/have not yet been applied:\R(.*?)(?:\R\s*\R|$)/s', $out, $m)) {
+        $names = [];
         foreach (preg_split('/\R/', $m[1]) as $line) {
             $line = trim($line);
-            if (preg_match('/^(\d{14}_\S+)$/', $line, $mm)) {
-                $pending[] = $mm[1];
+            if ($line === '') {
+                continue;
             }
+            if (!preg_match('/^(\d{14}_\S+)$/', $line, $mm)) {
+                // A line in the pending block that is not a migration name.
+                // Do not guess which of the two it is.
+                $names = null;
+                break;
+            }
+            $names[] = $mm[1];
         }
+        if ($names !== null && $names !== []) {
+            $pending = $names;
+        }
+    } elseif ($rc === 0 && str_contains($out, 'Database schema is up to date!')) {
+        $pending = [];
+    }
+
+    if ($pending === null) {
+        throw error(
+            "`prisma migrate status` exited $rc and printed something this recipe cannot\n" .
+            "classify (the output is above). It will NOT be read as \"no migrations pending\":\n" .
+            "that is the line you would use to decide whether the two ordering-exception\n" .
+            "migrations are in play, and being wrong about it is how 20260923000000 lands under\n" .
+            "a live old router that then stops draining the outbox in silence.\n\n" .
+            "Read the output. If the wording simply changed, fix the parser in\n" .
+            "deployments/deployer/hookubit.php; do not widen it to a catch-all.",
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Everything above read Prisma's PROSE. There is one question the prose
+    // cannot answer, and it is the question a recovery deploy turns on: is the
+    // database AHEAD of this release?
+    //
+    // `dep deploy --tag v1.3.0` is the documented way to put an older release
+    // back after a bad one, so this is the RECOVERY path, not an unlikely
+    // accident. The release's prisma/migrations is then a strict PREFIX of what
+    // is applied, which Prisma 5.22 classifies migrationsDirectoryIsBehind -- a
+    // diagnostic `migrate status` has no handler for. It falls through to
+    // "Database schema is up to date!" and exit 0. Every check above passes,
+    // $pending comes back empty, hookubit_schema_changed goes false, the symlink
+    // swaps, the OLD router starts, and BOTH health probes still pass, because
+    // readiness opens a pg pool and never runs the router's claim query. Across
+    // 20260923000000_rename_fan_out_to_routing the router cannot parse
+    // fan_out_cursor, ingest keeps answering 202 Accepted, and nothing is
+    // delivered -- under a green deploy.
+    //
+    // So the two sets are compared here, directly, before anything reassuring is
+    // printed or recorded. ONE extra node round trip, and nothing below may
+    // print an all-clear that this comparison has not earned.
+    $drift = hb_migration_drift(parse('{{migrate_path}}'));
+    foreach ($drift['detail'] as $line) {
+        hb_raw('  ' . $line);
+    }
+
+    // The one honest exception: a database with no _prisma_migrations table at
+    // all, where Prisma independently reports every migration this release
+    // carries as pending. That is a database at revision zero -- it cannot be
+    // ahead of anything, and refusing it would make a first deploy impossible.
+    // A missing table against a POPULATED schema is a different thing, and the
+    // 'not managed by Prisma Migrate' check above already refuses it.
+    $freshDatabase = $drift['status'] === 'no-migrations-table'
+        && $pending !== []
+        && array_diff($drift['disk'], $pending) === []
+        && array_diff($pending, $drift['disk']) === [];
+
+    if ($drift['status'] !== 'ok' && !$freshDatabase) {
+        $why = match ($drift['status']) {
+            'no-release' => parse('{{migrate_path}}') . ' has no apps/control-api/prisma/migrations on disk',
+            'no-url' => 'DIRECT_DATABASE_URL came back empty from ' . get('env_file') .
+                ' (an absent key, or a value continued onto a second line with a backslash)',
+            'no-client' => 'this release has no usable @prisma/client: pruned, never generated, or generated for another platform',
+            'no-migrations-on-disk' => 'this release has a prisma/migrations directory with no migrations in it',
+            'no-migrations-table' => 'the database has no _prisma_migrations table, and Prisma does not report ' .
+                'every migration in this release as pending either, so this is not simply a fresh database',
+            'no-migrations-applied' => '_prisma_migrations records no applied migration at all -- a dump restored ' .
+                'without its rows, or a hand baseline. Nothing whatever is known about this schema',
+            'unfinished-migration' => 'a migration in _prisma_migrations never finished and was not rolled back: ' .
+                implode(', ', $drift['unfinished']),
+            default => 'the query against _prisma_migrations did not run',
+        };
+        throw error(
+            "COULD NOT PROVE THE DATABASE IS NOT AHEAD OF THIS RELEASE. REFUSING.\n" .
+            "  Reason: $why.\n\n" .
+            "  `prisma migrate status` cannot answer this on its own: when the release's\n" .
+            "  migrations are a strict prefix of what is applied it prints \"Database schema is up\n" .
+            "  to date!\" and exits 0. So this recipe compares the two sets itself, and it will\n" .
+            "  not print an all-clear it has not earned.\n\n" .
+            "  Check by hand before deciding:\n" .
+            "    SELECT migration_name, finished_at, rolled_back_at FROM _prisma_migrations\n" .
+            "      ORDER BY migration_name;",
+        );
+    }
+
+    $ahead = $freshDatabase ? [] : array_values(array_diff($drift['applied'], $drift['disk']));
+    if ($ahead !== []) {
+        $named = [];
+        foreach ($ahead as $name) {
+            $named[] = "    $name" . (isset(HOOKUBIT_EXCEPTION_MIGRATIONS[$name])
+                ? "\n      " . HOOKUBIT_EXCEPTION_MIGRATIONS[$name]
+                : '');
+        }
+        throw error(
+            'THE DATABASE IS AHEAD OF THIS RELEASE BY ' . count($ahead) . " MIGRATION(S). REFUSING.\n\n" .
+            "  Applied in the database, absent from this release's prisma/migrations:\n" .
+            implode("\n", $named) . "\n\n" .
+            "  This is what deploying an OLDER ref looks like -- `--tag`, or a `--revision` pin.\n" .
+            "  `prisma migrate status` calls it \"up to date\" and exits 0, so without this check\n" .
+            "  the deploy goes fully green: no migrations pending, symlink swapped, old router\n" .
+            "  started, both health probes 200 (readiness opens a pg pool, it does not run the\n" .
+            "  claim query). Across 20260923000000_rename_fan_out_to_routing the router then\n" .
+            "  stops draining the outbox while ingest keeps answering 202 and nothing at all is\n" .
+            "  delivered.\n\n" .
+            "  Roll FORWARD with a fix: that is almost always the move. If this older release\n" .
+            "  genuinely has to go live, undo the schema change by hand first (the ALTER\n" .
+            "  statements are in the header of this file) and reconcile its migration directory\n" .
+            "  before deploying it.",
+        );
+    }
+
+    if ($drift['rolled_back'] !== []) {
+        warning(
+            '_prisma_migrations records ' . count($drift['rolled_back']) . ' rolled-back migration(s): ' .
+            implode(', ', $drift['rolled_back']) . '. They are not counted as applied.',
+        );
     }
 
     set('hookubit_pending_migrations', $pending);
 
+    if ($freshDatabase) {
+        info(
+            'The database has no _prisma_migrations table and Prisma reports every migration in ' .
+            'this release as pending, so it is at revision zero and cannot be ahead of anything.',
+        );
+    }
+
     if ($pending === []) {
-        info('No pending migrations: the schema is already at this revision.');
+        info(
+            'prisma migrate status answered, and no migrations are pending. Verified directly ' .
+            'against _prisma_migrations as well: all ' . count($drift['applied']) .
+            ' applied migration(s) are present in this release, so the schema is already at this ' .
+            'revision and the database is NOT ahead of it.',
+        );
     } else {
         info(count($pending) . ' migration(s) will be applied with the data plane stopped:');
         foreach ($pending as $name) {
@@ -710,8 +1476,22 @@ task('hookubit:migrate:status', function () {
 
 desc('Applies pending migrations from the NEW release (data plane must be stopped)');
 task('hookubit:migrate:deploy', function () {
+    // Two separate questions, and the stage only answers the first one.
     if (!hb_reached('data-plane-stopped')) {
         throw error('Refusing to migrate: hookubit:data-plane:stop has not run in this deploy.');
+    }
+    // The stage means the stop was attempted (see hookubit:data-plane:stop), so
+    // ask systemd whether it actually took. Both exception migrations assume no
+    // older worker and no older router is alive while they apply.
+    $dpUnit = (string) get('data_plane_unit');
+    if (test('{{bin/systemctl_query}} is-active --quiet ' . escapeshellarg($dpUnit))) {
+        throw error(
+            "Refusing to migrate: $dpUnit is STILL ACTIVE.\n" .
+            "hookubit:data-plane:stop ran, but the unit is up -- it was restarted, or the stop\n" .
+            "timed out and systemd has not finished. Both ordering-exception migrations assume no\n" .
+            "older worker and no older router is alive while they apply. Check with:\n" .
+            "  systemctl status $dpUnit",
+        );
     }
 
     // Set BEFORE the command runs, not after. `prisma migrate deploy` applies
@@ -722,10 +1502,9 @@ task('hookubit:migrate:deploy', function () {
     $pending = has('hookubit_pending_migrations') ? (array) get('hookubit_pending_migrations') : [];
     set('hookubit_schema_changed', $pending !== []);
 
-    run(<<<'SH'
-        set -eu
-        DATABASE_URL="$(sed -n 's|^DATABASE_URL=||p' {{env_file}} | tail -n1)"
-        DIRECT_DATABASE_URL="$(sed -n 's|^DIRECT_DATABASE_URL=||p' {{env_file}} | tail -n1)"
+    run("set -eu\n" . hb_env_sh() . "\n" . <<<'SH'
+        DATABASE_URL="$(hb_env DATABASE_URL)"
+        DIRECT_DATABASE_URL="$(hb_env DIRECT_DATABASE_URL)"
         [ -n "$DATABASE_URL" ] || { echo 'DATABASE_URL missing from {{env_file}}' >&2; exit 64; }
         [ -n "$DIRECT_DATABASE_URL" ] || { echo 'DIRECT_DATABASE_URL missing from {{env_file}}' >&2; exit 64; }
         export DATABASE_URL DIRECT_DATABASE_URL
@@ -744,10 +1523,24 @@ desc('Stops hookubit-data-plane (required across the two exception migrations)')
 task('hookubit:data-plane:stop', function () {
     $unit = (string) get('data_plane_unit');
     set('hookubit_data_plane_was_active', test('{{bin/systemctl_query}} is-active --quiet ' . escapeshellarg($unit)));
+
+    // The stage advances BEFORE the run, not after. TimeoutStopSec=90 plus one
+    // in-flight attempt burning EGRESS_TOTAL_TIMEOUT_MS can outlast the 180 s
+    // below; Deployer then kills the SSH process and throws while systemd calmly
+    // carries on and the unit DOES stop. With the stage set afterwards it would
+    // still read 'surveyed', and hookubit:failure would report "failed before
+    // anything was stopped or swapped" -- the exact opposite of the truth, about
+    // the one thing an operator needs to know. 'surveyed' is only reached at the
+    // end of hookubit:migrate:status, so a failure from here on unambiguously
+    // means the stop was attempted.
+    //
+    // This makes the stage mean "the stop was ATTEMPTED", not "the unit is
+    // down", so hookubit:migrate:deploy asks systemd itself rather than
+    // trusting it.
+    hb_stage('data-plane-stopped');
     // Up to TimeoutStopSec=90: webhookd drains in process and one outbound
     // attempt can take a full EGRESS_TOTAL_TIMEOUT_MS on top of that.
     run('{{bin/systemctl}} stop ' . escapeshellarg($unit), timeout: 180);
-    hb_stage('data-plane-stopped');
     info("$unit stopped");
 });
 
@@ -779,8 +1572,15 @@ task('hookubit:health', function () {
         i=0
         while [ \$i -lt $attempts ]; do
           i=\$((i+1))
-          live=\$(curl -sS -o /dev/null -w '%{http_code}' --max-time 5 http://127.0.0.1:$apiPort/health/live 2>/dev/null || echo 000)
-          resp=\$(curl -sS --max-time 6 -w '\\n%{http_code}' http://127.0.0.1:$probePort/health/ready 2>/dev/null || printf '\\n000')
+          # NORMALISE, never append. curl writes its -w string on a failed
+          # transfer AND exits non-zero, so `|| echo 000` produced live=000000 --
+          # which then failed the \$live = 000 test below and printed "returned
+          # HTTP 000000" instead of the one diagnosis that is nearly always right
+          # when a deploy's health check fails: nothing is listening.
+          live=\$(curl -sS -o /dev/null -w '%{http_code}' --max-time 5 http://127.0.0.1:$apiPort/health/live 2>/dev/null) || true
+          [ -n "\$live" ] || live=000
+          resp=\$(curl -sS --max-time 6 -w '\\n%{http_code}' http://127.0.0.1:$probePort/health/ready 2>/dev/null) || true
+          [ -n "\$resp" ] || resp="\$(printf '\\n000')"
           ready_code=\$(printf '%s' "\$resp" | tail -n1)
           ready_body=\$(printf '%s' "\$resp" | sed '\$d' | tr -d '\\n')
           if [ "\$live" = "200" ] && [ "\$ready_code" = "200" ]; then
@@ -834,12 +1634,13 @@ task('hookubit:health', function () {
     );
 });
 
-desc('Read-only checks against the live host: toolchain, units, migrations, health');
+desc('Read-only checks against the live host: toolchain, units, migrations, health, dashboard');
 task('hookubit:verify', function () {
     invoke('hookubit:toolchain');
     invoke('hookubit:systemd:check');
     invoke('hookubit:migrate:status');
     invoke('hookubit:health');
+    invoke('hookubit:dashboard:check');
 });
 
 // ---------------------------------------------------------------------------
@@ -874,6 +1675,7 @@ task('deploy', [
     'hookubit:api:restart',
     'hookubit:data-plane:start',
     'hookubit:health',
+    'hookubit:dashboard:check',
     'deploy:unlock',
     'deploy:cleanup',
     'deploy:success',
@@ -916,9 +1718,23 @@ before('deploy:failed', 'hookubit:failure');
 
 desc('Explains the failure and says exactly what to run');
 task('hookubit:failure', function () {
-    // Preflight failures happen before any connection. Do not open one now.
+    // There is no deploy lock yet, so this handler declines to touch the host:
+    // it must not steal a concurrent deploy's lock, and it has nothing it could
+    // safely unlock. The early return is deliberate. The WORDING must not go
+    // further than that, because the stage only advances at
+    // after('deploy:lock'), and deploy:info, deploy:setup and deploy:release all
+    // run before it — deploy:setup alone mkdir -p's {{deploy_path}}, .dep,
+    // releases and shared. A failure there (wrong owner on /opt, a full disk)
+    // leaves the stage at 'init' with the host already written to.
     if (!hb_reached('locked')) {
-        warning('Failed before the host was touched. Nothing was changed, nothing was connected to.');
+        warning(
+            'Failed before deploy:lock, so nothing here is holding a lock and this handler will ' .
+            'not touch the host. Nothing was stopped, migrated or swapped: the live release is ' .
+            'untouched.',
+        );
+        writeln('  If the failure was in deploy:setup or deploy:release the host WAS written to —');
+        writeln('  those create {{deploy_path}}, .dep/, releases/ and shared/. Read the error above:');
+        writeln('  a local preflight failure names hosts.yml or git, a remote one names a path.');
         return;
     }
 
@@ -932,8 +1748,37 @@ task('hookubit:failure', function () {
         // The release is live and the database has moved. Automatic rollback
         // here would be the wrong instinct: the symlink goes back, the schema
         // does not, and across the fan_out_cursor rename that is a SILENT stall.
-        warning('THE SYMLINK WAS ALREADY SWAPPED. THIS DEPLOY IS LIVE, AND IT IS NOT HEALTHY.');
+        if (hb_reached('healthy')) {
+            // Both probes passed, so the failure is downstream of them — today
+            // that means hookubit:dashboard:check. Saying "not healthy" here
+            // would send the operator to the journal for the wrong service.
+            warning('THE SYMLINK WAS ALREADY SWAPPED AND THIS DEPLOY IS LIVE. Both services are healthy; what failed is after them — read the error above, not the journal.');
+        } else {
+            warning('THE SYMLINK WAS ALREADY SWAPPED. THIS DEPLOY IS LIVE, AND IT IS NOT HEALTHY.');
+        }
         writeln('');
+        // ASK SYSTEMD, do not read the stage. The units are Type=simple, so
+        // `systemctl start` returns 0 the moment the process forks — the
+        // data-plane-started stage is reached even when webhookd dies a second
+        // later. Gating this on the stage suppressed the warning in exactly the
+        // case where nothing is being delivered: a crash loop.
+        if (!test('{{bin/systemctl_query}} is-active --quiet ' . escapeshellarg($dp))) {
+            warning("AND $dp IS NOT RUNNING: NOTHING IS BEING DELIVERED RIGHT NOW.");
+            writeln('');
+            writeln("  Ingest keeps answering 202 Accepted with the data plane down, so publishers");
+            writeln('  see success and the backlog is invisible on the events page. Whatever you');
+            writeln("  choose below, it ends with $dp running again.");
+            writeln('');
+            if (hb_reached('data-plane-started')) {
+                writeln('  hookubit:data-plane:start DID run and returned 0 — the unit is Type=simple, so');
+                writeln('  that only means the process forked. It has exited since: this is a crash loop,');
+                writeln("  and `systemctl status $dp` will show the restart counter.");
+            } else {
+                writeln('  hookubit:data-plane:start never ran: the failure is at or before the swap, and');
+                writeln('  hookubit:data-plane:stop did run.');
+            }
+            writeln('');
+        }
         writeln('  This recipe does NOT roll back automatically here, deliberately. `dep rollback`');
         writeln('  swaps the symlink; the database does not roll back, and this platform ships no');
         writeln('  down-migrations. ' . ($schemaChanged
@@ -1003,9 +1848,26 @@ task('hookubit:failure', function () {
 before('rollback', 'hookubit:rollback:before');
 after('rollback', 'hookubit:rollback:after');
 
+// Deployer registers only fail('deploy', 'deploy:failed'), so without this a
+// `dep rollback` that throws anywhere stops at the first non-zero task and
+// after('rollback', ...) never runs. hookubit:rollback:before has by then
+// STOPPED the data plane: the symlink would be left mid-swap, the API on the
+// other release, the data plane DOWN, ingest still answering 202, and the only
+// output a raw Deployer exception that says nothing about delivery having
+// stopped. MainCommand keys fail handlers on the command name, so this covers
+// the whole expanded script including both hooks.
+fail('rollback', 'hookubit:rollback:failed');
+
 desc('Warns about what a rollback cannot undo, then stops the data plane');
 task('hookubit:rollback:before', function () {
     $candidate = (string) get('rollback_candidate');
+    // Plain strings for hookubit:rollback:failed. `rollback_candidate` is a
+    // lazy Deployer value and would be RE-EVALUATED in the failure handler,
+    // against a symlink that may by then have moved; these do not move.
+    set('hookubit_rollback_candidate', $candidate);
+    set('hookubit_rollback_stopped_dp', false);
+    set('hookubit_rollback_aborted', false);
+    set('hookubit_rollback_db_ahead', true);
 
     writeln('');
     warning('A ROLLBACK SWAPS THE SYMLINK. THE DATABASE DOES NOT ROLL BACK.');
@@ -1026,37 +1888,217 @@ task('hookubit:rollback:before', function () {
     writeln('  retried:');
     writeln('    ALTER TABLE deliveries ALTER COLUMN next_attempt_at DROP NOT NULL;');
     writeln('');
-    writeln("  Asking Prisma whether the database is ahead of release $candidate ...");
+    writeln("  Comparing _prisma_migrations against the migration directories in release $candidate ...");
     writeln('');
 
-    set('migrate_path', '{{deploy_path}}/releases/' . $candidate);
-    $out = run(<<<'SH'
-        set -u
-        DATABASE_URL="$(sed -n 's|^DATABASE_URL=||p' {{env_file}} | tail -n1)"
-        DIRECT_DATABASE_URL="$(sed -n 's|^DIRECT_DATABASE_URL=||p' {{env_file}} | tail -n1)"
-        export DATABASE_URL DIRECT_DATABASE_URL
-        cd {{migrate_path}}/apps/control-api 2>/dev/null || { echo 'HB_NO_RELEASE'; exit 0; }
-        {{bin/pnpm}} exec prisma migrate status 2>&1 || true
-        SH);
-    hb_raw($out);
+    $drift = hb_migration_drift(parse('{{deploy_path}}/releases/' . $candidate));
+    $ahead = $drift['status'] === 'ok'
+        ? array_values(array_diff($drift['applied'], $drift['disk']))
+        : [];
+    // Migrations the candidate has on disk that were never applied. Not drift
+    // in the dangerous direction, but it means the candidate is not the release
+    // whose schema this database is at either.
+    $missing = $drift['status'] === 'ok'
+        ? array_values(array_diff($drift['disk'], $drift['applied']))
+        : [];
 
-    if (str_contains($out, 'HB_NO_RELEASE')) {
-        warning("Could not inspect release $candidate — it has no apps/control-api. Judge for yourself.");
-    } elseif (preg_match('/applied to the database but missing from the local migrations directory|not found in the local migrations directory|database schema is not in sync/i', $out)) {
-        warning("THE DATABASE IS AHEAD OF RELEASE $candidate. This rollback runs old code against a newer schema.");
-    } else {
-        info("Prisma reports no migrations applied beyond what release $candidate contains.");
+    if ($drift['detail'] !== []) {
+        foreach ($drift['detail'] as $line) {
+            hb_raw('  ' . $line);
+        }
+        writeln('');
     }
 
+    // The default is DRIFT. "Could not tell" is not an all-clear: this is the
+    // line an operator reads while deciding whether to hand-run an ALTER TABLE,
+    // and a false green here is how `dep rollback` reports success while the
+    // old router silently stops draining the outbox.
+    $proven = false;
+    if ($drift['status'] !== 'ok') {
+        $why = match ($drift['status']) {
+            'no-release' => "release $candidate has no apps/control-api/prisma/migrations on disk",
+            'no-url' => 'DIRECT_DATABASE_URL came back empty from ' . get('env_file'),
+            'no-client' => "release $candidate has no usable @prisma/client (pruned, or never built)",
+            'no-migrations-on-disk' => "release $candidate has a prisma/migrations directory with no migrations in it",
+            'no-migrations-table' => 'the database has no _prisma_migrations table at all, so nothing here can say what revision its schema is at',
+            'no-migrations-applied' => '_prisma_migrations records no applied migration — a dump restored without its rows, or a hand baseline. Nothing whatever is known about this schema',
+            'unfinished-migration' => 'a migration in _prisma_migrations never finished and was not rolled back, so it is FAILED and cannot appear in the comparison: ' . implode(', ', $drift['unfinished']),
+            default => 'the query against _prisma_migrations did not run',
+        };
+        warning(
+            "COULD NOT PROVE THE DATABASE IS NOT AHEAD OF RELEASE $candidate — TREAT THIS AS DRIFT.\n" .
+            "  Reason: $why.\n" .
+            '  Check by hand before answering: SELECT migration_name, finished_at, rolled_back_at ' .
+            'FROM _prisma_migrations ORDER BY migration_name;',
+        );
+    } elseif ($ahead !== []) {
+        warning(
+            'THE DATABASE IS AHEAD OF RELEASE ' . $candidate . ' BY ' . count($ahead) . " MIGRATION(S).\n" .
+            '  This rollback runs OLD CODE AGAINST A NEWER SCHEMA.',
+        );
+        foreach ($ahead as $name) {
+            writeln("    <fg=yellow;options=bold>$name</>");
+            if (isset(HOOKUBIT_EXCEPTION_MIGRATIONS[$name])) {
+                writeln('      ' . HOOKUBIT_EXCEPTION_MIGRATIONS[$name]);
+                writeln('      UNDO THIS BY HAND BEFORE ROLLING BACK:');
+                writeln('        ' . ($name === '20260923000000_rename_fan_out_to_routing'
+                    ? 'ALTER TABLE event_outbox RENAME COLUMN routing_cursor TO fan_out_cursor;'
+                    : 'ALTER TABLE deliveries ALTER COLUMN next_attempt_at DROP NOT NULL;'));
+            }
+        }
+    } else {
+        $proven = true;
+        info(
+            'Verified against _prisma_migrations: all ' . count($drift['applied']) .
+            " applied migration(s) are present in release $candidate. The database is NOT ahead.",
+        );
+        if ($missing !== []) {
+            warning(
+                'Release ' . $candidate . ' carries ' . count($missing) . ' migration(s) that were never applied: ' .
+                implode(', ', $missing) . '. Not drift in the dangerous direction, but it is not the release this schema came from either.',
+            );
+        }
+    }
+
+    if ($drift['rolled_back'] !== []) {
+        warning(
+            '_prisma_migrations records ' . count($drift['rolled_back']) . ' rolled-back migration(s): ' .
+            implode(', ', $drift['rolled_back']) . '. They are not counted as applied.',
+        );
+    }
+
+    // What hookubit:rollback:failed needs to decide whether bringing the data
+    // plane back up would be recovery or a silent stall.
+    set('hookubit_rollback_db_ahead', !$proven);
+
     writeln('');
-    if (!askConfirmation("Roll back to $candidate anyway?", false)) {
+    $question = $proven
+        ? "Roll back to $candidate? (the database is not ahead of it)"
+        : "The database may be AHEAD of $candidate. Roll back anyway?";
+    if (!askConfirmation($question, false)) {
+        // error() is not a GracefulShutdownException, so this DOES reach
+        // fail('rollback', ...). Mark it so the handler stays quiet about a
+        // half-state that does not exist.
+        set('hookubit_rollback_aborted', true);
         throw error('Rollback aborted. Nothing was changed.');
     }
+
+    // Set before the run, for the same reason hookubit:data-plane:stop does:
+    // TimeoutStopSec=90 plus an in-flight attempt can outlast the 180 s below,
+    // and Deployer then throws while systemd goes on and the unit does stop. The
+    // flag means "the stop was ATTEMPTED"; the handler asks systemd for the rest.
+    set('hookubit_rollback_stopped_dp', true);
 
     // The running processes hold the previous release's files open; the swap
     // alone changes nothing until they restart. Stop the data plane first, as
     // on a deploy, so nothing claims deliveries mid-swap.
     run('{{bin/systemctl}} stop ' . escapeshellarg((string) get('data_plane_unit')), timeout: 180);
+})->hidden();
+
+desc('Explains what a FAILED rollback left behind, and recovers the data plane');
+task('hookubit:rollback:failed', function () {
+    $dp = (string) get('data_plane_unit');
+    $api = (string) get('api_unit');
+    $candidate = has('hookubit_rollback_candidate') ? (string) get('hookubit_rollback_candidate') : '';
+    $stopped = has('hookubit_rollback_stopped_dp') && (bool) get('hookubit_rollback_stopped_dp');
+    $aborted = has('hookubit_rollback_aborted') && (bool) get('hookubit_rollback_aborted');
+    $dbAhead = !has('hookubit_rollback_db_ahead') || (bool) get('hookubit_rollback_db_ahead');
+
+    writeln('');
+
+    // The confirmation prompt's "no" throws through error(), which is not a
+    // GracefulShutdownException, so it lands here too. Nothing happened.
+    if ($aborted) {
+        info('Rollback declined at the confirmation prompt. Nothing was stopped and nothing was swapped.');
+        return;
+    }
+
+    if (!$stopped) {
+        warning('THE ROLLBACK FAILED BEFORE ANYTHING WAS STOPPED OR SWAPPED. The live release is untouched.');
+        writeln('  The drift probe or the warning above it failed, which is before the point of no');
+        writeln('  return. Read the error above; nothing needs recovering.');
+        return;
+    }
+
+    // Past here the data plane has been stopped on purpose and the run died
+    // somewhere between that and hookubit:health. Whether the symlink moved
+    // decides which code is live, and that decides whether starting the data
+    // plane is recovery or the silent stall this whole recipe is about. Ask the
+    // host rather than guessing from the stage.
+    // rollback_candidate is a bare release name ("7"); current/ points at
+    // "releases/7". basename() both sides rather than assuming either shape.
+    $link = trim((string) run('readlink {{deploy_path}}/current 2>/dev/null || true', no_throw: true));
+    $live = $link === '' ? '' : basename($link);
+    $known = $live !== '' && $candidate !== '';
+    $swapped = $known && $live === basename($candidate);
+    $active = test('{{bin/systemctl_query}} is-active --quiet ' . escapeshellarg($dp));
+
+    warning('THE ROLLBACK FAILED PART-WAY THROUGH. THIS IS A HALF-STATE.');
+    writeln('');
+    if (!$known) {
+        writeln('  current/ could not be read, so WHICH RELEASE IS LIVE IS UNKNOWN. Look by hand:');
+        writeln('    readlink {{deploy_path}}/current');
+    } elseif ($swapped) {
+        writeln("  current/ points at $live: the swap DID happen, so the OLDER code is live.");
+    } else {
+        writeln("  current/ points at $live, not the candidate " . basename($candidate) . ": the swap did");
+        writeln('  NOT happen, so the release that was live before this rollback is still live.');
+    }
+    writeln("  $api was not restarted by this run, so it may still be serving the other release's");
+    writeln('  code out of its already-open files. A restart is what settles that.');
+    writeln('');
+
+    if ($active) {
+        info("$dp is RUNNING, so deliveries are draining. Not touching it.");
+    } elseif (!$known) {
+        // Which code is live decides whether starting the data plane is recovery
+        // or the silent stall. Not knowing is not a reason to guess.
+        warning("$dp IS DOWN: NOTHING IS BEING DELIVERED RIGHT NOW, AND IT IS NOT BEING STARTED FOR YOU.");
+        writeln('');
+        writeln('  Starting it would be a guess: whether that is recovery or the silent stall in the');
+        writeln('  header of this file depends on which release current/ points at, and that could');
+        writeln('  not be read. Settle the symlink first, then:');
+        writeln("    dep hookubit:api:restart hookubit:data-plane:start hookubit:health");
+    } elseif (!$swapped) {
+        // Nothing was published. The code that was live before this rollback is
+        // still live, and it is the code this schema matches — the newer side.
+        // Starting the data plane is plain recovery.
+        warning("$dp IS DOWN: NOTHING IS BEING DELIVERED RIGHT NOW.");
+        writeln('  The symlink did not move, so the release that was already live is still live and');
+        writeln('  the schema matches it. Starting the data plane again on that release:');
+        run('{{bin/systemctl}} start ' . escapeshellarg($dp) . ' || true', timeout: 120);
+    } elseif ($dbAhead) {
+        // The swap happened and the drift probe could not prove the database is
+        // not ahead. Starting the older router here is exactly the failure the
+        // header of this file describes: it would look like recovery and deliver
+        // nothing. Refuse, loudly, and say why.
+        warning("$dp IS DOWN: NOTHING IS BEING DELIVERED RIGHT NOW, AND IT IS NOT BEING STARTED FOR YOU.");
+        writeln('');
+        writeln("  current/ is on $live — older code — and the drift probe could NOT prove the");
+        writeln('  database is not ahead of it. Starting the data plane now would look like recovery');
+        writeln('  and deliver nothing: across 20260923000000_rename_fan_out_to_routing the router');
+        writeln('  cannot parse fan_out_cursor, every claim fails, and ingest keeps answering 202.');
+        writeln('');
+        writeln('  Decide which way you are going, then finish it:');
+        writeln('    · FORWARD (preferred): `make deploy` with the fix. prisma migrate deploy is');
+        writeln('      idempotent and the deploy restarts both services for you.');
+        writeln('    · BACK: undo the schema change by hand FIRST —');
+        writeln('        ALTER TABLE event_outbox RENAME COLUMN routing_cursor TO fan_out_cursor;');
+        writeln('        ALTER TABLE deliveries ALTER COLUMN next_attempt_at DROP NOT NULL;');
+        writeln('      then finish the restart below.');
+    } else {
+        warning("$dp IS DOWN: NOTHING IS BEING DELIVERED RIGHT NOW.");
+        writeln("  The swap to $live happened and the drift probe proved the database is not");
+        writeln('  ahead of it, so this older release is the code this schema matches. Starting the');
+        writeln('  data plane again:');
+        run('{{bin/systemctl}} start ' . escapeshellarg($dp) . ' || true', timeout: 120);
+    }
+
+    writeln('');
+    writeln('  Then look, and finish the restart the failed run did not reach:');
+    writeln("    journalctl -u $dp -n 200 --no-pager");
+    writeln("    journalctl -u $api -n 200 --no-pager");
+    writeln('    dep hookubit:api:restart hookubit:data-plane:start hookubit:health');
 })->hidden();
 
 desc('Restarts the services onto the rolled-back release and health-checks');

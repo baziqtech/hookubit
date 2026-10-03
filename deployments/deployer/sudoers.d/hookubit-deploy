@@ -10,15 +10,35 @@
 # third-party package scripts from the network. Doing that as root means every
 # transitive dependency in the lockfile gets one free root shell on the box, and
 # every file it writes into the release is root-owned where a non-root service
-# user has to read it. The deploy user needs exactly seven commands.
+# user has to read it. The deploy user needs exactly six commands.
 #
 # Each entry matches the full command line, arguments included, so this grants
 # start/stop/restart of these two units and nothing else. No wildcards: a
 # trailing * would let `systemctl stop anything` through.
 #
 # Not here, on purpose:
-#   · `systemctl enable` and writing to /etc/systemd/system — a one-time install
-#     you do by hand, so a compromised deploy key cannot redefine what runs.
+#   · `systemctl enable`, `daemon-reload`, and writing to /etc/systemd/system —
+#     a one-time install you do by hand.
+#
+#     Be clear about what that buys, because it is NOT "a stolen deploy key
+#     cannot redefine what runs". It can: the deploy user owns the release tree
+#     and the `current` symlink, so it can write any binary to
+#     current/bin/webhookd and `sudo systemctl restart` straight into it. What
+#     the exclusion buys is narrower and still worth having:
+#
+#       - no path to ROOT. Writing a unit file, or editing one and reloading, is
+#         arbitrary code as root on the next start. Without that, the blast
+#         radius stays inside the two service users.
+#       - the USER and the HARDENING are fixed. User=, Group=,
+#         NoNewPrivileges=, ProtectSystem=, ReadWritePaths= and the rest are
+#         root-owned and the deploy user cannot touch them, so whatever it
+#         manages to run still runs as `hookubit`, confined, and not as root.
+#
+#     `daemon-reload` is excluded for the same reason and because nothing in the
+#     recipe calls it — installing or changing a unit is a by-hand, root step,
+#     and that is the step that reloads. Granting it here would be a permission
+#     with no caller, on a file whose whole argument is minimality.
+#
 #   · `systemctl is-active` and `status` — unprivileged, no sudo needed.
 #   · journalctl — grant it with group membership instead:
 #       sudo usermod -aG systemd-journal deploy
@@ -31,7 +51,6 @@ Cmnd_Alias HOOKUBIT_SERVICES = \
     /usr/bin/systemctl restart hookubit-api, \
     /usr/bin/systemctl start hookubit-data-plane, \
     /usr/bin/systemctl stop hookubit-data-plane, \
-    /usr/bin/systemctl restart hookubit-data-plane, \
-    /usr/bin/systemctl daemon-reload
+    /usr/bin/systemctl restart hookubit-data-plane
 
 deploy ALL=(root) NOPASSWD: HOOKUBIT_SERVICES
