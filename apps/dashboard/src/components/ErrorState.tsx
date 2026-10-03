@@ -1,4 +1,4 @@
-import { ApiRequestError } from '../lib/api';
+import { ApiRequestError, ApiTransportError } from '../lib/api';
 import type { ApiErrorCode } from '../types/api';
 import { Button } from './Button';
 import { EmptyState } from './EmptyState';
@@ -24,9 +24,7 @@ export function ErrorState({ error, onRetry, title }: ErrorStateProps) {
       description={
         <span className="flex flex-col items-center gap-2">
           <span>{details.message}</span>
-          {REMEDIES[details.code] && (
-            <span className="text-ink-muted">{REMEDIES[details.code]}</span>
-          )}
+          {details.remedy && <span className="text-ink-muted">{details.remedy}</span>}
           <span className="flex flex-wrap items-center justify-center gap-1.5 font-mono text-2xs text-ink-subtle">
             <span className="rounded border border-line bg-raised px-1.5 py-0.5">
               {details.code}
@@ -54,13 +52,36 @@ function describe(error: unknown): {
   title: string;
   message: string;
   code: string;
+  /** The second, quieter line. Undefined when the message already says it. */
+  remedy?: string;
   requestId?: string;
 } {
+  /*
+   * BEFORE the `ApiRequestError` branch, because it is one.
+   *
+   * A transport failure carries `internal_error`, which is the only code the
+   * closed union has for "the API never answered" — and the copy that code
+   * normally gets is wrong for both halves of it. "Something went wrong on our
+   * side" misdescribes a CORS misconfiguration, which is the operator's own
+   * setting, and "Quote the request ID below if you report it" names an ID that
+   * cannot exist, because no request ever reached a logger. `kind` is the fact
+   * the code cannot carry, so the headline comes from it, and the remedy is
+   * dropped: `timeoutMessage`/`unreachableMessage` already say what to check.
+   */
+  if (error instanceof ApiTransportError) {
+    return {
+      title:
+        error.kind === 'timeout' ? 'The API did not answer in time' : 'Could not reach the API',
+      message: error.body.message,
+      code: error.kind,
+    };
+  }
   if (error instanceof ApiRequestError) {
     return {
       title: TITLES[error.body.code] ?? 'Request failed',
       message: error.body.message,
       code: error.body.code,
+      remedy: REMEDIES[error.body.code],
       requestId: error.body.request_id,
     };
   }

@@ -1,0 +1,27 @@
+# Files in dist/ that Cloudflare must NOT upload as public assets.
+#
+# WHY THIS FILE IS IN `public/` AND NOT IN `dist/`
+# `dist/` is `vite build` output and is emptied on every build, so a file
+# written there survives exactly until the next `pnpm build`. Vite copies
+# `public/` verbatim into the output directory, dotfiles included, so this is
+# the only place the file can live and still be there at deploy time. It is
+# also what wrangler's own framework autoconfig does (it writes
+# `public/.assetsignore` for Astro and `static/.assetsignore` for SvelteKit).
+#
+# HOW WRANGLER READS IT
+# wrangler resolves `.assetsignore` at the root of `assets.directory`
+# (`./dist`, per wrangler.jsonc) and feeds the patterns to the `ignore`
+# package — gitignore syntax, matched against each path relative to that
+# directory, so a pattern with no slash matches at any depth. wrangler also
+# excludes this file itself from the upload, so it never becomes a public
+# asset.
+#
+# WHY `*.map`
+# `vite.config.ts` sets `build.sourcemap: true` on purpose — the map is wanted
+# on disk, for local debugging and for the bundle checks in the Deployer
+# recipe — but under the assets binding every file in `dist/` is served
+# publicly from the dashboard hostname. `index-<hash>.js.map` is 2.9 MB and
+# contains the complete frontend source: every comment, every internal name,
+# every route the UI knows about. Keeping the map and declining to publish it
+# is the whole point of this file; do not "fix" it by turning sourcemaps off.
+*.map
