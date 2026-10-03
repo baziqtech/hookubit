@@ -130,6 +130,10 @@ Reload and prove it from the **app** host, not from the database host:
 pg_isready -h db.lan -p 5432 -U hookubit -d hookubit
 ```
 
+`pg_isready` comes with `postgresql-client`, which the app host does not have
+until step 3 installs it. If you are working through this in order, run the
+`apt install` at the top of step 3 first, then come back for this one line.
+
 ::: warning Put a firewall in front of it anyway
 `pg_hba.conf` is authentication, not network policy. `ufw allow from 10.0.0.20
 to any port 5432` on the database host means a mistake in one file is not the
@@ -141,7 +145,7 @@ only thing between your ledger and the network.
 | Variable | Points at | Used by |
 |---|---|---|
 | `DATABASE_URL` | The database, through a pooler if you have one | Both planes, at runtime |
-| `DIRECT_DATABASE_URL` | The server directly, never a pooler | The migration command only |
+| `DIRECT_DATABASE_URL` | The server directly, never a pooler | The migration command, and `pg_dump` (step 13) |
 
 With no PgBouncer, set both to the same string. Keep them as two variables
 anyway: the day you add a pooler, migrating through it in transaction-pooling
@@ -211,8 +215,15 @@ accuracy of rate limits while it is down.
 
 ```bash
 sudo apt update
-sudo apt install -y build-essential git curl ca-certificates nginx
+sudo apt install -y build-essential git curl ca-certificates nginx \
+  postgresql-client rsync
 ```
+
+`postgresql-client` is not optional here even though PostgreSQL runs elsewhere:
+the `pg_isready` check in step 1 and the `pg_dump` in step 13 both run on *this*
+host, against `db.lan` over the network. `rsync` publishes the dashboard in
+steps 4 and 14; it is present on a standard Ubuntu Server install and missing
+from the minimal cloud images.
 
 Node 22 and pnpm — the repo pins pnpm through `packageManager`, so let corepack
 read it rather than installing a version by hand:
@@ -223,16 +234,35 @@ sudo apt install -y nodejs
 sudo corepack enable
 ```
 
-Go — match the version CI builds against, not whatever `apt` has:
+Go — match the version CI builds against, not whatever `apt` has. The version
+to use is `GO_VERSION` in `.github/workflows/ci.yml`; the repo is not cloned on
+this host until step 4, so read it on GitHub (or in a checkout you already have
+elsewhere) and substitute it into the URL below:
 
 ```bash
-grep GO_VERSION .github/workflows/ci.yml
 curl -fsSL https://go.dev/dl/go1.27.0.linux-amd64.tar.gz | sudo tar -C /usr/local -xz
+sudo ln -sf /usr/local/go/bin/go /usr/local/bin/go
 echo 'export PATH=$PATH:/usr/local/go/bin' | sudo tee /etc/profile.d/go.sh
 ```
 
 `go.mod` states a *minimum* language version, not a pin. The CI version is the
 one that has actually been tested.
+
+**Three lines because there are three different callers, and you need all
+three.** The tarball puts `go` in `/usr/local/go/bin`, which is on nobody's
+`PATH` by default.
+
+- The symlink into `/usr/local/bin` is the one `sudo` can find. Ubuntu's
+  sudoers sets `secure_path`, which **replaces** `PATH` for the target command;
+  it lists `/usr/local/bin` and not `/usr/local/go/bin`, so `sudo -u hookubit go
+  build …` fails with `go: command not found` no matter what your own shell can
+  do.
+- `/etc/profile.d/go.sh` is what gives *you* `go` interactively — next time you
+  log in, since `/etc/profile.d/*` is read by login shells only.
+- The builds in steps 4 and 14 call `/usr/local/go/bin/go` by absolute path
+  anyway. `sudo -u hookubit -H bash` is a non-login shell: it reads
+  `/etc/bash.bashrc` and `~/.bashrc` and never `/etc/profile` or
+  `/etc/profile.d/*`, so nothing there has put Go on its `PATH`.
 
 A system user with no shell:
 
@@ -270,10 +300,12 @@ devDependency and you need the CLI on the box for migrations and upgrades.
 
 ```bash
 cd /opt/hookubit/src/services/data-plane
-go build -o /opt/hookubit/bin/webhookd ./cmd/webhookd
+/usr/local/go/bin/go build -o /opt/hookubit/bin/webhookd ./cmd/webhookd
 ```
 
-One static binary. Nothing else to install.
+One static binary. Nothing else to install. The absolute path to `go` is
+deliberate: this is a non-login shell, so `/etc/profile.d/go.sh` from step 3 has
+not run in it and bare `go` is `command not found` here.
 
 ### The dashboard
 
@@ -293,12 +325,43 @@ VITE_INGEST_BASE_URL=https://hooks.example.com \
   page's `curl`. Leave it unset and that example says `http://localhost:8080`,
   which is right on a laptop and wrong in every message you paste to anyone.
 
+Check the bundle before you leave this shell — you are still in
+`/opt/hookubit/src` and `hookubit` owns these files:
+
+```bash
+# Must print one filename: the chunk carrying the ingest origin.
+grep -rlF --include='*.js' --exclude='*.js.map' \
+  'https://hooks.example.com' apps/dashboard/dist/assets
+
+# Must print nothing at all: the fallback did not survive into the bundle.
+grep -rlF --include='*.js' --exclude='*.js.map' \
+  'http://localhost:8080' apps/dashboard/dist/assets
+```
+
+Two greps, not one, and `-l` rather than `-q`: a `-q` line is silent whether it
+passed or failed, which teaches you nothing the first time you run it. The first
+command printing a filename is the configured origin reaching the emitted
+JavaScript. The second printing a filename means `VITE_INGEST_BASE_URL` was not
+set on the build line, so the `http://localhost:8080` fallback is compiled in —
+rebuild, do not ship it. `--exclude='*.js.map'` matters for the second one:
+`sourcemap: true` means the map always carries the fallback as source text,
+taken or not. Step 14 runs the same pair as part of its chain.
+
+That is the last step that runs inside the `hookubit` shell. Leave it before
+you go on: `hookubit` has `/usr/sbin/nologin` for a shell and is not in sudoers,
+so every `sudo` from here on fails from in there, and the `systemd-run`
+migration in step 6 cannot be run as `hookubit` at all.
+
+```bash
+exit
+```
+
 `apps/dashboard/dist/` is what Cloudflare will serve. Keep a copy on the app
 host too — nginx serves it as the origin, and as a fallback if you ever take
 Cloudflare out of the path:
 
 ```bash
-sudo rsync -a --delete apps/dashboard/dist/ /opt/hookubit/web/
+sudo rsync -a --delete /opt/hookubit/src/apps/dashboard/dist/ /opt/hookubit/web/
 ```
 
 ---
@@ -403,18 +466,46 @@ Migrations are a separate command, never something an app does on start. Run it
 by hand now, and on every upgrade:
 
 ```bash
-cd /opt/hookubit/src/apps/control-api
-sudo -u hookubit env $(grep -v '^#' /etc/hookubit/hookubit.env | xargs -d '\n') \
+sudo systemd-run --pipe --wait --collect \
+  --uid=hookubit --gid=hookubit \
+  --property=EnvironmentFile=/etc/hookubit/hookubit.env \
+  --working-directory=/opt/hookubit/src/apps/control-api \
   pnpm exec prisma migrate deploy
 
-sudo -u hookubit env $(grep -v '^#' /etc/hookubit/hookubit.env | xargs -d '\n') \
+sudo systemd-run --pipe --wait --collect \
+  --uid=hookubit --gid=hookubit \
+  --property=EnvironmentFile=/etc/hookubit/hookubit.env \
+  --working-directory=/opt/hookubit/src/apps/control-api \
   pnpm exec prisma migrate status
 ```
+
+Do not simplify that to `env $(grep -v '^#' /etc/hookubit/hookubit.env)`: `$(…)`
+word-splits on spaces, so `MAIL_FROM=HookuBit <no-reply@example.com>` arrives as
+two arguments and `env` runs `<no-reply@example.com>` as the command, whereas
+`systemd-run` reads the file with the very parser `EnvironmentFile=` uses in the
+units in step 7 — so migration and services agree on every key, and the
+migration connects with the `DIRECT_DATABASE_URL` from that same file.
 
 Two migrations in the history invert the usual "apply ahead of the code" rule
 and must be run with the data plane stopped. Both say so in capitals in their
 own header — see
 [Backup, restore and upgrades](/self-hosting/08-backup-restore-and-upgrades).
+
+### Prove the exit status comes back
+
+`--pipe --wait --collect` runs the unit in the foreground and returns *its* exit
+status to your shell. Every `&&` in step 14 is built on that. Check it once per
+host, now, while nothing depends on the answer:
+
+```bash
+sudo systemd-run --pipe --wait --collect /bin/false; echo $?   # must print 1
+```
+
+`1` means the status propagates and step 14's chains are real control flow. `0`
+means this systemd is reporting on the *launch* rather than the command, every
+`&&` on this page is decoration, and you must instead run each command on its
+own and read its status — or put the sequence in a script beginning with
+`set -euo pipefail`.
 
 ---
 
@@ -845,15 +936,67 @@ organization they own.
 
 ## 13. Backups
 
-Two things, and the second is the one people miss.
+Two things, and the second is the one people miss. Both run as root on the
+**app host** — that is where `/etc/hookubit/hookubit.env` is. Nothing sets
+`DIRECT_DATABASE_URL` in your shell, so read it out of that file; `pg_dump` then
+connects over the network to the database host. Dumps land in
+`/var/backups/hookubit`, root-owned and `0700`, so nothing depends on which
+directory you happened to be standing in.
 
 ```bash
 # 1. The database — the system of record AND the queue.
-pg_dump --format=custom "$DATABASE_URL" > hookubit-$(date +%F).dump
+sudo install -d -m 0700 /var/backups/hookubit
+
+URL=$(sudo sed -n 's/^DIRECT_DATABASE_URL=//p' /etc/hookubit/hookubit.env \
+        | tail -n1 | tr -d '\r' | sed -e 's/^"\(.*\)"$/\1/' -e "s/^'\(.*\)'\$/\1/")
+OUT=/var/backups/hookubit/hookubit-$(date +%F).dump
+
+sudo pg_dump --format=custom -f "$OUT" "${URL%%\?*}" \
+  || { echo 'DUMP FAILED — no backup taken'; sudo rm -f "$OUT"; false; }
 
 # 2. The encryption key. Separately, and not beside the dump.
-grep ENCRYPTION_KEY /etc/hookubit/hookubit.env
+sudo grep ENCRYPTION_KEY /etc/hookubit/hookubit.env
 ```
+
+Four details in that one command, each of them the difference between a backup
+and a file that looks like one.
+
+**`${URL%%\?*}` cuts the query string off, and it has to.** The URLs in the env
+file end in `?schema=public` because Prisma requires it; libpq rejects any URI
+query parameter it does not recognise, so the unstripped URL gets you
+`pg_dump: error: invalid URI query parameter: "schema"` and nothing else. Strip
+it here rather than keeping a second, dumper-only copy of the URL in the env
+file — and do not "fix" this by deleting `?schema=public` from the env file,
+which breaks Prisma. With no query string the expansion is a no-op, so the form
+is safe either way.
+
+**`-f`, not `>`.** The shell creates a redirect's target *before* `pg_dump`
+runs, so `> file` leaves a zero-byte file behind on every failure — and `-f`
+does too when the connection is refused. That is what the `||` branch is for: it
+says out loud that there is no backup, deletes the thing that would otherwise
+look like one, and ends on `false` so that `$?` is non-zero for anything
+wrapping this in a script or a cron job. Without it, an operator who checks `ls`
+rather than `$?` — or a wrapper that checks neither — finds out during the
+restore.
+
+**`DIRECT_DATABASE_URL`, not `DATABASE_URL`.** `pg_dump` holds one session for
+its whole repeatable-read snapshot, which a pooler in transaction mode will not
+give it. With no pooler the two variables hold the same string (step 1), so
+reading the direct one is right in both topologies and needs no decision at
+backup time. Left to a bare `"$DIRECT_DATABASE_URL"` that nothing ever set,
+`pg_dump` expands it to an empty string, falls back to a local socket and a
+database named after `$USER` — and there is no PostgreSQL on the app host at
+all.
+
+**The `sed` pipeline is doing more than it looks.** `tail -n1` takes the last
+definition of the key, which is what systemd's `EnvironmentFile=` parser does
+too — and step 12 teaches you to `tee -a` this very file, so a duplicate key is
+not hypothetical; without it you get both values joined by a newline in one
+argument. `tr -d '\r'` drops the carriage return a file edited on Windows leaves
+*inside* the URL. The last `sed` removes one layer of surrounding quotes,
+because systemd strips those and `sed` does not: left in, they become part of
+the dbname. Each of those failures is an error rather than a wrong dump, which
+is only good news because the `||` branch now cleans up after it.
 
 Redis needs no backup: it holds rate-limiter buckets, which is why a Redis
 outage costs limiter accuracy and not deliveries.
@@ -867,26 +1010,182 @@ turn on WAL archiving.
 
 ## 14. Upgrades
 
+Four blocks, in this order. The `&&` chains inside them are load-bearing —
+they are what keeps a failed step from being followed by the next one, and step
+6's self-test is what proves the status actually comes back. The blocks are
+deliberately separate, so each one is a checkpoint you read before running the
+next.
+
+**Run one block at a time, and read its output before the next.** Do not paste
+them in together. If the build chain stops anywhere, **do not run the migration
+block** — see the danger note below for why that specific combination is the
+worst outcome on this page. If you wrap this in a script, open the script with
+`set -euo pipefail` so the boundaries between the blocks are enforced too.
+
+Stop taking new work first:
+
 ```bash
-sudo systemctl stop hookubit-data-plane          # stop taking new work first
-cd /opt/hookubit/src && sudo -u hookubit git pull
-
-sudo -u hookubit pnpm install --frozen-lockfile
-sudo -u hookubit pnpm generate
-sudo -u hookubit pnpm --filter @hookubit/control-api build
-cd services/data-plane && sudo -u hookubit go build -o /opt/hookubit/bin/webhookd ./cmd/webhookd
-
-cd /opt/hookubit/src
-VITE_API_TRANSPORT=http VITE_INGEST_BASE_URL=https://hooks.example.com \
-  sudo -u hookubit pnpm --filter @hookubit/dashboard build
-sudo rsync -a --delete apps/dashboard/dist/ /opt/hookubit/web/
-
-cd apps/control-api && sudo -u hookubit env $(grep -v '^#' /etc/hookubit/hookubit.env | xargs -d '\n') \
-  pnpm exec prisma migrate deploy
-
-sudo systemctl restart hookubit-api
-sudo systemctl start hookubit-data-plane
+sudo systemctl stop hookubit-data-plane
 ```
+
+Then build. Every step needs the one above it to have succeeded, so the chain
+stops at the first failure — and it stops before anything has touched the
+schema. The data plane is down at that point: start it again and you are back
+where you began, on the old release.
+
+```bash
+cd /opt/hookubit/src \
+  && sudo -u hookubit git pull \
+  && sudo -u hookubit pnpm install --frozen-lockfile \
+  && sudo -u hookubit pnpm generate \
+  && sudo -u hookubit pnpm --filter @hookubit/control-api build \
+  && ( cd services/data-plane \
+       && sudo -u hookubit /usr/local/go/bin/go build \
+            -o /opt/hookubit/bin/webhookd ./cmd/webhookd ) \
+  && sudo -u hookubit env VITE_API_TRANSPORT=http \
+       VITE_INGEST_BASE_URL=https://hooks.example.com \
+       pnpm --filter @hookubit/dashboard build \
+  && { sudo -u hookubit grep -rlF --include='*.js' --exclude='*.js.map' \
+         'https://hooks.example.com' apps/dashboard/dist/assets \
+       || { echo 'INGEST ORIGIN MISSING FROM BUNDLE'; false; }; } \
+  && { ! sudo -u hookubit grep -rlF --include='*.js' --exclude='*.js.map' \
+         'http://localhost:8080' apps/dashboard/dist/assets \
+       || { echo 'LOCALHOST FALLBACK IS IN THE BUNDLE'; false; }; } \
+  && sudo rsync -a --delete apps/dashboard/dist/ /opt/hookubit/web/
+```
+
+Three details in that chain are easy to get wrong and silent when you do.
+
+**`/usr/local/go/bin/go`, not `go`.** `sudo` applies `secure_path` to the
+target command, replacing `PATH` with a list that has `/usr/local/bin` on it and
+`/usr/local/go/bin` not — so `sudo -u hookubit go build` is `command not found`
+even on a host where `go` works perfectly in your own shell. Step 3's symlink
+covers the same ground; the absolute path here is immune to `secure_path`
+differing between releases.
+
+**`env`, not a prefix.** `VITE_… sudo -u hookubit pnpm build` puts the values in
+*sudo's* environment, and Ubuntu's default `Defaults env_reset` builds a fresh
+environment for the target command keeping only `env_keep` — which does not
+include `VITE_*`. The build then runs with neither value: a dashboard on its
+in-memory mock, and a get-started page telling people to publish to
+`http://localhost:8080`. Step 4's form works because it runs *inside* the
+`sudo -u hookubit -H bash` shell with no `sudo` on the line. Here there is one,
+so the assignments go after it, through `env`.
+
+**Then prove it landed**, because nothing else will tell you. The two greps are
+the check the Deployer recipe runs — both halves of it: the emitted JavaScript
+must contain the ingest origin you configured, *and* must not contain the
+`http://localhost:8080` fallback. They are in the chain so a bundle missing the
+one, or carrying the other, stops the upgrade *before* the migration. An unset
+variable is exactly what leaves the fallback behind, which is why the negative
+half is worth the extra link.
+
+**What they prove is that `VITE_INGEST_BASE_URL` landed — not
+`VITE_API_TRANSPORT`.** A build with the origin right and the transport mistyped
+passes both greps and ships the in-memory mock. Nothing in this chain catches
+that; read the two assignments on the build line before you trust the greps.
+
+`-l` rather than `-q`, and the explicit failure messages, are there because
+`grep -q` and `rsync -a` are both silent on success: after a long noisy build,
+"the chain stopped at the check" and "the chain finished" would otherwise look
+identical, and the next thing you would do is run the migration over a stale
+`/opt/hookubit/web/`. The greps run as `hookubit` like every other command in
+the chain, so they depend on sudoers rather than on the modes of
+`/opt/hookubit` — tighten that directory to `0750` and a grep running as you
+would exit 2 and stop the chain for a reason that has nothing to do with the
+bundle.
+
+The filters must come **before** the pattern: in
+`grep -rlF -- PATTERN --include='*.js' dir` the `--` ends option parsing,
+`--include` becomes a filename operand, grep warns that no such file exists and
+exits 2, and the filter never applies at all.
+
+`--exclude='*.js.map'` is load-bearing for the **negative** grep specifically.
+`sourcemap: true` means `dist/assets/*.js.map` always carries the source line
+
+```js
+return import.meta.env.VITE_INGEST_BASE_URL ?? 'http://localhost:8080'
+```
+
+whether or not the fallback was taken — so a map in scope makes the negative
+check fire on a perfectly good bundle and report the opposite of the truth. For
+the positive grep the exclusion is only tidiness: `--include='*.js'` has
+already taken the maps out of scope, and the fallback literal a map carries
+cannot make a check for the origin's *presence* report the opposite of the
+truth. Keep both filters on both lines anyway; they are one flag each, and the
+pair is what the recipe uses.
+
+Then migrate, check, and only then restart — as one chain, so the restarts
+cannot happen without the migration having succeeded:
+
+```bash
+sudo systemd-run --pipe --wait --collect \
+  --uid=hookubit --gid=hookubit \
+  --property=EnvironmentFile=/etc/hookubit/hookubit.env \
+  --working-directory=/opt/hookubit/src/apps/control-api \
+  pnpm exec prisma migrate deploy \
+  && sudo systemd-run --pipe --wait --collect \
+    --uid=hookubit --gid=hookubit \
+    --property=EnvironmentFile=/etc/hookubit/hookubit.env \
+    --working-directory=/opt/hookubit/src/apps/control-api \
+    pnpm exec prisma migrate status \
+  && sudo systemctl restart hookubit-api \
+  && sudo systemctl start hookubit-data-plane
+```
+
+::: danger A new schema over old binaries is silent non-delivery, not a failed upgrade
+Two routes into the same state. In both of them the platform looks alive, ingest
+keeps answering `202`, and nothing comes out.
+
+**The build chain stopped and the migration block ran anyway.** This is what
+pasting all three blocks in together does to you. `pnpm install` failing on
+lockfile drift is an ordinary failure and the chain handles it correctly — but
+`go build` never ran, and it does not overwrite `/opt/hookubit/bin/webhookd` on
+failure, so the binary on disk is still the old release. Apply the new
+migrations over it — `20260923000000_rename_fan_out_to_routing` among them — and
+`systemctl start hookubit-data-plane` runs the pre-rename router against a
+post-rename schema: it stops draining the outbox while ingest carries on
+accepting events. **If the build chain stops anywhere, do not run the migration
+block.** Nothing has touched the schema at that point: start the data plane
+again and you are back on the old release, which is the entire reason these
+blocks are separate.
+
+**`migrate deploy` exited non-zero and you restarted anyway.** That is what the
+`&&` is for, and it is the same rule the Deployer recipe follows. The live
+release is old code, the schema may already have moved, and starting the data
+plane there **would look like recovery and deliver nothing**. Fix the cause and
+re-run the command; `prisma migrate deploy` is idempotent. It fails for ordinary
+reasons: a `P3009` left behind by an earlier failed migration, an advisory-lock
+timeout, or a `DIRECT_DATABASE_URL` pointed at a pooler — the thing the two-URL
+table in step 1 warns about.
+:::
+
+The `migrate status` in the middle is step 6's command again, it is read-only,
+and it is there so the applied list is in front of you before new code starts.
+Read it for what it proves. It answers "did my migrations apply", not "has the
+schema drifted": when the migrations on disk are a strict *prefix* of what the
+database has applied, it still prints `Database schema is up to date!` and exits
+0.
+
+Then prove the release actually delivers. `systemctl start` returns 0 the moment
+the unit is *running*, which is a long way from working, so the fourth block is
+step 7's three checks again:
+
+```bash
+curl -s localhost:3000/health/live      # control API
+curl -s localhost:9090/health/ready     # data plane, including its database ping
+curl -s localhost:9090/metrics | head   # Prometheus exposition
+```
+
+Then leave the alerts from step 11 in front of you for a few minutes:
+**`WebhookOutboxLagHigh`** (the oldest unrouted event is getting old — the
+router is not draining) and **`WebhookQueueBacklogGrowing`** (ready deliveries
+piling up and still climbing). A `webhookd` that binds its ports and reports
+`ready` while the router never drains is precisely the failure this page exists
+to prevent: a `DIRECT_DATABASE_URL` pointed somewhere wrong, or the strict-prefix
+case above, leaves a healthy-looking process in front of a growing outbox. If
+**`WebhookQueueDepthNotExported`** is firing, the backlog alert cannot fire at
+all — read that as no signal rather than a clear one.
 
 Then **purge the Cloudflare cache** for `index.html`, or browsers keep the old
 bundle and request asset filenames that no longer exist. If you set the cache
