@@ -27,7 +27,35 @@ Type=simple
 User=hookubit
 Group=hookubit
 WorkingDirectory=/opt/hookubit/current
-EnvironmentFile=/etc/hookubit/hookubit.env
+# CONFIGURATION IS TWO FILES, AND THE ORDER IS THE WHOLE POINT.
+#
+#   /opt/hookubit/shared/.env                       the nine variables BOTH planes read
+#   /opt/hookubit/shared/services/data-plane/.env   this service's own
+#
+# A LATER EnvironmentFile= WINS in systemd, so the common file goes FIRST and this
+# service's own second. The Go binary does not read either file - it reads the process
+# environment, and this is what fills it. The order still has to match the control
+# plane's (@nestjs/config, where EARLIER envFilePath entries win), because the common
+# file is the SAME file for both planes and an ENCRYPTION_KEY that resolves differently
+# in the two is a worker that cannot decrypt what the control API wrote.
+#
+# NO `-` PREFIX, deliberately. `-EnvironmentFile=` tolerates a missing file, and there
+# is no state of this system in which running without one of these is correct. Much of
+# the platform's configuration has a safe default - LOG_LEVEL, every EGRESS_*, the
+# breaker thresholds - so a tolerated-missing file does not fail cleanly; it starts
+# something that is configured by accident. Without the dash, a start fails BEFORE
+# ExecStart with `Failed to load environment files: No such file or directory` naming
+# the path, which is the one message an operator can act on. These units are `enable`d
+# and not started until the first deploy, so the only way to meet it is a reboot in
+# between - exactly when "you have not deployed yet" is the right answer.
+#
+# SHARED PATHS, NOT RELEASE PATHS. <release>/services/data-plane/.env is a symlink to
+# the same file, but it exists only for whichever release is current - so a unit that
+# read it through current/ would depend on the symlink swap having finished. PID 1 reads
+# these as root before privileges are dropped, so ProtectSystem= and ReadOnlyPaths=
+# below do not apply to them, and this process never opens either file itself.
+EnvironmentFile=/opt/hookubit/shared/.env
+EnvironmentFile=/opt/hookubit/shared/services/data-plane/.env
 ExecStart=/opt/hookubit/current/bin/webhookd all
 Restart=on-failure
 RestartSec=5

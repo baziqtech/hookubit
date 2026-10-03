@@ -33,7 +33,41 @@ import { WebhookSubscriptionsModule } from './webhook-subscriptions/webhook-subs
     ConfigModule.forRoot({
       isGlobal: true,
       validate: validateEnv,
-      envFilePath: ['.env.local', '.env', '../../.env'],
+      // TWO files, and each entry has exactly one job. Both are resolved
+      // against the process CWD, which is `apps/control-api` in every way this
+      // service is actually started: `pnpm --filter @hookubit/control-api
+      // start:dev` and `jest` both run from the package directory, and
+      // systemd's WorkingDirectory is `<deploy>/current/apps/control-api`. So
+      // the same two relative paths mean the same two things in development and
+      // in production, which is the point.
+      //
+      //   '.env'        this service's OWN variables - the ones only the
+      //                 control plane reads (JWT_SECRET, SESSION_SECRET,
+      //                 CORS_ORIGINS, TRUST_PROXY_HOPS, SMTP_*, ...).
+      //                 apps/control-api/.env in development; in production a
+      //                 Deployer shared_files symlink to shared/apps/control-api/.env.
+      //   '../../.env'  the COMMON variables both planes must agree on
+      //                 (APP_ENV, DATABASE_URL, ENCRYPTION_KEY*, REDIS_URL,
+      //                 LOG_LEVEL, OTEL_*). The repository root in development;
+      //                 the release root in production, where Deployer symlinks
+      //                 shared/.env. They are not duplicated into this
+      //                 service's file on purpose: an ENCRYPTION_KEY that
+      //                 drifts between the two planes means the control API
+      //                 writes endpoint secrets the Go worker cannot decrypt,
+      //                 and each process validates its own config happily.
+      //
+      // ORDER IS SIGNIFICANT and this one is deliberate. @nestjs/config's
+      // loadEnvFile does `config = Object.assign(dotenv.parse(file), config)`
+      // walking the array, so what is already accumulated wins - EARLIER
+      // entries beat later ones. Service-specific therefore overrides common,
+      // which is also how systemd resolves it (later EnvironmentFile= wins, and
+      // the units list common first). Real environment variables beat both.
+      //
+      // '.env.local' was the first entry until it was removed: it was the only
+      // reference to that filename anywhere in the repository, so it was a
+      // lookup that could never succeed and a third name for operators to
+      // wonder about.
+      envFilePath: ['.env', '../../.env'],
     }),
     LoggerModule.forRoot({
       pinoHttp: {

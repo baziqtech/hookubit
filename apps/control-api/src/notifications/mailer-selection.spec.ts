@@ -27,7 +27,15 @@ describe('selectMailer', () => {
     expect(selectMailer(configOf({ APP_ENV: appEnv }), null, choices)).toBe('stub');
   });
 
-  it('treats a missing APP_ENV as development, matching the schema default', () => {
+  /**
+   * NOT the schema default - there is no longer one. `env.schema.ts` REQUIRES
+   * APP_ENV, so through the normal boot path this case cannot occur; what it
+   * pins is `selectMailer`'s own independent `?? 'development'`, which is
+   * deliberate belt-and-braces for a `ConfigService` assembled without the
+   * schema (this suite's `configOf`, and `Test.createTestingModule` fixtures).
+   * See the comment on that line in mailer-selection.ts.
+   */
+  it("falls back to the stub when the ConfigService has no APP_ENV at all - selectMailer's own default, not the schema's", () => {
     expect(selectMailer(configOf({}), null, choices)).toBe('stub');
   });
 

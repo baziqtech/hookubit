@@ -231,6 +231,22 @@ jobs:
       - name: Lint
         run: pnpm -r lint
       - name: Build
+        # `pnpm -r build` includes @hookubit/dashboard, and its vite build
+        # REFUSES when VITE_API_TRANSPORT is unset or is anything other than
+        # `http` or `mock` (apps/dashboard/vite.config.ts). The guard exists
+        # because an unset value silently selects the in-memory mock, so a
+        # build that said nothing shipped a dashboard where every screen works
+        # against data that does not exist. `http` is the value a real deploy
+        # uses, so it is the one CI should be compiling.
+        #
+        # ON THE STEP, NOT THE JOB, deliberately. At job level it would also
+        # apply to `pnpm -r test` below, where unset is the CORRECT setting:
+        # `src/lib/api.ts` picks its transport from this variable and the
+        # dashboard's own suites pin the unset behaviour (vitest is not subject
+        # to the guard - the plugin is `apply: 'build'`). Setting it for the
+        # whole job would quietly change what those tests exercise.
+        env:
+          VITE_API_TRANSPORT: http
         run: pnpm -r build
       # apps/docs/api is GENERATED from the control plane's OpenAPI document by
       # the docs build that just ran. If that regeneration changed a committed

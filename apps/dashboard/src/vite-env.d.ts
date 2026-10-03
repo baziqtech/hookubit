@@ -1,7 +1,12 @@
 /// <reference types="vite/client" />
 
 interface ImportMetaEnv {
-  /** `http` talks to the real control API; anything else uses the in-memory mock. */
+  /**
+   * `http` talks to the real control API, at relative `/v1/...` paths on this
+   * page's own origin; anything else — unset included — uses the in-memory
+   * mock. There is no base-URL variable: the dashboard and the API are served
+   * from one origin, so a relative path is correct by construction.
+   */
   readonly VITE_API_TRANSPORT?: 'http' | 'mock';
   /**
    * Base URL of the INGEST API (Go, :8080) — a different surface from the
@@ -9,15 +14,6 @@ interface ImportMetaEnv {
    * copy-paste `curl` on the get-started page. Defaults to `http://localhost:8080`.
    */
   readonly VITE_INGEST_BASE_URL?: string;
-  /**
-   * Origin of the CONTROL API — scheme and host, no `/v1`, no trailing slash,
-   * e.g. `https://api.hookubit.com`. Prepended to every request made through
-   * `src/lib/api.ts`.
-   *
-   * Unset is correct in development (Vite proxies `/v1`) and a hard failure in
-   * a production build: see `src/lib/api-base-url.ts`.
-   */
-  readonly VITE_API_BASE_URL?: string;
 }
 
 interface ImportMeta {

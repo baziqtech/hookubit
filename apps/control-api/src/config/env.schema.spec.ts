@@ -3,11 +3,28 @@ import { validateEnv } from './env.schema';
 const KEY_32 = Buffer.alloc(32, 7).toString('base64');
 const SECRET_32 = 'x'.repeat(32);
 
+/**
+ * The MINIMUM environment that validates. APP_ENV is part of that minimum
+ * because it is required and has no default - see the APP_ENV block in
+ * env.schema.ts for why a deployment identity must not be guessed at.
+ */
 const baseEnv = (): Record<string, unknown> => ({
+  APP_ENV: 'development',
   DATABASE_URL: 'postgres://user:pass@localhost:5432/webhooks',
   JWT_SECRET: SECRET_32,
   SESSION_SECRET: SECRET_32,
   ENCRYPTION_KEY: KEY_32,
+});
+
+/**
+ * staging/production additionally require a mail transport, a hop count and
+ * the dashboard origin every mailed link is built on.
+ */
+const serverEnv = (): Record<string, unknown> => ({
+  SMTP_URL: 'smtp://mailer:secret@mail.example.com:587',
+  MAIL_FROM: 'HookuBit <no-reply@example.com>',
+  TRUST_PROXY_HOPS: '2',
+  DASHBOARD_URL: 'https://webhooks.example.com',
 });
 
 const smtpEnv = (): Record<string, unknown> => ({
@@ -22,6 +39,179 @@ describe('validateEnv', () => {
     expect(env.DIRECT_DATABASE_URL).toBeUndefined();
     expect(env.CONTROL_API_PORT).toBe(3000);
     expect(env.APP_ENV).toBe('development');
+  });
+
+  /**
+   * APP_ENV HAS NO DEFAULT, and that is the fix rather than an oversight.
+   *
+   * It defaulted to `development`, which is exactly the value
+   * `auth/session.service.ts` uses to turn the session cookie's `Secure` flag
+   * OFF. That service is careful - it opts OUT for `development` and `test`
+   * only, so a misspelled `prod` still gets a Secure cookie - but the schema
+   * default undid the care: an APP_ENV that was never set reached it as
+   * `development` rather than as "unrecognised", so a production box whose env
+   * file was missing the line sent its session cookie over plaintext HTTP,
+   * silently.
+   */
+  describe('APP_ENV is required - a deployment identity is never guessed', () => {
+    it.each([undefined, '', '  ', '\t', '\n '])(
+      'REFUSES to boot with APP_ENV %j, naming the variable and the four legal values',
+      (value) => {
+        expect(() => validateEnv({ ...baseEnv(), APP_ENV: value })).toThrow(
+          /APP_ENV: APP_ENV must be one of development\|test\|staging\|production, and it is REQUIRED/,
+        );
+      },
+    );
+
+    it('says WHY in the message, so the operator does not have to read the schema', () => {
+      let message = '';
+      try {
+        validateEnv({ ...baseEnv(), APP_ENV: undefined });
+      } catch (e) {
+        message = (e as Error).message;
+      }
+      expect(message).toContain('there is no default');
+      expect(message).toContain('Secure');
+    });
+
+    it('refuses a MISSING key and a BLANK value identically - k8s secretRef injects blank', () => {
+      const missing = { ...baseEnv() };
+      delete missing.APP_ENV;
+      expect(() => validateEnv(missing)).toThrow(/APP_ENV/);
+      expect(() => validateEnv({ ...baseEnv(), APP_ENV: '' })).toThrow(/APP_ENV/);
+    });
+  });
+
+  /**
+   * TRUST_PROXY_HOPS has no default for the same reason, with a different
+   * failure. 0 is the safe value when the answer is unknown - it under-counts
+   * rather than trusting an attacker-supplied X-Forwarded-For - but it is not a
+   * safe DEFAULT: 0 behind a proxy makes Express resolve every client to the
+   * proxy, so ThrottleGuard's per-IP buckets collapse into ONE bucket for the
+   * whole internet and the per-IP limits on login and password reset stop
+   * existing. A box behind nginx that never set the line got that silently.
+   */
+  describe('TRUST_PROXY_HOPS must be STATED on an internet-facing environment', () => {
+    it.each(['staging', 'production'])(
+      'REFUSES to boot under APP_ENV=%s with no hop count, naming the correct value',
+      (appEnv) => {
+        const env: Record<string, unknown> = { ...baseEnv(), ...serverEnv(), APP_ENV: appEnv };
+        delete env.TRUST_PROXY_HOPS;
+        expect(() => validateEnv(env)).toThrow(
+          new RegExp(`TRUST_PROXY_HOPS: TRUST_PROXY_HOPS is required when APP_ENV=${appEnv}`),
+        );
+      },
+    );
+
+    it.each(['', '  ', '\t'])('treats a blank hop count %j as unset, not as 0', (blank) => {
+      expect(() =>
+        validateEnv({ ...baseEnv(), ...serverEnv(), APP_ENV: 'production', TRUST_PROXY_HOPS: blank }),
+      ).toThrow(/TRUST_PROXY_HOPS/);
+    });
+
+    it('names 2 - Cloudflare then nginx - so the message is actionable', () => {
+      let message = '';
+      const env: Record<string, unknown> = { ...baseEnv(), ...serverEnv(), APP_ENV: 'production' };
+      delete env.TRUST_PROXY_HOPS;
+      try {
+        validateEnv(env);
+      } catch (e) {
+        message = (e as Error).message;
+      }
+      expect(message).toContain('Use 2 for the standard deployment');
+      expect(message).toContain('ONE bucket for the whole internet');
+    });
+
+    /**
+     * The reason the default had to go rather than being kept alongside a
+     * check: a box genuinely without a proxy must still be able to say 0, and
+     * with `.default(0)` an unset variable and a deliberate 0 are the same
+     * value by the time the refinement runs.
+     */
+    it('ACCEPTS a deliberate 0 in production - "nothing in front of me" is a legal answer', () => {
+      const env = validateEnv({
+        ...baseEnv(),
+        ...serverEnv(),
+        APP_ENV: 'production',
+        TRUST_PROXY_HOPS: '0',
+      });
+      expect(env.TRUST_PROXY_HOPS).toBe(0);
+    });
+
+    it.each(['development', 'test'])(
+      'does NOT require it under APP_ENV=%s, and still reports 0 to callers',
+      (appEnv) => {
+        const env = validateEnv({ ...baseEnv(), APP_ENV: appEnv });
+        expect(env.TRUST_PROXY_HOPS).toBe(0);
+      },
+    );
+  });
+
+  /**
+   * DASHBOARD_URL is the third variable of this shape, and its failure is the
+   * only one that reaches END USERS. It defaulted to http://localhost:5173,
+   * and it is the base of every link the service mails - /verify-email,
+   * /reset-password, /accept-invitation - so a production box missing the line
+   * sent real recipients password-reset links pointing at the operator's
+   * laptop. The mail was accepted and delivered; only the link was dead, with
+   * nothing refusing and nothing logged, so it looked like a mail fault.
+   */
+  describe('DASHBOARD_URL must be STATED on an internet-facing environment', () => {
+    it.each(['staging', 'production'])(
+      'REFUSES to boot under APP_ENV=%s with no dashboard origin, naming the variable',
+      (appEnv) => {
+        const env: Record<string, unknown> = { ...baseEnv(), ...serverEnv(), APP_ENV: appEnv };
+        delete env.DASHBOARD_URL;
+        expect(() => validateEnv(env)).toThrow(
+          new RegExp(`DASHBOARD_URL: DASHBOARD_URL is required when APP_ENV=${appEnv}`),
+        );
+      },
+    );
+
+    it.each(['', '  ', '\t'])('treats a blank dashboard origin %j as unset', (blank) => {
+      expect(() =>
+        validateEnv({ ...baseEnv(), ...serverEnv(), APP_ENV: 'production', DASHBOARD_URL: blank }),
+      ).toThrow(/DASHBOARD_URL: DASHBOARD_URL is required/);
+    });
+
+    it('names the consequence - dead links in real mail - so the message is actionable', () => {
+      let message = '';
+      const env: Record<string, unknown> = { ...baseEnv(), ...serverEnv(), APP_ENV: 'production' };
+      delete env.DASHBOARD_URL;
+      try {
+        validateEnv(env);
+      } catch (e) {
+        message = (e as Error).message;
+      }
+      expect(message).toContain('http://localhost:5173');
+      expect(message).toContain('password-reset');
+      expect(message).toContain('the link is dead');
+      expect(message).toContain('CORS_ORIGINS');
+    });
+
+    /**
+     * The same reason the TRUST_PROXY_HOPS default had to go: with
+     * `.default('http://localhost:5173')` an unset variable and a deliberate
+     * localhost value are one value by the time the refinement runs. A box
+     * that really is served from localhost must still be able to say so.
+     */
+    it('ACCEPTS a deliberate localhost origin in production - it is a legal answer, just not a default', () => {
+      const env = validateEnv({
+        ...baseEnv(),
+        ...serverEnv(),
+        APP_ENV: 'production',
+        DASHBOARD_URL: 'http://localhost:5173',
+      });
+      expect(env.DASHBOARD_URL).toBe('http://localhost:5173');
+    });
+
+    it.each(['development', 'test'])(
+      'does NOT require it under APP_ENV=%s, and still reports a string to callers',
+      (appEnv) => {
+        const env = validateEnv({ ...baseEnv(), APP_ENV: appEnv });
+        expect(env.DASHBOARD_URL).toBe('http://localhost:5173');
+      },
+    );
   });
 
   describe('blank optional URLs (k8s secretRef / compose ${VAR:-} inject "")', () => {
@@ -45,8 +235,10 @@ describe('validateEnv', () => {
   });
 
   describe('blank optional non-URL fields fall back to their defaults', () => {
+    // APP_ENV is deliberately NOT in this list any more: it has no default, so
+    // a blank value is a refusal rather than a fallback. See the dedicated
+    // describe block above.
     it.each([
-      ['APP_ENV', 'development'],
       ['LOG_LEVEL', 'info'],
       ['ENCRYPTION_KEY_ID', 'k1'],
       ['ENCRYPTION_KEYS_RETIRED', ''],
@@ -56,7 +248,11 @@ describe('validateEnv', () => {
       expect(env[key]).toBe(expected);
     });
 
-    it('TRUST_PROXY_HOPS defaults to 0 - trust nothing - when unset or blank', () => {
+    // In development and test an absent or blank hop count reads as 0 - trust
+    // nothing - so every caller still sees a number. It is NOT a schema
+    // default: the transform that produces the 0 runs after the refinement
+    // that requires the variable on staging and production.
+    it('TRUST_PROXY_HOPS reads as 0 when unset or blank in development', () => {
       expect(validateEnv(baseEnv()).TRUST_PROXY_HOPS).toBe(0);
       expect(validateEnv({ ...baseEnv(), TRUST_PROXY_HOPS: '  ' }).TRUST_PROXY_HOPS).toBe(0);
     });
@@ -113,10 +309,11 @@ describe('validateEnv', () => {
       },
     );
 
-    // staging/production need a mail transport (see the SMTP block below), so
-    // the accepted-environment check supplies one - it is checking APP_ENV.
+    // staging/production need a mail transport and a hop count (see the blocks
+    // above and below), so `serverEnv()` supplies both - this is checking
+    // APP_ENV, not them.
     it.each(['development', 'test', 'staging', 'production'])('accepts APP_ENV %j', (value) => {
-      expect(validateEnv({ ...baseEnv(), ...smtpEnv(), APP_ENV: value }).APP_ENV).toBe(value);
+      expect(validateEnv({ ...baseEnv(), ...serverEnv(), APP_ENV: value }).APP_ENV).toBe(value);
     });
 
     it('rejects an unknown LOG_LEVEL', () => {
@@ -251,9 +448,17 @@ describe('validateEnv', () => {
     it.each(['staging', 'production'])(
       'REFUSES to boot under APP_ENV=%s with no SMTP_URL, naming the variable',
       (appEnv) => {
-        expect(() => validateEnv({ ...baseEnv(), APP_ENV: appEnv })).toThrow(
-          new RegExp(`SMTP_URL: SMTP_URL is required when APP_ENV=${appEnv}`),
-        );
+        // TRUST_PROXY_HOPS and DASHBOARD_URL are supplied - the other two
+        // staging/production requirements - so SMTP_URL is the ONLY thing at
+        // fault and the message is about it alone.
+        expect(() =>
+          validateEnv({
+            ...baseEnv(),
+            APP_ENV: appEnv,
+            TRUST_PROXY_HOPS: '2',
+            DASHBOARD_URL: 'https://webhooks.example.com',
+          }),
+        ).toThrow(new RegExp(`SMTP_URL: SMTP_URL is required when APP_ENV=${appEnv}`));
       },
     );
 
@@ -261,7 +466,12 @@ describe('validateEnv', () => {
       expect(validateEnv({ ...baseEnv(), APP_ENV: appEnv }).SMTP_URL).toBeUndefined();
     });
 
-    it('defaults DASHBOARD_URL to the local dev server, blank included', () => {
+    /**
+     * Only in development and test, and only through the transform that runs
+     * after the refinement - under staging/production an absent or blank value
+     * refuses the boot instead. See the DASHBOARD_URL describe block above.
+     */
+    it('reads as the local dev server under development, blank included', () => {
       expect(validateEnv(baseEnv()).DASHBOARD_URL).toBe('http://localhost:5173');
       expect(validateEnv({ ...baseEnv(), DASHBOARD_URL: '' }).DASHBOARD_URL).toBe(
         'http://localhost:5173',

@@ -53,6 +53,48 @@ alongside it. That file is owned by the deployments side — until it changes, t
 image is honestly labelled rather than silently wrong. Tests in
 `src/components/DemoDataBanner.test.tsx` pin both directions.
 
+## A forgotten `VITE_API_TRANSPORT` now fails the build
+
+The banner above is a *last* line of defence: it depends on a human loading the
+page and noticing. `vite.config.ts` now carries a guard that makes the
+*forgotten* case loud at build time, while leaving a *chosen* mock build
+possible:
+
+| Value on `vite build` | Result |
+| --- | --- |
+| unset, empty, whitespace | refuses, non-zero exit, names the variable and the consequence |
+| `http` | builds silently |
+| `mock` | builds, with a boxed DEMO BUILD warning at the start and at the end |
+| anything else (`HTTP`, `htp`, `" http "`) | refuses, naming the two valid values |
+
+It is a plugin with `apply: 'build'` rather than a check in the exported config
+function, because that function also runs for `vite dev` and for every `vitest`
+run — Vitest loads this same config file — and `apply: 'build'` delegates the
+distinction to Vite's own dispatch instead of to a hand-written test on
+`command`/`mode`. Measured, not assumed: `vite build` is
+`command="build" mode="production"`; `vite` is `serve`/`development`; `vitest
+run` is `serve`/`test`. Only the first applies the plugin.
+
+It reads `config.env` in `configResolved` — the resolved map Vite is about to
+inline into `import.meta.env` — so the value checked is exactly the value the
+bundle gets, whether it came from the command line or from an `.env` file.
+
+Comparison is exact. `HTTP` and `" http "` are refusals, not accepted
+spellings, because the bundle's own test is `=== 'http'` and anything that
+misses it selects the mock. `vite-config-guard.test.ts` pins the table.
+
+**Consequences elsewhere, checked:**
+
+- `deployments/docker/dashboard.Dockerfile` defaults `ARG
+  VITE_API_TRANSPORT=mock` and passes it explicitly on the `RUN` line, so the
+  container build still succeeds — now with the demo warning in the image build
+  log, which is an improvement on the `echo` it had.
+- `.github/workflows/ci.yml` runs `pnpm -r build` with the variable unset. That
+  job **fails** until it sets one. This is the guard working, not a bug in it.
+- The Deployer recipe does not build the dashboard at all today
+  (`deployments/deployer/hookubit.php` builds only `@hookubit/control-api`);
+  whoever adds that step must pass `VITE_API_TRANSPORT=http`.
+
 ## Login handles `email_not_verified`
 
 The control plane's auth hardening returns `403` with

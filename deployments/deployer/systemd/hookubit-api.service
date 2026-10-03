@@ -28,7 +28,38 @@ Type=simple
 User=hookubit
 Group=hookubit
 WorkingDirectory=/opt/hookubit/current/apps/control-api
-EnvironmentFile=/etc/hookubit/hookubit.env
+# CONFIGURATION IS TWO FILES, AND THE ORDER IS THE WHOLE POINT.
+#
+#   /opt/hookubit/shared/.env                    the nine variables BOTH planes read
+#   /opt/hookubit/shared/apps/control-api/.env   this service's own
+#
+# A LATER EnvironmentFile= WINS in systemd, so the common file goes FIRST and this
+# service's own second. @nestjs/config resolves it the same way round from the other
+# end - envFilePath is ['.env', '../../.env'] against this WorkingDirectory, and
+# EARLIER entries win there - so both parsers agree that service-specific beats common.
+# If they disagreed, one file would mean different things to the process and to the unit
+# that starts it, and the symptom would be a value nobody can find in either file.
+#
+# NO `-` PREFIX, deliberately. `-EnvironmentFile=` tolerates a missing file, and there
+# is no state of this system in which running without one of these is correct. Much of
+# the platform's configuration has a safe default - LOG_LEVEL, every EGRESS_*, the
+# breaker thresholds - so a tolerated-missing file does not fail cleanly; it starts
+# something that is configured by accident. Without the dash, a start fails BEFORE
+# ExecStart with `Failed to load environment files: No such file or directory` naming
+# the path, which is the one message an operator can act on. These units are `enable`d
+# and not started until the first deploy, so the only way to meet it is a reboot in
+# between - exactly when "you have not deployed yet" is the right answer.
+#
+# SHARED PATHS, NOT RELEASE PATHS. <release>/.env and <release>/apps/control-api/.env
+# are symlinks to these same two files, but they exist only for whichever release is
+# current - so a unit that read them through current/ would depend on the symlink swap
+# having finished. PID 1 reads these as root before privileges are dropped, so
+# ProtectSystem= and ReadOnlyPaths= below do not apply to them. The service user's own
+# access matters for a different reason: @nestjs/config does existsSync() and then
+# readFileSync() on those two symlinks, and an EACCES there is a control API that does
+# not boot. That is what the 0640 mode and the hookubit group in the README are for.
+EnvironmentFile=/opt/hookubit/shared/.env
+EnvironmentFile=/opt/hookubit/shared/apps/control-api/.env
 ExecStart=/usr/bin/node dist/main.js
 Restart=on-failure
 RestartSec=5

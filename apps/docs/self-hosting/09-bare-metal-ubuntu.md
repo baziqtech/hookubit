@@ -4,14 +4,13 @@ No Docker. systemd for the control API and the data plane, nginx in front of
 them as a plain reverse proxy, and PostgreSQL and Redis on their own machines.
 Mail goes to Amazon SES; Prometheus and Grafana watch the lot.
 
-**This host does not serve the dashboard.** Cloudflare builds and publishes it
-from the same repository on every push, and nothing on this page builds, copies
-or serves a front-end bundle. This box answers two hostnames and no files: the
-control API and ingest, each proxied to a local port.
+**This host serves everything.** The dashboard is built into the release and
+nginx serves it off that release, on the same hostname that proxies the control
+API. One box, one deploy, two hostnames. Nothing is hosted anywhere else.
 
 Hostnames below are the ones `hookubit.com` itself uses. Substitute your own
-domain — but keep the dashboard and the API **under one registrable domain**,
-which is what the first constraint below is about.
+domain — but keep the dashboard and the API on **one hostname**, which is what
+the first constraint below is about.
 
 Ubuntu 22.04 or 24.04 throughout, PostgreSQL 15 or newer. If you would rather
 run containers, read [Docker Compose](/self-hosting/04-docker-compose) — and see
@@ -21,39 +20,48 @@ end, because the honest answer is "for two of these, yes".
 ## The shape
 
 ```
-                    ┌──────────────────────────────────────────┐
-  browser  ────────▶│ Cloudflare          hookubit.com         │
-                    │  the dashboard's static assets, built    │
-                    │  and published by Cloudflare on push     │
-                    └───────────────────┬──────────────────────┘
-                                        │ fetch https://api.hookubit.com/v1/*
-                                        │ credentials: include — same-site
-  publisher ─────────────────────────┐  │
-  (hooks.hookubit.com)               ▼  ▼
-                            ┌──────────────────────────┐
-                            │ app host — nginx :443    │
-                            │   proxies only; serves   │
-                            │   no files at all        │
-                            │  api.    → :3000  api    │
-                            │  hooks.  → :8080  ingest │
-                            │  probes :9090  localhost │
-                            └────┬──────────────┬──────┘
-                                 │              │
-                   ┌─────────────▼──┐      ┌────▼───────────┐
-                   │ db.lan:5432    │      │ cache.lan:6379 │
-                   │ PostgreSQL     │      │ Redis          │
-                   │ system of      │      │ rate-limiter   │
-                   │ record + queue │      │ buckets only   │
-                   └────────────────┘      └────────────────┘
+  browser ──────────┐          publisher ──────────┐
+  hookubit.com      │          hooks.hookubit.com  │
+                    ▼                              ▼
+         ┌───────────────────────────────────────────────────┐
+         │ Cloudflare — proxy only. TLS, caching, DDoS.      │
+         │ It hosts nothing.                                 │
+         └──────────┬────────────────────────────┬───────────┘
+                    │                            │
+                    ▼                            ▼
+         ┌─────────────────────────────────────────────────────┐
+         │ app host — nginx :443                               │
+         │                                                     │
+         │  hookubit.com        ONE ORIGIN, two handlers:      │
+         │    /v1/*     ──────────────────▶ :3000  control API │
+         │    everything else ───▶ current/apps/dashboard/dist │
+         │                         (SPA, try_files fallback)   │
+         │                                                     │
+         │  hooks.hookubit.com  ─────────▶ :8080  ingest       │
+         │                                                     │
+         │  probes :9090  localhost only, never published      │
+         └──────┬─────────────────────────────────┬────────────┘
+                │                                 │
+    ┌───────────▼────┐                     ┌──────▼─────────┐
+    │ db.lan:5432    │                     │ cache.lan:6379 │
+    │ PostgreSQL     │                     │ Redis          │
+    │ system of      │                     │ rate-limiter   │
+    │ record + queue │                     │ buckets only   │
+    └────────────────┘                     └────────────────┘
 ```
 
 | Host | Runs | Loses what, if it dies |
 |---|---|---|
-| **app** | nginx, `hookubit-api`, `hookubit-data-plane` | Time. Queued deliveries resume from PostgreSQL. |
+| **app** | nginx, `hookubit-api`, `hookubit-data-plane`, **and the dashboard's files** | Time, plus the operator UI. Queued deliveries resume from PostgreSQL. |
 | **db** | PostgreSQL 15+ | **Everything.** System of record *and* the delivery queue. |
 | **cache** | Redis | Rate-limiter accuracy. Not deliveries. |
 | **monitoring** | Prometheus, Grafana | Visibility. Nothing operational. |
-| **Cloudflare** | the dashboard, and the proxy in front of this box | Operator access to the UI. The API and ingest keep working for anything that calls them directly. |
+| **Cloudflare** | **the proxy in front of this box — nothing else.** TLS termination at the edge, caching, DDoS absorption | Public reachability of all three paths: §8's packet filter accepts `443` from Cloudflare's ranges only, so nothing gets in around it. |
+
+The dashboard is `apps/dashboard/dist` inside the live release, served by nginx
+as the document root for `hookubit.com`. It is built by the deploy, it swaps with
+the `current` symlink, and it rolls back with it — the same lifecycle as
+`dist/main.js` and `bin/webhookd`, not a separate one.
 
 **`webhookd all` runs all four data-plane roles in one process.** One unit, one
 log, one set of probes. The roles split into separate deployments the day the
@@ -74,32 +82,35 @@ deliveries. That is why it gets no backup and no replication here.
 Read these before you buy a domain. Both are properties of the code, not
 preferences, and both are cheap to satisfy and expensive to retrofit.
 
-### 1. The dashboard and the API must share one registrable domain
+### 1. The dashboard and the API are one origin
 
-The dashboard is served from `hookubit.com` and the control API from
-`api.hookubit.com`. Different origins, so every call is cross-origin — and the
-same **site**, which is the part that matters.
+`hookubit.com` serves the dashboard's files **and** proxies `/v1/*` to the
+control API. Same scheme, same host, same port: one origin, and almost
+everything that used to be a decision follows from that for free.
 
-The session cookie is issued `HttpOnly; SameSite=Lax` with no `Domain`
-(`apps/control-api/src/auth/session.service.ts`, asserted by a spec in every
-environment). A `Lax` cookie is withheld from cross-**site** requests, not from
-cross-origin ones, and "site" means the registrable domain: `hookubit.com` and
-`api.hookubit.com` are one site, so the browser sends it. The dashboard asks it
-to, with `credentials: 'include'`, against the base URL it is built with
-(`VITE_API_BASE_URL`; `apps/dashboard/src/lib/api-base-url.ts`).
+- **Relative paths are correct by construction.** `src/lib/api.ts` calls
+  `fetch('/v1/projects')`, which resolves against whatever hostname served the
+  page. There is nothing to configure, nothing to keep in sync, and nothing that
+  can be set to a wrong value — see `apps/dashboard/README.md`, "Why there is no
+  `VITE_API_BASE_URL`".
+- **There is no CORS.** Not "CORS is configured correctly" — the browser runs no
+  cross-origin check on a same-origin request at all. No preflight, no
+  `Access-Control-Allow-Origin`, no `OPTIONS` to let through. `CORS_ORIGINS` can
+  stay **empty**, and empty is now the *correct* value rather than a dangerous
+  one: it fails closed, and what it closes is a door nothing needs to use.
+- **The session cookie never crosses an origin.** It is issued `HttpOnly;
+  SameSite=Lax` with no `Domain` (`apps/control-api/src/auth/session.service.ts`,
+  asserted by a spec in every environment). Same-origin requests send it under
+  every `SameSite` value there is, so the registrable-domain arithmetic that used
+  to matter here has nothing left to decide.
 
-What does **not** work is a dashboard on a different registrable domain — a
-`*.pages.dev` preview URL, or a separate brand domain. Sign-in succeeds, the
-cookie is set and then never sent again, and every request after it is
-anonymous. It looks like a broken session, not a broken deployment.
-
-Two things the API side has to hold up, or none of this works. Both are one line
-in `/etc/hookubit/hookubit.env` and both are covered in §9:
-
-- the dashboard's origin is listed **exactly** in `CORS_ORIGINS`, which is
-  configured with `credentials: true` and **fails closed** when unset;
-- nginx passes `OPTIONS` through to the API, because a cross-origin dashboard
-  preflights every write.
+This is the simplification the whole page turns on, so be clear about what
+replaced the risk rather than removed it. Two origins failed **loudly and
+early**: `CORS_ORIGINS` wrong and sign-in itself fails on the first request. One
+origin moves that hazard into §8's server block, where it fails **late and
+quietly** — a missing `location /v1/` answers API calls with `index.html` and a
+`200`. That is the single most important thing on this page and it has its own
+heading in §8.
 
 ### 2. Ingest gets its own hostname
 
@@ -109,10 +120,12 @@ eventually want to rate-limit, cache and scale it separately. Give it
 `hooks.hookubit.com`.
 
 That hostname is **compiled into the dashboard bundle** as
-`VITE_INGEST_BASE_URL`, so decide it before the dashboard is first built — and
-set it where that build happens, which is Cloudflare's build environment, not
-this host. The build settings are in `apps/dashboard/README.md` in the
-repository.
+`VITE_INGEST_BASE_URL`, so decide it before the dashboard is first built. The
+build happens **on this host** — §4 by hand, or the Deployer recipe on every
+deploy, which reads it from `ingest_base_url` in
+`deployments/deployer/hosts.yml` and then greps the built JS to prove the value
+arrived. `apps/dashboard/README.md` explains what the variable does and what an
+unset one produces.
 
 ---
 
@@ -289,12 +302,24 @@ A system user with no shell:
 
 ```bash
 sudo useradd --system --create-home --home-dir /opt/hookubit --shell /usr/sbin/nologin hookubit
-sudo mkdir -p /opt/hookubit/{src,bin} /etc/hookubit
+sudo mkdir -p /opt/hookubit/{src,bin,shared}
 sudo chown -R hookubit:hookubit /opt/hookubit
 ```
 
-Two directories, not three. There is no `web/`: nothing on this host serves
-static files any more.
+Three directories, and still no `web/`: nginx serves the dashboard **out of the
+build tree** (`src/apps/dashboard/dist` here, `current/apps/dashboard/dist`
+under the Deployer recipe), never out of a copy. A copy would be a second thing
+to keep in step, and a stale copy is indistinguishable from a fresh one until a
+user finds it.
+
+There is no `/etc/hookubit` either — configuration lives in
+`/opt/hookubit/shared` (§5), which is also where the Deployer recipe keeps it,
+so the two layouts agree on every path.
+
+**`/opt/hookubit` must be traversable by `www-data`**, because nginx opens files
+underneath it. The `chown -R hookubit:hookubit` above leaves it `0755`, which is
+enough; §8 says what to do if you have tightened it, and the Deployer README
+covers the same ground for the two-user layout.
 
 ---
 
@@ -333,16 +358,64 @@ not run in it and bare `go` is `command not found` here.
 
 ### The dashboard
 
-**Not here.** Cloudflare's git integration builds and publishes the dashboard
-from this same repository on every push to the deployment branch. Nothing on
-this host builds it, copies it or serves it, and the three values compiled into
-the bundle — the transport, the control API's base URL and the ingest base URL —
-are set in **Cloudflare's build environment**, documented in
-`apps/dashboard/README.md` in the repository.
+Built here, into the tree nginx serves. Two variables, both compiled in by vite
+and neither of them a secret:
 
-What that means for this page: the front end and the back end deploy on
-different triggers. A push updates the dashboard. Step 14 updates this host.
-Neither waits for the other, and §9 is where the two are wired together.
+```bash
+cd /opt/hookubit/src
+VITE_API_TRANSPORT=http \
+VITE_INGEST_BASE_URL=https://hooks.hookubit.com \
+  pnpm --filter @hookubit/dashboard build
+
+# 12 files, and no .map among them.
+find apps/dashboard/dist -type f | wc -l
+find apps/dashboard/dist -name '*.map'
+```
+
+Output is `apps/dashboard/dist/`, which becomes nginx's `root` in §8. Prove the
+variables landed before you move on, because neither failure is visible in the
+build output:
+
+```bash
+# The ingest origin IS in the bundle, and the localhost fallback is NOT.
+grep -rlF --include='*.js' -e 'https://hooks.hookubit.com' apps/dashboard/dist/assets
+grep -rlF --include='*.js' -e 'http://localhost:8080'      apps/dashboard/dist/assets
+```
+
+The first must name a file. The second must name none and exit `1`. **Keep the
+`--include` before the pattern and never put a `--` in front of it**: after a
+`--` the filter becomes a filename, grep searches the directory unfiltered and
+exits `2`, and on the second command `2` looks exactly like "not found".
+
+::: danger `VAR=x sudo -u hookubit …` silently sets nothing
+If you are not inside the `sudo -u hookubit -H bash` shell this step opens, the
+obvious spelling does not work:
+
+```bash
+VITE_API_TRANSPORT=http sudo -u hookubit pnpm --filter @hookubit/dashboard build   # WRONG
+```
+
+That sets the variable on `sudo`, and sudoers' `env_reset` builds a fresh
+environment for the target command, so nothing arrives. Put `env` **after**
+`sudo`, inside the privilege change:
+
+```bash
+sudo -u hookubit env VITE_API_TRANSPORT=http \
+     VITE_INGEST_BASE_URL=https://hooks.hookubit.com \
+     pnpm --filter @hookubit/dashboard build                                       # RIGHT
+```
+
+The two variables fail differently when they are stripped, which is why the
+greps above are not optional. `VITE_API_TRANSPORT` has a guard in
+`apps/dashboard/vite.config.ts` and the build **refuses** — loud, immediate,
+nothing shipped. `VITE_INGEST_BASE_URL` has none: the build succeeds and
+compiles `http://localhost:8080` in, and the only symptom is a Get-started page
+whose `curl` points at the operator's own laptop.
+
+The Deployer recipe is unaffected by this: it runs as the deploy user over ssh
+with no `sudo` in the command, so a plain prefix reaches the process. It runs the
+same two greps anyway.
+:::
 
 That is the last step that runs inside the `hookubit` shell. Leave it before
 you go on: `hookubit` has `/usr/sbin/nologin` for a shell and is not in sudoers,
@@ -357,41 +430,100 @@ exit
 
 ## 5. Configuration
 
+**Three files, not one.** Configuration is split by who reads it, and the split
+is load-bearing rather than tidy:
+
+| File | Holds | Read by |
+|---|---|---|
+| `/opt/hookubit/shared/.env` | the **nine** variables both planes read | both units |
+| `/opt/hookubit/shared/apps/control-api/.env` | the control plane's own | `hookubit-api` only |
+| `/opt/hookubit/shared/services/data-plane/.env` | the data plane's own | `hookubit-data-plane` only |
+
+The nine shared ones — `APP_ENV`, `DATABASE_URL`, `LOG_LEVEL`, `REDIS_URL`,
+`ENCRYPTION_KEY`, `ENCRYPTION_KEY_ID`, `ENCRYPTION_KEYS_RETIRED`,
+`OTEL_EXPORTER_OTLP_ENDPOINT`, `OTEL_SERVICE_NAMESPACE` — live in exactly one
+file **so that they cannot drift**. Two copies of `ENCRYPTION_KEY` that disagree
+means the control API encrypts endpoint signing secrets the worker cannot
+decrypt: each process validates its own configuration happily, every delivery
+fails at signing time, and nothing in either log points at the cause.
+`DATABASE_URL` is the same class of fault — ingest writes events the router never
+reads.
+
+Everything else belongs to one plane and lives with it. The full catalogue of
+each file, with every default in a comment, is the three `.env.example`
+templates in the repository (`/opt/hookubit/src/.env.example` and the two beside
+it); [Configuration](/self-hosting/05-configuration) is the reference table.
+
+::: tip Why `shared/` and not the source tree
+These are the same three paths the Deployer recipe uses
+(`deployments/deployer/README.md`), where they live outside the release
+directories and are symlinked into each one. Putting them in the same place here
+means moving from this hand-built tree to the automated deploy later changes
+nothing about your configuration, and §14's `git pull` cannot touch them.
+:::
+
 ```bash
-sudo install -o hookubit -g hookubit -m 0600 /dev/null /etc/hookubit/hookubit.env
-sudo -u hookubit tee /etc/hookubit/hookubit.env >/dev/null <<'EOF'
+sudo mkdir -p /opt/hookubit/shared/apps/control-api \
+             /opt/hookubit/shared/services/data-plane
+
+# 1. The nine both planes read.
+sudo tee /opt/hookubit/shared/.env >/dev/null <<'EOF'
 APP_ENV=production
 LOG_LEVEL=info
 
 DATABASE_URL=postgresql://hookubit:PASSWORD@db.lan:5432/hookubit?schema=public
-DIRECT_DATABASE_URL=postgresql://hookubit:PASSWORD@db.lan:5432/hookubit?schema=public
-DATABASE_MAX_CONNECTIONS=20
 REDIS_URL=redis://:PASSWORD@cache.lan:6379/0
 
 ENCRYPTION_KEY=REPLACE
+EOF
+
+# 2. The control plane's own.
+sudo tee /opt/hookubit/shared/apps/control-api/.env >/dev/null <<'EOF'
 JWT_SECRET=REPLACE
 SESSION_SECRET=REPLACE
+
+# Migrations must bypass PgBouncer: transaction pooling breaks DDL and the
+# session-scoped advisory lock Prisma takes. With no pooler it is the same URL
+# as DATABASE_URL above — but it must be set HERE, because the Prisma CLI reads
+# this directory's .env and does not read the common file.
+DIRECT_DATABASE_URL=postgresql://hookubit:PASSWORD@db.lan:5432/hookubit?schema=public
 
 # Amazon SES, over SMTP. The credentials are SES *SMTP* credentials, which are
 # derived from an IAM user and are NOT the IAM access key itself.
 SMTP_URL=smtp://SES_SMTP_USER:SES_SMTP_PASSWORD@email-smtp.eu-west-1.amazonaws.com:587
+# Do NOT quote this. Angle brackets and spaces are ordinary characters to both
+# dotenv and systemd, and a quote is parsed differently by each.
 MAIL_FROM=HookuBit <no-reply@example.com>
 
-# The dashboard's origin, twice, for two different jobs. DASHBOARD_URL is the
-# base of every link in every email; wrong here means mail full of dead links.
-# CORS_ORIGINS is an exact-match list and FAILS CLOSED: unset, and sign-in
-# itself fails. Both are the hostname Cloudflare serves the dashboard on, NOT
-# this box's. See §9.
+# The public origin this box answers the dashboard AND /v1 on. It is the base of
+# every link in every email; wrong here means mail full of dead links.
 DASHBOARD_URL=https://hookubit.com
-CORS_ORIGINS=https://hookubit.com
+
+# CORS_ORIGINS IS DELIBERATELY EMPTY, AND THAT IS THE CORRECT VALUE.
+# The dashboard and the API are one origin, so the browser runs no cross-origin
+# check on these requests: there is no preflight to allow and no header to get
+# right. The variable fails closed, and what it closes is a door nothing needs.
+# Put an origin here ONLY when some OTHER site's JavaScript must call this API
+# from a browser - and read §9 first, because that is a real decision, not a
+# formality.
+CORS_ORIGINS=
 
 CONTROL_API_PORT=3000
+
+# EXACTLY the number of reverse proxies in front of this process.
+# Cloudflare + nginx = 2. See "Proxy hops" below before changing it.
+TRUST_PROXY_HOPS=2
+EOF
+
+# 3. The data plane's own.
+sudo tee /opt/hookubit/shared/services/data-plane/.env >/dev/null <<'EOF'
+DATABASE_MAX_CONNECTIONS=20
+
 INGEST_PORT=8080
 DATA_PLANE_METRICS_PORT=9090
 
-# EXACTLY the number of reverse proxies in front of each process.
-# Cloudflare + nginx = 2. See "Proxy hops" below before changing these.
-TRUST_PROXY_HOPS=2
+# EXACTLY the number of reverse proxies in front of the INGEST api. See
+# "Proxy hops" below.
 INGEST_TRUSTED_PROXY_HOPS=2
 
 WORKER_CONCURRENCY=32
@@ -402,18 +534,79 @@ Generate the three secrets separately so they never appear in your shell
 history as part of a heredoc:
 
 ```bash
-for k in ENCRYPTION_KEY:32 JWT_SECRET:48 SESSION_SECRET:48; do
-  sudo -u hookubit sed -i "s|^${k%%:*}=REPLACE|${k%%:*}=$(openssl rand -base64 ${k##*:})|" \
-    /etc/hookubit/hookubit.env
+sudo sed -i "s|^ENCRYPTION_KEY=REPLACE|ENCRYPTION_KEY=$(openssl rand -base64 32)|" \
+  /opt/hookubit/shared/.env
+for k in JWT_SECRET SESSION_SECRET; do
+  sudo sed -i "s|^$k=REPLACE|$k=$(openssl rand -base64 48)|" \
+    /opt/hookubit/shared/apps/control-api/.env
 done
 ```
 
+### Ownership and mode
+
+```bash
+sudo chown -R root:hookubit /opt/hookubit/shared
+sudo chmod 0750 /opt/hookubit/shared \
+                /opt/hookubit/shared/apps /opt/hookubit/shared/apps/control-api \
+                /opt/hookubit/shared/services /opt/hookubit/shared/services/data-plane
+sudo chmod 0640 /opt/hookubit/shared/.env \
+                /opt/hookubit/shared/apps/control-api/.env \
+                /opt/hookubit/shared/services/data-plane/.env
+```
+
+`0640`, group `hookubit` — **not** the `0600 hookubit:hookubit` this page used to
+prescribe, which is a mode that works right up until something other than the
+service user has to read the file, and then fails in a way that looks like
+anything but a permission. Taking it apart:
+
+- **`root` owns them.** You edit configuration with `sudo`; nothing else on the
+  box can change what the services are told. Under the Deployer recipe the owner
+  is the deploy user instead, because `prisma migrate deploy` and the migration
+  guard run as that user over ssh and need `DATABASE_URL` and
+  `DIRECT_DATABASE_URL`. **That is the one difference between the two layouts**,
+  and it is why the old `0600 hookubit:hookubit` broke an automated deploy: the
+  deploy user could not read its own database URL.
+- **Group `hookubit`, read.** It is tempting to leave this off, because systemd
+  reads an `EnvironmentFile=` as **root**, in PID 1, before it drops privileges —
+  so the service user genuinely does not need it *for that*. It needs it for
+  something else. The control API loads `.env` and `../../.env` relative to its
+  working directory through `@nestjs/config`, which does `existsSync()` and then
+  `readFileSync()`; an `EACCES` there is not a skipped file, it is a control API
+  that **does not boot**. Group-read is what keeps that from happening the first
+  time somebody symlinks these files into the source tree or moves to the
+  Deployer layout, where they *are* symlinked into every release.
+- **Nothing for *other*.** These files hold `ENCRYPTION_KEY` and a database
+  password. The directory modes above matter as much as the file modes: a
+  world-traversable path to a `0640` file is one `chmod` away from being readable.
+
 ::: danger Back up ENCRYPTION_KEY somewhere that is not the database
 Endpoint signing secrets are AES-256-GCM ciphertext bound to their row, and the
-key lives only in this file. A database backup restored without it gives you a
-platform that starts, accepts events, and fails every single delivery at
-signing time.
+key lives only in `/opt/hookubit/shared/.env`. A database backup restored
+without it gives you a platform that starts, accepts events, and fails every
+single delivery at signing time.
 :::
+
+### Format rules — both parsers must agree, line for line
+
+Every one of these files is read by systemd's `EnvironmentFile=` **and**, for the
+common and control-api files, by dotenv inside the control API. They are not the
+same language, and a line that means two different things in the two parsers
+hands the two planes different configuration out of one file. Plain `KEY=value`
+only:
+
+- **No quotes.** Both strip them, but they disagree about escapes inside them.
+- **No `$`.** dotenv-expand would substitute; systemd would not.
+- **No `export`.** dotenv accepts it; systemd puts it in the key name.
+- **No backslash line continuations.** systemd joins them; dotenv does not — and
+  a connection string cut at the `\` usually still *parses*, so the symptom is
+  two planes quietly using different databases.
+- **No trailing comments.** `KEY=value  # note` gives dotenv `value` and systemd
+  `value  # note`.
+- **No leading `;` on a comment.** Use `#`.
+
+`MAIL_FROM=HookuBit <no-reply@example.com>` is safe in both and must stay
+**unquoted** — that is why the rule is "no quotes" rather than "quote values with
+spaces".
 
 ### Proxy hops
 
@@ -423,8 +616,29 @@ shares one bucket, because they all appear to come from your proxy. Set it too
 high and a client picks its own address with an `X-Forwarded-For` header, which
 is worse than no rate limiting, because it looks like there is some.
 
-**For the topology on this page it is 2, for both planes.** Here is the
-arithmetic, because this is a number to derive once rather than tune.
+**For the topology on this page it is 2, for both planes** — `TRUST_PROXY_HOPS`
+in `shared/apps/control-api/.env` and `INGEST_TRUSTED_PROXY_HOPS` in
+`shared/services/data-plane/.env`.
+
+::: tip It is still 2, and nothing about the dashboard move changed it
+Worth saying out loud rather than leaving to inference, because the hostname
+layout did change. This number counts **proxies in front of the process**, not
+hostnames and not `location` blocks. The chain into the control API is
+`client → Cloudflare → nginx → :3000`, which is two proxies, and it was two
+proxies when the API answered on its own hostname. nginx serving static files
+out of a second `location` in the same server block adds no hop: it is the same
+nginx, the same TLS termination, the same `proxy_pass`.
+
+The derivation below is therefore unchanged, and so is the table. Re-derive it
+if you take Cloudflare out (**1**) or put a load balancer in front of it
+(**3**).
+:::
+
+They are per-process counts, which is exactly
+why they are not in the common file: the two planes can legitimately sit behind
+different numbers of proxies, and a single shared value would be a guess about
+both. Here is the arithmetic, because this is a number to derive once rather
+than tune.
 
 Express (and the Go ingest handler, identically) builds one list: the socket
 address first, then the `X-Forwarded-For` entries read right to left. A count of
@@ -449,7 +663,7 @@ property of that line.
 own machine and read the headers back:
 
 ```bash
-curl -s https://api.hookubit.com/v1/auth/session -o /dev/null
+curl -s https://hookubit.com/v1/auth/session -o /dev/null
 sudo journalctl -u hookubit-api -n 20 -o cat \
   | jq -c 'select(.req) | {xff: .req.headers["x-forwarded-for"],
                            cf: .req.headers["cf-connecting-ip"],
@@ -481,9 +695,11 @@ Cloudflare can reach the port. Both are §8, and both are mandatory.
 
 The SSRF guard refuses to deliver to private addresses, and in
 `APP_ENV=production` the blanket override is **refused outright** —
-`EGRESS_ALLOW_PRIVATE_NETWORKS=true` will not start. Name the subnets instead:
+`EGRESS_ALLOW_PRIVATE_NETWORKS=true` will not start. Name the subnets instead,
+in the data plane's own file — the control plane reads neither key:
 
 ```bash
+# /opt/hookubit/shared/services/data-plane/.env
 EGRESS_PRIVATE_ALLOWLIST=10.0.0.0/24,192.168.1.0/24
 ```
 
@@ -495,7 +711,9 @@ allowlist written to look like one.
 There is none configured, and that is fine. The effect is that the maximum event
 size is the inline limit (64 KiB), and a larger payload is refused with exactly
 that reason rather than silently truncated. Add `S3_ENDPOINT`, `S3_BUCKET`,
-`S3_REGION`, `S3_ACCESS_KEY` and `S3_SECRET_KEY` when you need bigger events.
+`S3_REGION`, `S3_ACCESS_KEY` and `S3_SECRET_KEY` to
+`/opt/hookubit/shared/services/data-plane/.env` when you need bigger events. The
+control plane reads none of them, which is why they are not in the common file.
 
 ---
 
@@ -507,23 +725,41 @@ by hand now, and on every upgrade:
 ```bash
 sudo systemd-run --pipe --wait --collect \
   --uid=hookubit --gid=hookubit \
-  --property=EnvironmentFile=/etc/hookubit/hookubit.env \
+  --property=EnvironmentFile=/opt/hookubit/shared/.env \
+  --property=EnvironmentFile=/opt/hookubit/shared/apps/control-api/.env \
   --working-directory=/opt/hookubit/src/apps/control-api \
   pnpm exec prisma migrate deploy
 
 sudo systemd-run --pipe --wait --collect \
   --uid=hookubit --gid=hookubit \
-  --property=EnvironmentFile=/etc/hookubit/hookubit.env \
+  --property=EnvironmentFile=/opt/hookubit/shared/.env \
+  --property=EnvironmentFile=/opt/hookubit/shared/apps/control-api/.env \
   --working-directory=/opt/hookubit/src/apps/control-api \
   pnpm exec prisma migrate status
 ```
 
-Do not simplify that to `env $(grep -v '^#' /etc/hookubit/hookubit.env)`: `$(…)`
-word-splits on spaces, so `MAIL_FROM=HookuBit <no-reply@example.com>` arrives as
-two arguments and `env` runs `<no-reply@example.com>` as the command, whereas
-`systemd-run` reads the file with the very parser `EnvironmentFile=` uses in the
-units in step 7 — so migration and services agree on every key, and the
-migration connects with the `DIRECT_DATABASE_URL` from that same file.
+**Two `EnvironmentFile=` properties, common first.** `DATABASE_URL` is in the
+common file and `DIRECT_DATABASE_URL` is in the control plane's own, and the
+migration needs both. The order matches the units in §7 for the same reason it
+matters there: a **later** `EnvironmentFile=` wins in systemd, and the control
+API resolves the same pair the other way round (`envFilePath` is
+`['.env', '../../.env']`, where **earlier** entries win) — so both agree that
+service-specific beats common. The data plane's file is not listed: nothing here
+reads it.
+
+Do not simplify that to `env $(grep -v '^#' …)`: `$(…)` word-splits on spaces, so
+`MAIL_FROM=HookuBit <no-reply@example.com>` arrives as two arguments and `env`
+runs `<no-reply@example.com>` as the command, whereas `systemd-run` reads the
+files with the very parser `EnvironmentFile=` uses in the units in step 7 — so
+migration and services agree on every key.
+
+::: tip Running `pnpm` without `systemd-run`
+`pnpm --filter @hookubit/control-api prisma:deploy` works too, from anywhere in
+the tree: that script exports the common file before invoking the CLI, because
+the Prisma CLI reads `.env` from its **working directory** only and would
+otherwise never see `DATABASE_URL`. `systemd-run` is still the better habit here,
+because it proves the files parse the same way the services will read them.
+:::
 
 Two migrations in the history invert the usual "apply ahead of the code" rule
 and must be run with the data plane stopped. Both say so in capitals in their
@@ -563,7 +799,9 @@ Type=simple
 User=hookubit
 Group=hookubit
 WorkingDirectory=/opt/hookubit/src/apps/control-api
-EnvironmentFile=/etc/hookubit/hookubit.env
+# Common first, this service's own second: a LATER EnvironmentFile= wins.
+EnvironmentFile=/opt/hookubit/shared/.env
+EnvironmentFile=/opt/hookubit/shared/apps/control-api/.env
 ExecStart=/usr/bin/node dist/main.js
 Restart=on-failure
 RestartSec=5
@@ -594,7 +832,9 @@ Type=simple
 User=hookubit
 Group=hookubit
 WorkingDirectory=/opt/hookubit
-EnvironmentFile=/etc/hookubit/hookubit.env
+# Common first, this service's own second: a LATER EnvironmentFile= wins.
+EnvironmentFile=/opt/hookubit/shared/.env
+EnvironmentFile=/opt/hookubit/shared/services/data-plane/.env
 ExecStart=/opt/hookubit/bin/webhookd all
 Restart=on-failure
 RestartSec=5
@@ -615,6 +855,25 @@ WantedBy=multi-user.target
 Neither unit lists `After=postgresql` or `After=redis`, because neither runs
 here. Both retry the database on a backoff instead of exiting, which is what you
 want when the database host reboots.
+
+**Two `EnvironmentFile=` lines each, and the order is the point.** systemd lets a
+**later** file override an earlier one, so the common file goes first and the
+service's own second. The control API resolves the same pair from the other end —
+`envFilePath` is `['.env', '../../.env']` and **earlier** entries win there — so
+both parsers agree that service-specific beats common. If they disagreed, one
+file would mean different things to the process and to the unit that starts it.
+
+Each unit loads only its own file plus the common one, which is also a small
+privilege win: the control API is never handed `S3_SECRET_KEY`, and the data
+plane is never handed `JWT_SECRET` or `SESSION_SECRET`.
+
+**Neither line is `-`-prefixed.** `-EnvironmentFile=` tolerates a missing file,
+and there is no state of this platform in which running without one of these is
+correct — much of the configuration has a safe default, so a tolerated-missing
+file does not fail cleanly, it starts something configured by accident. Without
+the dash, a start before §5 has been done fails **before** `ExecStart` with
+`Failed to load environment files: No such file or directory` and the path in the
+message, which is the one error an operator can act on immediately.
 
 ```bash
 sudo systemctl daemon-reload
@@ -637,18 +896,100 @@ and lost it.
 
 ## 8. nginx, behind a firewall
 
-**nginx on this box serves no files, and it has one job: two hostnames, two
-local ports.**
+**nginx has two hostnames and three jobs: serve the dashboard, proxy the control
+API on the same hostname, and proxy ingest on its own.**
 
-| Hostname | Proxied to | What answers |
+| Hostname | Path | Answered by |
 |---|---|---|
-| `api.hookubit.com` | `127.0.0.1:3000` | the control API, `/v1/*` only |
-| `hooks.hookubit.com` | `127.0.0.1:8080` | ingest |
+| `hookubit.com` | `/v1/*` | `127.0.0.1:3000` — the control API |
+| `hookubit.com` | everything else | files in `current/apps/dashboard/dist`, falling back to `index.html` |
+| `hooks.hookubit.com` | everything | `127.0.0.1:8080` — ingest |
 
-No `root`, no `try_files`, no `/assets/` block and no SPA fallback. The
-dashboard and its assets are Cloudflare's (§9), and a copy of the bundle here
-would be a second thing to keep in step — a stale copy is indistinguishable
-from a fresh one until a user finds it.
+That first hostname doing two things is the whole design (constraint 1), and it
+is also the one place on this page where a mistake is both easy and silent. Read
+the next heading before you write the file.
+
+### `/v1/` must win over the SPA fallback, and `^~` is what makes it
+
+An SPA needs `try_files $uri /index.html`: React Router owns
+`/orgs/:orgId/projects/:projectId/…`, those paths exist on no disk, and without
+the fallback a refresh or a pasted link is a `404`. That fallback is also a
+machine for turning a missing `location` into a `200`.
+
+**If `/v1/` is not handled, `GET /v1/projects` returns `index.html` with a
+`200`.** Not a 404, not a 502 — the dashboard's own HTML, with a success status
+and `Content-Type: text/html`. The app then calls `response.json()` on it and
+dies on `JSON.parse`, screen by screen, with a browser console full of
+`Unexpected token '<'` and nothing anywhere naming the cause. Sign-in fails the
+same way. The platform behind it is completely healthy; every probe in §7 is
+green.
+
+This hazard is **new**, and it is the price of the one-origin simplification.
+Two origins put a build-time variable in the path, and a wrong one failed on the
+first request with a CORS error that named itself. Deleting that variable moved
+the failure here, into a file no test covers.
+
+So get the precedence right, and understand what it does and does not depend on:
+
+| What nginx does | Consequence here |
+|---|---|
+| `location = /path` — exact — wins immediately | `= /index.html` is reached even via the `try_files` internal redirect |
+| otherwise nginx finds the **longest matching prefix** | `/v1/` (4 chars) beats `/` (1 char) for `/v1/projects` |
+| if that longest prefix has `^~`, matching **stops there** | `^~ /v1/` is immune to every regex, present and future |
+| otherwise **regex** locations are tried, in file order, and the first match wins — **outranking the prefix** | a bare `location /v1/` can be stolen by any regex in the block |
+| if no regex matched, the longest prefix is used | the ordinary path |
+
+Two things follow, and the second is the one people get wrong.
+
+**The order of the `location` blocks in the file does not matter.** Prefix
+selection is by length, not by line number. Writing `location /` first and
+`location ^~ /v1/` last behaves identically to the reverse. You cannot fix this
+hazard by moving blocks around, and you cannot break it that way either.
+
+**A regex location can take `/v1/` away from a plain prefix, from anywhere in
+the block.** That is the real "misordering" risk, and it is a type precedence
+rather than a position one. `location ~ \.json$ { try_files $uri /index.html; }`
+— an entirely reasonable-looking line — captures `/v1/openapi.json` even when it
+is written *below* `location /v1/`. `^~` is the one-character answer: it ends
+matching at the prefix, so no regex added later can reach inside it.
+
+::: tip Verified by execution, not by reading the manual
+The table above was checked by running nginx 1.27 over the server block below
+with a stub upstream, which is worth reporting because four of the five rows
+only matter when something is wrong:
+
+| Config | `GET /v1/projects` | `GET /v1/openapi.json` |
+|---|---|---|
+| as written below | `401 application/json` | `401 application/json` |
+| `location ^~ /v1/` **deleted** | **`200 text/html`** | **`200 text/html`** |
+| `location /v1/` (no `^~`) + `location ~ \.json$` | `401 application/json` | **`200 text/html`** |
+| `location ^~ /v1/` + the same regex | `401 application/json` | `401 application/json` |
+| blocks in reverse file order | `401 application/json` | `401 application/json` |
+
+And one more, which is why `/assets/` below is a plain prefix and **not** `^~`:
+with `location ^~ /assets/`, `GET /assets/index-<hash>.js.map` answered `200`
+with the sourcemap's contents, because `^~` had stopped the
+`location ~ \.map$ { return 404; }` regex from ever being considered. `^~` is
+the right modifier for a block that must beat regexes and the wrong one for a
+block that needs a regex to reach inside it.
+:::
+
+**The one-line proof, after every install and after every edit to this file:**
+
+```bash
+curl -s -o /dev/null -w '%{http_code} %{content_type}\n' https://hookubit.com/v1/auth/session
+```
+
+- `401 application/json; charset=utf-8` — correct. That is the control API
+  answering, through nginx, through Cloudflare.
+- `200 text/html` — **stop.** `/v1/` is not reaching the API; you are looking at
+  `index.html`. The dashboard is broken and nothing else will tell you.
+- `000` or `502` — nginx or the API unit, not the `location` blocks. §7's
+  localhost probes separate those two.
+
+The Deployer recipe runs this assertion on every deploy
+(`hookubit:dashboard:check`), against nginx on loopback with the Host header
+set, so an edge cache cannot make it pass or fail wrongly.
 
 ### Only Cloudflare may reach ports 80 and 443
 
@@ -763,7 +1104,7 @@ and your publishers are dropped at the packet filter with no error anywhere in
 nginx's logs. §9's DNS table says proxied for exactly this reason.
 
 ::: tip Checking it from off-box
-`curl -sv --resolve api.hookubit.com:443:<your-ip> https://api.hookubit.com/v1/auth/session`
+`curl -sv --resolve hookubit.com:443:<your-ip> https://hookubit.com/v1/auth/session`
 from anywhere that is not Cloudflare should now hang and time out. Through the
 normal DNS name it should answer `401`. If the first one answers, the table did
 not load — `sudo nft list table inet hookubit`.
@@ -778,35 +1119,51 @@ Install the certificate and key as `/etc/ssl/cloudflare/origin.pem` and
 
 ::: danger Not Let's Encrypt, and not an HTTP-01 challenge
 An `http-01` challenge — `certbot --nginx`, or any webroot — cannot work against
-the configuration below. The challenge arrives as
-`/.well-known/acme-challenge/<token>` on a hostname whose only `location` is
-`/v1/`, so it lands on `return 404` and issuance fails. That is survivable the
-first time, because you find out immediately. What is not survivable is the
-**renewal** 60 days later: it fails the same way, silently, in a timer whose
-output nobody reads, and when the certificate expires Cloudflare starts
-answering **`526` on every API call** while the dashboard's assets keep loading
-perfectly from Cloudflare's own edge. It looks exactly like an API outage.
+the configuration below, and it fails in the SPA's characteristic way rather
+than with an error. The challenge arrives as
+`/.well-known/acme-challenge/<token>`, no such file exists, `try_files` falls
+back, and the ACME server is handed **`index.html` with a `200`** where it
+expected a key authorization. Issuance fails saying the response did not match.
+
+That is survivable the first time, because you find out immediately. What is not
+survivable is the **renewal** 60 days later: it fails the same way, silently, in
+a timer whose output nobody reads, and when the certificate expires Cloudflare
+answers **`526` on everything** — the dashboard included, since both come from
+this origin now. One origin at least makes that failure total rather than
+half-working, which is the kind of outage people notice in minutes.
 
 If you want a publicly-trusted certificate anyway, use **DNS-01** (`certbot
---dns-cloudflare`), which never touches this nginx. Do not open a
-`/.well-known/` hole in the API hostname just to make `http-01` work: the port
-is Cloudflare-only now, so the challenge would have to come through the proxy
-anyway, and you would be maintaining an unauthenticated path on the API
-hostname for the benefit of one request every two months.
+--dns-cloudflare`), which never touches this nginx. Do not carve a
+`/.well-known/` exception into the server block just to make `http-01` work: the
+port is Cloudflare-only now, so the challenge would have to come through the
+proxy anyway, and you would be maintaining an unauthenticated path on the
+hostname that serves your operator UI for the benefit of one request every two
+months.
 :::
 
 ### `/etc/nginx/sites-available/hookubit`
 
 ```nginx
-# ── The control API. /v1/* and nothing else.
+# ── hookubit.com — the dashboard AND the control API. ONE origin.
 server {
     listen 443 ssl http2;
-    server_name api.hookubit.com;
+    server_name hookubit.com;
 
     ssl_certificate     /etc/ssl/cloudflare/origin.pem;
     ssl_certificate_key /etc/ssl/cloudflare/origin.key;
 
-    location /v1/ {
+    # The LIVE RELEASE's bundle, through the `current` symlink. Under the
+    # Deployer recipe that is what a deploy swaps and what a rollback swaps
+    # back; nginx resolves the symlink per request, so neither needs a reload.
+    # Building by hand (§4) instead? /opt/hookubit/src/apps/dashboard/dist.
+    root /opt/hookubit/current/apps/dashboard/dist;
+    index index.html;
+
+    # ── The control API. `^~` IS LOAD-BEARING: it stops location matching at
+    #    this prefix, so no regex block — here or added later — can take
+    #    /v1/<anything> away from it. Without it, one plausible regex turns
+    #    every API call into index.html with a 200. See the heading above.
+    location ^~ /v1/ {
         proxy_pass http://127.0.0.1:3000;
         proxy_http_version 1.1;
         proxy_set_header Host              $host;
@@ -815,13 +1172,69 @@ server {
         proxy_set_header X-Forwarded-Proto $scheme;
         # Long enough for a slow report, short enough to free the worker.
         proxy_read_timeout 60s;
+        # Do NOT add proxy_intercept_errors here. It is off by default, and on
+        # it would hand the API's own 404 and 5xx JSON to error_page — i.e.
+        # back to the SPA fallback — which is the same HTML-instead-of-JSON
+        # failure arriving by a different route.
     }
 
-    # /health/live is NOT published: it is probed on localhost (§7, and the
-    # Deployer recipe). Published, it is an unauthenticated oracle on your
-    # database's state.
-    location / {
+    # ── /health/* is probed on LOCALHOST (§7) and is never published: it is an
+    #    unauthenticated readout of this box's database reachability. Without
+    #    this block the SPA fallback would answer it with index.html — not a
+    #    leak, but not an answer either. The explicit 404 is what stops someone
+    #    later "fixing" that by proxying it.
+    location ^~ /health/ {
         return 404;
+    }
+
+    # ── NO SOURCEMAP IS EVER SERVED. apps/dashboard/vite.config.ts sets
+    #    build.sourcemap: false, so there should be nothing to match. This is
+    #    the second line of defence, not the first: one `pnpm build --sourcemap`
+    #    on the box publishes ~2.9 MB of complete frontend source — every
+    #    comment, every internal name, every route the UI knows about — at a
+    #    guessable URL, and nothing in the app or the build would notice.
+    #
+    #    A REGEX on purpose: a regex outranks the plain /assets/ prefix below,
+    #    which is where a map would actually land. That is also why /assets/ is
+    #    NOT written `^~` — `^~` there would stop this rule being considered.
+    location ~ \.map$ {
+        return 404;
+    }
+
+    # ── Content-hashed assets: immutable, one year. Vite fingerprints every
+    #    file here, so a changed file is a changed NAME and this can never
+    #    serve a stale one.
+    location /assets/ {
+        add_header Cache-Control "public, max-age=31536000, immutable";
+        # NOT `always`: the default status list leaves this header off the 404
+        # below, and a 404 cached for a year is its own outage.
+        #
+        # `=404`, NOT the SPA fallback. A missing hashed asset must be a 404.
+        # Falling back to index.html would answer a `<script type="module">`
+        # request with HTML — the same JSON.parse-of-HTML failure as a missing
+        # /v1/, one layer down.
+        try_files $uri =404;
+    }
+
+    # ── index.html must NEVER be cached for long. It names the hashed assets;
+    #    a stale copy asks for filenames the new release no longer has, and the
+    #    page fails to boot for that viewer only, until their cache expires.
+    #    `no-cache` means "revalidate every time", not "do not store", so the
+    #    ETag still makes it a cheap 304.
+    #
+    #    `= /index.html` is an EXACT match, which beats everything — and the
+    #    `try_files` internal redirect below re-runs location matching, so a
+    #    deep link lands here too and gets the same header. (Verified by
+    #    execution: GET /orgs/1/projects/2 comes back `no-cache`.)
+    location = /index.html {
+        add_header Cache-Control "no-cache";
+    }
+
+    # ── The SPA fallback. React Router owns every path that is not a file, so
+    #    a refresh or a pasted deep link must get index.html rather than a 404.
+    #    This block is the reason every block above it exists.
+    location / {
+        try_files $uri /index.html;
     }
 }
 
@@ -849,7 +1262,7 @@ server {
 
 server {
     listen 80;
-    server_name api.hookubit.com hooks.hookubit.com;
+    server_name hookubit.com hooks.hookubit.com;
     return 301 https://$host$request_uri;
 }
 ```
@@ -866,20 +1279,80 @@ sudo ln -s /etc/nginx/sites-available/hookubit /etc/nginx/sites-enabled/
 sudo nginx -t && sudo systemctl reload nginx
 ```
 
-Four things about that file.
+### `www-data` has to be able to read the release
 
-**`location /v1/` proxies every method, `OPTIONS` included, and it must.** The
-dashboard is on a different origin now, so every `PATCH`, every `DELETE` and
-every `Content-Type: application/json` request is preceded by a CORS preflight.
-Nest answers `OPTIONS` correctly — but only if it sees it. An nginx block that
-handles `OPTIONS` itself, or a `limit_except GET POST` that returns `405`,
-breaks every mutation in the dashboard while reads keep working perfectly, which
-is a miserable thing to debug. Do not add one.
+nginx opens files under `/opt/hookubit`, which means the `www-data` worker needs
+the **search** bit on every directory down to
+`current/apps/dashboard/dist` and **read** on the files in it. §3's
+`chown -R hookubit:hookubit /opt/hookubit` leaves `0755`, which is enough. If
+you have tightened it — or if you are on the Deployer layout, where
+`/opt/hookubit` is `2750` by default — widen the top of the tree back:
 
-**Nothing but `/v1/` is answered on the API hostname.** `/health/*` is excluded
-from the API's global prefix precisely so it can be probed on localhost, and
-publishing it hands the internet a readout of your database's reachability. The
-`404` is deliberate, and there is no SPA fallback: nothing here serves HTML.
+```bash
+sudo chmod 2755 /opt/hookubit          # setgid stays; `other` gets r-x again
+```
+
+::: danger Do not put `www-data` in the `hookubit` group
+It is the obvious-looking alternative and it is strictly worse now than it was
+before. The three env files in `shared/` are `0640` with group `hookubit`
+(§5), so group membership hands the **web server** `ENCRYPTION_KEY`, the
+database password, `JWT_SECRET` and `SESSION_SECRET`. nginx has no business
+being able to read any of them, and a web server is the single process on this
+box most likely to be the one that gets exploited. The world-execute bit on one
+directory is a far smaller grant than membership of the group that owns the
+secrets.
+
+Then keep the secrets independent of that directory mode, so widening the top of
+the tree cannot widen anything that matters:
+
+```bash
+sudo chmod 0750 /opt/hookubit/shared
+sudo chmod 0750 /opt/hookubit/shared/apps /opt/hookubit/shared/apps/control-api \
+                /opt/hookubit/shared/services /opt/hookubit/shared/services/data-plane
+```
+:::
+
+**The umask corollary changed, and it is not the one that was here before.** It
+used to be enough for the build user's umask to leave *group* read on, because
+only the service user read the tree. nginx reads it as **other** now, so:
+
+| umask | Directories | nginx can serve the bundle |
+|---|---|---|
+| `022` | `0755` | **yes** |
+| `027` | `0750` | **no** — `403 Forbidden` on every asset |
+| `077` | `0700` | no, and the service user cannot read the code either |
+
+`022` is Ubuntu's default and is what this page assumes. A hardened `027` — in
+`/etc/login.defs`, in `/etc/profile`, in a `pam_umask` setting, or in the deploy
+user's own `.profile` under the Deployer layout — now produces a dashboard that
+`403`s while the API, both units and every localhost probe are perfectly
+healthy. It also appears one *rebuild* after the umask was changed rather than
+immediately, because the files already on disk keep the modes they were written
+with.
+
+::: tip The tighter alternative, if you want the release tree closed
+An ACL grants exactly `www-data` exactly traversal, with no world bits at all,
+and a **default** ACL carries it onto release directories created later:
+
+```bash
+sudo setfacl -m     u:www-data:rx /opt/hookubit /opt/hookubit/releases
+sudo setfacl -d -m  u:www-data:rx /opt/hookubit/releases
+sudo chmod 2750 /opt/hookubit
+```
+
+It is more precise and it is one more mechanism to remember; `getfacl` is then
+part of debugging a `403`. Either is defensible. `2755` is what the rest of this
+page and the Deployer README assume.
+:::
+
+### Five more things about that file
+
+**There is no CORS block, and there must not be one.** The dashboard and the API
+are one origin, so there is no preflight: nothing sends `OPTIONS`, nothing looks
+for `Access-Control-Allow-Origin`. Adding CORS headers in nginx while the API
+also sets them is how you get *two* `Access-Control-Allow-Origin` headers, which
+browsers reject outright — a self-inflicted outage in service of a problem this
+topology does not have.
 
 **`client_max_body_size 2m` must stay above `PAYLOAD_MAX_BYTES`** (1 MiB by
 default). If nginx refuses first, the publisher gets an nginx HTML error page
@@ -890,74 +1363,87 @@ raise that.
 (nginx 1.18 and 1.24). On nginx 1.25 or newer it warns, and the replacement is
 `listen 443 ssl;` plus a separate `http2 on;`.
 
-And what stays unexposed: `9090` is probes and metrics and never goes through
+**`open_file_cache` is off, and leaving it off is what makes a deploy instant.**
+nginx resolves `/opt/hookubit/current` per request, so the symlink swap is picked
+up with no reload. Turn the cache on and it holds the resolved path for
+`open_file_cache_valid`, which means a window after every deploy in which the
+hostname serves the previous release's files.
+
+**What stays unexposed.** `9090` is probes and metrics and never goes through
 nginx. Prometheus reaches it over the private network or an SSH tunnel.
 
 ---
 
-## 9. Cloudflare
+## 9. Cloudflare — proxy and cache, nothing else
 
-Four names on one registrable domain. Only two of them are this box.
+**Cloudflare hosts nothing.** There is no Pages project, no Worker, no build
+settings and no deployment branch. What it provides is TLS at the edge, caching,
+DDoS absorption, and the address-hiding that §8's packet filter depends on. All
+three public paths terminate on the one box behind it.
 
 | Name | Who answers it | Where it is configured |
 |---|---|---|
-| `hookubit.com` | **Cloudflare.** The dashboard's static assets, built and published by Cloudflare's own git integration on every push to the deployment branch | Cloudflare, plus `apps/dashboard/` in the repository |
-| `sysadmin.hookubit.com` | nothing yet — a planned internal admin dashboard | n/a. Do not create the record until something serves it |
-| `api.hookubit.com` | nginx on the app host → `127.0.0.1:3000` | §8 |
+| `hookubit.com` | nginx on the app host → the dashboard's files, **and** `/v1/*` → `127.0.0.1:3000` | §8 |
 | `hooks.hookubit.com` | nginx on the app host → `127.0.0.1:8080` | §8 |
+| `sysadmin.hookubit.com` | nothing yet — a planned internal admin dashboard | n/a. Do not create the record until something serves it |
 
-**Nothing on this page deploys the dashboard, and `make deploy` does not either.**
-Cloudflare is connected to the repository and builds it when you push; there is
-no GitHub Actions workflow for it and no front-end step on this host. Its three
-build variables — the transport, the API base URL and the ingest base URL — are
-documented in `apps/dashboard/README.md` in the repository, which is the one
-place they are written down. The API base URL is the only wiring between the two
-halves: the dashboard fetches `https://api.hookubit.com/v1/...` with
-`credentials: 'include'`, and a production build with that variable unset
-refuses to boot rather than quietly fetching relative paths and parsing
-`index.html` as JSON.
+**`make deploy` ships everything.** One trigger, one artifact set: the release
+carries `apps/dashboard/dist`, `apps/control-api/dist/main.js` and
+`bin/webhookd`, and the `current` symlink swaps all three at once. There is no
+second deploy path, no front end that updates on `git push` while the server
+waits for a deploy, and no state in which the two halves are from different
+commits. Nothing at the edge needs purging afterwards — see "Cache rules".
 
-So the two halves deploy on different triggers. A push updates the dashboard.
-§14 updates this host. Neither waits for the other.
+### What the API still needs to be told
 
-### The API needs to be told about the dashboard
-
-Two variables in `/etc/hookubit/hookubit.env`, both on the **app host**, and the
-platform is unusable until they are right:
+One variable, in `/opt/hookubit/shared/apps/control-api/.env` on the app host:
 
 ```bash
-CORS_ORIGINS=https://hookubit.com
 DASHBOARD_URL=https://hookubit.com
 ```
 
-When `sysadmin.hookubit.com` exists it will be a third origin on that same
-comma-separated list. Until something serves it, there is nothing to add.
+It is the base of every link in outbound mail — verification, invitations,
+password resets. Wrong here means mail full of dead links while the platform
+itself works perfectly, which is why it is a variable at all rather than
+something the API infers from the request it is answering.
 
-::: danger CORS_ORIGINS unset is a dead platform, not a degraded one
-It is an exact-string list, split on commas, and it **fails closed**: unset or
-blank means `origin: false`, which blocks every cross-origin request at the
-preflight. The cookie is never sent, so **sign-in itself fails** and every
-screen is empty. The symptom is "nothing works at all", which sends people
-looking at the dashboard; the cause is one missing line on this box.
+::: tip `CORS_ORIGINS` stays empty, and that is the correct state
+It used to be the first thing to check on this page, because the dashboard was a
+different origin from the API and the variable fails closed. One origin removes
+the question: the browser runs no cross-origin check on a same-origin request,
+so there is no preflight to allow, no header to spell exactly, and nothing
+`CORS_ORIGINS` can do to this deployment in either direction.
 
-Scheme and host, no path and no trailing slash. `https://hookubit.com` does
-**not** cover `https://www.hookubit.com` — if the dashboard answers on both,
-list both, comma-separated. `DASHBOARD_URL` is separate and is the base of every
-link in outbound mail; wrong there means verification mail full of dead links.
+Leave it blank. Set it **only** when some other site's JavaScript must call this
+API from a browser — a separate admin tool on `sysadmin.hookubit.com`, say — and
+then list that origin exactly: scheme and host, no path, no trailing slash,
+`www.` a separate entry. Until then, an empty value is one fewer string that has
+to match something else to stay correct.
+
+`apps/dashboard/src/lib/api.test.ts` asserts that the dashboard's
+"could not reach the API" message does **not** mention this variable, so that
+nobody spends an outage editing something uninvolved.
 :::
 
 ### DNS
 
-Two records for this box, both **proxied** (orange cloud), both pointing at the
-app host's public IP:
+Two records, both **proxied** (orange cloud), both pointing at the app host's
+public IP:
 
 | Name | Type | Proxy |
 |---|---|---|
-| `api` | A (and AAAA if you have one) | **Proxied** |
+| `@` (the apex, `hookubit.com`) | A (and AAAA if you have one) | **Proxied** |
 | `hooks` | A (and AAAA if you have one) | **Proxied** |
 
-`hookubit.com` itself is a Workers/Pages custom domain and Cloudflare manages
-its record; you do not point it at this host.
+The apex is an ordinary A record at this box now — not a Workers or Pages custom
+domain, and not managed for you. If one is left over from a previous setup,
+**delete it before you create the A record**: a custom-domain binding takes the
+hostname, so the A record either cannot be created or is ignored, and the
+hostname keeps serving an old bundle from the edge while every check in §8 and
+§14 passes on the origin.
+
+There is no `api` record. The control API answers on the apex under `/v1/`, which
+is what makes it one origin.
 
 **Proxied is not optional any more.** §8's packet filter accepts `80` and `443`
 from Cloudflare's ranges and drops everything else, so a record set to DNS-only
@@ -980,15 +1466,32 @@ then a formality.
 
 ### Cache rules
 
+One hostname now serves content with three different cache lifetimes, so the
+rules are per-path rather than per-hostname:
+
 | Path | Rule |
 |---|---|
-| `api.hookubit.com/*` | **Bypass cache** |
+| `hookubit.com/v1/*` | **Bypass cache** |
+| `hookubit.com/assets/*` | **Respect origin headers** (or Edge TTL "use origin", and Browser TTL "respect origin") |
+| `hookubit.com/*` — everything else, which is `index.html` | **Respect origin headers.** Do not set an Edge TTL override |
 | `hooks.hookubit.com/*` | **Bypass cache** |
-| `hookubit.com/*` | leave to the dashboard's own asset handling |
 
-A cached `POST /v1/...` is not possible, but a cached `GET /v1/projects` served
-to the wrong tenant absolutely is. Bypass both API hostnames explicitly rather
-than relying on Cloudflare's default behaviour staying what it is today.
+**`/v1/*` must be bypassed, and it must be the first rule.** A cached
+`POST /v1/...` is not possible, but a cached `GET /v1/projects` served to the
+*wrong tenant* absolutely is. Do not rely on Cloudflare's default behaviour
+staying what it is today, and do not rely on the ordering being obvious —
+Cloudflare evaluates cache rules in order, so a broad `hookubit.com/*` rule
+above this one can swallow it.
+
+**Caching is enforced in nginx; Cloudflare is told to respect it.** §8 sets
+`Cache-Control: public, max-age=31536000, immutable` on `/assets/*` and
+`no-cache` on `index.html`, which is the only place the two values can be kept
+next to each other and next to the `try_files` they have to agree with. The
+edge's job is to honour them, not to restate them. Set a long Edge TTL on
+`hookubit.com/*` instead and you have overridden `index.html` too — the one
+thing that must never be cached for long, because it names the hashed assets and
+a stale copy asks for filenames the new release no longer has. `apps/dashboard/
+README.md` describes the same contract from the bundle's side.
 
 **Do not enable Rocket Loader, Auto Minify or Email Obfuscation** on
 `hookubit.com`. They rewrite JavaScript and HTML; the bundle is already minified
@@ -1000,34 +1503,50 @@ transformations. It takes signed `POST` bodies and the signature covers the exac
 bytes — anything that rewrites a request body makes every delivery fail
 verification.
 
-There is nothing to purge after a server deploy. The dashboard's assets are
-content-hashed and published by Cloudflare when you pushed; `make deploy` does
-not touch them.
+**There is still nothing to purge after a deploy,** for a different reason than
+before. Every asset filename contains a hash of its contents, so a new release
+asks for names the edge has never seen and fetches them from the origin; and
+`index.html`, the one unhashed file, is `no-cache` and revalidated on every hit.
+If you find yourself purging the cache to make a deploy appear, the rule above
+`hookubit.com/*` is wrong — fix that rather than purging again next time.
 
 ### Checking it
 
-From anywhere, including the app host:
+From anywhere, including the app host. These four are the install, in the order
+that localises a failure fastest:
 
 ```bash
-# The API answers through Cloudflare, with its own JSON, not an HTML page.
-curl -si https://api.hookubit.com/v1/auth/session | head -20
+# 1. /v1 reaches the control API and NOT the SPA fallback. The important one.
+curl -s -o /dev/null -w '%{http_code} %{content_type}\n' https://hookubit.com/v1/auth/session
 
-# The preflight the dashboard sends before every write.
-curl -si -X OPTIONS https://api.hookubit.com/v1/projects \
-  -H 'Origin: https://hookubit.com' \
-  -H 'Access-Control-Request-Method: PATCH' | head -20
+# 2. The dashboard is served, and its index.html is not cached for long.
+curl -sI https://hookubit.com/ | grep -iE 'HTTP/|cache-control|etag|cf-cache-status'
+
+# 3. A hashed asset IS cached immutably. Take the filename from the page itself.
+curl -s https://hookubit.com/ | grep -o '/assets/index-[^"]*\.js' | head -1
+curl -sI "https://hookubit.com$(curl -s https://hookubit.com/ | grep -o '/assets/index-[^"]*\.js' | head -1)" \
+  | grep -iE 'HTTP/|cache-control'
+
+# 4. No sourcemap is reachable, whatever was built.
+curl -s -o /dev/null -w '%{http_code}\n' "https://hookubit.com$(curl -s https://hookubit.com/ | grep -o '/assets/index-[^"]*\.js' | head -1).map"
 ```
 
-The first must be `401` with `"code":"unauthenticated"` in the body. HTML, or a
-Cloudflare error page, means the record, the cache rule or the firewall is wrong
-— and `526` specifically means the origin certificate.
+1. must be `401 application/json; charset=utf-8`. **`200 text/html` means the
+   `location ^~ /v1/` block is missing or has been out-ranked by a regex, and
+   the dashboard is broken** — §8's first heading. A Cloudflare error page means
+   the record, the cache rule or the firewall; `526` specifically means the
+   origin certificate.
+2. must be `200` with a short or zero `max-age` and an `ETag`.
+3. must be `200` with `max-age=31536000, immutable`.
+4. must be `404`, from `location ~ \.map$`. A `200` here is the complete
+   frontend source on a public URL: find out why a map was built
+   (`apps/dashboard/vite.config.ts` sets `build.sourcemap: false`) and treat the
+   nginx rule as having done its job rather than as the fix.
 
-The second must be `204` (or `200`) with
-`access-control-allow-origin: https://hookubit.com` and
-`access-control-allow-credentials: true`. Anything else — no header at all, or
-`403`, or `405` — is `CORS_ORIGINS` on this box, or an nginx block that stopped
-`OPTIONS` before it reached Nest. Every write in the dashboard fails while reads
-keep working, so this is worth one `curl` on every install.
+There is no `OPTIONS` check any more. There used to be one here, because a
+cross-origin dashboard preflighted every write and `CORS_ORIGINS` could take
+every mutation down while reads kept working. One origin sends no preflight at
+all, so there is nothing to check and nothing to get wrong.
 
 ---
 
@@ -1198,7 +1717,7 @@ There is no default account, by design. Registration is closed by default; open
 it, make your account, close it again:
 
 ```bash
-echo 'ALLOW_OPEN_REGISTRATION=true' | sudo tee -a /etc/hookubit/hookubit.env
+echo 'ALLOW_OPEN_REGISTRATION=true' | sudo tee -a /opt/hookubit/shared/apps/control-api/.env
 sudo systemctl restart hookubit-api
 ```
 
@@ -1206,7 +1725,8 @@ Register at `https://hookubit.com`, follow the verification link SES delivers,
 then:
 
 ```bash
-sudo sed -i 's/^ALLOW_OPEN_REGISTRATION=true/ALLOW_OPEN_REGISTRATION=false/' /etc/hookubit/hookubit.env
+sudo sed -i 's/^ALLOW_OPEN_REGISTRATION=true/ALLOW_OPEN_REGISTRATION=false/' \
+  /opt/hookubit/shared/apps/control-api/.env
 sudo systemctl restart hookubit-api
 ```
 
@@ -1223,8 +1743,10 @@ like a dead form, and `CORS_ORIGINS` (§9) is the usual cause on a first install
 ## 13. Backups
 
 Two things, and the second is the one people miss. Both run as root on the
-**app host** — that is where `/etc/hookubit/hookubit.env` is. Nothing sets
-`DIRECT_DATABASE_URL` in your shell, so read it out of that file; `pg_dump` then
+**app host** — that is where the env files are. Nothing sets
+`DIRECT_DATABASE_URL` in your shell, so read it out of the control plane's own
+file (`DATABASE_URL` is in the common one; the dump wants the direct URL);
+`pg_dump` then
 connects over the network to the database host. Dumps land in
 `/var/backups/hookubit`, root-owned and `0700`, so nothing depends on which
 directory you happened to be standing in.
@@ -1233,7 +1755,7 @@ directory you happened to be standing in.
 # 1. The database — the system of record AND the queue.
 sudo install -d -m 0700 /var/backups/hookubit
 
-URL=$(sudo sed -n 's/^DIRECT_DATABASE_URL=//p' /etc/hookubit/hookubit.env \
+URL=$(sudo sed -n 's/^DIRECT_DATABASE_URL=//p' /opt/hookubit/shared/apps/control-api/.env \
         | tail -n1 | tr -d '\r' | sed -e 's/^"\(.*\)"$/\1/' -e "s/^'\(.*\)'\$/\1/")
 OUT=/var/backups/hookubit/hookubit-$(date +%F).dump
 
@@ -1241,7 +1763,7 @@ sudo pg_dump --format=custom -f "$OUT" "${URL%%\?*}" \
   || { echo 'DUMP FAILED — no backup taken'; sudo rm -f "$OUT"; false; }
 
 # 2. The encryption key. Separately, and not beside the dump.
-sudo grep ENCRYPTION_KEY /etc/hookubit/hookubit.env
+sudo grep ENCRYPTION_KEY /opt/hookubit/shared/.env
 ```
 
 Four details in that one command, each of them the difference between a backup
@@ -1325,22 +1847,24 @@ cd /opt/hookubit/src \
   && sudo -u hookubit pnpm install --frozen-lockfile \
   && sudo -u hookubit pnpm generate \
   && sudo -u hookubit pnpm --filter @hookubit/control-api build \
+  && sudo -u hookubit env VITE_API_TRANSPORT=http \
+       VITE_INGEST_BASE_URL=https://hooks.hookubit.com \
+       pnpm --filter @hookubit/dashboard build \
+  && grep -rlF --include='*.js' -e 'https://hooks.hookubit.com' apps/dashboard/dist/assets \
+  && ! grep -rqF --include='*.js' -e 'http://localhost:8080' apps/dashboard/dist/assets \
   && ( cd services/data-plane \
        && sudo -u hookubit /usr/local/go/bin/go build \
             -o /opt/hookubit/bin/webhookd ./cmd/webhookd ) \
   && ls -l /opt/hookubit/bin/webhookd
 ```
 
-::: tip The dashboard is not in that chain, and it is not in this block
-Nothing here builds, copies or publishes the front end. Cloudflare built and
-published it the moment you pushed (§9, and `apps/dashboard/README.md` in the
-repository), on its own trigger and its own timeline. **You have not
-half-upgraded.** If a dashboard change is not live, the answer is in
-Cloudflare's deployment log for that push; if an API change is not live, it is
-in this block.
-:::
+**The dashboard is in that chain now, and the chain is still what protects
+you.** Every link needs the one above it, so a failed dashboard build stops
+everything after it — including, and this is the point, the migration block
+below, which you do not run at all if this one stopped. Nothing has touched the
+schema yet; start the data plane again and you are back on the old release.
 
-Two details in that chain are easy to get wrong and silent when you do.
+Four details in that chain are easy to get wrong and silent when you do.
 
 **`/usr/local/go/bin/go`, not `go`.** `sudo` applies `secure_path` to the
 target command, replacing `PATH` with a list that has `/usr/local/bin` on it and
@@ -1358,9 +1882,27 @@ The `ls` is read-only, it cannot pass when `go build` did not produce the
 binary, and the **mtime it prints is the fact the next block depends on**: look
 at it and confirm it is seconds old, not weeks.
 
-The `( cd services/data-plane && … )` subshell stays a subshell even though
-nothing follows it now. It costs nothing and it means a link added after it
-still runs from `/opt/hookubit/src`.
+**`sudo -u hookubit env VAR=…`, not `VAR=… sudo -u hookubit`.** The second form
+sets the variable on `sudo`, which discards it: sudoers' `env_reset` builds a
+fresh environment for the target command. `env` goes *after* `sudo`, inside the
+privilege change. The two variables then fail differently, which is why the
+greps are links in the chain rather than a note: `VITE_API_TRANSPORT` is guarded
+in `apps/dashboard/vite.config.ts` and a stripped one **refuses the build**,
+while a stripped `VITE_INGEST_BASE_URL` builds happily with
+`http://localhost:8080` compiled in.
+
+**The two greps keep their options before the pattern, and there is no `--`.**
+After a `--`, `--include='*.js'` stops being a filter and becomes a filename:
+grep warns about a file that does not exist, searches the directory unfiltered,
+and exits `2`. The negative check is `! grep -rq …`, and `2` is non-zero, so
+with a `--` in it that link passes while checking nothing. There is no
+`--exclude='*.js.map'` for two reasons — the `*.js` glob does not match a
+`.js.map` name anyway, and `vite.config.ts` emits no map — so if you find
+yourself adding one, find out why a sourcemap exists instead.
+
+The `( cd services/data-plane && … )` subshell matters more than it used to: the
+dashboard build and both greps run from `/opt/hookubit/src`, and the subshell is
+what keeps the `cd` from leaking into anything added after it.
 
 Then migrate, check, and only then restart — as one chain, so the restarts
 cannot happen without the migration having succeeded:
@@ -1368,12 +1910,14 @@ cannot happen without the migration having succeeded:
 ```bash
 sudo systemd-run --pipe --wait --collect \
   --uid=hookubit --gid=hookubit \
-  --property=EnvironmentFile=/etc/hookubit/hookubit.env \
+  --property=EnvironmentFile=/opt/hookubit/shared/.env \
+  --property=EnvironmentFile=/opt/hookubit/shared/apps/control-api/.env \
   --working-directory=/opt/hookubit/src/apps/control-api \
   pnpm exec prisma migrate deploy \
   && sudo systemd-run --pipe --wait --collect \
     --uid=hookubit --gid=hookubit \
-    --property=EnvironmentFile=/etc/hookubit/hookubit.env \
+    --property=EnvironmentFile=/opt/hookubit/shared/.env \
+    --property=EnvironmentFile=/opt/hookubit/shared/apps/control-api/.env \
     --working-directory=/opt/hookubit/src/apps/control-api \
     pnpm exec prisma migrate status \
   && sudo systemctl restart hookubit-api \
@@ -1435,30 +1979,39 @@ case above, leaves a healthy-looking process in front of a growing outbox. If
 **`WebhookQueueDepthNotExported`** is firing, the backlog alert cannot fire at
 all — read that as no signal rather than a clear one.
 
-Finally, prove the public hostname still reaches what you just restarted, and
-that the dashboard's preflight still gets through:
+Finally, prove the public hostname still reaches what you just restarted — and
+that it is serving the bundle you just built, not the previous one:
 
 ```bash
-curl -si https://api.hookubit.com/v1/auth/session | head -20
+# 1. /v1 reaches the control API, not the SPA fallback.
+curl -s -o /dev/null -w '%{http_code} %{content_type}\n' https://hookubit.com/v1/auth/session
 
-curl -si -X OPTIONS https://api.hookubit.com/v1/projects \
-  -H 'Origin: https://hookubit.com' \
-  -H 'Access-Control-Request-Method: PATCH' | head -20
+# 2. The hostname serves THIS build's entry module.
+diff <(grep -o '/assets/index-[^"]*\.js' /opt/hookubit/src/apps/dashboard/dist/index.html | head -1) \
+     <(curl -s https://hookubit.com/ | grep -o '/assets/index-[^"]*\.js' | head -1) \
+  && echo 'dashboard: the hostname is serving this build'
 ```
 
-The first must be `401` with `"code":"unauthenticated"`: that is this API
-answering through Cloudflare. HTML, or a Cloudflare error page, means the path
-from the edge is broken rather than the services — `526` is the origin
-certificate, `522`/`523` is the firewall or the DNS record.
+1. must be `401` with `application/json`. **`200 text/html` means `/v1` is
+   falling through to the SPA and every screen in the dashboard is broken** —
+   §8's first heading. A Cloudflare error page means the path from the edge
+   rather than the services: `526` is the origin certificate, `522`/`523` is the
+   firewall or the DNS record.
 
-The second must carry `access-control-allow-origin: https://hookubit.com`. It is
-here because it fails *separately*: `CORS_ORIGINS` is read at API start, so a
-restart onto an env file someone edited takes every write in the dashboard down
-while reads keep working and all three localhost probes stay green.
+2. must print nothing from `diff` and then the success line. A difference is
+   nginx serving a bundle that is not this one, and the cause is almost always
+   nginx's `root`: it must point through the path you actually build in
+   (`/opt/hookubit/src/apps/dashboard/dist` for this page's single-tree layout,
+   `/opt/hookubit/current/...` under the Deployer recipe). The second-likeliest
+   cause is an edge-cached `index.html`, which means a Cloudflare cache rule is
+   overriding the origin's `no-cache` — §9. Re-run it with
+   `-H 'Cache-Control: no-cache'` to tell the two apart.
 
-There is **nothing to purge** at the edge. The dashboard's assets are
-content-hashed and published by Cloudflare when you pushed, not by this block;
-this block never touched them.
+This replaces the `OPTIONS` preflight check that used to be here. One origin
+sends no preflight, so there is nothing left for `CORS_ORIGINS` to break and
+nothing to confirm. What took its place is a harder question — *is the HTML on
+the public hostname the HTML in this release* — which is the one thing that goes
+wrong on every deploy rather than once per install.
 
 Stopping the data plane first means in-flight deliveries drain against the old
 schema rather than mid-migration. Nothing is lost either way — the queue is
@@ -1499,17 +2052,42 @@ hand-rolling Compose across servers.
 
 ## Things that will bite you
 
-**`CORS_ORIGINS` unset or spelled differently from the dashboard's origin.** The
-single most likely first-install failure. It fails closed, so the preflight
-blocks everything, the cookie is never sent and **sign-in itself fails** — a
-dashboard that looks completely dead while both services on this box are
-healthy and every localhost probe is green. Exact string, scheme and host, no
-trailing slash, and `www.` is a second origin. §9 has the `curl -X OPTIONS` that
-catches it.
+**A missing or out-ranked `location ^~ /v1/`.** The single most likely
+first-install failure, and the one that announces itself least. With the SPA's
+`try_files $uri /index.html` fallback in place, an unhandled `/v1/projects`
+returns **`index.html` with a `200`**, the dashboard dies on `JSON.parse` of
+HTML screen by screen, and nothing — not a log, not a status code, not the
+browser's network tab at a glance — names the cause. Two ways in: the block is
+absent, or it is written without `^~` and a regex `location` in the same server
+block matched first. Block order in the file is **not** one of the ways; prefix
+selection is by length, not by line number. §8 has the one-line `curl`, and the
+Deployer recipe runs it on every deploy.
 
-**nginx handling `OPTIONS` itself.** Add a `limit_except`, or an `if` that
-returns early on `OPTIONS`, and every write in the dashboard fails while reads
-keep working. Let the preflight reach Nest.
+**A sourcemap in `dist/`.** `apps/dashboard/vite.config.ts` sets
+`build.sourcemap: false`, so a `.map` only exists if someone built with
+`--sourcemap` on the box — and `dist/` is a document root now, so it is ~2.9 MB
+of complete frontend source at a guessable URL. §8's
+`location ~ \.map$ { return 404; }` is the backstop; `find dist -name '*.map'`
+after a build is the check.
+
+**`index.html` cached at the edge.** Vite fingerprints every asset, so a stale
+`index.html` asks for filenames the new release no longer has and the page fails
+to boot — for the viewers whose cache has it, which makes it hard to reproduce
+and easy to dismiss. nginx sends `no-cache` for it; a broad Cloudflare Edge TTL
+rule on `hookubit.com/*` overrides that. §9.
+
+**`CORS_ORIGINS`, in either direction.** It is **not** on the list any more, and
+it should not be put back. The dashboard and the API are one origin, so no CORS
+check runs on these requests at all: an empty value is correct, and naming it in
+a failure report sends an operator to spend an outage editing something
+uninvolved. Adding an origin to it is a real decision about some *other* site's
+JavaScript (§9), not a step in getting the dashboard working.
+
+**`www-data` unable to traverse `/opt/hookubit`.** `403` on every asset while the
+API, both units and every localhost probe are green. `2755` on the deploy path
+and a `022` umask on the build user — and **not** `usermod -aG hookubit
+www-data`, which would hand the web server `ENCRYPTION_KEY` and the database
+password. §8.
 
 **Ports 80 and 443 open to the whole internet.** The orange cloud hides your
 address; it does not close the port, and anyone who connects directly chooses
@@ -1525,26 +2103,37 @@ later: Cloudflare then answers `526` on every API call while the dashboard's
 assets keep loading perfectly. Origin CA, or DNS-01.
 
 **The dashboard silently using its mock.** Built without
-`VITE_API_TRANSPORT=http` and every screen works, with data that does not exist.
-If nothing you create in the dashboard reaches the database, this is why — and
-that variable lives in Cloudflare's build environment, so that is where to look.
-See `apps/dashboard/README.md` in the repository.
+`VITE_API_TRANSPORT=http`, every screen works against data that does not exist.
+`vite.config.ts` now **refuses** such a build, so this can only reach a release
+as a deliberate `=mock`, or on a bundle built before that guard existed. The
+tell is the permanent red "Demo data" banner;
+`src/components/DemoDataBanner.tsx` puts it on every page including the auth
+ones. Grepping the bundle is not a check — see `apps/dashboard/README.md`.
 
-**The dashboard on a different registrable domain from the API.** A `*.pages.dev`
-URL or a second brand domain is cross-*site*, so the `SameSite=Lax` session
-cookie stops being sent: sign-in succeeds and every request after it is
-anonymous. Subdomains of one domain are fine; that is the design.
+**`VITE_INGEST_BASE_URL` stripped by `sudo`.** `VAR=x sudo -u hookubit …` sets
+the variable on `sudo`, which discards it under `env_reset`. The transport guard
+turns that into a refused build; this variable has no guard, so the build
+succeeds with `http://localhost:8080` compiled in and every operator gets a
+Get-started `curl` pointed at their own laptop. `sudo -u hookubit env VAR=x …`,
+and grep the built JS — §4 and §14 both do.
 
-**nginx still serving files.** If this host was set up when the dashboard was
-served from here, it has a `root` and a `try_files` fallback answering `/` out of
-a stale bundle. Take them out: `/v1/*` proxied, everything else `404`.
+**nginx's `root` not going through the live release.** A `root` naming a release
+directory, or an `/opt/hookubit/src` left from a hand-built install, is correct
+the day it is written and stale after the next deploy — and nothing else fails,
+because the old bundle still talks to the new `/v1`. It must be
+`/opt/hookubit/current/apps/dashboard/dist` under the Deployer recipe.
+`hookubit:dashboard:check` compares the entry module's hash on every deploy for
+exactly this.
 
 **Cloudflare in "Flexible" SSL mode.** Padlock in the browser, plain HTTP
 between Cloudflare and your origin, session cookies and signing secrets in
 clear text. Full (strict), always.
 
-**Cloudflare caching `/v1/*`.** Bypass it explicitly. Do not rely on the default
-behaviour staying what it is today.
+**Cloudflare caching `/v1/*`.** Bypass it explicitly, in a rule **above** any
+broad `hookubit.com/*` rule — one hostname now serves the API and the dashboard,
+so a cache rule written for the front end can reach the API. A cached
+`GET /v1/projects` served to the wrong tenant is the failure. Do not rely on the
+default behaviour staying what it is today.
 
 **Proxy hops set for the wrong topology.** Cloudflare + nginx is 2. At 0 behind
 proxies, the whole internet shares one per-IP rate-limit bucket. Too high, and a
@@ -1577,3 +2166,53 @@ Environment=DATA_PLANE_METRICS_PORT=9091
 nothing reserves capacity for the others. Six slow endpoints at the default cap
 are entitled to the whole 64-slot pool, and your fast endpoints queue behind
 them. Lower the cap before you raise the pool.
+
+### Two faults in the data plane's own config reader
+
+Both are in `services/data-plane/internal/config/`, both are present in the code
+as shipped, and both are listed here rather than in a bug tracker because the
+only thing that protects you from either one today is knowing about it. Neither
+can be worked around from an env file; each needs a small change in Go.
+
+**`APP_ENV=` empty makes the two planes disagree about where they are running.**
+`config.go`'s `env(key, fallback)` returns the fallback when
+`os.Getenv(key) == ""`, and Go cannot tell a variable that is set to the empty
+string from one that is unset. The three `.env.example` templates ship every
+required variable **present and empty** on purpose, so that a plane refuses to
+boot by name rather than starting against somebody's laptop — and `APP_ENV=` is
+in the common file, the one file both planes read.
+
+The control API does exactly what the templates intend: `APP_ENV` is required
+with no default, blank counts as unset, and it **refuses to boot** naming the
+variable. The data plane, from the same line in the same file, comes up believing
+it is `development` — and that is not a cosmetic difference, because it is the
+switch on its two production-only refusals:
+
+| Refusal | What it stops in `production` | What happens at `development` |
+|---|---|---|
+| `EGRESS_ALLOW_PRIVATE_NETWORKS=true` is rejected outright (`config.go`) | a blanket SSRF override reaching a server | it is **accepted**, and the worker will deliver to `169.254.169.254` and your LAN |
+| rate limits with no Redis are rejected (`isolation.go`) | per-endpoint delivery limits silently degrading to per-replica, i.e. multiplied by the replica count | it **starts**, and a customer's configured limit is whatever you multiplied it by |
+
+So one blank line in the file that exists specifically to stop the two planes
+drifting makes them drift in the worst available direction: the control plane
+stops, loudly, and the data plane starts with its guard rails off. **Set
+`APP_ENV=production` explicitly, and check it is not blank before you blame
+anything else.** `curl -s localhost:9090/health/ready` does not report it, so
+read the unit's startup log.
+
+**`envInt`, `envBool` and `envDuration` swallow parse errors.** All three return
+the default when `strconv` fails, with nothing logged:
+`INGEST_TRUSTED_PROXY_HOPS=two` runs at `0`, and `0` means the ingest handler
+takes the client address from the socket — which, behind Cloudflare and nginx, is
+`127.0.0.1` for every request on earth. Every publisher then shares one per-IP
+bucket. `WORKER_CONCURRENCY=32x` is the same shape, and so is any
+`*_TIMEOUT_MS` with a unit suffix on it (`30s` parses as nothing and reverts to
+the default, which may be shorter or longer than you meant).
+
+`internal/retention` is the exception and shows the fix: its `envInt`, `envBool`,
+`envDays` and `envMillis` all return `(value, error)` and the loader refuses, on
+the stated grounds that silently substituting a number for the one an operator
+wrote is the failure mode worth removing. The rest of the data plane's config
+does not do that yet. Until it does, **a typo in the data plane's env file is a
+value you do not have**, and the only way to see it is to read back what the
+process thinks it is using rather than what you wrote.

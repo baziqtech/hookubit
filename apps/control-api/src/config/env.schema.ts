@@ -23,9 +23,48 @@ const blankAsUnset = <T extends z.ZodTypeAny>(schema: T) => z.preprocess(blankTo
  * missing ENCRYPTION_KEY and discovers it at secret-rotation time is worse than
  * one that refuses to start.
  */
+/**
+ * APP_ENV is the deployment's IDENTITY, and it is REQUIRED - there is no
+ * default, because every possible default is a guess about which machine this
+ * process woke up on.
+ *
+ * It used to default to `development`, and that default quietly undid the one
+ * precaution built on top of it. `auth/session.service.ts` turns the session
+ * cookie's `Secure` flag OFF for exactly `development` and `test` - an explicit
+ * opt-OUT, so that a misspelled `prod` or `Production` fails safe and still
+ * gets a Secure cookie. But an APP_ENV that was never set at all did not reach
+ * that check as "unrecognised": the schema had already answered `development`
+ * on the operator's behalf, so a production box whose env file was missing the
+ * line sent its session cookie over plaintext HTTP, silently, with nothing in
+ * the logs to say so.
+ *
+ * Four other decisions key off it - the mail-transport refusal below, the
+ * `/docs` mount in main.ts, the pino-pretty transport, and `deployment.
+ * environment` on every span - so the cost of a wrong guess is high and the
+ * cost of asking is one line in an env file.
+ */
+const APP_ENVS = ['development', 'test', 'staging', 'production'] as const;
+
+const APP_ENV_MESSAGE =
+  'APP_ENV must be one of development|test|staging|production, and it is REQUIRED - ' +
+  'there is no default, because a default is a guess about where this process is running. ' +
+  'It decides whether the session cookie carries Secure (off ONLY for development and test), ' +
+  'whether a mail transport is mandatory, and whether /docs is mounted.';
+
+/**
+ * The DASHBOARD_URL the transform at the bottom restores for development and
+ * test only. `notifications/mailer-selection.ts` carries the same literal as
+ * its own last-resort fallback on purpose - it guards a `ConfigService` that
+ * never came through this schema - so the two are deliberately not shared.
+ */
+const LOCAL_DASHBOARD_URL = 'http://localhost:5173';
+
 export const envSchema = z.object({
   APP_ENV: blankAsUnset(
-    z.enum(['development', 'test', 'staging', 'production']).default('development'),
+    z.enum(APP_ENVS, {
+      required_error: APP_ENV_MESSAGE,
+      invalid_type_error: APP_ENV_MESSAGE,
+    }),
   ),
   LOG_LEVEL: blankAsUnset(
     z.enum(['trace', 'debug', 'info', 'warn', 'error', 'fatal']).default('info'),
@@ -74,10 +113,24 @@ export const envSchema = z.object({
    * high" - and a client can prepend its own X-Forwarded-For entry, choose a
    * fresh source address per request, and evade the bucket entirely.
    *
-   * Default 0 (no proxy) because that is the only value that is safe when
-   * unknown: it under-counts rather than trusting an attacker-supplied header.
+   * NO DEFAULT, deliberately. 0 is the safe value when the answer is unknown -
+   * it under-counts rather than trusting an attacker-supplied header - but it
+   * is NOT a safe default, because 0 behind a proxy is itself a failure: every
+   * client resolves to the proxy's own address, ThrottleGuard's per-IP buckets
+   * collapse into ONE bucket for the whole internet, and the per-IP limits on
+   * login and password reset stop existing. A box that is behind nginx and
+   * simply never set the variable got that silently.
+   *
+   * So it is left `.optional()` and the superRefine at the bottom REQUIRES it
+   * under APP_ENV=staging|production, where "internet-facing behind a proxy" is
+   * the normal shape. Keeping it optional rather than `.default(0)` is what
+   * makes that check possible at all: with a default, an unset variable and a
+   * deliberate `TRUST_PROXY_HOPS=0` are indistinguishable by the time
+   * superRefine runs, and a box genuinely without a proxy must still be able to
+   * say 0 out loud. The `.transform()` after the refine restores 0 for
+   * development and test, so every reader still sees a number.
    */
-  TRUST_PROXY_HOPS: blankAsUnset(z.coerce.number().int().min(0).max(10).default(0)),
+  TRUST_PROXY_HOPS: blankAsUnset(z.coerce.number().int().min(0).max(10).optional()),
   CORS_ORIGINS: blankAsUnset(z.string().default('')),
 
   /**
@@ -202,6 +255,24 @@ export const envSchema = z.object({
    * `/accept-invitation?token=`. A wrong value here is a mail full of dead
    * links, so the scheme is checked the way OTEL's is: `app.example.com`
    * parses as a URL with scheme `app.example.com` and would boot cleanly.
+   *
+   * NO DEFAULT on an internet-facing environment, for the same reason as
+   * APP_ENV and TRUST_PROXY_HOPS, and with the nastiest failure of the three.
+   * It used to default to `http://localhost:5173`, so a staging or production
+   * box whose env file was missing the line mailed password-reset, email-
+   * verification and invitation links pointing at the operator's laptop. The
+   * mail is accepted, delivered and opened; only the link is dead. Nothing
+   * refuses, nothing logs it, and it reaches END USERS looking like a mail
+   * problem rather than a configuration one.
+   *
+   * So, exactly as with TRUST_PROXY_HOPS: `.optional()` here, REQUIRED by the
+   * superRefine at the bottom under APP_ENV=staging|production, and the
+   * `.transform()` after that refinement restores the localhost value for
+   * development and test. Keeping it optional rather than `.default(...)` is
+   * what makes the check possible at all - with a default in place, an unset
+   * variable and a deliberate `DASHBOARD_URL=http://localhost:5173` are
+   * indistinguishable by the time superRefine runs. Callers still see a
+   * `string`, so nothing downstream changes.
    */
   DASHBOARD_URL: blankAsUnset(
     z
@@ -211,7 +282,7 @@ export const envSchema = z.object({
         (v) => /^https?:\/\//i.test(v),
         'DASHBOARD_URL must start with http:// or https:// (the dashboard origin, e.g. https://app.example.com)',
       )
-      .default('http://localhost:5173'),
+      .optional(),
   ),
   /**
    * SMTP connection URL, `smtp://user:pass@host:587` or `smtps://…`. SET IS
@@ -268,7 +339,64 @@ export const envSchema = z.object({
         'email verification, password reset and member invitations would silently deliver nothing',
     });
   }
-});
+  // The hop count must be STATED, not defaulted, anywhere this process is
+  // reachable from the internet. See TRUST_PROXY_HOPS above for why an unset
+  // variable and a deliberate 0 must not look the same.
+  //
+  // Gated on staging|production rather than on `!== 'development'` so that it
+  // matches the two environments the rest of this file already treats as
+  // not-internet-facing (`development` and `test` are also the only two where
+  // the session cookie may go out without Secure, and the only two where a
+  // stub mail transport is allowed). Requiring it under APP_ENV=test would make
+  // every test fixture carry a proxy topology it does not have.
+  if (
+    env.TRUST_PROXY_HOPS === undefined &&
+    (env.APP_ENV === 'staging' || env.APP_ENV === 'production')
+  ) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['TRUST_PROXY_HOPS'],
+      message:
+        `TRUST_PROXY_HOPS is required when APP_ENV=${env.APP_ENV}, and must be the EXACT number of ` +
+        'reverse proxies in front of this process. Unset it would have meant 0, which behind a proxy ' +
+        'resolves every client to the proxy and collapses the per-IP rate limits on login and password ' +
+        'reset into ONE bucket for the whole internet. Use 2 for the standard deployment ' +
+        '(Cloudflare -> nginx -> control-api), 1 for nginx alone, 0 only if nothing is in front of this ' +
+        'process at all - and say 0 explicitly if that is the case.',
+    });
+  }
+  // Same gate, same mechanism, and the failure reaches end users rather than
+  // staying inside the box: every link this service mails is built on
+  // DASHBOARD_URL, so an unset one on a server mails dead links from the
+  // operator's laptop address. See DASHBOARD_URL above.
+  if (
+    env.DASHBOARD_URL === undefined &&
+    (env.APP_ENV === 'staging' || env.APP_ENV === 'production')
+  ) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['DASHBOARD_URL'],
+      message:
+        `DASHBOARD_URL is required when APP_ENV=${env.APP_ENV}, and must be the public origin the ` +
+        `dashboard is served from. Unset it would have meant ${LOCAL_DASHBOARD_URL}, so every ` +
+        'email-verification, password-reset and member-invitation message this box sends would carry ' +
+        "a link to the operator's laptop: the mail is delivered, the recipient clicks, and the link " +
+        'is dead - with nothing refusing and nothing in the logs, so it reads as a mail fault. Use ' +
+        'https://webhooks.example.com (the dashboard origin, not this API\'s own hostname), and put ' +
+        'the same value in CORS_ORIGINS.',
+    });
+  }
+})
+  // Restores the "no proxy" reading for development and test, so that
+  // TRUST_PROXY_HOPS is a `number` for every consumer, and the local dashboard
+  // origin for the same two environments, so DASHBOARD_URL is a `string`. Both
+  // run AFTER the refinements above, which is the whole point: the checks see
+  // `undefined`, callers never do.
+  .transform((env) => ({
+    ...env,
+    TRUST_PROXY_HOPS: env.TRUST_PROXY_HOPS ?? 0,
+    DASHBOARD_URL: env.DASHBOARD_URL ?? LOCAL_DASHBOARD_URL,
+  }));
 
 export type Env = z.infer<typeof envSchema>;
 

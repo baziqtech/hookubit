@@ -2,10 +2,24 @@
  * Shared configuration for the load suite's Node-side tooling.
  *
  * The Go data plane does not read `.env` (docs/LOCAL_SETUP.md 5) but these
- * scripts do, because they must talk to the SAME database and the SAME object
- * store the running services were started with. Reading the repo's `.env` is
- * how the suite stays honest about that: if you point the data plane somewhere
- * else, you point this somewhere else too, in one place.
+ * scripts do, because they must talk to the SAME database the running services
+ * were started with and size themselves against the SAME worker settings.
+ * Reading the repo's env files is how the suite stays honest about that: if you
+ * point the data plane somewhere else, you point this somewhere else too, in
+ * one place.
+ *
+ * SINCE THE THREE-FILE SPLIT THAT IS TWO FILES, NOT ONE. What the suite reads
+ * is spread across them:
+ *
+ *   .env                      DATABASE_URL  (the nine both planes read)
+ *   services/data-plane/.env  INGEST_PORT, DATA_PLANE_METRICS_PORT,
+ *                             PAYLOAD_INLINE_MAX_BYTES, PAYLOAD_MAX_BYTES
+ *
+ * apps/control-api/.env is deliberately NOT read. Nothing here needs a
+ * control-plane-only key - the suite talks to the control API over HTTP, as a
+ * customer would - and loading it would put JWT_SECRET and SESSION_SECRET in
+ * this process's environment for no reason. Add it here if that ever changes,
+ * ahead of the common file, not behind it.
  */
 
 import fs from 'node:fs';
@@ -16,8 +30,37 @@ export const REPO_ROOT = path.resolve(fileURLToPath(new URL('.', import.meta.url
 export const LOAD_ROOT = path.join(REPO_ROOT, 'tests/load');
 export const ARTIFACTS = path.join(LOAD_ROOT, '.artifacts');
 
-/** Parse the repo `.env` without adding a dependency. Existing process env wins. */
-export function loadDotEnv(file = path.join(REPO_ROOT, '.env')) {
+/**
+ * The env files this suite reads, IN PRECEDENCE ORDER - service-specific first.
+ *
+ * `loadDotEnv` only fills a key that is still undefined, so the FIRST file to
+ * define one wins and a real environment variable beats both. That is the same
+ * resolution the services use from the other end: @nestjs/config walks
+ * envFilePath doing `Object.assign(dotenv.parse(file), config)`, so earlier
+ * entries win there too, and systemd gets there by listing the common file
+ * first because a LATER EnvironmentFile= wins. Three parsers, one answer.
+ */
+export const ENV_FILES = [
+  path.join(REPO_ROOT, 'services/data-plane/.env'),
+  path.join(REPO_ROOT, '.env'),
+];
+
+/**
+ * Parse one env file without adding a dependency. Existing process env wins.
+ *
+ * This is the third hand-written reader of this format in the repository - the
+ * other two are `hb_env` in deployments/deployer/hookubit.php and systemd's own
+ * EnvironmentFile parser - so it follows the same rules the templates enforce
+ * and that apps/control-api/src/config/env-example.spec.ts checks: plain
+ * KEY=value, no quotes, no `$`, no `export`, no trailing comments, and every
+ * value on one physical line.
+ *
+ * A value continued with a trailing backslash THROWS rather than being read as
+ * one line. Truncated at the `\` a connection string usually still parses, so
+ * the quiet outcome is a load run that seeds and verifies against a different
+ * database than the services are writing to - which is not a load test.
+ */
+export function loadDotEnv(file) {
   if (!fs.existsSync(file)) return;
   for (const rawLine of fs.readFileSync(file, 'utf8').split('\n')) {
     const line = rawLine.trim();
@@ -26,6 +69,13 @@ export function loadDotEnv(file = path.join(REPO_ROOT, '.env')) {
     if (eq === -1) continue;
     const key = line.slice(0, eq).trim();
     let value = line.slice(eq + 1).trim();
+    if (value.endsWith('\\')) {
+      throw new Error(
+        `${file}: ${key} ends in a backslash. Put the whole value on one physical line - ` +
+          'systemd would join it with the next one and this reader would not, so the ' +
+          'services and this suite would disagree about where to look.',
+      );
+    }
     if (
       (value.startsWith('"') && value.endsWith('"')) ||
       (value.startsWith("'") && value.endsWith("'"))
@@ -36,7 +86,7 @@ export function loadDotEnv(file = path.join(REPO_ROOT, '.env')) {
   }
 }
 
-loadDotEnv();
+for (const file of ENV_FILES) loadDotEnv(file);
 
 const int = (name, fallback) => {
   const raw = process.env[name];

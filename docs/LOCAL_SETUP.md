@@ -63,7 +63,27 @@ refuses any database whose name does not end in `_test`. Pointing
 `DATABASE_URL` at `hookubit` and running `go test` fails with a message saying
 so rather than destroying your development data.
 
-## 2. Generate secrets and write .env
+## 2. Generate secrets and write the three .env files
+
+**Configuration is three files, not one**, split by who reads it:
+
+| Copy this template | To this file | Holds |
+|---|---|---|
+| `.env.example` | `.env` | the **nine** variables **both** planes read |
+| `apps/control-api/.env.example` | `apps/control-api/.env` | the control plane's own |
+| `services/data-plane/.env.example` | `services/data-plane/.env` | the data plane's own |
+
+The nine shared ones — `APP_ENV`, `DATABASE_URL`, `LOG_LEVEL`, `REDIS_URL`,
+`ENCRYPTION_KEY`, `ENCRYPTION_KEY_ID`, `ENCRYPTION_KEYS_RETIRED`,
+`OTEL_EXPORTER_OTLP_ENDPOINT`, `OTEL_SERVICE_NAMESPACE` — live in one file
+**so that they cannot drift**. Two copies of `ENCRYPTION_KEY` that disagree means
+the control API encrypts endpoint signing secrets the Go worker cannot decrypt;
+both processes validate their own configuration happily and every delivery fails
+at signing time.
+
+`.gitignore` already covers all three live files (`.env`, `.env.*`,
+`!.env.example`), at any depth. The templates themselves carry every variable the
+plane reads, with every default in a comment — read them; they are the reference.
 
 Three secrets are mandatory and validated at boot. `ENCRYPTION_KEY` must decode
 to exactly 32 bytes — it is the AES-256-GCM key protecting endpoint signing
@@ -71,37 +91,99 @@ secrets, and both the control plane and the Go worker read the same value.
 
 ```bash
 cd /Users/naj/development/shaq/shaq_webhooks
-cp .env.example .env
+cp .env.example                        .env
+cp apps/control-api/.env.example       apps/control-api/.env
+cp services/data-plane/.env.example    services/data-plane/.env
 
+# The nine both planes read.
 cat >> .env <<EOT
+
+# --- generated $(date +%F) ---
+APP_ENV=development
+LOG_LEVEL=debug
+DATABASE_URL=postgresql://hookubit:hookubit@localhost:5432/hookubit?schema=public
+REDIS_URL=redis://localhost:6379/0
+ENCRYPTION_KEY=$(openssl rand -base64 32)
+EOT
+
+# The control plane's own.
+cat >> apps/control-api/.env <<EOT
 
 # --- generated $(date +%F) ---
 JWT_SECRET=$(openssl rand -base64 48)
 SESSION_SECRET=$(openssl rand -base64 48)
-ENCRYPTION_KEY=$(openssl rand -base64 32)
+DASHBOARD_URL=http://localhost:5173
+CORS_ORIGINS=http://localhost:5173
+DIRECT_DATABASE_URL=postgresql://hookubit:hookubit@localhost:5432/hookubit?schema=public
+ALLOW_OPEN_REGISTRATION=false
+EOT
+
+# The data plane's own.
+cat >> services/data-plane/.env <<EOT
+
+# --- generated $(date +%F) ---
+S3_ENDPOINT=http://localhost:9000
+S3_BUCKET=hookubit-payloads
+S3_ACCESS_KEY=minioadmin
+S3_SECRET_KEY=minioadmin
+EGRESS_ALLOW_PRIVATE_NETWORKS=true
 EOT
 ```
 
-Then edit `.env` and confirm:
+The templates ship every required variable **present and empty**, and appending
+is safe: every reader of this format — dotenv, systemd, `hb_env` in the deploy
+recipe — takes the **last** definition of a repeated key, so the generated block
+at the end wins over the empty line above it.
 
-```
-DATABASE_URL=postgresql://hookubit:hookubit@localhost:5432/hookubit?schema=public
-DIRECT_DATABASE_URL=postgresql://hookubit:hookubit@localhost:5432/hookubit?schema=public
-REDIS_URL=redis://localhost:6379/0
-APP_ENV=development
-ALLOW_OPEN_REGISTRATION=false
-```
+Which file a variable goes in is not a matter of taste. `DIRECT_DATABASE_URL`
+goes in `apps/control-api/.env` and `DATABASE_URL` in `.env`; that asymmetry is
+real and §3 is where it bites.
+
+### Format rules, because three different parsers read these files
+
+dotenv (the control API), `source` (your shell, for the Go roles) and systemd's
+`EnvironmentFile=` (on a server) must all agree line for line. Plain `KEY=value`:
+**no quotes, no `$`, no `export`, no backslash continuations, no trailing
+comments, no leading `;`.** `MAIL_FROM=HookuBit <no-reply@localhost>` is safe in
+all three **unquoted** — that is why the rule is "no quotes" rather than "quote
+values with spaces". `apps/control-api/src/config/env-example.spec.ts` parses all
+three templates both ways and diffs the results; it runs in `pnpm test`.
+
+The `$` rule is the one with teeth locally: step 5 and the `prisma:*` scripts
+both `source` these files, so a `$(…)` in one of them is a command your shell
+runs.
 
 ## 3. Install, generate the client, migrate
 
 ```bash
 pnpm install
 pnpm generate           # prisma generate
-pnpm migrate:deploy     # applies the two committed migrations
+pnpm migrate:deploy     # applies the committed migrations
 ```
 
 Use `migrate:deploy`, not `migrate`. The migrations are committed; `migrate dev`
 would try to author a new one.
+
+**Why those scripts and not bare `prisma`.** The Prisma CLI reads `.env` from its
+**working directory** and nowhere else, and it runs with a working directory of
+`apps/control-api` — where, after the split, `DATABASE_URL` is not. So
+`apps/control-api/package.json`'s `prisma:*` scripts carry a prelude:
+
+```
+if [ -f ../../.env ]; then set -a; . ../../.env; set +a; fi; prisma …
+```
+
+The common file is exported into the environment; the CLI then loads
+`apps/control-api/.env` itself and finds `DIRECT_DATABASE_URL` there. Run
+`prisma generate` by hand from `apps/control-api` and you get
+`Environment variable not found: DATABASE_URL` — that is this, not a broken
+install. The `[ -f … ]` guard is what lets the same script run where there is no
+common file at all, which is the case during a deploy's build step.
+
+One consequence worth knowing: for the two keys Prisma needs, the **common** file
+wins if you duplicate a key into both, which is the opposite of how the running
+services resolve it. Do not duplicate keys across files — that is the whole point
+of the split — and it cannot come up.
 
 ## 4. Create the first owner
 
@@ -121,12 +203,20 @@ membership in one transaction.
 
 ## 5. Start the services
 
-**The Go data plane does NOT read `.env`** — it reads the process environment.
-Export it in each shell that runs a Go service:
+**The Go data plane does NOT read `.env`** — it reads the process environment,
+and it needs **two** files now. Export them in each shell that runs a Go service,
+from `services/data-plane`:
 
 ```bash
-set -a; source .env; set +a
+cd services/data-plane
+set -a; source ../../.env; source .env; set +a
 ```
+
+Common **first**, service-specific **second**: a later `source` wins, which
+matches how systemd resolves the same pair on a server (a later
+`EnvironmentFile=` wins) and how the control API resolves it from the other end
+(`envFilePath` is `['.env', '../../.env']`, where *earlier* entries win). All
+three agree that service-specific beats common.
 
 Terminal 1 — control plane on :3000 (OpenAPI at /docs):
 
@@ -138,9 +228,14 @@ Terminal 2 — data plane. `all` runs ingest, router, scheduler and worker in on
 process; run them separately if you want to watch a single stage:
 
 ```bash
-set -a; source .env; set +a
-pnpm dev:data-plane            # or: cd services/data-plane && go run ./cmd/webhookd worker
+cd services/data-plane
+set -a; source ../../.env; source .env; set +a
+go run ./cmd/webhookd all      # or: ... worker, to watch a single stage
 ```
+
+`pnpm dev:data-plane` from the repository root does the same `go run`, but it
+does **not** export anything, so the shell you run it from has to have been
+prepared the way above.
 
 Ingest listens on :8080, probes and Prometheus metrics on :9090.
 
@@ -186,11 +281,12 @@ none of those flows can be finished from the console. Run a catcher:
 docker compose -f deployments/compose/docker-compose.dev.yml up -d mailpit
 ```
 
-Add to `.env` and restart `pnpm dev:api`:
+Add to **`apps/control-api/.env`** — mail is the control plane's alone, so none
+of it belongs in the common file — and restart `pnpm dev:api`:
 
 ```
 SMTP_URL=smtp://localhost:1025
-MAIL_FROM="HookuBit <no-reply@localhost>"
+MAIL_FROM=HookuBit <no-reply@localhost>
 ```
 
 Every message lands in the inbox at http://localhost:8025; nothing leaves your
@@ -201,8 +297,13 @@ step 5 at `/verify-email?token=…`, `/reset-password?token=…` and
 Gotchas:
 
 - **Both variables or neither.** `SMTP_URL` without `MAIL_FROM` refuses to boot.
-  Quote `MAIL_FROM` — the angle brackets are shell syntax if you export it. The
-  display name is also the product name the messages use.
+  Do **not** quote `MAIL_FROM` in the file: angle brackets and spaces are
+  ordinary characters to dotenv and to systemd, and a quote is parsed differently
+  by each. It is also the one line in these files you must never `source` — which
+  is why nothing does: the Go shells source the *common* and *data-plane* files,
+  never this one, and the deploy recipe reads keys with `sed`. Typing it at a
+  shell prompt still needs quoting, because there the brackets are redirections.
+  The display name is also the product name the messages use.
 - **`SMTP_URL` set means SMTP in every environment**, `APP_ENV=development`
   included. `SMTP_URL` unset under staging or production refuses to boot, by
   name — there is no "quiet" mode outside development/test.
@@ -213,8 +314,9 @@ Gotchas:
   the address exists. Start Mailpit and use "resend verification" from the
   login screen.
 - **The `bootstrap` owner needs none of this.** It is created verified.
-- **Only the control plane reads `.env`** (step 5). The Go services do not send
-  mail, so there is nothing to export in their shells.
+- **Only the control plane reads these two keys**, and they live only in its own
+  file (step 5). The Go services do not send mail, so there is nothing to export
+  in their shells.
 - The link in the message is the only copy of the token; the log carries a
   prefix. Never paste a token out of Mailpit into a ticket.
 
