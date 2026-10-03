@@ -12,8 +12,8 @@
  *
  *     make deploy                     # thin wrapper around `dep deploy`
  *     dep list                        # every task, with descriptions
- *     dep hookubit:preflight          # local-only checks, touches no host
- *     dep hookubit:verify             # read-only checks against the host
+ *     dep deploy --plan               # the task order, connecting to nothing
+ *     dep hookubit:health             # read-only probes against the host
  *     dep rollback                    # READ deployments/deployer/README.md first
  *
  * Everything host-specific lives in deployments/deployer/hosts.yml.

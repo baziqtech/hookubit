@@ -1,8 +1,17 @@
 # Bare metal on Ubuntu
 
-No Docker. systemd for the platform, nginx in front of everything public,
-Cloudflare serving the dashboard, and PostgreSQL and Redis on their own
-machines. Mail goes to Amazon SES; Prometheus and Grafana watch the lot.
+No Docker. systemd for the control API and the data plane, nginx in front of
+them as a plain reverse proxy, and PostgreSQL and Redis on their own machines.
+Mail goes to Amazon SES; Prometheus and Grafana watch the lot.
+
+**This host does not serve the dashboard.** Cloudflare builds and publishes it
+from the same repository on every push, and nothing on this page builds, copies
+or serves a front-end bundle. This box answers two hostnames and no files: the
+control API and ingest, each proxied to a local port.
+
+Hostnames below are the ones `hookubit.com` itself uses. Substitute your own
+domain — but keep the dashboard and the API **under one registrable domain**,
+which is what the first constraint below is about.
 
 Ubuntu 22.04 or 24.04 throughout, PostgreSQL 15 or newer. If you would rather
 run containers, read [Docker Compose](/self-hosting/04-docker-compose) — and see
@@ -12,21 +21,23 @@ end, because the honest answer is "for two of these, yes".
 ## The shape
 
 ```
-                    ┌─────────────────────────────────────────┐
-  browser  ────────▶│ Cloudflare   webhooks.example.com       │
-                    │  · serves /assets/* from cache          │
-                    │  · passes /v1/* and /health/* to origin │
-                    └────────────────────┬────────────────────┘
-                                         │
-  publisher ──────────────────────────┐  │
-  (server-to-server)                  ▼  ▼
-                            ┌────────────────────────┐
-                            │ app host — nginx :443  │
-                            │  hookubit-api    :3000 │
-                            │  hookubit-data-plane   │
-                            │    ingest        :8080 │
-                            │    probes        :9090 │
-                            └────┬──────────────┬────┘
+                    ┌──────────────────────────────────────────┐
+  browser  ────────▶│ Cloudflare          hookubit.com         │
+                    │  the dashboard's static assets, built    │
+                    │  and published by Cloudflare on push     │
+                    └───────────────────┬──────────────────────┘
+                                        │ fetch https://api.hookubit.com/v1/*
+                                        │ credentials: include — same-site
+  publisher ─────────────────────────┐  │
+  (hooks.hookubit.com)               ▼  ▼
+                            ┌──────────────────────────┐
+                            │ app host — nginx :443    │
+                            │   proxies only; serves   │
+                            │   no files at all        │
+                            │  api.    → :3000  api    │
+                            │  hooks.  → :8080  ingest │
+                            │  probes :9090  localhost │
+                            └────┬──────────────┬──────┘
                                  │              │
                    ┌─────────────▼──┐      ┌────▼───────────┐
                    │ db.lan:5432    │      │ cache.lan:6379 │
@@ -42,6 +53,7 @@ end, because the honest answer is "for two of these, yes".
 | **db** | PostgreSQL 15+ | **Everything.** System of record *and* the delivery queue. |
 | **cache** | Redis | Rate-limiter accuracy. Not deliveries. |
 | **monitoring** | Prometheus, Grafana | Visibility. Nothing operational. |
+| **Cloudflare** | the dashboard, and the proxy in front of this box | Operator access to the UI. The API and ingest keep working for anything that calls them directly. |
 
 **`webhookd all` runs all four data-plane roles in one process.** One unit, one
 log, one set of probes. The roles split into separate deployments the day the
@@ -62,36 +74,45 @@ deliveries. That is why it gets no backup and no replication here.
 Read these before you buy a domain. Both are properties of the code, not
 preferences, and both are cheap to satisfy and expensive to retrofit.
 
-### 1. The dashboard must be same-origin with the control API
+### 1. The dashboard and the API must share one registrable domain
 
-The dashboard calls the API with **relative paths** — `fetch('/v1/projects')`,
-in `apps/dashboard/src/lib/api.ts`. There is no API base-URL setting and nothing
-to configure. Whatever origin serves `index.html` must also answer `/v1/*`.
+The dashboard is served from `hookubit.com` and the control API from
+`api.hookubit.com`. Different origins, so every call is cross-origin — and the
+same **site**, which is the part that matters.
 
-So the working shape is **one hostname**, with Cloudflare deciding per path
-whether to serve a cached asset or pass the request to your origin. What does
-*not* work is a dashboard on `dash.example.com` (or `*.pages.dev`) talking to an
-API on `api.example.com`: every call 404s at the CDN.
+The session cookie is issued `HttpOnly; SameSite=Lax` with no `Domain`
+(`apps/control-api/src/auth/session.service.ts`, asserted by a spec in every
+environment). A `Lax` cookie is withheld from cross-**site** requests, not from
+cross-origin ones, and "site" means the registrable domain: `hookubit.com` and
+`api.hookubit.com` are one site, so the browser sends it. The dashboard asks it
+to, with `credentials: 'include'`, against the base URL it is built with
+(`VITE_API_BASE_URL`; `apps/dashboard/src/lib/api-base-url.ts`).
 
-There is a second reason the same hostname is the right answer. The session
-cookie is issued `HttpOnly; SameSite=Lax`, hardcoded in
-`apps/control-api/src/auth/session.service.ts`. A `Lax` cookie is not sent on
-cross-**site** requests, so a dashboard on `hookubit.pages.dev` calling
-`api.example.com` would sign in successfully and then be anonymous on every
-subsequent request — a failure that looks like a broken session, not a broken
-deployment. Subdomains of one registrable domain *are* same-site, so
-`app.example.com` → `api.example.com` would keep working; a different
-registrable domain would not. One hostname sidesteps the question entirely.
+What does **not** work is a dashboard on a different registrable domain — a
+`*.pages.dev` preview URL, or a separate brand domain. Sign-in succeeds, the
+cookie is set and then never sent again, and every request after it is
+anonymous. It looks like a broken session, not a broken deployment.
+
+Two things the API side has to hold up, or none of this works. Both are one line
+in `/etc/hookubit/hookubit.env` and both are covered in §9:
+
+- the dashboard's origin is listed **exactly** in `CORS_ORIGINS`, which is
+  configured with `credentials: true` and **fails closed** when unset;
+- nginx passes `OPTIONS` through to the API, because a cross-origin dashboard
+  preflights every write.
 
 ### 2. Ingest gets its own hostname
 
 Publishing is server-to-server with a bearer token. It has a completely
 different traffic shape from the dashboard, no cookies and no CORS, and you will
 eventually want to rate-limit, cache and scale it separately. Give it
-`hooks.example.com`.
+`hooks.hookubit.com`.
 
 That hostname is **compiled into the dashboard bundle** as
-`VITE_INGEST_BASE_URL`, so decide it before you build.
+`VITE_INGEST_BASE_URL`, so decide it before the dashboard is first built — and
+set it where that build happens, which is Cloudflare's build environment, not
+this host. The build settings are in `apps/dashboard/README.md` in the
+repository.
 
 ---
 
@@ -216,14 +237,14 @@ accuracy of rate limits while it is down.
 ```bash
 sudo apt update
 sudo apt install -y build-essential git curl ca-certificates nginx \
-  postgresql-client rsync
+  postgresql-client nftables jq
 ```
 
 `postgresql-client` is not optional here even though PostgreSQL runs elsewhere:
-the `pg_isready` check in step 1 and the `pg_dump` in step 13 both run on *this*
-host, against `db.lan` over the network. `rsync` publishes the dashboard in
-steps 4 and 14; it is present on a standard Ubuntu Server install and missing
-from the minimal cloud images.
+the `pg_isready` check in step 1, the `pg_dump` in step 13 and the Deployer
+recipe's migration guard all run on *this* host, against `db.lan` over the
+network. `nftables` is the firewall in step 8 and `jq` reads the request log in
+step 5; both are usually present already.
 
 Node 22 and pnpm — the repo pins pnpm through `packageManager`, so let corepack
 read it rather than installing a version by hand:
@@ -268,9 +289,12 @@ A system user with no shell:
 
 ```bash
 sudo useradd --system --create-home --home-dir /opt/hookubit --shell /usr/sbin/nologin hookubit
-sudo mkdir -p /opt/hookubit/{src,bin,web} /etc/hookubit
+sudo mkdir -p /opt/hookubit/{src,bin} /etc/hookubit
 sudo chown -R hookubit:hookubit /opt/hookubit
 ```
+
+Two directories, not three. There is no `web/`: nothing on this host serves
+static files any more.
 
 ---
 
@@ -281,7 +305,7 @@ Build as the service user so nothing in the tree ends up owned by root:
 ```bash
 sudo -u hookubit -H bash
 cd /opt/hookubit/src
-git clone https://github.com/YOU/hookubit.git .    # or rsync the tree across
+git clone https://github.com/YOU/hookubit.git .    # or copy the tree across
 pnpm install --frozen-lockfile
 ```
 
@@ -309,43 +333,16 @@ not run in it and bare `go` is `command not found` here.
 
 ### The dashboard
 
-**Two values are compiled in and cannot be changed afterwards.**
+**Not here.** Cloudflare's git integration builds and publishes the dashboard
+from this same repository on every push to the deployment branch. Nothing on
+this host builds it, copies it or serves it, and the three values compiled into
+the bundle — the transport, the control API's base URL and the ingest base URL —
+are set in **Cloudflare's build environment**, documented in
+`apps/dashboard/README.md` in the repository.
 
-```bash
-cd /opt/hookubit/src
-VITE_API_TRANSPORT=http \
-VITE_INGEST_BASE_URL=https://hooks.example.com \
-  pnpm --filter @hookubit/dashboard build
-```
-
-- `VITE_API_TRANSPORT=http` — **without it the dashboard runs against its
-  in-memory mock.** Every screen works, backed by data that does not exist. If
-  nothing you create ever reaches the database, this is why.
-- `VITE_INGEST_BASE_URL` — the public ingest origin, printed in the get-started
-  page's `curl`. Leave it unset and that example says `http://localhost:8080`,
-  which is right on a laptop and wrong in every message you paste to anyone.
-
-Check the bundle before you leave this shell — you are still in
-`/opt/hookubit/src` and `hookubit` owns these files:
-
-```bash
-# Must print one filename: the chunk carrying the ingest origin.
-grep -rlF --include='*.js' --exclude='*.js.map' \
-  'https://hooks.example.com' apps/dashboard/dist/assets
-
-# Must print nothing at all: the fallback did not survive into the bundle.
-grep -rlF --include='*.js' --exclude='*.js.map' \
-  'http://localhost:8080' apps/dashboard/dist/assets
-```
-
-Two greps, not one, and `-l` rather than `-q`: a `-q` line is silent whether it
-passed or failed, which teaches you nothing the first time you run it. The first
-command printing a filename is the configured origin reaching the emitted
-JavaScript. The second printing a filename means `VITE_INGEST_BASE_URL` was not
-set on the build line, so the `http://localhost:8080` fallback is compiled in —
-rebuild, do not ship it. `--exclude='*.js.map'` matters for the second one:
-`sourcemap: true` means the map always carries the fallback as source text,
-taken or not. Step 14 runs the same pair as part of its chain.
+What that means for this page: the front end and the back end deploy on
+different triggers. A push updates the dashboard. Step 14 updates this host.
+Neither waits for the other, and §9 is where the two are wired together.
 
 That is the last step that runs inside the `hookubit` shell. Leave it before
 you go on: `hookubit` has `/usr/sbin/nologin` for a shell and is not in sudoers,
@@ -354,14 +351,6 @@ migration in step 6 cannot be run as `hookubit` at all.
 
 ```bash
 exit
-```
-
-`apps/dashboard/dist/` is what Cloudflare will serve. Keep a copy on the app
-host too — nginx serves it as the origin, and as a fallback if you ever take
-Cloudflare out of the path:
-
-```bash
-sudo rsync -a --delete /opt/hookubit/src/apps/dashboard/dist/ /opt/hookubit/web/
 ```
 
 ---
@@ -388,10 +377,13 @@ SESSION_SECRET=REPLACE
 SMTP_URL=smtp://SES_SMTP_USER:SES_SMTP_PASSWORD@email-smtp.eu-west-1.amazonaws.com:587
 MAIL_FROM=HookuBit <no-reply@example.com>
 
-# The origin every link in every email is built from. Wrong here means mail
-# full of dead links. Same hostname the dashboard is served from.
-DASHBOARD_URL=https://webhooks.example.com
-CORS_ORIGINS=https://webhooks.example.com
+# The dashboard's origin, twice, for two different jobs. DASHBOARD_URL is the
+# base of every link in every email; wrong here means mail full of dead links.
+# CORS_ORIGINS is an exact-match list and FAILS CLOSED: unset, and sign-in
+# itself fails. Both are the hostname Cloudflare serves the dashboard on, NOT
+# this box's. See §9.
+DASHBOARD_URL=https://hookubit.com
+CORS_ORIGINS=https://hookubit.com
 
 CONTROL_API_PORT=3000
 INGEST_PORT=8080
@@ -425,18 +417,65 @@ signing time.
 
 ### Proxy hops
 
-`TRUST_PROXY_HOPS` is an exact count, not a boolean, and it is how the
-per-IP rate limiter finds the client. Set it too low and every request in the
-world shares one bucket, because they all appear to come from your proxy. Set it
-too high and a client can spoof its own address by sending an
-`X-Forwarded-For` header.
+`TRUST_PROXY_HOPS` is an exact count, not a boolean, and it is how the per-IP
+rate limiter finds the client. Set it too low and every request in the world
+shares one bucket, because they all appear to come from your proxy. Set it too
+high and a client picks its own address with an `X-Forwarded-For` header, which
+is worse than no rate limiting, because it looks like there is some.
 
-With Cloudflare proxying to nginx proxying to the process, that is **2**. If you
-later take Cloudflare out of the path, it is 1. If you put a load balancer in
-front of Cloudflare, it is 3. Count the hops; do not guess.
+**For the topology on this page it is 2, for both planes.** Here is the
+arithmetic, because this is a number to derive once rather than tune.
 
-Make nginx honest about the chain by trusting Cloudflare's ranges (see the nginx
-section), or the count is meaningless.
+Express (and the Go ingest handler, identically) builds one list: the socket
+address first, then the `X-Forwarded-For` entries read right to left. A count of
+`n` trusts the `n` nearest entries and takes the client from the next one along.
+On this box:
+
+| # | Entry | Who wrote it |
+|---|---|---|
+| 0 | `127.0.0.1` | the kernel. nginx is the peer. |
+| 1 | right-most `X-Forwarded-For` | nginx, from `$remote_addr` |
+| 2 | next `X-Forwarded-For` | **Cloudflare**, from the connection it accepted |
+| 3+ | anything further left | **the client**. Forgeable. |
+
+So `2` lands on the entry Cloudflare wrote, which is the first one no client can
+reach — Cloudflare *appends* to whatever `X-Forwarded-For` the client sent, it
+does not replace it. Take Cloudflare out of the path later and the count is 1;
+put a load balancer in front of Cloudflare and it is 3. Change the
+`X-Forwarded-For` line in §8's nginx and recount, because that table is a
+property of that line.
+
+**Then confirm the derivation, from the request log.** Call the API from your
+own machine and read the headers back:
+
+```bash
+curl -s https://api.hookubit.com/v1/auth/session -o /dev/null
+sudo journalctl -u hookubit-api -n 20 -o cat \
+  | jq -c 'select(.req) | {xff: .req.headers["x-forwarded-for"],
+                           cf: .req.headers["cf-connecting-ip"],
+                           socket: .req.remoteAddress}'
+```
+
+`cf` must be your own public address, and `xff` must end in it — twice, in fact,
+once from Cloudflare and once from nginx, which is what a count of 2 is reading.
+Repeat it with `-H 'X-Forwarded-For: 9.9.9.9'` and watch `9.9.9.9` appear on the
+**left** of that list, where the count never reaches it.
+
+::: warning What this check cannot tell you
+`socket` is always `127.0.0.1`: `pino-std-serializers` fills `remoteAddress`
+from the socket, never from `req.ip`, so the resolved client address — the one
+the rate limiter actually buckets on — **does not appear in this log at all**.
+The check above proves the *headers* are what the table says. It cannot detect
+over-counting: set `TRUST_PROXY_HOPS=5` and every line of that output is
+identical while every request quietly gets its own rate-limit bucket.
+
+So do not tune this number until the output looks right. Derive it from the
+topology, as above, and use the log only to confirm that the topology is the one
+you think it is.
+:::
+
+And none of it means anything unless nginx is honest about the chain and only
+Cloudflare can reach the port. Both are §8, and both are mandatory.
 
 ### Consumers on the LAN
 
@@ -596,42 +635,178 @@ and lost it.
 
 ---
 
-## 8. nginx
+## 8. nginx, behind a firewall
 
-nginx terminates TLS at the origin and routes by path and hostname. Cloudflare
-sits in front of it; the origin certificate can be a Cloudflare Origin CA
-certificate, which is free and lasts fifteen years, or Let's Encrypt.
+**nginx on this box serves no files, and it has one job: two hostnames, two
+local ports.**
 
-### Trust Cloudflare's addresses first
+| Hostname | Proxied to | What answers |
+|---|---|---|
+| `api.hookubit.com` | `127.0.0.1:3000` | the control API, `/v1/*` only |
+| `hooks.hookubit.com` | `127.0.0.1:8080` | ingest |
 
-Without this, `X-Forwarded-For` is whatever the client claimed and
-`TRUST_PROXY_HOPS` is decoration.
+No `root`, no `try_files`, no `/assets/` block and no SPA fallback. The
+dashboard and its assets are Cloudflare's (§9), and a copy of the bundle here
+would be a second thing to keep in step — a stale copy is indistinguishable
+from a fresh one until a user finds it.
 
-`/etc/nginx/conf.d/cloudflare.conf`:
+### Only Cloudflare may reach ports 80 and 443
 
-```nginx
-# Refresh from https://www.cloudflare.com/ips/ — these change.
-# A cron that curls the list and reloads nginx is worth the five lines.
-set_real_ip_from 173.245.48.0/20;
-set_real_ip_from 103.21.244.0/22;
-# … the rest of https://www.cloudflare.com/ips-v4 and ips-v6 …
-real_ip_header CF-Connecting-IP;
+Do this **before** the server blocks below, on every host, whether or not you
+think anyone knows your address.
+
+Proxying a DNS record hides your IP from `dig`. It does not close your ports.
+`443` on this box is reachable from anywhere on the internet the moment nginx
+starts, and the address is discoverable without your help. Historical DNS
+archives keep whatever those names pointed at before you turned the orange cloud
+on. Certificate transparency names every hostname you ever issue a
+publicly-trusted certificate for, which tells an attacker what to look for. And
+this platform's whole job is to make outbound connections: **every delivery to
+every customer endpoint arrives from this box's address**, so anyone who
+receives one of your webhooks already has it.
+
+**That is not a theoretical exposure, because a direct connection switches the
+per-IP rate limiter off.** With `TRUST_PROXY_HOPS=2` the control API takes the
+client address from the third entry of the list `[socket address, X-Forwarded-For
+right-to-left]` (`src/config/trust-proxy.ts`, and `proxy-addr` underneath it).
+Through Cloudflare that entry is the one Cloudflare wrote, and a client cannot
+reach it. Connecting **straight to this box**, the whole list is the attacker's:
+`X-Forwarded-For: 1.2.3.4, 5.6.7.8` makes `req.ip` whatever they like, so
+`ThrottleGuard`'s `name:ip:<ip>` bucket (`src/common/throttle.guard.ts`) is
+fresh on every request and the limits on login and password reset — the two that
+exist to make credential stuffing expensive — are simply gone.
+`set_real_ip_from` cannot save you here: the connection really is from outside
+Cloudflare, so there is nothing to rewrite.
+
+One script, run now and on a timer, because Cloudflare's ranges change. It
+writes the packet filter and the `set_real_ip_from` list from the same fetch, so
+the two can never disagree:
+
+```bash
+sudo install -d /etc/nftables.d
+sudo tee /usr/local/sbin/hookubit-cloudflare-ranges >/dev/null <<'EOF'
+#!/bin/bash
+# Ports 80 and 443: Cloudflare only. Plus the list nginx trusts to set
+# CF-Connecting-IP. One fetch, two consumers, applied atomically.
+set -euo pipefail
+v4=$(curl -fsS --max-time 20 https://www.cloudflare.com/ips-v4)
+v6=$(curl -fsS --max-time 20 https://www.cloudflare.com/ips-v6)
+# `|| true` because grep -c exits 1 on a count of zero, and with `set -e` that
+# would kill the script before the message below could say why.
+n=$(printf '%s\n%s\n' "$v4" "$v6" | grep -cE '^[0-9a-fA-F.:]+/[0-9]{1,3}$' || true)
+[ "$n" -ge 20 ] || { echo "got $n CIDRs, expected 20+; leaving everything as it is" >&2; exit 1; }
+
+# One `nft -f` is one transaction: the old table is replaced, never absent.
+{ echo 'table inet hookubit { }'
+  echo 'delete table inet hookubit'
+  echo 'table inet hookubit {'
+  echo "  set cf4 { type ipv4_addr; flags interval; elements = { $(printf '%s\n' "$v4" | paste -sd, -) } }"
+  echo "  set cf6 { type ipv6_addr; flags interval; elements = { $(printf '%s\n' "$v6" | paste -sd, -) } }"
+  echo '  chain input {'
+  echo '    type filter hook input priority -10; policy accept;'
+  echo '    iif lo accept'
+  echo '    tcp dport { 80, 443 } ip  saddr @cf4 accept'
+  echo '    tcp dport { 80, 443 } ip6 saddr @cf6 accept'
+  echo '    tcp dport { 80, 443 } drop'
+  echo '  }'
+  echo '}'
+} > /etc/nftables.d/hookubit-cloudflare.nft
+nft -f /etc/nftables.d/hookubit-cloudflare.nft
+
+{ echo 'real_ip_header CF-Connecting-IP;'
+  printf 'set_real_ip_from %s;\n' $v4 $v6
+} > /etc/nginx/conf.d/cloudflare-real-ip.conf
+nginx -t && systemctl reload nginx
+EOF
+sudo chmod 0755 /usr/local/sbin/hookubit-cloudflare-ranges
+sudo hookubit-cloudflare-ranges
 ```
+
+Make it survive a reboot, and re-run weekly:
+
+```bash
+grep -q nftables.d /etc/nftables.conf \
+  || echo 'include "/etc/nftables.d/*.nft";' | sudo tee -a /etc/nftables.conf
+sudo systemctl enable --now nftables
+
+echo '17 4 * * 0 root /usr/local/sbin/hookubit-cloudflare-ranges' \
+  | sudo tee /etc/cron.d/hookubit-cloudflare-ranges
+```
+
+A cron entry rather than `systemd-run --on-calendar`, which creates a
+*transient* timer and loses it on the next reboot. Cron also mails root the
+output, which is where you want the "got 0 CIDRs" line to end up.
+
+Four details in that script, each of which is the difference between a firewall
+and a lockout.
+
+**It refuses to apply a list that does not look like one.** `curl -fsS` fails
+loudly on a 5xx, but a captive portal or a proxy can return a cheerful HTML
+page with a `200`. Counting CIDR-shaped lines first means a bad fetch leaves
+yesterday's working rules in place instead of installing a table that matches
+nothing and drops all your traffic.
+
+**One `nft -f`, one transaction.** Create-if-absent, delete, redefine — all in
+one file, so the ruleset is never momentarily empty. Run as three commands there
+is a window in which the box is open, and that window is when you are looking
+somewhere else.
+
+**Its own table, at priority `-10`.** It does not fight ufw or anything else:
+packets traverse every base chain for the hook, a `drop` here is final, and an
+`accept` here does not bypass another table's rules. Leave `policy accept` —
+this table is not your whole firewall, only the rule about these two ports. The
+`iif lo accept` is there so `curl http://localhost` from the box itself still
+works; without it your own debugging hangs along with the attacker's.
+
+**Every public hostname must stay proxied after this.** Set `hooks` to DNS-only
+and your publishers are dropped at the packet filter with no error anywhere in
+nginx's logs. §9's DNS table says proxied for exactly this reason.
+
+::: tip Checking it from off-box
+`curl -sv --resolve api.hookubit.com:443:<your-ip> https://api.hookubit.com/v1/auth/session`
+from anywhere that is not Cloudflare should now hang and time out. Through the
+normal DNS name it should answer `401`. If the first one answers, the table did
+not load — `sudo nft list table inet hookubit`.
+:::
+
+### TLS: a Cloudflare Origin CA certificate
+
+Issue one in the Cloudflare dashboard (SSL/TLS → Origin Server → Create
+Certificate), fifteen years, free, covering `hookubit.com` and `*.hookubit.com`.
+Install the certificate and key as `/etc/ssl/cloudflare/origin.pem` and
+`origin.key`, `0600`, root-owned.
+
+::: danger Not Let's Encrypt, and not an HTTP-01 challenge
+An `http-01` challenge — `certbot --nginx`, or any webroot — cannot work against
+the configuration below. The challenge arrives as
+`/.well-known/acme-challenge/<token>` on a hostname whose only `location` is
+`/v1/`, so it lands on `return 404` and issuance fails. That is survivable the
+first time, because you find out immediately. What is not survivable is the
+**renewal** 60 days later: it fails the same way, silently, in a timer whose
+output nobody reads, and when the certificate expires Cloudflare starts
+answering **`526` on every API call** while the dashboard's assets keep loading
+perfectly from Cloudflare's own edge. It looks exactly like an API outage.
+
+If you want a publicly-trusted certificate anyway, use **DNS-01** (`certbot
+--dns-cloudflare`), which never touches this nginx. Do not open a
+`/.well-known/` hole in the API hostname just to make `http-01` work: the port
+is Cloudflare-only now, so the challenge would have to come through the proxy
+anyway, and you would be maintaining an unauthenticated path on the API
+hostname for the benefit of one request every two months.
+:::
 
 ### `/etc/nginx/sites-available/hookubit`
 
 ```nginx
-# ── Dashboard + control API: ONE origin, because the dashboard calls the API
-# with relative paths. See "Two constraints" above.
+# ── The control API. /v1/* and nothing else.
 server {
     listen 443 ssl http2;
-    server_name webhooks.example.com;
+    server_name api.hookubit.com;
 
     ssl_certificate     /etc/ssl/cloudflare/origin.pem;
     ssl_certificate_key /etc/ssl/cloudflare/origin.key;
 
-    # The API. Everything under /v1 and /health goes to the control plane.
-    location ~ ^/(v1|health)/ {
+    location /v1/ {
         proxy_pass http://127.0.0.1:3000;
         proxy_http_version 1.1;
         proxy_set_header Host              $host;
@@ -642,27 +817,18 @@ server {
         proxy_read_timeout 60s;
     }
 
-    # The dashboard, as origin for Cloudflare's cache.
-    root /opt/hookubit/web;
-
-    location /assets/ {
-        # Hashed filenames: safe to cache for ever.
-        add_header Cache-Control "public, max-age=31536000, immutable";
-        try_files $uri =404;
-    }
-
+    # /health/live is NOT published: it is probed on localhost (§7, and the
+    # Deployer recipe). Published, it is an unauthenticated oracle on your
+    # database's state.
     location / {
-        # index.html must NEVER be cached, or a deploy leaves every browser on
-        # a stale bundle pointing at assets that no longer exist.
-        add_header Cache-Control "no-store";
-        try_files $uri /index.html;
+        return 404;
     }
 }
 
 # ── Ingest: its own hostname, its own limits.
 server {
     listen 443 ssl http2;
-    server_name hooks.example.com;
+    server_name hooks.hookubit.com;
 
     ssl_certificate     /etc/ssl/cloudflare/origin.pem;
     ssl_certificate_key /etc/ssl/cloudflare/origin.key;
@@ -682,75 +848,186 @@ server {
 }
 
 server {
-    listen 80 default_server;
-    server_name _;
+    listen 80;
+    server_name api.hookubit.com hooks.hookubit.com;
     return 301 https://$host$request_uri;
 }
 ```
 
-`client_max_body_size 2m` must stay **above** the platform's own payload
-ceiling, which is `PAYLOAD_MAX_BYTES` and defaults to 1 MiB. If nginx refuses
-first, the publisher gets an nginx HTML error page instead of the platform's
-JSON naming the limit it hit. Raise this whenever you raise that.
-
-Note what is *not* exposed: `9090` is probes and metrics, and it stays on
-localhost. Prometheus reaches it over the private network or an SSH tunnel —
-never through nginx.
-
 ```bash
+# Ubuntu ships an enabled site that claims `default_server` on port 80. Leave it
+# and `nginx -t` fails with "a duplicate default server for 0.0.0.0:80" the
+# moment any other block claims the same thing — and while it is enabled it is
+# the default server for every hostname you have not named, answering the Ubuntu
+# welcome page to anything that reaches this box on a name you did not expect.
+sudo rm -f /etc/nginx/sites-enabled/default
+
 sudo ln -s /etc/nginx/sites-available/hookubit /etc/nginx/sites-enabled/
 sudo nginx -t && sudo systemctl reload nginx
 ```
+
+Four things about that file.
+
+**`location /v1/` proxies every method, `OPTIONS` included, and it must.** The
+dashboard is on a different origin now, so every `PATCH`, every `DELETE` and
+every `Content-Type: application/json` request is preceded by a CORS preflight.
+Nest answers `OPTIONS` correctly — but only if it sees it. An nginx block that
+handles `OPTIONS` itself, or a `limit_except GET POST` that returns `405`,
+breaks every mutation in the dashboard while reads keep working perfectly, which
+is a miserable thing to debug. Do not add one.
+
+**Nothing but `/v1/` is answered on the API hostname.** `/health/*` is excluded
+from the API's global prefix precisely so it can be probed on localhost, and
+publishing it hands the internet a readout of your database's reachability. The
+`404` is deliberate, and there is no SPA fallback: nothing here serves HTML.
+
+**`client_max_body_size 2m` must stay above `PAYLOAD_MAX_BYTES`** (1 MiB by
+default). If nginx refuses first, the publisher gets an nginx HTML error page
+instead of the platform's JSON naming the limit it hit. Raise this whenever you
+raise that.
+
+**`listen 443 ssl http2;` is the right spelling for Ubuntu 22.04 and 24.04**
+(nginx 1.18 and 1.24). On nginx 1.25 or newer it warns, and the replacement is
+`listen 443 ssl;` plus a separate `http2 on;`.
+
+And what stays unexposed: `9090` is probes and metrics and never goes through
+nginx. Prometheus reaches it over the private network or an SSH tunnel.
 
 ---
 
 ## 9. Cloudflare
 
-Two DNS records, both **proxied** (orange cloud):
+Four names on one registrable domain. Only two of them are this box.
 
-| Name | Type | Value |
+| Name | Who answers it | Where it is configured |
 |---|---|---|
-| `webhooks` | A | app host's public IP |
-| `hooks` | A | app host's public IP |
+| `hookubit.com` | **Cloudflare.** The dashboard's static assets, built and published by Cloudflare's own git integration on every push to the deployment branch | Cloudflare, plus `apps/dashboard/` in the repository |
+| `sysadmin.hookubit.com` | nothing yet — a planned internal admin dashboard | n/a. Do not create the record until something serves it |
+| `api.hookubit.com` | nginx on the app host → `127.0.0.1:3000` | §8 |
+| `hooks.hookubit.com` | nginx on the app host → `127.0.0.1:8080` | §8 |
 
-Then, and this is the part that matters:
+**Nothing on this page deploys the dashboard, and `make deploy` does not either.**
+Cloudflare is connected to the repository and builds it when you push; there is
+no GitHub Actions workflow for it and no front-end step on this host. Its three
+build variables — the transport, the API base URL and the ingest base URL — are
+documented in `apps/dashboard/README.md` in the repository, which is the one
+place they are written down. The API base URL is the only wiring between the two
+halves: the dashboard fetches `https://api.hookubit.com/v1/...` with
+`credentials: 'include'`, and a production build with that variable unset
+refuses to boot rather than quietly fetching relative paths and parsing
+`index.html` as JSON.
+
+So the two halves deploy on different triggers. A push updates the dashboard.
+§14 updates this host. Neither waits for the other.
+
+### The API needs to be told about the dashboard
+
+Two variables in `/etc/hookubit/hookubit.env`, both on the **app host**, and the
+platform is unusable until they are right:
+
+```bash
+CORS_ORIGINS=https://hookubit.com
+DASHBOARD_URL=https://hookubit.com
+```
+
+When `sysadmin.hookubit.com` exists it will be a third origin on that same
+comma-separated list. Until something serves it, there is nothing to add.
+
+::: danger CORS_ORIGINS unset is a dead platform, not a degraded one
+It is an exact-string list, split on commas, and it **fails closed**: unset or
+blank means `origin: false`, which blocks every cross-origin request at the
+preflight. The cookie is never sent, so **sign-in itself fails** and every
+screen is empty. The symptom is "nothing works at all", which sends people
+looking at the dashboard; the cause is one missing line on this box.
+
+Scheme and host, no path and no trailing slash. `https://hookubit.com` does
+**not** cover `https://www.hookubit.com` — if the dashboard answers on both,
+list both, comma-separated. `DASHBOARD_URL` is separate and is the base of every
+link in outbound mail; wrong there means verification mail full of dead links.
+:::
+
+### DNS
+
+Two records for this box, both **proxied** (orange cloud), both pointing at the
+app host's public IP:
+
+| Name | Type | Proxy |
+|---|---|---|
+| `api` | A (and AAAA if you have one) | **Proxied** |
+| `hooks` | A (and AAAA if you have one) | **Proxied** |
+
+`hookubit.com` itself is a Workers/Pages custom domain and Cloudflare manages
+its record; you do not point it at this host.
+
+**Proxied is not optional any more.** §8's packet filter accepts `80` and `443`
+from Cloudflare's ranges and drops everything else, so a record set to DNS-only
+is a record whose traffic never arrives — and nginx logs nothing, because
+nothing reached it. Proxied also keeps `CF-Connecting-IP` in the path, which is
+what makes `TRUST_PROXY_HOPS=2` and the per-IP limits mean anything.
+
+### TLS
 
 **SSL/TLS mode must be Full (strict).** "Flexible" makes Cloudflare talk plain
 HTTP to your origin, so every session cookie and every signing secret you read
-in the dashboard crosses the internet in clear text, while the browser shows a
-padlock.
+in the dashboard crosses the internet in clear text while the browser shows a
+padlock. Full (strict) also means the origin certificate has to be real, which
+is what the Origin CA certificate in §8 is for. A self-signed one is refused and
+the symptom is a Cloudflare `526` on every API call — the same symptom as an
+expired certificate, and the reason §8 does not offer `http-01`.
 
-**Cache rules.** Cloudflare caches static assets by extension by default, which
-is nearly right. Make it exactly right:
+Turn on **Always Use HTTPS** while you are there. The `listen 80` block in §8 is
+then a formality.
+
+### Cache rules
 
 | Path | Rule |
 |---|---|
-| `/assets/*` | Cache everything, respect origin TTL (the files are content-hashed) |
-| `/v1/*` | **Bypass cache** |
-| `/health/*` | **Bypass cache** |
-| `/` and `/index.html` | Bypass cache, or you will serve a stale bundle after a deploy |
+| `api.hookubit.com/*` | **Bypass cache** |
+| `hooks.hookubit.com/*` | **Bypass cache** |
+| `hookubit.com/*` | leave to the dashboard's own asset handling |
 
 A cached `POST /v1/...` is not possible, but a cached `GET /v1/projects` served
-to the wrong tenant absolutely is. Bypass the API prefix explicitly rather than
-relying on Cloudflare's defaults staying what they are today.
+to the wrong tenant absolutely is. Bypass both API hostnames explicitly rather
+than relying on Cloudflare's default behaviour staying what it is today.
 
 **Do not enable Rocket Loader, Auto Minify or Email Obfuscation** on
-`webhooks.example.com`. They rewrite JavaScript and HTML, and the bundle is
-already minified and content-hashed; the only thing they can do here is break it
-in ways that reproduce on no one's laptop.
+`hookubit.com`. They rewrite JavaScript and HTML; the bundle is already minified
+and content-hashed, so the only thing they can do here is break it in ways that
+reproduce on nobody's laptop.
 
-**Leave `hooks.example.com` alone** apart from proxying. No caching, no
-transformations. It takes signed `POST` bodies, and the signature covers the
-exact bytes — anything that rewrites a request body makes every delivery fail
+**Leave `hooks.hookubit.com` alone** apart from proxying. No caching, no
+transformations. It takes signed `POST` bodies and the signature covers the exact
+bytes — anything that rewrites a request body makes every delivery fail
 verification.
 
-### If you would rather use Cloudflare Pages
+There is nothing to purge after a server deploy. The dashboard's assets are
+content-hashed and published by Cloudflare when you pushed; `make deploy` does
+not touch them.
 
-You can, but you must still answer `/v1/*` from the same hostname — either with
-a Pages Function proxying to your origin, or a Worker route. The moment the
-dashboard and the API are on different hostnames, you are relying on the session
-cookie surviving a cross-site request, and it will not. See
-[Two constraints](#two-constraints-that-decide-the-whole-design).
+### Checking it
+
+From anywhere, including the app host:
+
+```bash
+# The API answers through Cloudflare, with its own JSON, not an HTML page.
+curl -si https://api.hookubit.com/v1/auth/session | head -20
+
+# The preflight the dashboard sends before every write.
+curl -si -X OPTIONS https://api.hookubit.com/v1/projects \
+  -H 'Origin: https://hookubit.com' \
+  -H 'Access-Control-Request-Method: PATCH' | head -20
+```
+
+The first must be `401` with `"code":"unauthenticated"` in the body. HTML, or a
+Cloudflare error page, means the record, the cache rule or the firewall is wrong
+— and `526` specifically means the origin certificate.
+
+The second must be `204` (or `200`) with
+`access-control-allow-origin: https://hookubit.com` and
+`access-control-allow-credentials: true`. Anything else — no header at all, or
+`403`, or `405` — is `CORS_ORIGINS` on this box, or an nginx block that stopped
+`OPTIONS` before it reached Nest. Every write in the dashboard fails while reads
+keep working, so this is worth one `curl` on every install.
 
 ---
 
@@ -846,12 +1123,16 @@ sudo cp deployments/observability/prometheus/alerts.yaml /etc/prometheus/
 sudo promtool check rules /etc/prometheus/alerts.yaml
 ```
 
-They include `WebhookOutboxLagHigh` (the router is not draining),
-`WebhookQueueDepthNotExported` (the collector itself stopped, which no
-throughput alert would catch), `WebhookRateLimiterDegraded` (Redis is gone and
-limits are per-process) and `WebhookEgressBlockedMetadataAddress` — an endpoint
-URL resolving to a cloud metadata address, which is someone probing for
-credentials, not a misconfiguration.
+They include `WebhookOutboxLagHigh` (the oldest unrouted event is getting old —
+the router is not draining), `WebhookQueueBacklogGrowing` (ready deliveries
+piling up and still climbing, which is the pair to the lag alert and the one
+step 14 watches after an upgrade), `WebhookQueueDepthNotExported` (the collector
+itself stopped, which no throughput alert would catch — and with it firing the
+backlog alert cannot fire at all, so read it as no signal rather than a clear
+one), `WebhookRateLimiterDegraded` (Redis is gone and limits are per-process)
+and `WebhookEgressBlockedMetadataAddress` — an endpoint URL resolving to a cloud
+metadata address, which is someone probing for credentials, not a
+misconfiguration.
 
 `/etc/systemd/system/prometheus.service`:
 
@@ -921,7 +1202,8 @@ echo 'ALLOW_OPEN_REGISTRATION=true' | sudo tee -a /etc/hookubit/hookubit.env
 sudo systemctl restart hookubit-api
 ```
 
-Register in the dashboard, follow the verification link SES delivers, then:
+Register at `https://hookubit.com`, follow the verification link SES delivers,
+then:
 
 ```bash
 sudo sed -i 's/^ALLOW_OPEN_REGISTRATION=true/ALLOW_OPEN_REGISTRATION=false/' /etc/hookubit/hookubit.env
@@ -931,6 +1213,10 @@ sudo systemctl restart hookubit-api
 Everyone after you joins by invitation from the Team page. Leaving open
 registration on means anyone who can reach the API creates an account and an
 organization they own.
+
+If the registration form submits and nothing happens, read the browser console
+before you read the API's log: a CORS failure at the preflight looks exactly
+like a dead form, and `CORS_ORIGINS` (§9) is the usual cause on a first install.
 
 ---
 
@@ -1010,7 +1296,7 @@ turn on WAL archiving.
 
 ## 14. Upgrades
 
-Four blocks, in this order. The `&&` chains inside them are load-bearing —
+Five blocks, in this order. The `&&` chains inside them are load-bearing —
 they are what keeps a failed step from being followed by the next one, and step
 6's self-test is what proves the status actually comes back. The blocks are
 deliberately separate, so each one is a checkpoint you read before running the
@@ -1042,19 +1328,19 @@ cd /opt/hookubit/src \
   && ( cd services/data-plane \
        && sudo -u hookubit /usr/local/go/bin/go build \
             -o /opt/hookubit/bin/webhookd ./cmd/webhookd ) \
-  && sudo -u hookubit env VITE_API_TRANSPORT=http \
-       VITE_INGEST_BASE_URL=https://hooks.example.com \
-       pnpm --filter @hookubit/dashboard build \
-  && { sudo -u hookubit grep -rlF --include='*.js' --exclude='*.js.map' \
-         'https://hooks.example.com' apps/dashboard/dist/assets \
-       || { echo 'INGEST ORIGIN MISSING FROM BUNDLE'; false; }; } \
-  && { ! sudo -u hookubit grep -rlF --include='*.js' --exclude='*.js.map' \
-         'http://localhost:8080' apps/dashboard/dist/assets \
-       || { echo 'LOCALHOST FALLBACK IS IN THE BUNDLE'; false; }; } \
-  && sudo rsync -a --delete apps/dashboard/dist/ /opt/hookubit/web/
+  && ls -l /opt/hookubit/bin/webhookd
 ```
 
-Three details in that chain are easy to get wrong and silent when you do.
+::: tip The dashboard is not in that chain, and it is not in this block
+Nothing here builds, copies or publishes the front end. Cloudflare built and
+published it the moment you pushed (§9, and `apps/dashboard/README.md` in the
+repository), on its own trigger and its own timeline. **You have not
+half-upgraded.** If a dashboard change is not live, the answer is in
+Cloudflare's deployment log for that push; if an API change is not live, it is
+in this block.
+:::
+
+Two details in that chain are easy to get wrong and silent when you do.
 
 **`/usr/local/go/bin/go`, not `go`.** `sudo` applies `secure_path` to the
 target command, replacing `PATH` with a list that has `/usr/local/bin` on it and
@@ -1063,57 +1349,18 @@ even on a host where `go` works perfectly in your own shell. Step 3's symlink
 covers the same ground; the absolute path here is immune to `secure_path`
 differing between releases.
 
-**`env`, not a prefix.** `VITE_… sudo -u hookubit pnpm build` puts the values in
-*sudo's* environment, and Ubuntu's default `Defaults env_reset` builds a fresh
-environment for the target command keeping only `env_keep` — which does not
-include `VITE_*`. The build then runs with neither value: a dashboard on its
-in-memory mock, and a get-started page telling people to publish to
-`http://localhost:8080`. Step 4's form works because it runs *inside* the
-`sudo -u hookubit -H bash` shell with no `sudo` on the line. Here there is one,
-so the assignments go after it, through `env`.
+**`ls -l` is the last link on purpose.** Every command before it is silent on
+success, `go build` included, so after a long noisy build "the chain stopped at
+the Go build" and "the chain finished" would otherwise look identical — and the
+next thing you would do is run the migration block over a `webhookd` from the
+previous release, which is the exact failure the danger note below describes.
+The `ls` is read-only, it cannot pass when `go build` did not produce the
+binary, and the **mtime it prints is the fact the next block depends on**: look
+at it and confirm it is seconds old, not weeks.
 
-**Then prove it landed**, because nothing else will tell you. The two greps are
-the check the Deployer recipe runs — both halves of it: the emitted JavaScript
-must contain the ingest origin you configured, *and* must not contain the
-`http://localhost:8080` fallback. They are in the chain so a bundle missing the
-one, or carrying the other, stops the upgrade *before* the migration. An unset
-variable is exactly what leaves the fallback behind, which is why the negative
-half is worth the extra link.
-
-**What they prove is that `VITE_INGEST_BASE_URL` landed — not
-`VITE_API_TRANSPORT`.** A build with the origin right and the transport mistyped
-passes both greps and ships the in-memory mock. Nothing in this chain catches
-that; read the two assignments on the build line before you trust the greps.
-
-`-l` rather than `-q`, and the explicit failure messages, are there because
-`grep -q` and `rsync -a` are both silent on success: after a long noisy build,
-"the chain stopped at the check" and "the chain finished" would otherwise look
-identical, and the next thing you would do is run the migration over a stale
-`/opt/hookubit/web/`. The greps run as `hookubit` like every other command in
-the chain, so they depend on sudoers rather than on the modes of
-`/opt/hookubit` — tighten that directory to `0750` and a grep running as you
-would exit 2 and stop the chain for a reason that has nothing to do with the
-bundle.
-
-The filters must come **before** the pattern: in
-`grep -rlF -- PATTERN --include='*.js' dir` the `--` ends option parsing,
-`--include` becomes a filename operand, grep warns that no such file exists and
-exits 2, and the filter never applies at all.
-
-`--exclude='*.js.map'` is load-bearing for the **negative** grep specifically.
-`sourcemap: true` means `dist/assets/*.js.map` always carries the source line
-
-```js
-return import.meta.env.VITE_INGEST_BASE_URL ?? 'http://localhost:8080'
-```
-
-whether or not the fallback was taken — so a map in scope makes the negative
-check fire on a perfectly good bundle and report the opposite of the truth. For
-the positive grep the exclusion is only tidiness: `--include='*.js'` has
-already taken the maps out of scope, and the fallback literal a map carries
-cannot make a check for the origin's *presence* report the opposite of the
-truth. Keep both filters on both lines anyway; they are one flag each, and the
-pair is what the recipe uses.
+The `( cd services/data-plane && … )` subshell stays a subshell even though
+nothing follows it now. It costs nothing and it means a link added after it
+still runs from `/opt/hookubit/src`.
 
 Then migrate, check, and only then restart — as one chain, so the restarts
 cannot happen without the migration having succeeded:
@@ -1138,7 +1385,7 @@ Two routes into the same state. In both of them the platform looks alive, ingest
 keeps answering `202`, and nothing comes out.
 
 **The build chain stopped and the migration block ran anyway.** This is what
-pasting all three blocks in together does to you. `pnpm install` failing on
+pasting the blocks in together does to you. `pnpm install` failing on
 lockfile drift is an ordinary failure and the chain handles it correctly — but
 `go build` never ran, and it does not overwrite `/opt/hookubit/bin/webhookd` on
 failure, so the binary on disk is still the old release. Apply the new
@@ -1169,7 +1416,8 @@ database has applied, it still prints `Database schema is up to date!` and exits
 
 Then prove the release actually delivers. `systemctl start` returns 0 the moment
 the unit is *running*, which is a long way from working, so the fourth block is
-step 7's three checks again:
+step 7's three checks again — all on localhost, because that is where the
+probes live:
 
 ```bash
 curl -s localhost:3000/health/live      # control API
@@ -1187,9 +1435,30 @@ case above, leaves a healthy-looking process in front of a growing outbox. If
 **`WebhookQueueDepthNotExported`** is firing, the backlog alert cannot fire at
 all — read that as no signal rather than a clear one.
 
-Then **purge the Cloudflare cache** for `index.html`, or browsers keep the old
-bundle and request asset filenames that no longer exist. If you set the cache
-rules above, only `index.html` needs purging; if you did not, purge everything.
+Finally, prove the public hostname still reaches what you just restarted, and
+that the dashboard's preflight still gets through:
+
+```bash
+curl -si https://api.hookubit.com/v1/auth/session | head -20
+
+curl -si -X OPTIONS https://api.hookubit.com/v1/projects \
+  -H 'Origin: https://hookubit.com' \
+  -H 'Access-Control-Request-Method: PATCH' | head -20
+```
+
+The first must be `401` with `"code":"unauthenticated"`: that is this API
+answering through Cloudflare. HTML, or a Cloudflare error page, means the path
+from the edge is broken rather than the services — `526` is the origin
+certificate, `522`/`523` is the firewall or the DNS record.
+
+The second must carry `access-control-allow-origin: https://hookubit.com`. It is
+here because it fails *separately*: `CORS_ORIGINS` is read at API start, so a
+restart onto an env file someone edited takes every write in the dashboard down
+while reads keep working and all three localhost probes stay green.
+
+There is **nothing to purge** at the edge. The dashboard's assets are
+content-hashed and published by Cloudflare when you pushed, not by this block;
+this block never touched them.
 
 Stopping the data plane first means in-flight deliveries drain against the old
 schema rather than mid-migration. Nothing is lost either way — the queue is
@@ -1230,12 +1499,45 @@ hand-rolling Compose across servers.
 
 ## Things that will bite you
 
-**The dashboard silently using its mock.** Build without
-`VITE_API_TRANSPORT=http` and every screen works, with data that does not exist.
-If nothing you create in the dashboard reaches the database, this is why.
+**`CORS_ORIGINS` unset or spelled differently from the dashboard's origin.** The
+single most likely first-install failure. It fails closed, so the preflight
+blocks everything, the cookie is never sent and **sign-in itself fails** — a
+dashboard that looks completely dead while both services on this box are
+healthy and every localhost probe is green. Exact string, scheme and host, no
+trailing slash, and `www.` is a second origin. §9 has the `curl -X OPTIONS` that
+catches it.
 
-**The dashboard on a different hostname from the API.** Relative-path `fetch`
-means the calls go to the CDN and 404. Same hostname, routed by path.
+**nginx handling `OPTIONS` itself.** Add a `limit_except`, or an `if` that
+returns early on `OPTIONS`, and every write in the dashboard fails while reads
+keep working. Let the preflight reach Nest.
+
+**Ports 80 and 443 open to the whole internet.** The orange cloud hides your
+address; it does not close the port, and anyone who connects directly chooses
+their own `X-Forwarded-For` — which makes `TRUST_PROXY_HOPS=2` hand them a
+fresh per-IP bucket on every request. §8's packet filter is not optional.
+
+**A DNS record set to DNS-only after that firewall is in place.** Its traffic is
+dropped before nginx sees it, so there is nothing in any log. Proxied, always.
+
+**Let's Encrypt with an `http-01` challenge.** It cannot work against an API
+hostname whose only location is `/v1/`, and the renewal fails silently 60 days
+later: Cloudflare then answers `526` on every API call while the dashboard's
+assets keep loading perfectly. Origin CA, or DNS-01.
+
+**The dashboard silently using its mock.** Built without
+`VITE_API_TRANSPORT=http` and every screen works, with data that does not exist.
+If nothing you create in the dashboard reaches the database, this is why — and
+that variable lives in Cloudflare's build environment, so that is where to look.
+See `apps/dashboard/README.md` in the repository.
+
+**The dashboard on a different registrable domain from the API.** A `*.pages.dev`
+URL or a second brand domain is cross-*site*, so the `SameSite=Lax` session
+cookie stops being sent: sign-in succeeds and every request after it is
+anonymous. Subdomains of one domain are fine; that is the design.
+
+**nginx still serving files.** If this host was set up when the dashboard was
+served from here, it has a `root` and a `try_files` fallback answering `/` out of
+a stale bundle. Take them out: `/v1/*` proxied, everything else `404`.
 
 **Cloudflare in "Flexible" SSL mode.** Padlock in the browser, plain HTTP
 between Cloudflare and your origin, session cookies and signing secrets in
@@ -1246,7 +1548,8 @@ behaviour staying what it is today.
 
 **Proxy hops set for the wrong topology.** Cloudflare + nginx is 2. At 0 behind
 proxies, the whole internet shares one per-IP rate-limit bucket. Too high, and a
-client can spoof its address with a header.
+client can spoof its address with a header — and nothing in the request log
+changes when you get it wrong in that direction. Derive it (§5), do not tune it.
 
 **`client_max_body_size` below the payload ceiling.** nginx refuses first, and
 the publisher gets HTML instead of the platform's JSON naming the limit.

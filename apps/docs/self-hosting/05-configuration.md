@@ -88,10 +88,10 @@ which plane's configuration loader reads the key.
 | `ENCRYPTION_KEY` | unset | both | Base64 AES-256-GCM key, exactly 32 bytes decoded. **Required by both planes**; the worker will not start without it. |
 | `CONTROL_API_PORT` | `3000` | control plane | Listen port of the control API. |
 | `CONTROL_API_URL` | `http://localhost:3000` | neither (informational) | Public URL of the control API. |
-| `DASHBOARD_URL` | `http://localhost:5173` | control plane | Public origin of the dashboard; the base of every link in outbound mail. Scheme required. |
+| `DASHBOARD_URL` | `http://localhost:5173` | control plane | Public origin of the dashboard; the base of every link in outbound mail. Scheme required. Not the API's own hostname: where the dashboard and the API are separate hosts, this is the dashboard's, and it belongs in `CORS_ORIGINS` too. |
 | `SMTP_URL` | `smtp://localhost:1025` | control plane | `smtp://` or `smtps://` with credentials. Set means SMTP everywhere; unset refuses to boot under `staging`/`production`. `host:587` is refused. |
 | `MAIL_FROM` | `"HookuBit <no-reply@localhost>"` | control plane | From header, `Name <address>` or bare address. Required whenever `SMTP_URL` is set. |
-| `CORS_ORIGINS` | `http://localhost:5173` | control plane | Comma-separated browser origins allowed to call the control API. |
+| `CORS_ORIGINS` | `http://localhost:5173` | control plane | Comma-separated browser origins allowed to call the control API. Exact strings — scheme and host, no path, no trailing slash — and `www.` is a separate origin. **Fails closed**: unset or blank allows no cross-origin request at all, which blocks the preflight, so the session cookie is never sent and sign-in itself fails. Required whenever the dashboard is on a different hostname from the API. |
 | `TRUST_PROXY_HOPS` | `0` | control plane | Exact number of reverse proxies in front of the control API (0..10). Wrong in either direction breaks per-IP rate limiting. |
 | `INGEST_PORT` | `8080` | data plane | Listen port of the ingest API. |
 | `DATA_PLANE_METRICS_PORT` | `9090` | data plane | Port serving `/health/*` and `/metrics` on every Go role. |

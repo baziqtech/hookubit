@@ -6,8 +6,16 @@ breaking and auto-disable, HMAC signing with overlapping secret rotation, and a
 delivery ledger you can actually answer "what happened to this event?" from —
 without opening psql.
 
-Runs as hosted SaaS or as a self-hosted Docker/Kubernetes deployment against
-**the customer's own PostgreSQL**.
+Runs as hosted SaaS, as a self-hosted Docker or Kubernetes deployment, or on a
+plain Ubuntu box with `make deploy` — always against **the customer's own
+PostgreSQL**.
+
+The two halves ship separately. The control API and the Go data plane go to your
+own server; the React dashboard is a Cloudflare Worker that serves its own
+assets and proxies `/v1/*` back to that server, so the two sit on one hostname
+and Cloudflare builds and publishes the front end on every push. Containerise
+the whole thing instead and the dashboard image is still there — see
+[Deploying it](#deploying-it).
 
 > **Renamed to HookuBit.** The npm scope is `@hookubit/*`, the Go module is
 > `github.com/shaq/hookubit/services/data-plane`, the Helm chart is
@@ -129,6 +137,46 @@ both refuse without an SMTP URL. CI renders the chart, the raw manifests and the
 compose file and asserts what reaches each process — the worker gets the
 encryption key it decrypts endpoint secrets with, never the session key; both
 planes are told how many proxies stand in front of them.
+
+## Deploying it
+
+Three paths, all documented in the self-hosting guide under `apps/docs/`:
+
+| Path | Where it lives |
+|---|---|
+| **Bare-metal Ubuntu** — systemd, nginx, your own PostgreSQL and Redis | [deployments/deployer/](deployments/deployer/) and [apps/docs/self-hosting/09-bare-metal-ubuntu.md](apps/docs/self-hosting/09-bare-metal-ubuntu.md) |
+| **Docker Compose** | [deployments/docker/](deployments/docker/), [apps/docs/self-hosting/04-docker-compose.md](apps/docs/self-hosting/04-docker-compose.md) |
+| **Kubernetes** — [Helm chart](apps/docs/self-hosting/02-helm.md) or [raw manifests](apps/docs/self-hosting/03-kubernetes-manifests.md) | [deployments/helm/](deployments/helm/), [deployments/kubernetes/](deployments/kubernetes/) |
+
+The bare-metal path is automated end to end:
+
+```bash
+make deploy          # release directory, build, migrate, atomic symlink swap, health check
+dep hookubit:health  # just the probes, read-only
+dep rollback         # read deployments/deployer/README.md first — the database does not roll back
+```
+
+It is a Deployer recipe, so the one file you edit is
+`deployments/deployer/hosts.yml`. It deploys a **pushed** git ref; it stops the
+data plane across a migration, because two migrations in the history fail
+*silently* in the other order; it refuses outright when the database has applied
+a migration this release does not carry, which is what deploying an older ref
+looks like and what `prisma migrate status` calls "up to date"; and it will not
+roll back for you after the symlink swap, deliberately.
+[deployments/deployer/README.md](deployments/deployer/README.md) is the
+reasoning.
+
+**It deploys the server side only.** The dashboard is static files that
+Cloudflare's git integration builds and publishes on push, served from
+`hookubit.com`, and it calls the control API on `api.hookubit.com` with
+`credentials: 'include'` — a different origin on the same registrable domain, so
+the `SameSite=Lax` session cookie is still sent. That costs the API two
+settings, both on the server: the dashboard's origin in `CORS_ORIGINS`, which
+fails closed, and `DASHBOARD_URL` for the links in outbound mail. See
+`apps/dashboard/README.md` and §8–§9 of the bare-metal guide. If you self-host
+the whole platform in containers instead,
+`deployments/docker/dashboard.Dockerfile` still builds and serves the dashboard
+from one origin.
 
 ## Documentation for customers
 
