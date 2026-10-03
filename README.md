@@ -7,11 +7,11 @@ delivery ledger you can actually answer "what happened to this event?" from —
 without opening psql.
 
 Runs as hosted SaaS, as a self-hosted Docker or Kubernetes deployment, or on a
-plain Ubuntu box with `make deploy` — always against **the customer's own
-PostgreSQL**.
+plain Ubuntu box with `make deploy-dev` / `make deploy-prod` — always against
+**the customer's own PostgreSQL**.
 
-**It all ships together, to one box.** `make deploy` builds the control API, the
-Go data plane and the React dashboard into one release, and nginx serves the
+**It all ships together, to one box per environment.** `make deploy-prod` builds
+the control API, the Go data plane and the React dashboard into one release, and nginx serves the
 dashboard's files and proxies `/v1/*` to the control API on the same hostname.
 One origin: relative `fetch('/v1/…')` is correct by construction, there is no
 CORS, and the session cookie never crosses an origin. Cloudflare sits in front
@@ -161,10 +161,21 @@ Three paths, all documented in the self-hosting guide under `apps/docs/`:
 The bare-metal path is automated end to end:
 
 ```bash
-make deploy          # release directory, build, migrate, atomic symlink swap, health check
-dep hookubit:health  # just the probes, read-only
-dep rollback         # read deployments/deployer/README.md first — the database does not roll back
+make deploy-dev      # release directory, build, migrate, atomic symlink swap, health check
+make deploy-prod     # the same, to the live box
+make deploy          # refuses: there are two boxes and neither is the default
+
+make health-dev      # just the probes, read-only
+make plan-dev        # the task order, connecting to nothing
+make rollback-prod   # read deployments/deployer/README.md first — the database does not roll back
 ```
+
+**Two hosts, two machines, one branch each:** `dev` tracks `dev`, `prod` tracks
+`main`, and the environment is named in every command. They differ in nothing
+but their hostname, their branch and their three domains — same ports, same unit
+names, same `/opt/hookubit` on each, because they are separate boxes and nothing
+needs de-conflicting. A run that would cover both is refused unless you ask for
+it with `--multi-host`, and that applies to `rollback` as much as to `deploy`.
 
 It is a Deployer recipe, so the one file you edit is
 `deployments/deployer/hosts.yml`. It deploys a **pushed** git ref; it stops the

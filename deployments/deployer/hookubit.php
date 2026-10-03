@@ -107,6 +107,14 @@ set('data_plane_metrics_port', 9090);
 // Empty by default and REFUSED in hookubit:build rather than defaulted. A
 // default here would be a guess about somebody's domain that ships itself into
 // a bundle nobody can correct without a rebuild.
+//
+// BOTH ARE PER-HOST, and with two environments that is load-bearing rather than
+// merely tidy. hookubit:build reads {{ingest_base_url}} in the CURRENT host's
+// context, so `dep deploy dev` compiles dev's ingest hostname into dev's bundle
+// and then greps dev's bundle for dev's value; prod's deploy does the same with
+// prod's. Neither value is ever a literal in this file - the only occurrences of
+// hookubit.com below are inside the two refusal messages, as examples of the
+// line to add.
 set('dashboard_origin', '');
 set('ingest_base_url', '');
 
@@ -128,8 +136,53 @@ set('api_unit', 'hookubit-api');
 set('data_plane_unit', 'hookubit-data-plane');
 
 // ---------------------------------------------------------------------------
+// The ref each host gets. NO DEFAULT, deliberately.
+//
+// There are two hosts now - `dev` on the `dev` branch and `prod` on `main`,
+// two separate machines - and the pairing is the whole point. So the one value
+// that must never apply here is a fallback: recipe/deploy/update_code.php sets
+// `branch` to 'HEAD', which against a server-side clone means "whatever the
+// repository's default branch is". A host whose `branch:` line was forgotten
+// would then deploy `main` to dev, go completely green, and tell nobody.
+//
+// Empty here, pinned per host in hosts.yml, and hookubit:host:guard refuses a
+// host that is neither - before anything connects. `--branch`, `--tag` and
+// `--revision` still override for one run, and the guard says that it happened.
+set('branch', '');
+
+// The opt-in for a run that covers more than one host. hookubit:host:guard
+// refuses two-machine runs without it; see the long comment there for why that
+// is a flag rather than "did you type both names".
+//
+// It is an option() rather than an `-o` key because every set option is
+// forwarded to the per-host workers by IOArguments::collect, it shows up in
+// `dep deploy --help`, and it cannot be switched on from the environment.
+option(
+    'multi-host',
+    null,
+    \Symfony\Component\Console\Input\InputOption::VALUE_NONE,
+    'Permit one run to cover more than one host (dev AND prod)',
+);
+
+// ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+if (!function_exists('Deployer\\hb_unusable_hostname')) {
+    /**
+     * True when the current host cannot be connected to at all, because its
+     * `hostname` in hosts.yml is still a placeholder (or missing).
+     *
+     * Used in two places that must agree: hookubit:host:guard, which refuses
+     * the run, and hookubit:unlock, which must then NOT try to ssh anywhere.
+     */
+    function hb_unusable_hostname(): bool
+    {
+        $hostname = trim((string) currentHost()->getHostname());
+
+        return $hostname === '' || stripos($hostname, 'REPLACE_ME') !== false;
+    }
+}
 
 if (!function_exists('Deployer\\hb_env_sh')) {
     /**
@@ -284,6 +337,162 @@ if (!function_exists('Deployer\\hb_applied')) {
 // Tasks
 // ---------------------------------------------------------------------------
 
+desc('Refuses a run covering 2+ hosts, an unpinned branch, a placeholder hostname');
+task('hookubit:host:guard', function () {
+    // THE ONE TASK IN THIS RECIPE THAT TOUCHES NOTHING. No run(), no test(), no
+    // upload() - so it executes locally and SSH is never opened. That is what
+    // makes it the right place for every refusal that can be decided from
+    // hosts.yml alone: by the time anything connects, the question "which box
+    // is this, and what ref is it pinned to" has already been answered out loud.
+    //
+    // It is hooked before `deploy`, before `rollback`, and before the two
+    // read-only probes an operator might run without thinking. Hooks are not
+    // expanded by invoke(), so the copies of hookubit:health and
+    // hookubit:dashboard:check that hookubit:restart calls mid-deploy do not
+    // re-run it.
+    $alias = (string) currentHost()->getAlias();
+
+    // Set now, cleared at the very end. Every refusal below therefore leaves it
+    // set, and hookubit:unlock reads it to know that no lock can exist yet: this
+    // task runs BEFORE deploy:lock, so a refusal here means nothing was locked
+    // and there is nothing to ssh out and remove. It persists from this worker
+    // to the deploy:failed one because WorkerCommand saves host config back to
+    // the master even when the task threw.
+    set('hb_guard_refused', true);
+
+    // ----------------------------------------------------------------------
+    // 1. ONE RUN, ONE MACHINE - unless you said --multi-host.
+    //
+    // WHAT DEPLOYER ACTUALLY DOES with an omitted selector, in 7.5.12, is in
+    // Command/SelectCommand.php::selectHosts, and it is NOT `all`: with more
+    // than one host it opens a comma-separated MULTI-SELECT prompt on a
+    // terminal, and throws "No host selected." without one. The
+    // `$selectors = ['all']` line is in complete(), which feeds shell
+    // completion and nothing else. So a bare `dep deploy` does not fan out to
+    // both boxes today. The hazard it leaves is narrower and still live:
+    //
+    //   - the prompt lists dev and prod adjacent and takes `0,1`. One comma in
+    //     an unselected `dep deploy` is a production deploy.
+    //   - `default_selector`, which selectHosts consults BEFORE giving up,
+    //     would make the omission a true fan-out the moment anyone set it.
+    //   - `dep deploy all` does it today, in four characters.
+    //
+    // WHY THE RULE IS "ONE HOST" AND NOT "ONE HOST UNLESS YOU TYPED BOTH".
+    // This task cannot see the selector. Master::createProcess forks
+    // `dep worker --task … --host …` per task per host, and that argv carries
+    // no selector - so inside any task `dep deploy dev prod` and a `0,1` at the
+    // prompt are indistinguishable. Rather than guess, the opt-in is explicit:
+    // --multi-host, which IOArguments::collect does forward to the workers.
+    //
+    // For a two-box inventory the sequential form is the better habit anyway:
+    // `make deploy-dev` and then `make deploy-prod` means prod only ever gets a
+    // release dev has already accepted. One command that does both cannot offer
+    // that, whatever it is called.
+    $selected = (array) get('selected_hosts', []);
+    $multi = input()->hasOption('multi-host') && (bool) input()->getOption('multi-host');
+
+    if (count($selected) > 1 && !$multi) {
+        $lines = [];
+        foreach (select('all') as $host) {
+            $pinned = trim((string) $host->get('branch', ''));
+            $lines[] = sprintf(
+                '    dep deploy %-5s%s',
+                (string) $host->getAlias(),
+                $pinned === '' ? '' : '   # branch ' . $pinned,
+            );
+        }
+
+        throw error(
+            'REFUSING: this run covers ' . count($selected) . ' hosts (' . implode(', ', $selected) . ").\n\n" .
+            "  dev and prod are two separate machines and one of them is live. Nothing in this\n" .
+            "  platform needs a single command that touches both, and a deploy or a ROLLBACK\n" .
+            "  that reaches prod should have prod's name in the shell history. One at a time:\n\n" .
+            implode("\n", $lines) . "\n\n" .
+            "  Through the Makefile: `make deploy-dev`, `make deploy-prod`, and the matching\n" .
+            "  `rollback-dev` / `rollback-prod`. Deploy dev first; prod then gets a release dev\n" .
+            "  has already accepted.\n\n" .
+            "  If you genuinely want one run to cover them all, say so and it will:\n\n" .
+            "    dep deploy dev prod --multi-host\n\n" .
+            "  Nothing has connected to anything. deployments/deployer/README.md, \"Two hosts,\n" .
+            "  one per environment\", is the reasoning.",
+        );
+    }
+
+    if (count($selected) > 1) {
+        warning(
+            '--multi-host: THIS RUN COVERS ' . count($selected) . ' HOSTS: ' .
+            implode(', ', $selected) . '. Proceeding because you asked for it.',
+        );
+    }
+
+    // ----------------------------------------------------------------------
+    // 2. WHAT THIS HOST RESOLVED TO. Printed BEFORE the two refusals below, so
+    // that a host which is not filled in yet still tells you what it is pinned
+    // to - which is the thing you are usually checking.
+    $branch = trim((string) get('branch'));
+    $hostname = trim((string) currentHost()->getHostname());
+    $user = trim((string) currentHost()->getRemoteUser());
+
+    info(sprintf(
+        '%s → branch %s · %s%s · %s',
+        $alias,
+        $branch === '' ? '(UNSET)' : $branch,
+        $user === '' ? '' : $user . '@',
+        $hostname === '' ? '(UNSET)' : $hostname,
+        (string) get('deploy_path'),
+    ));
+
+    // ----------------------------------------------------------------------
+    // 3. THE REF IS PINNED. In update_code's own precedence order, so the last
+    // match is the one that would actually win.
+    $override = null;
+    foreach (['branch', 'tag', 'revision'] as $opt) {
+        if (input()->hasOption($opt) && !empty(input()->getOption($opt))) {
+            $override = "--$opt=" . input()->getOption($opt);
+        }
+    }
+
+    if ($override !== null) {
+        warning("$alias: $override overrides this host's pinned branch for this run.");
+    } elseif ($branch === '' || strcasecmp($branch, 'HEAD') === 0) {
+        throw error(
+            "REFUSING: host `$alias` has no `branch:` pinned in deployments/deployer/hosts.yml.\n\n" .
+            "  Each host is paired with exactly one ref - dev with `dev`, prod with `main` - and\n" .
+            "  hookubit.php sets no default on purpose. Deployer's own default is `HEAD`, which\n" .
+            "  against the server's clone means the repository's default branch: an unpinned dev\n" .
+            "  box would deploy `main`, pass every probe, and say nothing.\n\n" .
+            "  Add the line under `$alias:`, beside its hostname:\n\n" .
+            "    branch: dev\n\n" .
+            "  For one run only, and only when you mean it, `--branch=`, `--tag=` or\n" .
+            "  `--revision=` overrides it and this guard says so.\n\n" .
+            "  Nothing has connected to anything.",
+        );
+    }
+
+    // ----------------------------------------------------------------------
+    // 4. THE HOST IS REAL. This check came back deliberately: with one host a
+    // placeholder failed at the SSH connection and reading that error was
+    // cheaper than keeping a validator. With two it is no longer the same
+    // error - "could not resolve REPLACE_ME" does not say WHICH environment
+    // was being deployed, and the answer now matters.
+    if (hb_unusable_hostname()) {
+        throw error(
+            "REFUSING: host `$alias` still has a placeholder hostname ($hostname).\n\n" .
+            "  Set it in deployments/deployer/hosts.yml under `$alias:` - an IP, a DNS name, or\n" .
+            "  (better) an alias from your ~/.ssh/config, so the port, key and ProxyJump live\n" .
+            "  where ssh expects them:\n\n" .
+            "    hostname: dev.internal.example.com\n\n" .
+            "  Only `$alias` is affected; the other host is unaffected and deployable.\n\n" .
+            "  Nothing has connected to anything.",
+        );
+    }
+
+    set('hb_guard_refused', false);
+});
+// NOT ->once(): checks 3 and 4 are per-host, and on `dep deploy dev prod` the
+// second host's missing branch or placeholder hostname has to be its own
+// refusal rather than something the first host's pass hid.
+
 desc('Installs, generates Prisma, builds the control API, the dashboard and webhookd');
 task('hookubit:build', function () {
     // BOTH host settings are validated HERE, at the front of the first task that
@@ -298,26 +507,29 @@ task('hookubit:build', function () {
     $ingest = trim((string) get('ingest_base_url'));
     $origin = rtrim(trim((string) get('dashboard_origin')), '/');
     $free = "\n\n  Nothing has been built, stopped or swapped; the live release is untouched.";
+    // Both values are per-host, so the refusal has to name WHICH host block is
+    // short of a line. There are two now, and they carry different domains.
+    $under = "\n\n  …under `" . currentHost()->getAlias() . ":` in deployments/deployer/hosts.yml.";
 
     if ($ingest === '') {
         throw error(
-            "REFUSING: `ingest_base_url` is not set in deployments/deployer/hosts.yml.\n\n" .
+            "REFUSING: `ingest_base_url` is not set for host `" . currentHost()->getAlias() . "` in deployments/deployer/hosts.yml.\n\n" .
             "  It is compiled into the dashboard bundle as VITE_INGEST_BASE_URL and cannot be\n" .
             "  changed afterwards without a rebuild. Left unset the bundle falls back to\n" .
             "  http://localhost:8080, and the Get-started page then hands every operator a\n" .
             "  `curl` that cannot work - a wrong value nothing else in the platform notices,\n" .
             "  on a release that is otherwise completely healthy.\n\n" .
-            "    ingest_base_url: https://hooks.hookubit.com" . $free,
+            "    ingest_base_url: https://hooks.hookubit.com" . $under . $free,
         );
     }
     if ($origin === '') {
         throw error(
-            "REFUSING: `dashboard_origin` is not set in deployments/deployer/hosts.yml.\n\n" .
+            "REFUSING: `dashboard_origin` is not set for host `" . currentHost()->getAlias() . "` in deployments/deployer/hosts.yml.\n\n" .
             "  It is the public origin nginx answers BOTH the dashboard and /v1 on, and\n" .
             "  hookubit:dashboard:check needs it to prove that what the hostname serves is\n" .
             "  this release's bundle and not a stale one. It must match DASHBOARD_URL in\n" .
             "  {{deploy_path}}/shared/apps/control-api/.env.\n\n" .
-            "    dashboard_origin: https://hookubit.com" . $free,
+            "    dashboard_origin: https://hookubit.com" . $under . $free,
         );
     }
 
@@ -876,6 +1088,10 @@ task('hookubit:dashboard:check', function () {
 // Stock `deploy`, with the build, the migration and the restarts hooked in.
 task('deploy')->desc('Builds, migrates with the data plane stopped, swaps, restarts, health-checks');
 
+// FIRST, before deploy:info even: it decides from hosts.yml alone and connects
+// to nothing, so every refusal it can make is free.
+before('deploy', 'hookubit:host:guard');
+
 after('deploy:update_code', 'hookubit:build');
 // Before deploy:shared, which is what turns shared/<path> into the release symlinks.
 // Stock order is ... update_code, deploy:env, deploy:shared ... so this lands between
@@ -883,13 +1099,61 @@ after('deploy:update_code', 'hookubit:build');
 before('deploy:shared', 'hookubit:env');
 before('deploy:symlink', 'hookubit:migrate');
 after('deploy:symlink', 'hookubit:restart');
-after('deploy:failed', 'deploy:unlock');
+// Stock `after('deploy:failed', 'deploy:unlock')`, except that it does not try
+// to ssh to a host that cannot be reached.
+//
+// hookubit:host:guard is now the FIRST task in the deploy, and it can refuse
+// before deploy:lock has run - on a host whose hostname is still REPLACE_ME,
+// which does not resolve. The stock hook would then follow a refusal that said
+// "nothing has connected to anything" with a failed `rm -f` over ssh and a
+// second, more confusing error about the task that cleans up. There is nothing
+// to clean up: no lock was taken, and on that host no lock can exist.
+//
+// Two cases are skipped, and only two. Everything else - a build that failed, a
+// migration that refused, a health check that went red - unlocks exactly as
+// before, because by then the lock really was taken. Skipping it on a guess
+// leaves a deploy locked, which is worse than one pointless `rm -f`.
+task('hookubit:unlock', function () {
+    $alias = (string) currentHost()->getAlias();
+
+    if (get('hb_guard_refused', false)) {
+        writeln("  No lock to release: hookubit:host:guard refused before deploy:lock ran, so");
+        writeln("  nothing on $alias was locked. Skipping deploy:unlock, which would otherwise");
+        writeln('  follow a refusal that said nothing had connected with an ssh that did.');
+        return;
+    }
+    if (hb_unusable_hostname()) {
+        writeln("  No lock to release: $alias has no reachable hostname, so nothing was ever");
+        writeln('  locked on it. Skipping deploy:unlock rather than failing twice.');
+        return;
+    }
+
+    invoke('deploy:unlock');
+})->hidden();
+after('deploy:failed', 'hookubit:unlock');
+
+// The two read-only tasks an operator runs without thinking. Neither changes
+// anything, so fanning out is not destructive - but `dep hookubit:health` that
+// silently included prod is still a reading nobody asked for, and the output of
+// two hosts interleaved is the kind of thing people misread at 2am. Same
+// requirement, same message. invoke() does not expand hooks, so the copies
+// hookubit:restart calls mid-deploy are unaffected.
+before('hookubit:health', 'hookubit:host:guard');
+before('hookubit:dashboard:check', 'hookubit:host:guard');
 
 // ---------------------------------------------------------------------------
 // Rollback. The symlink rolls back; the database does not.
 // ---------------------------------------------------------------------------
 
 before('rollback', 'hookubit:rollback:warn');
+// Registered AFTER the warning on purpose, and it runs BEFORE it: Task::addBefore
+// array_unshift()s, so the last `before()` on a task is the first to run. The
+// order matters - "which box is this?" has to be answered before anything asks
+// "roll back anyway?", or the operator is confirming a destructive change to a
+// host nobody has named. A rollback to every host is exactly as bad as a deploy
+// to every host.
+before('rollback', 'hookubit:host:guard');
+
 after('rollback', 'hookubit:restart');
 
 desc('Says what a rollback cannot undo, and asks');

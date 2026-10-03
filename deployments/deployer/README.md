@@ -3,12 +3,24 @@
 This is [apps/docs/self-hosting/09-bare-metal-ubuntu.md](../../apps/docs/self-hosting/09-bare-metal-ubuntu.md),
 automated. The guide is still the explanation; this is the procedure that runs.
 
+**Every command names its environment.** There are two hosts — `dev` and
+`prod`, two separate machines — and neither is the default. See
+[Two hosts, one per environment](#two-hosts-one-per-environment).
+
 ```
-make deploy                  # the whole thing
-dep list                     # every task
-dep hookubit:health          # just the probes, read-only
-dep hookubit:dashboard:check # just "is the hostname serving this release", read-only
-dep rollback                 # READ "Rollback" below first
+make deploy-dev                   # the whole thing, to the dev box    (branch dev)
+make deploy-prod                  # the whole thing, to the LIVE box   (branch main)
+make deploy                       # refuses, and names the two above
+
+make plan-dev   / plan-prod       # the task order, connecting to nothing
+make health-dev / health-prod     # just the probes, read-only
+make rollback-dev / rollback-prod # READ "Rollback" below first
+
+dep list                          # every task
+dep deploy dev                    # what make deploy-dev runs
+dep hookubit:host:guard prod      # which ref is prod pinned to? decided from
+                                  # hosts.yml alone — connects to nothing
+dep hookubit:dashboard:check dev  # "is the hostname serving this release", read-only
 ```
 
 Deployer is PHP, but nothing PHP runs on the server and the server needs neither
@@ -18,10 +30,135 @@ that is one command.
 
 **This deploys the whole platform: the control API, the data plane and the
 dashboard.** The dashboard is built into the release and nginx serves it off that
-release, so one `make deploy` ships all three and the `current` symlink swaps
+release, so one `make deploy-dev` ships all three and the `current` symlink swaps
 them together. There is no second deploy path and no state in which the front
 end and the API are from different commits. "I deployed and my UI change is not
 there" is answered by `hookubit:dashboard:check`, which the deploy runs for you.
+
+## Two hosts, one per environment
+
+```
+dev   branch dev    → its own machine, /opt/hookubit, :3000 / :9090
+prod  branch main   → its own machine, /opt/hookubit, :3000 / :9090
+```
+
+Two **separate machines**, one environment each, pinned to one branch each. That
+is the only reason this stays simple: because nothing is shared, nothing has to
+be de-conflicted. Both boxes run the same two unit names, listen on the same two
+ports and deploy into the same `/opt/hookubit`. There are no `-dev` unit
+suffixes, no port offsets and no path variants, and there should not be — that
+complexity buys you two installs on *one* machine, which is not what this is.
+
+**Five values differ, and that is the whole of `hosts.yml`'s per-host section:**
+
+| Key | `dev` | `prod` |
+|---|---|---|
+| `hostname` | **`REPLACE_ME`** — that box does not exist yet | `192.168.100.21` |
+| `branch` | `dev` | `main` |
+| `remote_user` | `deploy` | `naj` |
+| `dashboard_origin` | `https://dev.hookubit.com` | `https://hookubit.com` |
+| `ingest_base_url` | `https://hooks.dev.hookubit.com` | `https://hooks.hookubit.com` |
+
+Everything else — `repository`, `deploy_path`, both ports, both unit names,
+`service_group`, `keep_releases`, the `bin/*` paths, `default_timeout` — is in
+`hosts.yml`'s global `config:` block **once**. A dev/prod pair that has drifted
+on `bin/pnpm` is a confusing afternoon, and the only defence against that is for
+the value to exist in one place.
+
+`branch` is the exception that must *not* be global, and the recipe enforces it.
+Deployer's own default for `branch` is `HEAD`, which against the server's clone
+means the repository's default branch — so a host whose `branch:` line was
+forgotten would deploy `main` to the dev box, pass every probe and say nothing.
+`hookubit.php` therefore sets `branch` to the **empty string**, and
+`hookubit:host:guard` refuses a host that is not pinned.
+
+### A bare `dep deploy` would have hit both. What stops it now
+
+The hazard is real and worth being precise about, because the usual statement of
+it is wrong. In Deployer 7.5.12, `Command/SelectCommand.php::selectHosts` does
+**not** fall back to `all` when you omit the selector: with more than one host it
+opens a comma-separated **multi-select prompt** on a terminal, and throws
+`No host selected.` without one. (The `$selectors = ['all']` line people quote is
+in `complete()`, which feeds shell completion and nothing else.)
+
+So a bare `dep deploy` is not a silent fan-out *today*. What it is, is a prompt
+that lists `dev` and `prod` adjacent and accepts `0,1` — one comma between a dev
+deploy and a production deploy — and a `default_selector`, which `selectHosts`
+consults **before** giving up, would turn the omission into a real fan-out the
+moment anyone set it. `dep deploy all` does it today, in four characters. Two
+layers close it:
+
+**1. The Makefile names the environment in the target, not in a variable.**
+`make deploy` and `make rollback` take no argument and do nothing but refuse,
+printing the two targets that work. The environment is not a `HOST=` variable
+on purpose: a variable can be set from outside the command line — one
+`export HOST=prod` in a shell profile or a stray line in a CI job and a later
+bare `make deploy` is a production deploy with nothing on the command line to
+show for it. A target name cannot be set from the environment, and
+`make deploy-prod` is what ends up in shell history, in a runbook and in a chat
+message.
+
+**2. `hookubit:host:guard` refuses a run that covers more than one host.**
+Hooked `before('deploy')`, `before('rollback')`, `before('hookubit:health')` and
+`before('hookubit:dashboard:check')` — so going round the Makefile with a direct
+`dep` call does not get you a fan-out either, and a **rollback** to every host,
+which is every bit as bad as a deploy to every host, is refused the same way. It
+is the one task in the recipe that runs no remote command at all, so it decides
+from `hosts.yml` alone and every refusal it makes is free: nothing has connected
+to anything. On `rollback` it is registered **after**
+`hookubit:rollback:warn` and therefore runs **before** it — `Task::addBefore`
+`array_unshift`s — because "which box is this?" has to be answered before anyone
+is asked "roll back anyway?".
+
+It refuses three things, each naming the host:
+
+| Refusal | Means |
+|---|---|
+| this run covers 2 hosts | no `--multi-host`. One at a time: `make deploy-dev`, then `make deploy-prod` |
+| host `X` has no `branch:` pinned | the pairing is missing, and `HEAD` is not an answer. `--branch=` / `--tag=` / `--revision=` still override for one run, and the guard says out loud that it happened |
+| host `X` still has a placeholder hostname | `REPLACE_ME`. Only that host is affected; the other stays deployable |
+
+Before any of those, it prints what the host resolved to, so the pairing is
+visible rather than asserted:
+
+```
+$ dep hookubit:host:guard prod
+[prod] info prod → branch main · naj@192.168.100.21 · /opt/hookubit
+```
+
+**Both boxes in one run** is possible and has to be asked for:
+`dep deploy dev prod --multi-host`. It is a flag rather than "did you type both
+names" for a mechanical reason — `Master::createProcess` forks
+`dep worker --task … --host …` per task per host, and *that* argv carries no
+selector, so inside a task `dep deploy dev prod` and a `0,1` at the prompt are
+indistinguishable. Guessing was not worth it, and the sequential form is the
+better habit anyway: deploy `dev`, then `prod`, and prod only ever gets a
+release dev has already accepted.
+
+**What none of this protects against.** Naming the wrong host correctly.
+`dep deploy prod`, `make deploy-prod` and picking `prod` alone from the prompt
+are all exactly as deliberate as they look, and the guard lets all three
+through — its job is to stop the host you did *not* name, not the one you did.
+It also cannot help if someone sets `default_selector`, or runs
+`hookubit:build`, `hookubit:env` or `hookubit:migrate` directly rather than
+through `deploy`; those are unhooked, because they are steps of a deploy rather
+than things an operator reaches for.
+
+### Keeping your edits out of commits
+
+`hosts.yml` is **tracked**, and with two hosts it now carries more real detail
+than it used to: prod's address and login, and both environments' public
+hostnames. To keep your own edits out of commits while leaving the file tracked:
+
+```bash
+git update-index --skip-worktree deployments/deployer/hosts.yml
+```
+
+That is still the right advice and it is still per-clone and per-checkout — run
+it again after a fresh clone. Be clear about what it does and does not do: it
+makes git ignore **your** changes to that file; it does not retract what is
+already committed in it, and a `git pull` that changes the file will fail until
+you `--no-skip-worktree`, pull, and set it again.
 
 ## Files
 
@@ -29,7 +166,7 @@ there" is answered by `hookubit:dashboard:check`, which the deploy runs for you.
 |---|---|
 | `../../deploy.php` | Entry point. `dep` finds it in the repo root. |
 | `hookubit.php` | All tasks. Short on purpose; the reasoning lives here. |
-| `hosts.yml` | **The only file you edit.** Hostname, user, deploy path, ports, and the dashboard's two build values. |
+| `hosts.yml` | **The only file you edit.** Two hosts (`dev`, `prod`) carrying hostname, branch, user and the dashboard's two domains; everything the two boxes share, once, in `config:`. |
 | `systemd/*.service` | The two units, pointing at `current/`. |
 | `sudoers.d/hookubit-deploy` | The six privileged commands a deploy needs. |
 
@@ -38,25 +175,46 @@ The recipe assumes five things on the host, all installed by §3 of the guide:
 uses to read `_prisma_migrations`. Without `postgresql-client` the guard refuses
 the deploy rather than guessing, and says so.
 
-It also needs **two values in `hosts.yml` that did not used to be there**, and
-refuses at the very start of `hookubit:build` without them, before anything is
-built, stopped or swapped:
+It also needs **two values per host in `hosts.yml`**, and refuses at the very
+start of `hookubit:build` without them, before anything is built, stopped or
+swapped:
 
-| Key | Example | What it is |
+| Key | `prod`'s value | What it is |
 |---|---|---|
-| `dashboard_origin` | `https://hookubit.com` | the public origin nginx answers the dashboard **and** `/v1` on. Must equal `DASHBOARD_URL` in `shared/apps/control-api/.env` |
+| `dashboard_origin` | `https://hookubit.com` | the public origin nginx answers the dashboard **and** `/v1` on. Must equal `DASHBOARD_URL` in that box's `shared/apps/control-api/.env` |
 | `ingest_base_url` | `https://hooks.hookubit.com` | ingest's own hostname, compiled into the bundle as `VITE_INGEST_BASE_URL` |
+
+**Both are per-host, and with two environments that is load-bearing rather than
+tidy.** `hookubit:build` reads `{{ingest_base_url}}` in the *current* host's
+context, so `make deploy-dev` compiles dev's ingest hostname into dev's bundle
+and then greps dev's bundle for dev's value, and prod's deploy does the same with
+prod's. The same is true of `dashboard_origin` in `hookubit:dashboard:check`,
+which derives the `Host` header and SNI it probes loopback with from whichever
+host it is running against. Neither value is a literal anywhere in the recipe —
+the only `hookubit.com` strings in `hookubit.php` are inside the two refusal
+messages, as examples of the line to add. A refusal names the host whose block is
+short of it.
 
 Both are checked in `hookubit:build` even though only the first is *used* after
 the swap, because that is the one place a refusal is free. Failing at
 `hookubit:dashboard:check` over a missing line in `hosts.yml` would mean a red
 deploy over a release that is already live and probably fine.
 
-If you keep your `hosts.yml` out of commits with `git update-index
---skip-worktree`, add both keys by hand — the first deploy after this change
-will otherwise refuse, naming the key and the line to add.
+## One-time server setup — **run it once per box**
 
-## One-time server setup
+There are two machines, so this whole section happens **twice**: once on the dev
+box and once on the prod box. It is the same procedure both times, with the same
+users, the same paths, the same unit names and the same ports — the boxes differ
+only in their hostname, their branch and their three domains
+(`dashboard_origin`, `ingest_base_url`, and the `DASHBOARD_URL` in the env file
+that must match the first). Nothing below is per-environment. Do not invent
+`-dev` suffixes for either box; each one is alone on its machine.
+
+Each box gets its own PostgreSQL database, its own Redis, its own three env
+files under its own `shared/`, and **its own `ENCRYPTION_KEY`** — never prod's.
+The dev box's deploy user needs its own SSH key in your `~/.ssh/config` and its
+own read-only GitHub deploy key; the server clones the repository, so both boxes
+clone it independently, each on its own branch.
 
 Follow §1–§5 and §7–§12 of the guide — database, Redis, toolchain, env file,
 systemd, nginx and its firewall, Cloudflare, first account. Three things differ
@@ -292,9 +450,15 @@ confirm it.
 
 ## What a deploy does, in order
 
-`dep deploy --plan` prints this; it is Deployer's stock `deploy` with three
-tasks hooked in.
+`dep deploy --plan dev` prints this (`make plan-dev`); it is Deployer's stock
+`deploy` with the host guard and three tasks hooked in.
 
+0. **`hookubit:host:guard`** — hooked `before('deploy')`, so it is the first
+   thing that runs, ahead of `deploy:info`. It runs no remote command: it checks
+   that the run covers one host, that the host is pinned to a branch, and that
+   its hostname is not a placeholder, prints `dev → branch dev · …`, and refuses
+   with nothing connected if any of the three is wrong. See
+   [Two hosts](#two-hosts-one-per-environment).
 1. `deploy:info`, `deploy:setup`, `deploy:lock`, `deploy:release`,
    `deploy:update_code` — a new release directory, code from the **pushed** ref.
 2. **`hookubit:build`** — validates `dashboard_origin` and `ingest_base_url`,
@@ -350,15 +514,23 @@ tasks hooked in.
    and says that the release is nevertheless live.
 7. `deploy:unlock`, `deploy:cleanup`, `deploy:success`.
 
-Two things this recipe deliberately no longer does, both of which it used to:
+**`hosts.yml` is checked before anything connects again, and it is the second
+host that brought the check back.** With one host, a `REPLACE_ME` hostname
+failed at the SSH connection and reading that error was cheaper than keeping a
+validator. With two it is no longer the same error: `could not resolve
+REPLACE_ME` does not say *which environment* was being deployed, and that answer
+now matters. `hookubit:host:guard` makes it, locally, naming the host — and the
+same task carries the "is this host pinned to a branch at all" check, which has
+no SSH-level symptom whatsoever. It is deliberately narrow: three questions
+decidable from `hosts.yml` alone, and nothing that needs the server to answer.
 
-- **It does not check your `hosts.yml` before connecting.** A `REPLACE_ME`
-  hostname now fails at the SSH connection instead of in a validator. Cheaper to
-  read the error than to maintain the validator.
+One thing this recipe still deliberately does not do:
+
 - **It does not compare your local tree against the remote ref.** Deployer
   deploys a **pushed** ref: if you have not pushed, you have not deployed, and
-  nothing warns you. `git push` first, and `dep deploy --plan` shows you which
-  ref is configured.
+  nothing warns you. `git push` first — to `dev` for the dev box, to `main` for
+  prod — and `dep hookubit:host:guard <host>` prints the ref that host is
+  pinned to without connecting to it.
 
 ### Why the data plane is stopped across the migration
 
@@ -424,8 +596,10 @@ existing table), before the symlink moves. Loud failures do not need a guard.
 
 ### Deploying an older ref
 
-`dep deploy --tag v1.3.0` is the documented way to put an older release back
-after a bad one — so it is a **recovery path**, not an unlikely accident, and it
+`dep deploy prod --tag v1.3.0` is the documented way to put an older release
+back after a bad one — the host is named here as everywhere else, and
+`hookubit:host:guard` reports the `--tag` as overriding that host's pinned
+branch for the one run — so it is a **recovery path**, not an unlikely accident, and it
 is the reason the guard exists at all.
 
 The release's `prisma/migrations` is then a strict *prefix* of what is applied,
@@ -516,6 +690,14 @@ distinguishes two PostgreSQL stories that look identical from a dashboard:
 Where a failure leaves you depends on where it happened, and the task that was
 running tells you:
 
+- **In `hookubit:host:guard`** — nothing happened at all. It runs before
+  `deploy:lock`, so there is no lock to release and `deploy:failed`'s unlock is
+  **skipped** rather than run: the stock hook would follow a refusal that said
+  "nothing has connected to anything" with an `ssh` that did, and on a
+  `REPLACE_ME` host it would fail and print a second, more confusing error about
+  the cleanup. That skip is narrow — it applies only to a guard refusal and to a
+  host with no reachable hostname. Every later failure unlocks exactly as
+  before, because by then the lock really was taken.
 - **In `hookubit:build`** — nothing was stopped, nothing was swapped, the live
   release is untouched. The half-built release is left for inspection and
   `deploy:cleanup` will remove it on the next successful deploy.
@@ -524,7 +706,8 @@ running tells you:
 - **In `hookubit:migrate`, during `prisma migrate deploy`** — the data plane is
   **down** and the schema may have moved part-way. Nothing is being delivered,
   and ingest is answering `502` through nginx because ingest is part of the data
-  plane. Fix the cause and re-run `make deploy`: `prisma migrate deploy` is
+  plane. Fix the cause and re-run the same target (`make deploy-dev` /
+  `make deploy-prod`): `prisma migrate deploy` is
   idempotent, and a re-run restarts both units for you. Do not start the data
   plane by hand onto the *old* release if migrations were applied.
 - **After the swap** — the new release is live and unhealthy.
@@ -539,8 +722,13 @@ running tells you:
 
 ## Rollback
 
-> **`dep rollback` swaps the symlink. The database does not roll back.**
+> **`dep rollback <host>` swaps the symlink. The database does not roll back.**
 > This platform ships no down-migrations, by design.
+
+`make rollback-dev` and `make rollback-prod`; a bare `make rollback` refuses,
+and `hookubit:host:guard` refuses a `dep rollback` that would cover both boxes.
+It runs **before** `hookubit:rollback:warn`, so you are never asked "roll back
+anyway?" about a host nobody has named.
 
 So a rollback across a schema change runs **old code against a new schema**.
 Across `20260923000000_rename_fan_out_to_routing` that specifically means the
@@ -591,7 +779,8 @@ Call it 150–250 MB of unique bytes per release, plus the shared pnpm store
 (roughly 1–2 GB, once) and the Go build cache. Three releases is **under a
 gigabyte** of real disk and buys you the live one, one to roll back to, and one
 spare for when the rollback target turns out to be broken too. Lowering it to 1
-means `dep rollback` has nothing to roll back to.
+means `dep rollback <host>` has nothing to roll back to. The two boxes count
+separately: three releases on each.
 
 `pnpm store prune` on the deploy user reclaims what no surviving release needs —
 safe to run after a deploy, never during one.

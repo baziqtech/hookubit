@@ -12,6 +12,37 @@ Hostnames below are the ones `hookubit.com` itself uses. Substitute your own
 domain — but keep the dashboard and the API on **one hostname**, which is what
 the first constraint below is about.
 
+::: tip This page builds ONE box. Run it once per environment.
+Everything below describes a single machine. If you want a staging or dev
+environment as well as production, **run this whole page again on a second
+box** — do not try to put two installs on one machine. The second copy differs
+in exactly five values, and in nothing else:
+
+| | the dev box | the prod box |
+|---|---|---|
+| its address | its own hostname / IP | its own hostname / IP |
+| the git ref it deploys | `dev` | `main` |
+| the deploy SSH user | its own | its own |
+| the dashboard + API hostname | `dev.hookubit.com` | `hookubit.com` |
+| the ingest hostname | `hooks.dev.hookubit.com` | `hooks.hookubit.com` |
+
+The ports (`3000`, `8080`, `9090`), the unit names (`hookubit-api`,
+`hookubit-data-plane`), the service user, the install path and every command on
+this page are **the same on both**, because each box is alone on its machine.
+Resist adding `-dev` suffixes or port offsets: that complexity only buys you two
+installs on one host, which this page does not do.
+
+What each box must *not* share with the other: its PostgreSQL database, its
+Redis, its three env files, and above all its **`ENCRYPTION_KEY`** — a dev box
+that can decrypt production's endpoint signing secrets is a production secret
+with a dev box's security.
+
+The Deployer recipe automates both from one inventory: `dev` and `prod` in
+`deployments/deployer/hosts.yml`, each pinned to its branch, each named
+explicitly at deploy time. See
+[deployments/deployer/README.md](https://github.com/baziqtech/hookubit/blob/main/deployments/deployer/README.md).
+:::
+
 Ubuntu 22.04 or 24.04 throughout, PostgreSQL 15 or newer. If you would rather
 run containers, read [Docker Compose](/self-hosting/04-docker-compose) — and see
 [Where Docker still earns its place](#where-docker-still-earns-its-place) at the
@@ -124,7 +155,10 @@ That hostname is **compiled into the dashboard bundle** as
 build happens **on this host** — §4 by hand, or the Deployer recipe on every
 deploy, which reads it from `ingest_base_url` in
 `deployments/deployer/hosts.yml` and then greps the built JS to prove the value
-arrived. `apps/dashboard/README.md` explains what the variable does and what an
+arrived. It is a **per-host** value there, which is why each environment needs
+its own: the dev box's bundle carries the dev ingest hostname and prod's carries
+prod's, and because it is compiled in, pointing a box at the other
+environment's ingest is a rebuild, not a restart. `apps/dashboard/README.md` explains what the variable does and what an
 unset one produces.
 
 ---
@@ -1387,12 +1421,14 @@ three public paths terminate on the one box behind it.
 | `hooks.hookubit.com` | nginx on the app host → `127.0.0.1:8080` | §8 |
 | `sysadmin.hookubit.com` | nothing yet — a planned internal admin dashboard | n/a. Do not create the record until something serves it |
 
-**`make deploy` ships everything.** One trigger, one artifact set: the release
-carries `apps/dashboard/dist`, `apps/control-api/dist/main.js` and
-`bin/webhookd`, and the `current` symlink swaps all three at once. There is no
-second deploy path, no front end that updates on `git push` while the server
-waits for a deploy, and no state in which the two halves are from different
-commits. Nothing at the edge needs purging afterwards — see "Cache rules".
+**`make deploy-prod` ships everything.** One trigger, one artifact set: the
+release carries `apps/dashboard/dist`, `apps/control-api/dist/main.js` and
+`bin/webhookd`, and the `current` symlink swaps all three at once. The
+environment is named in the command — `make deploy-dev` for the dev box — and a
+bare `make deploy` refuses, because with two boxes neither is the default.
+There is no second deploy path, no front end that updates on `git push` while
+the server waits for a deploy, and no state in which the two halves are from
+different commits. Nothing at the edge needs purging afterwards — see "Cache rules".
 
 ### What the API still needs to be told
 
