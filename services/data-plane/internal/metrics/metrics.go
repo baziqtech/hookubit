@@ -68,7 +68,19 @@ var (
 	RateLimitHits = promauto.NewCounterVec(prometheus.CounterOpts{
 		Name: "rate_limit_hits_total",
 		Help: "Requests or deliveries deferred by a rate limit, by scope.",
-	}, []string{"scope"})
+	}, []string{"scope"}) // source_ip | ingest | project | organization | endpoint
+
+	// RateLimiterDegraded is THE alert for the limiter.
+	//
+	// The limiter fails open by design (ARCHITECTURE.md 14), so a Redis outage
+	// costs no traffic and produces no errors - which means nothing else in the
+	// system would ever tell an operator that fleet-wide ceilings have silently
+	// become per-replica ones. Any sustained non-zero rate here means the
+	// configured limits are not the limits in force.
+	RateLimiterDegraded = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "rate_limiter_degraded_total",
+		Help: "Rate limit decisions taken without the shared store, by cause. Limits are per replica while this is non-zero.",
+	}, []string{"cause"}) // redis | policy_lookup
 
 	CircuitBreakerOpened = promauto.NewCounter(prometheus.CounterOpts{
 		Name: "circuit_breaker_open_total",
@@ -152,4 +164,118 @@ var (
 		Name: "queue_leases_lost_total",
 		Help: "Leases found to be no longer held by this worker, by the operation that discovered it.",
 	}, []string{"operation"}) // renew | release
+
+	// PayloadOffloads counts events whose payload went to object storage
+	// instead of inline into PostgreSQL, by outcome. A rising `error` is an
+	// ingest outage in the making: an offload that fails is a 500, never a 202.
+	PayloadOffloads = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "payload_offloads_total",
+		Help: "Payloads written to object storage at ingest, by outcome.",
+	}, []string{"outcome"}) // stored | error
+
+	// PayloadFetches counts reads of an offloaded payload on the delivery
+	// path. `missing` means the object is gone and the delivery failed
+	// distinctly; `unavailable` means the bucket did not answer and the
+	// delivery was DEFERRED without burning an attempt.
+	PayloadFetches = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "payload_fetches_total",
+		Help: "Reads of an offloaded payload on the delivery path, by outcome.",
+	}, []string{"outcome"}) // fetched | missing | unavailable | corrupt
+
+	// PayloadOrphans counts objects uploaded by a request that then wrote no
+	// events row. `deleted` is the compensating delete succeeding in-request;
+	// `leaked` is one left for the sweep; `swept` is one the sweep reclaimed.
+	PayloadOrphans = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "payload_orphan_objects_total",
+		Help: "Unreferenced payload objects, by how they were dealt with.",
+	}, []string{"outcome"}) // deleted | leaked | swept
+)
+
+// --- Concurrency occupancy (G13) -----------------------------------------
+//
+// rate_limit_hits_total{scope="endpoint_concurrency"} counts REFUSALS. It says
+// that something was turned away; it cannot say what was holding the capacity,
+// and the whole difficulty of G13 is that the symptom (one tenant's webhooks
+// are slow) points nowhere near the cause (a different tenant's endpoints are
+// sitting on the pool). These gauges are the occupancy behind that counter.
+//
+// CARDINALITY. None of them is labelled by endpoint, project or organisation
+// id, and none of them may become so. A label whose value set grows with the
+// customer list is an outage of its own on a busy platform, and this package's
+// header says so. The per-key question - WHICH endpoint is holding the slots -
+// is answered by concurrency_gate_busiest_key_slots, which is the largest
+// single key's holding with the key itself left out: enough to see one endpoint
+// eating the pool, not enough to build a series per customer. The identity of
+// that endpoint is a log and a delivery-log query, deliberately.
+//
+// The `scope` label is the four gate ceilings, matching the values
+// rate_limit_hits_total already uses for the tenant gate (global, organization,
+// project) plus `endpoint`, which that counter spells `endpoint_concurrency`
+// because it shares a metric with the endpoint RATE limit. Joining the two on
+// scope therefore needs that one rename; it is not worth changing a shipped
+// counter's label value to avoid.
+var (
+	// WorkerPoolSlotsInUse and WorkerPoolSlotsCapacity are the REAL ceiling on
+	// in-flight attempts in this process: the worker pool. At the shipped
+	// defaults MAX_CONCURRENCY_GLOBAL (512) sits eight times above
+	// WORKER_CONCURRENCY (64), so the gate that reads as the process ceiling
+	// can never bind and this pair is the one to alarm on.
+	WorkerPoolSlotsInUse = promauto.NewGauge(prometheus.GaugeOpts{
+		Name: "worker_pool_slots_in_use",
+		Help: "Worker pool slots held by claimed deliveries in this process.",
+	})
+
+	WorkerPoolSlotsCapacity = promauto.NewGauge(prometheus.GaugeOpts{
+		Name: "worker_pool_slots_capacity",
+		Help: "Worker pool size (WORKER_CONCURRENCY) in this process.",
+	})
+
+	// GateSlotsInUse is the sum of the slots held at one scope. For the keyed
+	// scopes it is a sum ACROSS keys, so it can exceed GateSlotsCapacity, which
+	// is a PER-KEY ceiling - that is not a bug, it is the shape of the gate.
+	GateSlotsInUse = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "concurrency_gate_slots_in_use",
+		Help: "Concurrency gate slots currently held, summed across keys, by scope.",
+	}, []string{"scope"}) // global | organization | project | endpoint
+
+	// GateSlotsCapacity is the configured ceiling: process-wide for `global`,
+	// per key for the rest (MAX_CONCURRENCY_PER_ORG / _PER_PROJECT /
+	// _PER_ENDPOINT). It is published so a dashboard can show occupancy against
+	// the limit without an operator having to know the deployment's env.
+	GateSlotsCapacity = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "concurrency_gate_slots_capacity",
+		Help: "Configured concurrency ceiling by scope: process-wide for global, per key otherwise.",
+	}, []string{"scope"})
+
+	// GateKeysActive is how many distinct organisations / projects / endpoints
+	// hold capacity right now. Read against WorkerPoolSlotsInUse it answers the
+	// question G13 exists for: are the pool's slots spread across many
+	// endpoints, or concentrated in a handful?
+	GateKeysActive = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "concurrency_gate_keys_active",
+		Help: "Distinct keys holding capacity at this scope (0 for the unkeyed global scope).",
+	}, []string{"scope"})
+
+	// GateBusiestKeySlots is the largest single key's holding at this scope -
+	// the concentration signal, without a per-tenant label. One endpoint at
+	// MAX_CONCURRENCY_PER_ENDPOINT against a small pool is the measured G13
+	// failure, and this is the series that shows it.
+	GateBusiestKeySlots = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "concurrency_gate_busiest_key_slots",
+		Help: "Slots held by the single busiest key at this scope. Concentration signal; the key itself is deliberately not a label.",
+	}, []string{"scope"})
+
+	// DeliveryRateLimitFleetWide is 1 when endpoints.rate_limit is charged
+	// against a shared store and 0 when it is charged per replica (G17). Zero
+	// means every customer's configured limit is multiplied by the worker
+	// replica count, which is a customer-visible guarantee quietly weaker than
+	// the one the control plane accepted.
+	//
+	// Distinct from rate_limiter_degraded_total, which counts a shared store
+	// that was configured and then failed. This one says it was never
+	// configured, so that counter will sit at a confident zero.
+	DeliveryRateLimitFleetWide = promauto.NewGauge(prometheus.GaugeOpts{
+		Name: "delivery_rate_limit_fleet_wide",
+		Help: "1 when endpoint delivery rate limits are enforced fleet-wide, 0 when they are per replica.",
+	})
 )

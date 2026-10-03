@@ -1,5 +1,5 @@
 {
-  "name": "webhook-platform",
+  "name": "hookubit",
   "private": true,
   "packageManager": "pnpm@9.12.3",
   "engines": {
@@ -8,12 +8,12 @@
   "scripts": {
     "dev:infra": "docker compose -f deployments/compose/docker-compose.dev.yml up -d",
     "dev:infra:down": "docker compose -f deployments/compose/docker-compose.dev.yml down",
-    "dev:api": "pnpm --filter @webhook/control-api start:dev",
-    "dev:dashboard": "pnpm --filter @webhook/dashboard dev",
+    "dev:api": "pnpm --filter @hookubit/control-api start:dev",
+    "dev:dashboard": "pnpm --filter @hookubit/dashboard dev",
     "dev:data-plane": "cd services/data-plane && go run ./cmd/webhookd all",
-    "migrate": "pnpm --filter @webhook/control-api prisma:migrate",
-    "migrate:deploy": "pnpm --filter @webhook/control-api prisma:deploy",
-    "generate": "pnpm --filter @webhook/control-api prisma:generate",
+    "migrate": "pnpm --filter @hookubit/control-api prisma:migrate",
+    "migrate:deploy": "pnpm --filter @hookubit/control-api prisma:deploy",
+    "generate": "pnpm --filter @hookubit/control-api prisma:generate",
     "build": "pnpm -r build",
     "test": "pnpm -r test",
     "lint": "pnpm -r lint",
@@ -21,8 +21,20 @@
     "go:test": "cd services/data-plane && go test ./...",
     "go:vet": "cd services/data-plane && go vet ./...",
     "test:db:migrate": "cd apps/control-api && DATABASE_URL='postgresql://postgres:root@localhost:5432/hookubit_test?schema=public' DIRECT_DATABASE_URL='postgresql://postgres:root@localhost:5432/hookubit_test?schema=public' npx prisma migrate deploy",
-    "go:test:db": "cd services/data-plane && DATABASE_URL='postgresql://postgres:root@localhost:5432/hookubit_test?sslmode=disable' go test -p 1 -count=1 ./...",
-    "go:test:race": "cd services/data-plane && DATABASE_URL='postgresql://postgres:root@localhost:5432/hookubit_test?sslmode=disable' go test -p 1 -race -count=1 ./..."
+    "go:test:db": "cd services/data-plane && REDIS_TEST_URL='redis://localhost:6379/1' DATABASE_URL='postgresql://postgres:root@localhost:5432/hookubit_test?sslmode=disable' go test -count=1 ./...",
+    "go:test:race": "cd services/data-plane && REDIS_TEST_URL='redis://localhost:6379/1' DATABASE_URL='postgresql://postgres:root@localhost:5432/hookubit_test?sslmode=disable' go test -race -count=1 ./...",
+    "load:sink": "node tests/load/sink/sink.mjs",
+    "load:seed": "node tests/load/scripts/seed.mjs",
+    "load:verify": "node tests/load/scripts/verify.mjs",
+    "load:wide": "node tests/load/scripts/run.mjs wide",
+    "load:slow": "node tests/load/scripts/run.mjs slow-endpoints",
+    "load:failing": "node tests/load/scripts/run.mjs failing-endpoints",
+    "load:tenants": "node tests/load/scripts/run.mjs many-tenants",
+    "load:large": "node tests/load/scripts/run.mjs large-payloads",
+    "load:all": "node tests/load/scripts/run.mjs all",
+    "docs:dev": "pnpm --filter @hookubit/docs dev",
+    "docs:build": "pnpm --filter @hookubit/docs build",
+    "docs:check": "pnpm --filter @hookubit/docs exec node scripts/generate-api-reference.mjs --check"
   },
   "pnpm": {
     "overrides": {

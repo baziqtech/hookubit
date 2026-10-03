@@ -1,0 +1,98 @@
+# Prometheus scrape configuration for HookuBit.
+#
+# Drop these entries into the `scrape_configs:` list of a Prometheus you already
+# run. This file is NOT applied to the cluster and is not part of the Helm
+# release: the platform does not install Prometheus, in the same spirit as it
+# does not install PostgreSQL.
+#
+# WHAT EXPORTS WHAT
+#
+#   data plane (webhookd ingest|router|scheduler|worker)  :9090/metrics
+#   control API (NestJS)                                  no Prometheus endpoint today
+#   dashboard (nginx, static files)                       nothing to export
+#
+# So this scrapes the four Go roles and nothing else. Every role serves the full
+# metric set on the same port as its probes, which is why the port is called
+# `probes` in the manifests.
+#
+# THE ANNOTATIONS ARE ALREADY THERE. deployments/kubernetes/3*.yaml and the Helm
+# chart (observability.prometheusAnnotations, default true) put
+# prometheus.io/scrape, /port and /path on every data-plane pod. The job below
+# is the generic annotation-driven discovery that reads them, so nothing needs
+# to change on either side when a role is added.
+#
+# ── If you run prometheus-operator ─────────────────────────────────────────
+# Use a PodMonitor instead of this file; the operator ignores raw scrape_configs
+# unless you wrap them in a scrapeConfig CRD. Equivalent PodMonitor:
+#
+#   apiVersion: monitoring.coreos.com/v1
+#   kind: PodMonitor
+#   metadata:
+#     name: hookubit-data-plane
+#     namespace: hookubit
+#   spec:
+#     selector:
+#       matchLabels:
+#         app.kubernetes.io/name: hookubit
+#     podMetricsEndpoints:
+#       - port: probes          # named port, 9090
+#         path: /metrics
+#         interval: 30s
+#     namespaceSelector:
+#       matchNames: [hookubit]
+#
+# Note the selector matches the platform's own label, NOT the component label -
+# one PodMonitor covers all four roles, and the `component` label arrives on
+# every series through the pod-label relabelling below.
+
+scrape_configs:
+  - job_name: hookubit-data-plane
+    # 30s, not 15s. Nothing here is a fast-moving signal: the delivery
+    # histograms are aggregated over minutes and queue_depth is refreshed by a
+    # collector on its own ticker. Halving the interval doubles the storage for
+    # no new information.
+    scrape_interval: 30s
+    scrape_timeout: 10s
+    kubernetes_sd_configs:
+      - role: pod
+        namespaces:
+          names: [hookubit]
+
+    relabel_configs:
+      # Honour the annotations the manifests already carry.
+      - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_scrape]
+        action: keep
+        regex: 'true'
+      - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_path]
+        action: replace
+        target_label: __metrics_path__
+        regex: (.+)
+      # Rewrite the address to the annotated port. Without this, discovery
+      # targets the pod's first declared port - which for the ingest role is
+      # 8080, the PUBLIC event-publishing API, and scraping that produces a
+      # steady stream of 404s in the ingest logs rather than metrics.
+      - source_labels: [__address__, __meta_kubernetes_pod_annotation_prometheus_io_port]
+        action: replace
+        regex: '([^:]+)(?::\d+)?;(\d+)'
+        replacement: '$1:$2'
+        target_label: __address__
+
+      # Identity. `component` is the role (ingest|router|scheduler|worker) and is
+      # what every query in the dashboard groups by when it needs to separate
+      # them.
+      - source_labels: [__meta_kubernetes_namespace]
+        target_label: namespace
+      - source_labels: [__meta_kubernetes_pod_name]
+        target_label: pod
+      - source_labels: [__meta_kubernetes_pod_label_app_kubernetes_io_component]
+        target_label: component
+      - source_labels: [__meta_kubernetes_pod_label_app_kubernetes_io_instance]
+        target_label: release
+
+    # NO metric_relabel_configs dropping series by name here, deliberately. The
+    # metric set is already small and every label in it is bounded by
+    # construction (see the header of internal/metrics/metrics.go): nothing is
+    # labelled by organisation, project, endpoint, event or delivery id. If a
+    # future metric arrives with a per-tenant label, drop it HERE as a stopgap
+    # and then fix it at the source - a cardinality bomb defused only in the
+    # scrape config is one that goes off in the next cluster.

@@ -9,10 +9,11 @@ import (
 	"sync"
 	"testing"
 	"time"
+	"unicode/utf8"
 
-	"github.com/shaq/webhook-platform/services/data-plane/internal/egress"
-	"github.com/shaq/webhook-platform/services/data-plane/internal/queue"
-	"github.com/shaq/webhook-platform/services/data-plane/internal/signing"
+	"github.com/shaq/hookubit/services/data-plane/internal/egress"
+	"github.com/shaq/hookubit/services/data-plane/internal/queue"
+	"github.com/shaq/hookubit/services/data-plane/internal/signing"
 )
 
 // testClient builds a real egress client that is allowed to dial the loopback
@@ -343,9 +344,12 @@ func TestDeliveryFailsWithoutRawPayloadBytes(t *testing.T) {
 	}))
 	defer srv.Close()
 
+	// No payload_raw AND no payload_location: there is nowhere the bytes could
+	// be. That is a recorded failure, not a deferral - deferring would leave
+	// the delivery cycling forever over a row that will never gain bytes.
 	h := newHarness(t, srv.URL)
 	h.store.job.Payload = nil
-	h.store.job.PayloadLocation = "s3://bucket/evt_01TEST"
+	h.store.job.PayloadLocation = ""
 	h.worker.handle(context.Background(), h.lease())
 
 	got := h.store.lastCompletion(t)
@@ -506,5 +510,33 @@ func TestTransientLoadFailureDefersRatherThanSpins(t *testing.T) {
 	got := h.store.lastDefer(t)
 	if got.Delay <= 0 {
 		t.Fatal("a delivery deferred after a database fault must carry a delay, or the next poll re-claims it immediately")
+	}
+}
+
+// The sanitiser on its own, for the cases the delivery path cannot reach
+// conveniently - chiefly a bound that lands in the middle of a multi-byte rune.
+func TestStorableTextIsAlwaysStorable(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		max  int
+		want string
+	}{
+		{"fits", `{"a":1}`, 64, `{"a":1}`},
+		{"nul stripped", "a\x00b", 64, "ab"},
+		{"cut mid rune", "aaa€", 4, "aaa�\n…[truncated]"},
+		{"invalid utf8 repaired", "a\x80b", 64, "a�b"},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			got := storableText([]byte(tc.in), tc.max, false)
+			if got != tc.want {
+				t.Fatalf("storableText(%q, %d) = %q, want %q", tc.in, tc.max, got, tc.want)
+			}
+			if !utf8.ValidString(got) || strings.ContainsRune(got, 0) {
+				t.Fatalf("result is not storable text: %q", got)
+			}
+		})
 	}
 }

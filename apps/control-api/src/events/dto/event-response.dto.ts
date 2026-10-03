@@ -1,6 +1,7 @@
-import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
+import { ApiProperty } from '@nestjs/swagger';
 import { Event, EventStatus } from '@prisma/client';
 import { HEADER_REDACTED, isRedactedRequestHeader } from '../../deliveries/delivery-limits';
+import { DeliveryRollup } from '../delivery-rollup';
 import { PayloadEncoding, PayloadSource, renderPayload } from '../event-payload';
 
 function iso(value: Date | string | null | undefined): string | null {
@@ -44,25 +45,30 @@ export class EventDto {
   @ApiProperty() project_id!: string;
   @ApiProperty() event_type!: string;
 
-  @ApiPropertyOptional({
+  @ApiProperty({
+    type: String,
     nullable: true,
-    description: 'The producer-supplied key that made ingest idempotent (ARCHITECTURE.md 17).',
+    description:
+      'The idempotency key the producer published this event with, if any. Publishing again ' +
+      'with the same key in the same project resolves to this event instead of creating another.',
   })
   idempotency_key!: string | null;
 
-  @ApiPropertyOptional({
+  @ApiProperty({
+    type: String,
     nullable: true,
     description:
-      'Opt-in serialisation key, carried onto every delivery this event fanned out to. Stored ' +
-      'from day one; ordering enforcement is deferred (ADR-0004), so this does NOT currently ' +
-      'guarantee anything about delivery order.',
+      'Opt-in serialisation key, carried onto every delivery this event routed to. It is ' +
+      'accepted and stored today so it is already in place when per-key ordering is enforced, ' +
+      'but per-key ordering is NOT yet enforced: this field currently guarantees nothing about ' +
+      'delivery order.',
   })
   ordering_key!: string | null;
 
   @ApiProperty({
     enum: ['received', 'processing', 'processed', 'failed'],
     description:
-      'The INGEST/fan-out state, not a delivery outcome. `processed` means the fan-out ' +
+      'The INGEST/routing state, not a delivery outcome. `processed` means the routing ' +
       'committed, which says nothing about whether any endpoint accepted it - that is what the ' +
       'deliveries are for.',
   })
@@ -79,13 +85,14 @@ export class EventDto {
   })
   payload_inline!: boolean;
 
-  @ApiPropertyOptional({
+  @ApiProperty({
+    type: String,
     nullable: true,
     description: '`s3://bucket/key` when the payload was too large to store inline.',
   })
   payload_location!: string | null;
 
-  @ApiPropertyOptional({
+  @ApiProperty({
     type: 'object',
     additionalProperties: { type: 'string' },
     nullable: true,
@@ -95,14 +102,60 @@ export class EventDto {
 
   @ApiProperty() created_at!: string;
 
-  @ApiPropertyOptional({
+  @ApiProperty({
+    type: String,
     nullable: true,
-    description: 'When the fan-out first committed. Null until it has.',
+    description: 'When the routing first committed. Null until it has.',
   })
   processed_at!: string | null;
+
+  @ApiProperty({
+    type: () => EventDeliveryRollupDto,
+    nullable: true,
+    description:
+      'What became of this event, rolled up from its DELIVERIES rather than from `status`. ' +
+      'Read this, not `status`, to answer "did anyone receive it?" - `status: processed` means ' +
+      'the router ran and committed, and says nothing about whether anybody got anything. ' +
+      'Null on routes that do not compute it.',
+  })
+  deliveries!: EventDeliveryRollupDto | null;
 }
 
-export function toEventDto(event: Event): EventDto {
+/**
+ * The event's deliveries, counted.
+ *
+ * `state` is the six-way rollup; the counts travel with it so a client can
+ * spell out the actual mix ("1 delivered, 1 cancelled") rather than paraphrase
+ * the state.
+ */
+export class EventDeliveryRollupDto {
+  @ApiProperty({
+    enum: ['received', 'in_progress', 'delivered', 'partly_delivered', 'all_failed', 'dropped'],
+    description:
+      '`dropped` is the one worth reading twice: the routing COMPLETED and produced no ' +
+      'deliveries, because no subscription matched. The publisher was answered 202 and the ' +
+      'event went nowhere. `received` means the routing has not finished - which is also how an ' +
+      'event stuck BEFORE routing appears here, because it has no deliveries and no completed ' +
+      'routing. Telling those apart needs `event_outbox`; see `GET /projects/:id/outbox`.',
+  })
+  state!: string;
+
+  @ApiProperty({ description: 'Deliveries this event produced, across every status.' })
+  total!: number;
+
+  @ApiProperty() succeeded!: number;
+
+  @ApiProperty({ description: '`failed` plus `exhausted`.' })
+  failed!: number;
+
+  @ApiProperty({ description: 'pending, scheduled, queued, processing or retrying.' })
+  in_flight!: number;
+
+  @ApiProperty({ description: 'Stopped before it could be sent - usually a paused endpoint.' })
+  cancelled!: number;
+}
+
+export function toEventDto(event: Event, rollup?: DeliveryRollup): EventDto {
   return {
     id: event.id,
     project_id: event.projectId,
@@ -117,6 +170,7 @@ export function toEventDto(event: Event): EventDto {
     headers: safeHeaders(event.headers),
     created_at: new Date(event.createdAt).toISOString(),
     processed_at: iso(event.processedAt),
+    deliveries: rollup ?? null,
   };
 }
 
@@ -133,13 +187,14 @@ export class EventPayloadDto {
   })
   source!: PayloadSource;
 
-  @ApiPropertyOptional({
+  @ApiProperty({
+    type: String,
     nullable: true,
     description: 'THE DELIVERED BYTES, decoded. This is what was signed.',
   })
   body!: string | null;
 
-  @ApiPropertyOptional({
+  @ApiProperty({
     enum: ['utf-8', 'base64'],
     nullable: true,
     description:
@@ -148,7 +203,7 @@ export class EventPayloadDto {
   })
   encoding!: PayloadEncoding | null;
 
-  @ApiPropertyOptional({ nullable: true }) location!: string | null;
+  @ApiProperty({ type: String, nullable: true }) location!: string | null;
 
   @ApiProperty({ description: 'Bytes as received. Meaningful even when `body` is null.' })
   size_bytes!: number;
@@ -156,7 +211,7 @@ export class EventPayloadDto {
   @ApiProperty({ description: 'SHA-256 of the authoritative bytes, lowercase hex.' })
   sha256!: string;
 
-  @ApiPropertyOptional({
+  @ApiProperty({
     type: 'object',
     additionalProperties: true,
     nullable: true,
@@ -202,5 +257,5 @@ export function toEventDetailDto(event: Event): EventDetailDto {
 export class EventListDto {
   @ApiProperty({ type: [EventDto] }) data!: EventDto[];
   @ApiProperty() has_more!: boolean;
-  @ApiPropertyOptional({ nullable: true }) next_offset!: number | null;
+  @ApiProperty({ type: Number, nullable: true }) next_offset!: number | null;
 }

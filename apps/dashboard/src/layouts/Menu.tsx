@@ -5,10 +5,24 @@ export interface MenuProps {
   /** The trigger's visible content. */
   trigger: ReactNode;
   label: string;
+  /**
+   * Which way the popover opens. The account menu sits at the FOOT of a
+   * sidebar that is exactly one viewport tall, so opening downward put "Sign
+   * out" below the fold on a 720px-high window, where nothing could scroll to
+   * it: the sidebar is sticky and its own height. Menus at the top of the
+   * sidebar keep the default.
+   */
+  placement?: 'bottom' | 'top';
   children: (close: () => void) => ReactNode;
   align?: 'left' | 'right';
   className?: string;
   triggerClassName?: string;
+  /**
+   * The disclosure chevron the trigger draws for you. Set `false` when the
+   * trigger is a multi-line card that needs its own glyph placed against a
+   * particular row rather than centred against the whole control.
+   */
+  chevron?: boolean;
 }
 
 /**
@@ -20,10 +34,12 @@ export interface MenuProps {
 export function Menu({
   trigger,
   label,
+  placement = 'bottom',
   children,
   align = 'left',
   className,
   triggerClassName,
+  chevron = true,
 }: MenuProps) {
   const [open, setOpen] = useState(false);
   const containerRef = useRef<HTMLDivElement>(null);
@@ -67,14 +83,16 @@ export function Menu({
         )}
       >
         {trigger}
-        <svg
-          className="ml-auto h-3 w-3 shrink-0 text-ink-subtle"
-          viewBox="0 0 12 12"
-          fill="none"
-          aria-hidden="true"
-        >
-          <path d="m3 4.5 3 3 3-3" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
-        </svg>
+        {chevron && (
+          <svg
+            className="ml-auto h-3 w-3 shrink-0 text-ink-subtle"
+            viewBox="0 0 12 12"
+            fill="none"
+            aria-hidden="true"
+          >
+            <path d="m3 4.5 3 3 3-3" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+          </svg>
+        )}
       </button>
 
       {open && (
@@ -82,7 +100,8 @@ export function Menu({
           role="menu"
           aria-label={label}
           className={cn(
-            'absolute z-40 mt-1 min-w-[15rem] animate-pop-in rounded-lg border border-line',
+            'absolute z-40 min-w-[15rem] animate-pop-in rounded-lg border border-line',
+            placement === 'top' ? 'bottom-full mb-1' : 'mt-1',
             'bg-panel p-1 shadow-pop',
             align === 'right' ? 'right-0' : 'left-0',
           )}

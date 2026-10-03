@@ -77,7 +77,7 @@ export class AuditLogsController {
       'stored: values redacted at write time stay redacted, and there is no filter over ' +
       'metadata contents, because one would be an oracle against that redaction.',
   })
-  @ApiParam({ name: 'orgId', example: 'org_01J...' })
+  @ApiParam({ name: 'orgId', type: String, example: 'org_01J...', description: 'Organization id, `org_…`.' })
   @ApiOkResponse({ type: AuditLogListDto })
   list(
     @Tenant() context: RequestContext,
@@ -95,8 +95,8 @@ export class AuditLogsController {
       'For deep-linking out of the list. Read-only, like everything on this controller: an ' +
       'audit row is never edited or removed, and a correction is a new row.',
   })
-  @ApiParam({ name: 'orgId', example: 'org_01J...' })
-  @ApiParam({ name: 'auditLogId', example: 'aud_01J...' })
+  @ApiParam({ name: 'orgId', type: String, example: 'org_01J...', description: 'Organization id, `org_…`.' })
+  @ApiParam({ name: 'auditLogId', type: String, example: 'aud_01J...', description: 'Audit log entry id, `aud_…`.' })
   @ApiOkResponse({ type: AuditLogDto })
   get(
     @Tenant() context: RequestContext,

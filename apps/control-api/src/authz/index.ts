@@ -14,6 +14,12 @@ export { TenantGuard } from './tenant.guard';
 export { CROSS_TENANT_MESSAGE, TenantResolver } from './tenant-resolver.service';
 export { TenantScope, TenantScopeFactory, type TenantClient } from './tenant-scope.factory';
 export {
+  EVENT_PAYLOAD_HEAD_TAG,
+  eventPayloadHeadQuery,
+  readEventPayloadHeads,
+  type EventPayloadHeadRow,
+} from './event-payload-head';
+export {
   DEFAULT_PAGE_SIZE,
   MAX_PAGE_SIZE,
   ScopedRepository,

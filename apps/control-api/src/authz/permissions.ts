@@ -72,6 +72,13 @@ const GRANTS = {
   'policies.read':         { owner: true,  admin: true,  developer: true,  viewer: true,  billing: false },
   'policies.write':        { owner: true,  admin: true,  developer: true,  viewer: false, billing: false },
 
+  // Alert destinations. Readable by everyone who can read the delivery record,
+  // because "who gets told when this breaks?" is part of understanding what
+  // happened. Writable by developer and up: adding a destination sends mail to
+  // an address of the writer's choosing, which is not a viewer's to do.
+  'notifications.read':    { owner: true,  admin: true,  developer: true,  viewer: true,  billing: false },
+  'notifications.write':   { owner: true,  admin: true,  developer: true,  viewer: false, billing: false },
+
   'members.read':          { owner: true,  admin: true,  developer: true,  viewer: true,  billing: true  },
   'members.write':         { owner: true,  admin: true,  developer: false, viewer: false, billing: false },
 
@@ -370,10 +377,17 @@ export const TENANT_SCOPE_PERMISSIONS: Readonly<Record<string, readonly Permissi
     subscriptions: ['subscriptions.read'],
     retryPolicies: ['policies.read'],
     rateLimitPolicies: ['policies.read'],
+    notificationDestinations: ['notifications.read'],
     // Idempotency records are the write path's own bookkeeping for the resource
     // being written; they carry no data of their own beyond a stored response.
     idempotencyKeys: ['events.read'],
     events: ['events.read'],
+    // The router's work queue for an event. Reading it is reading the event's
+    // own processing state - "why has nothing arrived?" - so it rides on
+    // `events.read`. WRITING it (requeue) does not: that route demands
+    // `events.replay` AND `deliveries.replay`, because a requeue puts real
+    // outbound HTTP on a customer's endpoints.
+    eventOutbox: ['events.read'],
     deliveries: ['deliveries.read'],
     endpointSecrets: ['endpoint-secrets.read'],
     // Health is an endpoint's delivery record, not its credential.

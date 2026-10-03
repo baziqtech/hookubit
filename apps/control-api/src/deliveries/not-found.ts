@@ -16,7 +16,7 @@ import { AppError } from '../common/errors';
  * is confirms that it is live infrastructure belonging to another customer.
  *
  * Only `not_found` is rewritten. The distinctions that are genuinely useful
- * inside the tenant - a deleted endpoint, a fan-out over the cap, an event that
+ * inside the tenant - a deleted endpoint, a routing over the cap, an event that
  * was never delivered anywhere - are different codes with different messages
  * and survive untouched.
  */

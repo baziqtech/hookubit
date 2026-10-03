@@ -1,5 +1,5 @@
 {
-  "name": "@webhook/dashboard",
+  "name": "@hookubit/dashboard",
   "version": "0.1.0",
   "private": true,
   "type": "module",
@@ -7,11 +7,17 @@
     "dev": "vite",
     "build": "tsc -b && vite build",
     "preview": "vite preview",
+    "preview:cf": "pnpm build && wrangler dev",
+    "cf:check": "wrangler deploy --dry-run --outdir .wrangler/dry-run",
+    "deploy": "pnpm build && wrangler deploy",
     "lint": "eslint src --ext ts,tsx",
     "test": "vitest run --passWithNoTests",
-    "generate:api": "openapi-typescript http://localhost:3000/docs-json -o src/types/api.d.ts"
+    "generate:api": "pnpm --filter @hookubit/control-api build && node ../control-api/dist/openapi.js ../control-api/openapi.json && openapi-typescript ../control-api/openapi.json --default-non-nullable false -o src/types/api.d.ts",
+    "test:e2e": "playwright test"
   },
   "dependencies": {
+    "@fontsource-variable/jetbrains-mono": "^5.3.0",
+    "@fontsource-variable/plus-jakarta-sans": "^5.3.0",
     "@tanstack/react-query": "^5.62.7",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
@@ -20,6 +26,7 @@
     "zustand": "^5.0.2"
   },
   "devDependencies": {
+    "@playwright/test": "1.63.0",
     "@types/react": "^18.3.17",
     "@types/react-dom": "^18.3.5",
     "@typescript-eslint/eslint-plugin": "^8.18.1",
@@ -32,6 +39,7 @@
     "tailwindcss": "^3.4.17",
     "typescript": "^5.7.2",
     "vite": "^6.0.5",
-    "vitest": "^2.1.8"
+    "vitest": "^2.1.8",
+    "wrangler": "4.138.0"
   }
 }

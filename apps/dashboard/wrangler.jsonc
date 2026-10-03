@@ -1,0 +1,29 @@
+{
+  // Static assets only — the same shape as lastmile/operations_dashboard, and
+  // for the same reason: there is no server-side work for a Worker to do.
+  //
+  // There used to be a Worker here that reverse-proxied `/v1/*` to the control
+  // API, because the dashboard fetched bare relative paths and the session
+  // cookie is `SameSite=Lax`. Both hostnames sit under `hookubit.com`
+  // (`hookubit.com` serves this app, `api.hookubit.com` the control API), so
+  // the requests are SAME-SITE and a `Lax` cookie is sent on them. The
+  // dashboard now calls the API by its own origin (`VITE_API_BASE_URL`, see
+  // src/lib/api-base-url.ts) and the proxy is gone.
+  //
+  // No `assets.binding` either: a binding exists to let Worker code fetch an
+  // asset itself, and with no `main` there is no Worker code and no `env` for
+  // it to appear on.
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "hookubit-dashboard",
+  "compatibility_date": "2026-06-11",
+  "observability": { "enabled": true },
+  "assets": {
+    // `vite build` output (vite.config.ts: build.outDir). Relative to THIS
+    // file, so a deploy from the repo root with
+    // `-c apps/dashboard/wrangler.jsonc` still resolves it.
+    "directory": "./dist",
+    // Client-side routing: /orgs/:orgId/projects/:projectId/... exists only in
+    // React Router, so an unknown path must return index.html, not a 404.
+    "not_found_handling": "single-page-application"
+  }
+}

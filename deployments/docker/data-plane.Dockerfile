@@ -2,7 +2,12 @@
 # Multi-stage: compile once, ship a minimal, stateless runtime image
 # (ARCHITECTURE.md 40).
 
-FROM golang:1.23-alpine AS builder
+# Keep this in step with GO_VERSION in .github/workflows/ci.yml. It is the
+# BUILD toolchain, not the module minimum: services/data-plane/go.mod declares
+# `go 1.21` and stays there deliberately (see its header). Raised from 1.23,
+# which is out of support and was shipping ten known-reachable standard-library
+# vulnerabilities into this binary.
+FROM golang:1.27-alpine AS builder
 WORKDIR /src
 COPY services/data-plane/go.mod services/data-plane/go.sum ./
 RUN go mod download

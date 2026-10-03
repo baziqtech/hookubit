@@ -11,10 +11,13 @@ const TONES: Record<StatusTone, string> = {
   neutral: 'bg-raised text-ink-muted border-line-strong/60',
 };
 
+// The dot is a saturated form of the tone, not the tone itself. At 6px the
+// text colour - chosen for contrast against a soft background at 11.5px -
+// reads as grey; these carry the chroma the size needs.
 const DOTS: Record<StatusTone, string> = {
-  ok: 'bg-ok',
-  warn: 'bg-warn',
-  danger: 'bg-danger',
+  ok: 'bg-ok-dot',
+  warn: 'bg-warn-dot',
+  danger: 'bg-danger-dot',
   info: 'bg-info',
   neutral: 'bg-ink-subtle',
 };

@@ -21,6 +21,7 @@ import {
 } from '../endpoint-secrets/testing/harness';
 import { TenantTransactionRunner } from '../organizations/tenant-transaction';
 import { EndpointsController } from './endpoints.controller';
+import { EndpointHealthService } from './endpoint-health.service';
 import { EndpointsService } from './endpoints.service';
 
 /** Authentication has its own suite; the cookie here is just a user id. */
@@ -95,6 +96,7 @@ describe('endpoints and secrets over HTTP', () => {
         SessionGuard,
         TenantGuard,
         EndpointsService,
+        EndpointHealthService,
         EndpointSecretsService,
       ],
     }).compile();

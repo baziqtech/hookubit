@@ -12,3 +12,9 @@ coverage/
 bin/
 tmp/
 *.tsbuildinfo
+
+# load-test run artifacts: manifests carry plaintext API keys
+tests/load/.artifacts/
+
+# Emitted by `pnpm openapi`; the source of truth is the code that produces it.
+apps/control-api/openapi.json

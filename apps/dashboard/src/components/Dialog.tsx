@@ -50,6 +50,14 @@ export function Dialog({
     return () => dialog.removeEventListener('cancel', onCancel);
   }, [onClose]);
 
+  // A closed dialog is NOT in the document. A native <dialog> that is merely
+  // not open keeps its whole subtree in the DOM - every input, every form id -
+  // so a page with a closed "create" dialog in its sidebar had a second, empty
+  // "Name" and "Slug" behind the settings form, and a footer button's `form`
+  // attribute could bind to the wrong one. Unmounting on close removes the
+  // whole class of problem; the open transition still animates on mount.
+  if (!open) return null;
+
   return (
     <dialog
       ref={ref}

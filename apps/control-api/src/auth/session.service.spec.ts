@@ -35,6 +35,7 @@ function seedUser(prisma: FakePrisma, id: string, email: string): User {
     emailVerifiedAt: null,
     lastLoginAt: null,
     disabledAt: null,
+    onboardingCompletedAt: null,
     createdAt: new Date(),
     updatedAt: new Date(),
   };

@@ -22,9 +22,10 @@ const STUB_MAILER_ENVIRONMENTS = new Set(['development', 'test']);
 const TOKEN_LOG_PREFIX = 6;
 
 /**
- * Placeholder transport until a notifications module ships an SMTP/provider
- * implementation. It exists so AuthService depends on a port rather than on
- * `console.log`, and so the swap is a provider change in AuthModule.
+ * The transport bound when `SMTP_URL` is unset. The real one is
+ * `notifications/SmtpMailer`; `AuthModule` picks between the two with
+ * `selectMailer`, and this class exists so that choice is a provider change
+ * rather than an `if` inside AuthService.
  *
  * Two rules, both learned the hard way (FIX 5):
  *
@@ -43,8 +44,9 @@ const TOKEN_LOG_PREFIX = 6;
  *     reset silently non-functional - users saw 202s and no mail ever arrived.
  *     Constructing this provider in staging/production now fails module init.
  *
- * For a usable local flow, point MAILER_PORT at a real transport against a local
- * catcher (Mailpit/MailHog) rather than reading tokens out of the console.
+ * For a usable local flow, set `SMTP_URL` to a local catcher (Mailpit is in
+ * docker-compose.dev.yml; see docs/LOCAL_SETUP.md) rather than reading tokens
+ * out of the console - with it set, this class is never constructed.
  */
 @Injectable()
 export class DevelopmentAuthMailer implements AuthMailer {

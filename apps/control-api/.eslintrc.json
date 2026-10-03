@@ -54,7 +54,8 @@
         "src/auth/**/*.ts",
         "src/infrastructure/**/*.ts",
         "src/cli/**/*.ts",
-        "src/health/**/*.ts"
+        "src/health/**/*.ts",
+        "src/maintenance/**/*.ts"
       ],
       "rules": {
         "no-restricted-imports": "off"
@@ -62,6 +63,7 @@
     },
     {
       "files": [
+        "src/notification-destinations/notification-confirmation.service.ts",
         "src/organizations/user-scope.ts",
         "src/organizations/user-directory.ts",
         "src/organizations/tenant-transaction.ts",

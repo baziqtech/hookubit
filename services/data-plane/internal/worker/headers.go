@@ -6,7 +6,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/shaq/webhook-platform/services/data-plane/internal/signing"
+	"github.com/shaq/hookubit/services/data-plane/internal/signing"
 )
 
 // The platform headers documented in docs/API.md. Consumers verify against
@@ -22,7 +22,7 @@ const (
 )
 
 // UserAgent identifies the platform to the endpoint's logs and WAF.
-const UserAgent = "ShaQ-Webhooks/1.0"
+const UserAgent = "HookuBit/1.0"
 
 // platformHeaders is the set a customer cannot set, override or remove. The
 // signature is the one that matters: an endpoint whose custom_headers included

@@ -31,7 +31,13 @@ services/data-plane without exempting the files they live in, so a real key
 pasted beside one still fails the build.
 """
 regexTarget = "secret"
-regexes = ['''0123456789abcdef''']
+regexes = [
+  '''0123456789abcdef''',
+  # The same filler run in the other direction - the retired key in the
+  # cross-language crypto test vector. gitleaks decodes base64 before matching,
+  # so the decoded form is what the allowlist has to name.
+  '''fedcba9876543210''',
+]
 
 [[allowlists]]
 description = """
@@ -54,6 +60,28 @@ regexes = ['''^[A-Z][A-Z0-9_]{2,40}=$''']
 
 [[allowlists]]
 description = """
+Fixture identifiers that the generic-api-key rule mistakes for credentials, each
+matched by its exact synthetic SHAPE. `scenario-NN-key` and `idem-WORD-XXXX` are
+idempotency keys in the failure-injection and replay tests; `ep_01JQPENDING` is
+a placeholder endpoint id whose suffix is the word PENDING, not a ULID; the two
+base64 literals decode to the ASCII strings 0123456789abcdef0123456789abcdef and
+fedcba9876543210fedcba9876543210 - the cross-language crypto test vector's keys,
+sequential filler in both directions; and the wk_live_ value spells
+"MockPlaintextKeyValue" in leetspeak. None of these can be produced by a key
+generator. The file that holds each still fails on a real key beside it.
+"""
+regexTarget = "secret"
+regexes = [
+  '''^scenario-[0-9]{2}-key$''',
+  '''^idem-[A-Z]+-[0-9A-F]{4}$''',
+  '''^ep_01JQPENDING$''',
+  '''^MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=$''',
+  '''^ZmVkY2JhOTg3NjU0MzIxMGZlZGNiYTk4NzY1NDMyMTA=$''',
+  '''^wk_live_9f2cM0ckPl4int3xtK3yV4lu3Chars32$''',
+]
+
+[[allowlists]]
+description = """
 Build output and installed packages. These are gitignored, so CI never sees
 them, but a local `gitleaks detect --no-git` walks the working tree and would
 otherwise re-report every finding twice - once from src/, once from dist/.
@@ -65,4 +93,9 @@ paths = [
   '''(^|/)node_modules/''',
   '''(^|/)\.pnpm-store/''',
   '''(^|/)coverage/''',
+  # Also gitignored, also never seen by CI, and a local --no-git walk otherwise
+  # reports a developer's own .env and the load suite's manifests - which hold
+  # real local API keys by design (the control plane returns a key once).
+  '''^\.env$''',
+  '''(^|/)tests/load/\.artifacts/''',
 ]

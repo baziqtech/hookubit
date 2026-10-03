@@ -1,7 +1,7 @@
 # Running locally, without Docker
 
 Everything except Redis runs as a native process. This is the path to a real
-end-to-end delivery: publish an event, watch it fan out, watch it get signed and
+end-to-end delivery: publish an event, watch it route, watch it get signed and
 sent.
 
 ## 0. Prerequisites — check these first
@@ -19,16 +19,49 @@ this is the one hard requirement.
 
 Redis you already have. Node 20+, pnpm, and Go 1.21+ are also needed.
 
+**If you cloned before the HookuBit rename**, the dev compose file's Postgres
+role, password and database are all `hookubit` now (they were `webhook` /
+`webhook_platform`), and the compose project is `hookubit-dev`. Postgres only
+runs initdb on an EMPTY data directory, so an existing volume keeps the old
+role and the new `DATABASE_URL` fails to authenticate against a server that
+looks healthy. Reset it once:
+
+```bash
+docker compose -f deployments/compose/docker-compose.dev.yml down -v
+```
+
+That deletes only the throwaway dev volume. If you run PostgreSQL natively
+instead, nothing changes — point `DATABASE_URL` at whatever role you already
+created.
+
 ## 1. Create the role and database
 
 ```bash
 psql -h localhost -U postgres <<'SQL'
-CREATE ROLE webhook WITH LOGIN PASSWORD 'webhook';
-CREATE DATABASE webhook_platform OWNER webhook;
+CREATE ROLE hookubit WITH LOGIN PASSWORD 'hookubit';
+CREATE DATABASE hookubit OWNER hookubit;
+CREATE DATABASE hookubit_test OWNER hookubit;
 SQL
 ```
 
 Adjust the superuser name if yours differs.
+
+**Two databases, and only two.** `hookubit` is yours to develop against;
+`hookubit_test` is the one every automated suite uses. Migrate the test one
+with `pnpm test:db:migrate`.
+
+Nothing creates any other database. The Go suites used to copy `hookubit_test`
+once per package — `hookubit_test_internal_worker`, and so on — which was fast
+and correct and left a database behind per package per run until there were
+hundreds of them. They now share `hookubit_test`, taking a PostgreSQL advisory
+lock on it for the lifetime of each test binary and truncating it on the way
+in. DB-backed packages therefore queue rather than run side by side, and two
+concurrent runs queue too.
+
+Because a run *empties* the database it is given, `internal/testsupport`
+refuses any database whose name does not end in `_test`. Pointing
+`DATABASE_URL` at `hookubit` and running `go test` fails with a message saying
+so rather than destroying your development data.
 
 ## 2. Generate secrets and write .env
 
@@ -52,8 +85,8 @@ EOT
 Then edit `.env` and confirm:
 
 ```
-DATABASE_URL=postgresql://webhook:webhook@localhost:5432/webhook_platform?schema=public
-DIRECT_DATABASE_URL=postgresql://webhook:webhook@localhost:5432/webhook_platform?schema=public
+DATABASE_URL=postgresql://hookubit:hookubit@localhost:5432/hookubit?schema=public
+DIRECT_DATABASE_URL=postgresql://hookubit:hookubit@localhost:5432/hookubit?schema=public
 REDIS_URL=redis://localhost:6379/0
 APP_ENV=development
 ALLOW_OPEN_REGISTRATION=false
@@ -75,12 +108,12 @@ would try to author a new one.
 There is no default account, by design. Build first — the CLI runs from `dist/`:
 
 ```bash
-pnpm --filter @webhook/control-api build
+pnpm --filter @hookubit/control-api build
 
 BOOTSTRAP_EMAIL='you@example.com' \
 BOOTSTRAP_PASSWORD='a-real-password-12+' \
 BOOTSTRAP_ORG='ShaQ Express' \
-pnpm --filter @webhook/control-api bootstrap
+pnpm --filter @hookubit/control-api bootstrap
 ```
 
 It refuses to run twice, and creates the organization, the owner and the
@@ -141,7 +174,51 @@ require("http").createServer((req,res)=>{
 }).listen(8081,()=>console.log("sink on :8081"));'
 ```
 
-## 6. Drive the path
+## 6. Mail: verification links, password reset, invitations
+
+Self-serve signup, forgot-password and team invitations all end in an email
+carrying a single-use link, and login refuses an unverified address. With no
+transport configured the control plane logs a six-character token prefix and
+delivers nothing — deliberately (`apps/control-api/HANDOFF.md`, FIX 5) — so
+none of those flows can be finished from the console. Run a catcher:
+
+```bash
+docker compose -f deployments/compose/docker-compose.dev.yml up -d mailpit
+```
+
+Add to `.env` and restart `pnpm dev:api`:
+
+```
+SMTP_URL=smtp://localhost:1025
+MAIL_FROM="HookuBit <no-reply@localhost>"
+```
+
+Every message lands in the inbox at http://localhost:8025; nothing leaves your
+machine. Links are built from `DASHBOARD_URL`, so they open the dashboard from
+step 5 at `/verify-email?token=…`, `/reset-password?token=…` and
+`/accept-invitation?token=…`.
+
+Gotchas:
+
+- **Both variables or neither.** `SMTP_URL` without `MAIL_FROM` refuses to boot.
+  Quote `MAIL_FROM` — the angle brackets are shell syntax if you export it. The
+  display name is also the product name the messages use.
+- **`SMTP_URL` set means SMTP in every environment**, `APP_ENV=development`
+  included. `SMTP_URL` unset under staging or production refuses to boot, by
+  name — there is no "quiet" mode outside development/test.
+- **The stub is not a fallback for a server that is down.** With `SMTP_URL` set
+  and Mailpit stopped you get one warning at boot and an error line per message
+  (`Failed to send email_verification to <hash>@domain`), and signup still
+  answers 202 — that is deliberate (FIX 3), the response must not say whether
+  the address exists. Start Mailpit and use "resend verification" from the
+  login screen.
+- **The `bootstrap` owner needs none of this.** It is created verified.
+- **Only the control plane reads `.env`** (step 5). The Go services do not send
+  mail, so there is nothing to export in their shells.
+- The link in the message is the only copy of the token; the log carries a
+  prefix. Never paste a token out of Mailpit into a ticket.
+
+## 7. Drive the path
 
 Log in through the dashboard at http://localhost:5173, or use the API directly.
 **Confirm exact request shapes at http://localhost:3000/docs** — the OpenAPI
@@ -173,7 +250,7 @@ delivered. Within a poll interval the router materialises a delivery row and the
 worker signs and sends it — you should see it arrive at the sink with
 `Webhook-Signature: t=...,v1=...`.
 
-## 7. Verify the signature the way a consumer would
+## 8. Verify the signature the way a consumer would
 
 ```
 HMAC-SHA256(secret, "<t>.<exact raw body bytes>")
@@ -181,6 +258,37 @@ HMAC-SHA256(secret, "<t>.<exact raw body bytes>")
 
 compared in constant time against any `v1=` value. During a rotation window
 there will be two `v1=` components, one per active secret.
+
+## 9. Prove the dashboard against the real stack
+
+`apps/dashboard/e2e/` is a Playwright journey that exercises every dashboard
+control against the running control API, data plane and Mailpit - the mock
+transport proves nothing here, so the runner starts Vite with
+`VITE_API_TRANSPORT=http` and a local webhook receiver on `127.0.0.1:9797`.
+
+It expects, beyond section 5: the control API started with
+`ALLOW_OPEN_REGISTRATION=true` (it registers a fresh account per run and reads
+the verification link from Mailpit), and `EGRESS_ALLOW_PRIVATE_NETWORKS=true`
+on both planes (the receiver is a loopback address).
+
+```bash
+pnpm --filter @hookubit/dashboard test:e2e
+pnpm --filter @hookubit/dashboard exec playwright show-report   # traces and video for any failure
+```
+
+The suite starts its own dev server on 5173 and a receiver on 9797. To run it
+without taking down a dev server you are using, override both:
+
+```bash
+E2E_PORT=5273 E2E_RECEIVER_PORT=9897 pnpm --filter @hookubit/dashboard test:e2e
+```
+
+Two things bite on repeated runs from one machine. Registration is throttled at
+5 per hour and sign-in at 10 per 15 minutes per address, and the buckets live in
+Redis when it is up; a dev-only reset is
+`docker exec <redis> sh -c "redis-cli --scan --pattern 'throttle:auth.*' | xargs -r redis-cli DEL"`.
+And each run leaves its account and organization behind on purpose - they are
+what the audit log and retention are for.
 
 ## Where to look when it does not work
 
@@ -197,3 +305,24 @@ curl -s localhost:9090/metrics | grep -E 'events_ingested|deliveries_|outbox_pen
   and that `ENCRYPTION_KEY` is exported in its shell.
 - Attempts recorded with a signature the consumer rejects → the NestJS/Go crypto
   or signing contract. This is the least-tested seam in the system.
+- Registered (202) but no mail → `SMTP_URL` is unset (the stub logs
+  `[dev-mailer] … token abc123…` and sends nothing) or Mailpit is down (the
+  control-api log has `SMTP transport … could not be verified at boot` and a
+  `Failed to send …` line per message). `curl -s localhost:8025/api/v1/messages`
+  shows what the catcher actually received.
+
+## The documentation site
+
+`apps/docs` is the customer-facing documentation (VitePress). It needs nothing
+running - no database, no API:
+
+```bash
+pnpm docs:dev      # http://localhost:4000
+pnpm docs:build    # what CI runs: regenerates the API reference, then builds with dead-link checking ON
+```
+
+The API reference under `apps/docs/api/` is generated from
+`apps/control-api/openapi.json`, which `pnpm --filter @hookubit/control-api openapi`
+emits from source. Do not edit the generated pages; change the DTO decorators
+and rebuild. A build failure naming a dead link is a real broken link - fix the
+link, not the check.

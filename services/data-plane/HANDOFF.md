@@ -43,7 +43,7 @@ how much they will hurt if they are missing.
 
 3. **`events` wants an `ordering_key` column.** `Delivery` has one, `Event` does
    not, so the router has nowhere to read it from when it materialises the
-   fan-out. Until it exists, ingest stores it in `events.headers` as
+   routing. Until it exists, ingest stores it in `events.headers` as
    `{"ordering_key": "..."}` (see `requestMetadata` in `internal/ingest`). That
    works, but it is a JSON lookup on a hot path and it hides a routing input
    inside a column named for something else. Requested:
@@ -70,7 +70,7 @@ how much they will hurt if they are missing.
      delivery read this column and nothing else.
    - `payload` - the jsonb projection, for filtering, search and the operator
      UI. Never sign it, never deliver it.
-   - `payload_hash` - SHA-256 of `payload_raw`, so the invariant is checkable:
+      - `payload_hash` - SHA-256 of `payload_raw`, so the invariant is checkable:
      `HashPayload(payload_raw) == payload_hash`. That is asserted against a
      real database in `TestPostgresCreateEventPreservesRawPayloadBytes`
      (`internal/ingest/store_postgres_test.go`, skipped without
@@ -110,136 +110,134 @@ how much they will hurt if they are missing.
    ready set rather than a redundant one - which is why its doc comment no
    longer calls it cosmetic.
 
-7. **`deliveries.next_attempt_at` NOT NULL** (ADR-0007). **THE GO SIDE IS NOW
-   READY. This is unblocked - please apply it.**
+   *Landed* as `deliveries_ready_idx` in `20260907000000` with exactly that
+   predicate, and *rebuilt* under the same name by `20260911000000` (item 7)
+   as `(organization_id, project_id, next_attempt_at, created_at, id)` - no
+   `NULLS FIRST`, `id` appended - once the column became NOT NULL.
 
-   *Why it matters, restated, because "make a column NOT NULL" reads like
-   tidying and is not.* The claim orders by `next_attempt_at NULLS FIRST`, so
-   NULL is not a neutral value: it sorts **ahead of every due retry**. While the
-   column is nullable, one code path writing a NULL silently promotes that row
-   to the front of the queue, ahead of work that is actually due, and nothing
-   fails - the symptom is a retry starving until it hits `max_retry_duration`
-   and is reported to the customer as their endpoint failing when the platform
-   never re-attempted it. NOT NULL converts that latent ordering hazard into a
-   constraint violation at the moment the mistake is made.
+7. **`deliveries.next_attempt_at` NOT NULL** (ADR-0007) — **RESOLVED** by
+   `20260911000000_next_attempt_at_not_null`, applied to `hookubit` (10 legacy
+   NULL rows backfilled to `created_at`, 0 remain) and `hookubit_test`.
 
-   *What blocked it and what changed.* The consolidated migration deliberately
-   skipped this because `advanceSQL` in `internal/worker/store.go` wrote
-   `next_attempt_at = CASE WHEN $5 THEN now() + $6 ELSE NULL END` - a NULL on
-   **every terminal transition**, so the constraint would have rejected every
-   successful delivery. That `ELSE` branch now writes `now()`.
+   *Why it mattered, kept for the record because "make a column NOT NULL"
+   reads like tidying and was not.* The claim used to order by
+   `next_attempt_at NULLS FIRST`, so NULL was not a neutral value: it sorted
+   **ahead of every due retry**. One code path writing a NULL silently promoted
+   that row to the front of the queue and nothing failed - the symptom was a
+   retry starving until `max_retry_duration` and being reported to the
+   customer as their endpoint failing when the platform never re-attempted it.
+   NOT NULL turns that into a constraint violation at the moment the mistake is
+   made.
 
-   A terminal delivery therefore carries a `next_attempt_at`, and somebody will
-   ask why. It has no scheduling meaning: `claimStatuses` in
-   `internal/queue/postgres.go` is
-   `('pending','scheduled','queued','retrying','processing')`, so status alone
-   keeps a terminal row out of the ready set whatever its timestamp says.
-   `now()` was chosen over carrying the previous value forward because it needs
-   no prior value - a legacy NULL row repairs itself the moment it goes
-   terminal - and it sorts the completed row harmlessly among other work
-   finishing at the same instant, in an ordering nothing consults for it.
+   *What the migration does.* Backfill `next_attempt_at = created_at` for
+   legacy NULLs; `ADD CONSTRAINT ... CHECK (next_attempt_at IS NOT NULL) NOT
+   VALID`, `VALIDATE`, `SET NOT NULL`, drop the check; `SET DEFAULT
+   CURRENT_TIMESTAMP` (now() under the spelling Prisma emits for
+   `@default(now())`, so the default is not drift). Every step is idempotent
+   and the NOT NULL block is skipped when the column already is, so the
+   header's hand-run recipe for a large installation (separate transactions,
+   `CONCURRENTLY` index builds) leaves the migration a no-op. Prisma side:
+   `nextAttemptAt DateTime @default(now())`.
 
-   Every write site in the data plane has been checked: `advanceSQL` (fixed),
-   `insertDeliveriesSQL` in `internal/router/store.go` (already `now()`), and
-   `releaseSQL`/`reclaimSQL`/`renewSQL` in `internal/queue/postgres.go` (do not
-   touch the column at all). `advanceSQL` is the only path to a terminal state -
-   `Defer` is always `scheduled`.
+   *It also rebuilt both ready-set indexes* (same names, same predicate) as
+   `(organization_id, project_id, next_attempt_at, created_at, id)` and
+   `(next_attempt_at, created_at, id)`: no `NULLS FIRST`, because the claim's
+   ORDER BY dropped it and the planner matches an index to an ORDER BY on the
+   nulls direction - measured before the rebuild, a plain `ORDER BY
+   next_attempt_at, created_at, id` against the NULLS FIRST index planned as
+   Index Scan -> **Sort** -> LockRows -> Limit; and `id` appended so the
+   tiebreaker the claim statements gained the same day is served by the index
+   instead of an Incremental Sort that has to read a whole routing's tie group
+   before emitting the first row. `TestClaimStatementsCanUseTheReadySetIndexes`
+   in `internal/queue` pins all three claim-path statements to their index with
+   no sort node, under real statistics (400 ready rows, ANALYZEd inside the
+   rolled-back EXPLAIN transaction - on a two-row table the costs tie and the
+   planner picks a Bitmap scan or Prisma's `(project_id, created_at)` index by
+   coin toss). `deployments/ci/expected-schema-drift.txt` still holds.
 
-   Covered by two integration tests, both gated on `DATABASE_URL` and both run
-   green against PostgreSQL 16.2:
-   `TestStoreCompleteMarksTerminalStates` (`internal/worker`) asserts
-   `next_attempt_at IS NOT NULL` after each of `succeeded`, `failed`,
-   `exhausted`, `cancelled`, that it is not in the future, and that the fixture
-   leaves no NULL row behind; `TestTerminalDeliveriesAreNeverClaimed`
-   (`internal/queue`) seeds terminal rows an hour overdue and proves neither
-   claim strategy picks them up.
+   *The Go side collapsed with it.* `readyPredicate` is a plain range
+   predicate, `claimedColumns` reads `next_attempt_at` directly, every ORDER BY
+   lost `NULLS FIRST`, and `queueDepthSQL` in `internal/metrics` matches. The
+   terminal-transition write in `advanceSQL` still writes `now()` - a terminal
+   row carries a `next_attempt_at` with no scheduling meaning, because
+   `claimStatuses` keeps it out of the ready set whatever the timestamp says -
+   and `TestStoreCompleteMarksTerminalStates` / `TestTerminalDeliveriesAreNeverClaimed`
+   still prove both halves.
 
-   **The migration wanted:**
-
-   ```sql
-   -- 1. Backfill rows written before this deploy. Bounded by history, not by
-   --    backlog; no new NULLs can appear once the binary below is live.
-   UPDATE deliveries SET next_attempt_at = created_at WHERE next_attempt_at IS NULL;
-
-   -- 2/3. Prove it, then promote it, without an ACCESS EXCLUSIVE full scan:
-   --      PostgreSQL 12+ uses a VALIDATED check to skip the scan that
-   --      SET NOT NULL would otherwise do while holding that lock.
-   ALTER TABLE deliveries
-       ADD CONSTRAINT deliveries_next_attempt_at_not_null
-       CHECK (next_attempt_at IS NOT NULL) NOT VALID;
-   ALTER TABLE deliveries VALIDATE CONSTRAINT deliveries_next_attempt_at_not_null;
-   ALTER TABLE deliveries ALTER COLUMN next_attempt_at SET NOT NULL;
-   ALTER TABLE deliveries DROP CONSTRAINT deliveries_next_attempt_at_not_null;
-
-   -- 4. So a future INSERT cannot omit it. ADR-0007 says "defaulted to
-   --    created_at"; a column default cannot reference another column, and
-   --    now() is that value for any row being inserted.
-   ALTER TABLE deliveries ALTER COLUMN next_attempt_at SET DEFAULT now();
-   ```
-
-   Prisma side: `nextAttemptAt DateTime @map("next_attempt_at")` - drop the `?`.
-
-   **DEPLOY ORDERING - this one is not interchangeable.** The data-plane binary
-   containing the `advanceSQL` fix **must be live everywhere before the
+   **DEPLOY ORDERING - carried forward because it is not interchangeable and
+   nothing is deployed anywhere yet.** The data-plane binary whose `advanceSQL`
+   writes `now()` on the terminal branch **must be live everywhere before the
    constraint is applied**. Apply the constraint first and every terminal
    transition still in flight from an older worker - including successful
    deliveries - fails its UPDATE, the transaction rolls back, the
    `delivery_attempts` row goes with it, and the delivery stays `processing`
    until its lease expires and it is retried against an endpoint that has
-   already received it. So:
+   already received it. So, in the first environment where the planes roll
+   separately:
 
    1. Deploy the data plane (workers, scheduler, router) at this revision.
    2. Confirm no older worker is still running.
-   3. Run the backfill (step 1 above) - it is idempotent, run it as many times
-      as you like.
-   4. Apply steps 2-4.
+   3. Run the backfill - idempotent, run it as often as you like.
+   4. Apply the rest of the migration.
 
-   Rolling back the binary after the constraint is applied has the same failure
-   mode, so the constraint must be dropped before any rollback past this
-   revision.
+   Rolling the binary back after the constraint is applied has the same
+   failure mode, so `ALTER COLUMN next_attempt_at DROP NOT NULL` must precede
+   any rollback past this revision. The migration's header says all of this
+   too.
 
-   **Two follow-ups this unblocks, neither required for the migration:**
+   **Done on the dashboard side** (was: still open): the "Next attempt" cell in
+   `DeliveryDetailPage.tsx` and `EventDetailPage.tsx` used to render
+   `next_attempt_at ? formatRelativeTime(...) : '—'` ungated on status, so a
+   succeeded delivery would have read "2 minutes ago" once the column became
+   NOT NULL. Both now gate on a non-terminal status
+   (`features/deliveries/next-attempt.ts`); a terminal delivery reads "None". The API contract is unchanged
+   (`next_attempt_at` stays `string | null` on the wire; its description now
+   says it is always set and to read it with `terminal`).
 
-   - `readyPredicate` in `internal/queue/postgres.go` still carries
-     `(next_attempt_at IS NULL OR next_attempt_at <= now())`, `claimedColumns`
-     still carries `COALESCE(next_attempt_at, created_at)`, and every ORDER BY
-     still carries `NULLS FIRST`. All of that is dead weight once the column is
-     NOT NULL and can be collapsed in a follow-up - it is left in place now
-     because it is what makes the deploy ordering above survive legacy rows.
-   - **Operator surface, for whoever owns the dashboard.** The "Next attempt"
-     cell in `DeliveryDetailPage.tsx` and `EventDetailPage.tsx` renders
-     `next_attempt_at ? formatRelativeTime(...) : '—'` and is **not gated on
-     status**, so a succeeded delivery will now read "2 minutes ago" where it
-     used to read "—". That is misleading in exactly the way ARCHITECTURE.md
-     cares about. Gate the field on a non-terminal status. Nothing in the API
-     contract changes: `next_attempt_at` is already typed `string | null`.
+## Object storage reconciliation: orphaned payloads — RESOLVED
 
-## Object storage reconciliation: orphaned payloads (owned by whoever runs the bucket)
+`PlanPayload` uploads an offloaded payload to
+`s3://<bucket>/<prefix>/<project_id>/<event_id>` **before** the ingest
+transaction, because the key contains the event ID and the row carries the
+location, and because holding that transaction open across an S3 round trip is
+what ARCHITECTURE.md forbids on the hot path. That window is now closed from
+both ends rather than accepted as a leak.
 
-`PlanPayload` uploads an offloaded payload to `s3://<bucket>/<project>/<event>`
-**before** the ingest transaction, because the object key contains the event ID
-and the event row carries the location. If `CreateEvent` then reports
-`created=false` (a lost idempotency race) or fails, the object is already
-written and no `events` row will ever reference it. Nothing reclaims it today,
-so the cost leaks: one orphaned object per lost race, forever.
+1. **Compensating delete, in-request** (`ingest.DisposeOrphan`). Every path
+   where ingest KNOWS no `events` row was written — a lost idempotency race, a
+   failure before the INSERT — deletes the object it just uploaded. That was
+   the recorded cause ("one orphaned object per lost race, forever") and it now
+   costs one DELETE in the same request.
 
-Restructuring so the upload happens only after the claim is won is not free -
-the claim and the event insert are one transaction on purpose (an idempotency
-row that points at an event which was never written is worse than an orphan),
-and holding that transaction open across an S3 round trip is exactly the thing
-ARCHITECTURE.md forbids. So this is a reconciliation requirement, not an
-ingest bug:
+   It is deliberately **not** done when `CreateEvent` returns an error: a COMMIT
+   that timed out may still have landed, and deleting then destroys a live
+   event's payload. Leaking an object is recoverable; that is not. Pinned by
+   `TestAmbiguousPersistFailureLeavesTheObjectAlone`.
 
-- **Preferred:** an object lifecycle rule on the payload prefix, plus a
-  sweep that deletes objects older than the idempotency window with no
-  matching `events.payload_location`. The event ID is in the key, so the sweep
-  is a single indexed lookup per candidate.
-- The sweep must never delete an object younger than the ingest deadline
-  (`INGEST_DB_TIMEOUT_MS`, default 5s) plus a margin, or it will race a
-  request that is between the upload and its COMMIT.
+2. **A sweep for the residue** (`payloadstore.Store.Reconcile`, run hourly by
+   the scheduler role). What (1) cannot cover is the process dying between the
+   PUT and the COMMIT. The sweep lists the prefix, derives each object's age
+   **from its key** — the event ID is a ULID, so no HEAD request is needed — and
+   deletes only what no `events` row references.
 
-Until one of those exists, the leak is bounded only by how often two requests
-with the same idempotency key race.
+A bucket lifecycle rule was considered and rejected as the primary mechanism:
+orphans and live payloads share a prefix and are indistinguishable by age alone,
+so any expiry broad enough to catch orphans also deletes payloads events still
+point at. One remains useful *after* event retention, not instead of this.
+
+The sweep is timid on purpose, because its failure mode is deleting customer
+data:
+
+| Guard | Effect |
+|---|---|
+| `ParseKey` | only keys of the exact shape this package writes are candidates |
+| `PAYLOAD_SWEEP_MIN_AGE_MS` (24h, floored at 1h) | never touches an object young enough to belong to a request mid-COMMIT |
+| object `LastModified` | corroborates the key's age; whichever is younger wins |
+| lookup error | skips the object, never deletes it |
+| `PAYLOAD_SWEEP_MAX_DELETES` (1000) | one run cannot cascade |
+
+Concurrent sweeps across replicas need no lease: deleting an already-deleted key
+succeeds.
 
 ## Timeouts on the ingest hot path
 
@@ -360,12 +358,14 @@ lease from an endpoint timeout.
   bucket (ARCHITECTURE.md 25). It must **fail open**: `internal/ingest` already
   logs a limiter fault and admits the request, and there is a test pinning that
   behaviour.
-- `ingest.PayloadStore` — `NewUnconfiguredPayloadStore()` today, which refuses
-  every write. Consequence worth knowing before someone debugs it in
-  production: **with `S3_BUCKET` unset, the effective maximum event size is
-  `PAYLOAD_INLINE_MAX_BYTES`, not `PAYLOAD_MAX_BYTES`**, and a payload above it
-  is rejected `413 payload_too_large` with a message saying exactly that. The
-  ingest role logs a warning at startup when the bucket is unset.
+- `ingest.PayloadStore` — now `payloadstore.Store` (AWS SDK v2, S3-compatible,
+  path-style for MinIO) whenever `S3_BUCKET` is set. With `S3_BUCKET` **unset**
+  it is still `NewUnconfiguredPayloadStore()`, and the consequence is unchanged
+  and worth knowing before someone debugs it in production: **the effective
+  maximum event size is `PAYLOAD_INLINE_MAX_BYTES`, not `PAYLOAD_MAX_BYTES`**,
+  and a payload above it is rejected `413 payload_too_large` with a message
+  saying exactly that. The ingest role logs a warning at startup when the
+  bucket is unset.
 - `idempotency_keys` TTL is a constant (`DefaultIdempotencyTTL`, 24h), not
   configuration. Promote it to an env var if a customer needs a longer window.
 
@@ -408,7 +408,7 @@ Two things that are not optional:
   rows. `runAll` already threads an `instanceID` through to `runWorker`; pass
   the same one here (or `instanceID + "-router"`). `router.New` refuses an empty
   id rather than defaulting to something plausible.
-- **`Concurrency` consumes pooled connections.** Each in-flight fan-out holds
+- **`Concurrency` consumes pooled connections.** Each in-flight routing holds
   one connection for the length of its transaction. Keep
   `RouterConcurrency + WorkerConcurrency` comfortably below
   `DATABASE_MAX_CONNECTIONS`, or a busy router starves the delivery loop of
@@ -427,8 +427,8 @@ knobs have package defaults today and should become environment variables:
 
 | Env var | Default | What it bounds |
 | --- | --- | --- |
-| `ROUTER_CONCURRENCY` | 4 | Events fanned out at once. One pooled connection each. |
-| `ROUTER_LEASE_SECONDS` | 60 | How long a claimed outbox row is unavailable after a router dies. Must exceed the worst-case fan-out transaction, not the poll interval. |
+| `ROUTER_CONCURRENCY` | 4 | Events routed at once. One pooled connection each. |
+| `ROUTER_LEASE_SECONDS` | 60 | How long a claimed outbox row is unavailable after a router dies. Must exceed the worst-case routing transaction, not the poll interval. |
 | `MAX_SUBSCRIPTIONS_PER_EVENT` | 2000 | Subscriptions examined **and** deliveries created for one event. |
 | `MAX_OUTBOX_ATTEMPTS` | 5 | The poison bound. Claims before a row is parked. |
 
@@ -451,7 +451,7 @@ registry, so `/metrics` is already correct. **Please move them into
 of the merge, not a design:
 
 `router_outbox_claimed_total`, `router_events_routed_total{outcome}`,
-`router_fan_out_size`, `router_subscriptions_skipped_total{reason}`,
+`router_deliveries_per_routing_batch`, `router_subscriptions_skipped_total{reason}`,
 `router_outbox_parked_total{reason}`, `router_route_duration_seconds`.
 
 The existing `deliveries_created_total` and `outbox_pending_age_seconds` are
@@ -459,8 +459,8 @@ driven by the router as specified; nothing about them changed.
 
 **The two to alert on.** `router_outbox_parked_total` at any non-zero rate is an
 event that will never be delivered without a human replaying it.
-`router_subscriptions_skipped_total{reason="fan_out_cap_exceeded"}` means
-endpoints were silently left out of a fan-out.
+`router_subscriptions_skipped_total{reason="routing_cap_exceeded"}` means
+endpoints were silently left out of a routing.
 
 ## 4. Schema and index requests (owned by `apps/control-api/prisma`)
 
@@ -484,7 +484,7 @@ endpoints were silently left out of a fan-out.
 2. **`deliveries_event_endpoint_original_key` must not be "cleaned up".**
    `prisma migrate diff` reports the partial unique index as drift because
    schema.prisma cannot express a partial index. It is the ON CONFLICT arbiter
-   for the entire fan-out. Regenerating the migration without it does not
+   for the entire routing. Regenerating the migration without it does not
    produce an error — it produces duplicate deliveries after any router restart.
    The migration file already says so; repeating it here because that is the
    file someone will "fix".
@@ -531,7 +531,7 @@ avoid.
   deduplicates explicitly (lowest subscription id wins, so the oldest
   subscription is recorded) rather than letting `ON CONFLICT DO NOTHING` swallow
   the second row, so the created count means what it says.
-- **The fan-out cap truncates rather than fails.** Over the cap, the oldest
+- **The routing cap truncates rather than fails.** Over the cap, the oldest
   subscriptions are served and the rest are dropped with an `ERROR` log naming
   the project and the remedy. Partial delivery beats none; silence would be the
   bug.
@@ -548,7 +548,7 @@ avoid.
 | Subscription pointing across a tenant boundary | Skipped as `tenant_mismatch`, checked before every other gate. The tenant columns come from the endpoint's own project/organisation, never from the event. |
 | Outbox row whose event was deleted | Parked with reason `event_missing`. Unreachable through the FK (it cascades), handled because a retention job that bypasses it would otherwise wedge the queue. |
 | Poisoned row | `attempts` is incremented by the **committed claim**, not on the failure path, so a row that kills the process still counts. Over `MAX_OUTBOX_ATTEMPTS` it is parked as `failed` with a recorded reason and never claimed again. |
-| Transient database failure mid-fan-out | Row released back to `pending` with an exponential backoff (1s → 60s) and `last_error` recorded. |
+| Transient database failure mid-routing | Row released back to `pending` with an exponential backoff (1s → 60s) and `last_error` recorded. |
 | Zero matching subscriptions | Normal. Event `processed`, outbox row `processed`, logged at INFO with the skip breakdown, `router_events_routed_total{outcome="no_subscriptions"}`. |
 
 ## 8. Tests, and what was not run
@@ -565,7 +565,7 @@ instance). Run them with:
 
 ```
 cd services/data-plane
-DATABASE_URL=postgresql://webhook:webhook@localhost:5432/webhook_platform go test -race -count=1 ./internal/router/
+DATABASE_URL=postgresql://postgres:root@localhost:5432/hookubit go test -race -count=1 ./internal/router/
 ```
 
 They assert the properties that cannot be unit-tested: that a re-run inserts
@@ -752,12 +752,26 @@ correctly" as verified in the algorithm and unverified in the deployment.
   front the *read* later; the probe admission must stay a conditional UPDATE in
   PostgreSQL, because it is the mutual exclusion that stops a thousand workers
   probing a recovering endpoint at once.
-- **Large payloads are not deliverable.** If `events.payload_raw` is NULL and
-  `payload_location` is set, the worker has no object-storage client and fails
-  the attempt with `payload_unavailable` — retryable, so it drains once an S3
-  client is wired, and bounded by `max_retry_duration` so it does not sit
-  forever. Wiring a read-side `PayloadStore` is the fix; the seam is
-  `ErrNoPayload` in `errors.go`.
+- **Large payloads ARE deliverable.** The worker fetches
+  `events.payload_location` through `worker.PayloadFetcher` and signs the exact
+  bytes it fetched, after checking they hash to `events.payload_hash`. Four
+  outcomes, and they are deliberately distinct:
+
+  | Situation | Outcome | Reason |
+  |---|---|---|
+  | fetched, hash matches | delivered | — |
+  | bucket unreachable / no client configured | **deferred**, no attempt row, retry budget untouched | `payload_unavailable` |
+  | object missing (404, swept, never written) | terminal `failed` | `payload_object_missing` |
+  | bytes do not match `payload_hash` | terminal `failed` | `payload_hash_mismatch` |
+
+  The last two are permanent (`retry.IsPermanentError`) because no retry can
+  change them, and both carry `http_status = 0` so the ledger never implies the
+  customer's endpoint rejected anything.
+
+  The fetch happens after the endpoint concurrency gate and **before** the
+  breaker: `Breaker.Allow` claims the half-open probe slot, and spending a
+  recovering endpoint's one probe on a delivery that never reaches the network
+  would delay its recovery by a whole cooldown for a reason unrelated to it.
 
 ## 5. Decisions taken, so they can be argued with
 

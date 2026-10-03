@@ -20,6 +20,7 @@ function seedUser(prisma: FakePrisma): User {
     emailVerifiedAt: null,
     lastLoginAt: null,
     disabledAt: null,
+    onboardingCompletedAt: null,
     createdAt: new Date(),
     updatedAt: new Date(),
   };

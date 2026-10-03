@@ -28,9 +28,9 @@ describe('WriteErrorNotice', () => {
   it('tells a ceiling that waiting will NOT help', () => {
     const html = render(
       new ApiRequestError(409, {
-        code: 'conflict',
+        code: 'limit_exceeded',
         message: 'This project already holds 50 un-revoked API keys, which is its limit of 50.',
-        details: { limit: 50, current: 50 },
+        details: { limit: 50, current: 50, resource: 'API keys' },
       }),
     );
 
@@ -48,7 +48,7 @@ describe('WriteErrorNotice', () => {
     );
     const ceiling = render(
       new ApiRequestError(409, {
-        code: 'conflict',
+        code: 'limit_exceeded',
         message: 'You already own 10 organizations, which is the limit.',
       }),
     );
@@ -68,5 +68,40 @@ describe('WriteErrorNotice', () => {
 
     expect(html).toContain('data-failure-kind="conflict"');
     expect(html).not.toContain('does not reset');
+  });
+
+  /**
+   * A validation failure names FIELDS, and the panel's job changes accordingly:
+   * it lists what was refused instead of offering a remedy, and it says nothing
+   * at all when the form has already placed every reason under its own input.
+   */
+  it('lists each refused field on a 400', () => {
+    const html = render(
+      new ApiRequestError(400, {
+        code: 'invalid_request',
+        message: ['url: loopback address', 'timeout_ms: must not be less than 1000'],
+      }),
+    );
+
+    expect(html).toContain('data-failure-kind="invalid"');
+    expect(html).toContain('loopback address');
+    expect(html).toContain('timeout_ms');
+  });
+
+  it('renders nothing when the form has claimed every field itself', () => {
+    const error = new ApiRequestError(400, {
+      code: 'invalid_request',
+      message: ['url: loopback address'],
+    });
+
+    // Repeating the reason above an input that already shows it reads as two
+    // separate problems.
+    expect(renderToStaticMarkup(<WriteErrorNotice error={error} claimedFields={['url']} />)).toBe(
+      '',
+    );
+    // ...but a field the form does not render must never vanish.
+    expect(
+      renderToStaticMarkup(<WriteErrorNotice error={error} claimedFields={['name']} />),
+    ).toContain('loopback address');
   });
 });

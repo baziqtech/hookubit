@@ -55,7 +55,7 @@ import {
  */
 @ApiTags('api-keys')
 @ApiCookieAuth('session')
-@ApiParam({ name: 'projectId', example: 'proj_01J8ZK...' })
+@ApiParam({ name: 'projectId', type: String, example: 'proj_01J8ZK...', description: 'Project id, `proj_…`.' })
 @ApiNotFoundResponse({
   description:
     "The project or key is not visible to this caller - absent, deleted, or another tenant's. " +
@@ -120,7 +120,7 @@ export class ApiKeysController {
   @Authorized('api-keys.write')
   @Throttle(API_KEY_REVOKE_THROTTLE)
   @HttpCode(HttpStatus.OK)
-  @ApiParam({ name: 'apiKeyId', example: 'key_01J8ZK...' })
+  @ApiParam({ name: 'apiKeyId', type: String, example: 'key_01J8ZK...', description: 'API key id, `key_…`.' })
   @ApiOperation({
     summary: 'Revoke an API key',
     description:

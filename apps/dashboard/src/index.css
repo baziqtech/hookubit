@@ -1,52 +1,114 @@
+@import '@fontsource-variable/plus-jakarta-sans';
+@import '@fontsource-variable/jetbrains-mono';
+
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
 
+/*
+ * The palette is the pen.dev design's, token for token (`~/Documents/hookubit.pen`,
+ * screen "00 Brand"). Two rules from that screen govern everything below:
+ *
+ *   1. Violet is for things you CLICK — buttons, links, focus rings, the active
+ *      nav item. It never means a state. That is why it sits far from the blue
+ *      that means in-flight: if the accent could also be a status, every screen
+ *      would have to be read twice.
+ *
+ *   2. Colour is never the only clue. Every state keeps its icon and its word.
+ *      Amber sits deliberately BETWEEN green and red so the three settled
+ *      outcomes never read as a yes/no pair.
+ *
+ * The `--c-nav-*` family exists so the rail owns its own colour vocabulary
+ * rather than borrowing the page's. Re-skinning the rail then touches these six
+ * lines and no component.
+ */
 @layer base {
   :root {
     color-scheme: light;
-    --c-canvas: 250 250 249;
+    /* Surfaces */
+    --c-canvas: 250 250 252;
     --c-panel: 255 255 255;
-    --c-raised: 245 245 244;
-    --c-line: 231 229 228;
-    --c-line-strong: 214 211 209;
-    --c-ink: 28 25 23;
-    --c-ink-muted: 87 83 78;
-    --c-ink-subtle: 138 133 127;
-    --c-accent: 67 56 202;
+    --c-raised: 247 247 250;
+    --c-sunken: 244 244 248;
+    --c-line: 228 228 235;
+    --c-line-strong: 210 210 220;
+    --c-grid: 239 239 244;
+    /* Text */
+    --c-ink: 24 24 30;
+    --c-ink-muted: 83 83 94;
+    --c-ink-subtle: 134 134 148;
+    /* Accent — violet, and only ever for things you click */
+    --c-accent: 107 56 212;
     --c-accent-ink: 255 255 255;
-    --c-accent-soft: 238 238 255;
+    --c-accent-deep: 88 45 176;
+    --c-accent-soft: 243 238 252;
+    --c-accent-line: 220 205 247;
+    /* Navigation rail */
+    --c-nav: 255 255 255;
+    --c-nav-ink: 24 24 30;
+    --c-nav-ink-muted: 83 83 94;
+    --c-nav-line: 228 228 235;
+    --c-nav-hover: 244 244 248;
+    --c-nav-active: 243 238 252;
+    --c-nav-section: 134 134 148;
+    /* Status. `-dot` is the saturated form for the 5px badge dot, which needs
+       more chroma than the text beside it to read at that size. */
     --c-ok: 21 128 61;
-    --c-ok-soft: 220 252 231;
+    --c-ok-soft: 240 253 244;
+    --c-ok-dot: 22 163 74;
     --c-warn: 180 83 9;
-    --c-warn-soft: 254 243 199;
+    --c-warn-soft: 255 247 237;
+    --c-warn-dot: 217 119 6;
     --c-danger: 185 28 28;
-    --c-danger-soft: 254 226 226;
+    --c-danger-soft: 254 242 242;
+    --c-danger-dot: 220 38 38;
     --c-info: 29 78 216;
-    --c-info-soft: 219 234 254;
+    --c-info-soft: 239 246 255;
+    --c-info-dot: 37 99 235;
+    /* Code is dark in BOTH themes: a payload is a quotation from another
+       system, and it reads as one when it keeps its own surface. */
+    --c-code: 12 12 14;
+    --c-code-ink: 214 222 232;
   }
 
   :root[data-theme='dark'] {
     color-scheme: dark;
     --c-canvas: 12 12 14;
     --c-panel: 22 22 25;
-    --c-raised: 30 30 34;
+    --c-raised: 26 26 30;
+    --c-sunken: 30 30 34;
     --c-line: 42 42 47;
     --c-line-strong: 60 60 66;
+    --c-grid: 35 35 39;
     --c-ink: 244 244 245;
     --c-ink-muted: 168 166 170;
     --c-ink-subtle: 120 118 123;
-    --c-accent: 129 140 248;
+    --c-accent: 146 103 242;
     --c-accent-ink: 17 17 20;
+    --c-accent-deep: 184 160 250;
     --c-accent-soft: 41 41 63;
+    --c-accent-line: 61 53 96;
+    --c-nav: 22 22 25;
+    --c-nav-ink: 244 244 245;
+    --c-nav-ink-muted: 168 166 170;
+    --c-nav-line: 42 42 47;
+    --c-nav-hover: 30 30 34;
+    --c-nav-active: 41 41 63;
+    --c-nav-section: 120 118 123;
     --c-ok: 74 222 128;
-    --c-ok-soft: 20 45 30;
+    --c-ok-soft: 15 42 27;
+    --c-ok-dot: 74 222 128;
     --c-warn: 251 191 36;
-    --c-warn-soft: 56 41 12;
+    --c-warn-soft: 46 32 8;
+    --c-warn-dot: 251 191 36;
     --c-danger: 248 113 113;
-    --c-danger-soft: 60 22 22;
-    --c-info: 96 165 250;
-    --c-info-soft: 23 37 68;
+    --c-danger-soft: 46 20 20;
+    --c-danger-dot: 248 113 113;
+    --c-info: 126 168 255;
+    --c-info-soft: 19 31 58;
+    --c-info-dot: 126 168 255;
+    --c-code: 8 8 10;
+    --c-code-ink: 214 222 232;
   }
 
   html {

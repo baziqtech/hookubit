@@ -1,0 +1,26 @@
+apiVersion: v2
+name: hookubit
+description: >-
+  HookuBit - a multi-tenant webhook delivery platform. Brings its own control
+  plane, data plane and dashboard; brings NO database - PostgreSQL is external
+  and required.
+type: application
+version: 0.1.0
+appVersion: '0.1.0'
+kubeVersion: '>=1.25.0-0'
+keywords: [webhooks, delivery, events, nestjs, go]
+home: https://github.com/shaq/hookubit
+sources:
+  - https://github.com/shaq/hookubit
+maintainers:
+  - name: ShaQ Express Platform
+annotations:
+  # RENAMED IN 0.1.0: this chart was `webhook-platform`. Every workload's
+  # `app.kubernetes.io/name` label changed with it, and a Deployment's
+  # `spec.selector` is IMMUTABLE - so an existing `webhook-platform` release
+  # CANNOT be upgraded to this chart. Uninstall and reinstall; see NOTES.txt.
+  #
+  # There are deliberately no chart dependencies. A bundled PostgreSQL subchart
+  # is the single fastest way to lose a customer's delivery history to a
+  # `helm uninstall` (ARCHITECTURE.md 36, engineering rule 4/34).
+  artifacthub.io/containsSecurityUpdates: 'false'

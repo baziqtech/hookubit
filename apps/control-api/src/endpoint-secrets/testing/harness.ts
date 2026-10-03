@@ -12,6 +12,7 @@ import {
 import { requestWith, seedWorld, sessionUser } from '../../authz/testing/fixtures';
 import { FakeTenantPrisma } from '../../authz/testing/tenant-prisma.fake';
 import { CryptoService } from '../../common/crypto.service';
+import { EndpointHealthService } from '../../endpoints/endpoint-health.service';
 import { EndpointsService } from '../../endpoints/endpoints.service';
 import {
   TenantAudit,
@@ -160,7 +161,7 @@ export async function harnessFor(
   const audit = new AuditService(db.asPrisma());
   const transactions = new SerializableTransactionRunner(db, scopes, audit);
   const secrets = new EndpointSecretsService(scopes, crypto, audit, transactions);
-  const endpoints = new EndpointsService(scopes, audit, secrets);
+  const endpoints = new EndpointsService(scopes, audit, secrets, new EndpointHealthService(scopes));
 
   return { db, context, scopes, crypto, audit, transactions, secrets, endpoints };
 }

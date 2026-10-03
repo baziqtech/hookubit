@@ -34,7 +34,7 @@ export const PROJECT_CREATE_THROTTLE = {
 export const PROJECTS_PER_ORGANIZATION = {
   env: 'MAX_PROJECTS_PER_ORGANIZATION',
   /**
-   * A hundred live projects is far past any real internal fan-out topology and
+   * A hundred live projects is far past any real internal routing topology and
    * far short of a number that hurts a listing, so it bites only on automation
    * that has gone wrong.
    */

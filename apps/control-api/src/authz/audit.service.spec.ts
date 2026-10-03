@@ -48,15 +48,63 @@ describe('AuditService', () => {
   /**
    * The write itself took a free-form organizationId and a free-form actor, and
    * was exported: any caller could file a row against any organization, in
-   * anyone's name. `recordFor` is the only door, and it takes all three off the
-   * resolved context.
+   * anyone's name. `recordFor` takes all three off the resolved context and is
+   * the only door a REQUEST goes through.
+   *
+   * `recordSystem` is the second and last door, added for periodic sweeps that
+   * act on a customer's resource with no request behind them (currently only
+   * the endpoint auto-disable in `src/maintenance`). It reopens exactly one of
+   * the two holes - a caller-supplied organizationId - and closes the other by
+   * construction: it takes no actor at all, so nothing can be filed in a
+   * person's name. The `write`-shaped hazard the original hole represented is
+   * pinned by the two tests below rather than left to the docblock.
+   *
+   * This list stays EXHAUSTIVE on purpose. It is not a formality to update
+   * alongside a new method; it is the thing that forces the next person adding
+   * one to argue for it in review.
    */
-  it('exposes no way to name the organization or the actor', () => {
+  it('exposes no way to name the actor, and only one deliberate way to name the organization', () => {
     const audit = new AuditService({} as never);
     expect((audit as unknown as Record<string, unknown>).record).toBeUndefined();
     expect(Object.getOwnPropertyNames(AuditService.prototype).sort()).toEqual(
-      ['constructor', 'recordFor', 'write'].sort(),
+      ['constructor', 'recordFor', 'recordSystem', 'write'].sort(),
     );
+  });
+
+  it('files a system entry with no actor of any kind', async () => {
+    const { db, audit } = await build();
+    const id = await audit.recordSystem(IDS.orgA, {
+      action: 'endpoint.auto_disabled',
+      resourceType: 'endpoint',
+      resourceId: IDS.endpointA1,
+      metadata: { consecutive_failures: 5 },
+    });
+
+    expect(id).toMatch(/^aud_/);
+    expect(db.all('auditLog')[0]).toMatchObject({
+      id,
+      organizationId: IDS.orgA,
+      // NULL, not a 'system' sentinel: `user_id` is a foreign key to `users`,
+      // and a sentinel would need a row somebody could authenticate as.
+      userId: null,
+      apiKeyId: null,
+      ipAddress: null,
+      userAgent: null,
+      action: 'endpoint.auto_disabled',
+    });
+  });
+
+  it('redacts a system entry the same way it redacts a request-driven one', async () => {
+    const { db, audit } = await build();
+    await audit.recordSystem(IDS.orgA, {
+      action: 'endpoint.auto_disabled',
+      resourceType: 'endpoint',
+      metadata: { signing_secret: 'shhh', last_success_at: '2026-09-06T04:00:00.000Z' },
+    });
+
+    const metadata = metadataOf(db);
+    expect(metadata.signing_secret).toBe(REDACTED);
+    expect(metadata.last_success_at).toBe('2026-09-06T04:00:00.000Z');
   });
 
   it('fills actor, organization and request metadata from the tenant context', async () => {

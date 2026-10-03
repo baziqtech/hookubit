@@ -1,13 +1,26 @@
+import { SpanContext } from '@opentelemetry/api';
+import { Delivery } from '@prisma/client';
 import { CROSS_TENANT_MESSAGE, MAX_PAGE_SIZE } from '../authz';
 import { IDS } from '../authz/testing/fixtures';
 import { AppError } from '../common/errors';
+import { setTracingEnabled, withSpan } from '../tracing';
+import { InMemoryTracing, startInMemoryTracing } from '../tracing/testing/in-memory-tracing';
 import { DeliveriesService } from './deliveries.service';
-import { MAX_INLINE_ATTEMPTS } from './delivery-limits';
-import { DeliveryDetailDto } from './dto';
+import { TRACEPARENT_LENGTH } from './trace-context';
+import {
+  PAYLOAD_PREVIEW_MAX_CHARS,
+  PAYLOAD_PREVIEW_READ_BYTES,
+} from '../events/event-payload';
+import { MAX_INLINE_ATTEMPTS, MAX_REPLAY_DELIVERIES } from './delivery-limits';
+import { DeliveryDetailDto, DeliveryListItemDto, toDeliveryDto } from './dto';
 import {
   FINANCE_ATTEMPTS,
   LEDGER,
+  LONG_BODY,
+  MULTIBYTE_BODY,
+  MULTIBYTE_CHAR,
   NOISY_ATTEMPTS,
+  WIDE_ENDPOINTS,
   ledgerHarness,
   rawDelivery,
 } from './testing/harness';
@@ -196,6 +209,55 @@ describe('fetching one delivery', () => {
     expect(first.response_headers).toEqual({ 'retry-after': '30' });
     expect(second.status).toBe('success');
     expect(second.http_status).toBe(200);
+  });
+
+  /**
+   * `attempt_count: 5` beside an empty attempt list is indistinguishable from
+   * "the platform never tried" - the single worst thing this ledger can say.
+   * Past the attempt horizon, retention reclaims the per-attempt detail and
+   * stamps `attempts_pruned_at`, and this field is what turns that silence into
+   * an answer. It must survive to the wire, on both shapes.
+   */
+  it('names the trace the worker kept for an attempt, and says null when it kept none', async () => {
+    const { deliveries, context } = await ledgerHarness();
+
+    const detail = await deliveries.get(context, LEDGER.deliveryOrderA1);
+
+    const [sampled, unsampled] = detail.attempts;
+    // Attempt 1's span was sampled: the row carries the id and so does the DTO.
+    expect(sampled.trace_id).toBe(LEDGER.attemptA1TraceId);
+    // Attempt 2's was not. The contract is `string | null`, not absent: a
+    // client renders "no trace kept" from null, and would render nothing at
+    // all from a missing key.
+    expect(unsampled.trace_id).toBeNull();
+    expect('trace_id' in unsampled).toBe(true);
+  });
+
+  it('says when the per-attempt detail was reclaimed by retention', async () => {
+    const { deliveries, context, db } = await ledgerHarness();
+    const prunedAt = new Date('2026-06-01T00:00:00.000Z');
+    const row = rawDelivery(db, LEDGER.deliveryOrderA1);
+    db.rows('delivery').set(LEDGER.deliveryOrderA1, { ...row, attemptsPrunedAt: prunedAt });
+
+    const detail = await deliveries.get(context, LEDGER.deliveryOrderA1);
+    expect(detail.attempts_pruned_at).toBe(prunedAt.toISOString());
+
+    // And on the SUMMARY shape, which the listing and the replay response both
+    // return. `DeliveryDetailDto` extends `DeliveryDto`, so asserting the
+    // mapper covers every route that emits either.
+    const summary = toDeliveryDto(
+      db.rows('delivery').get(LEDGER.deliveryOrderA1) as unknown as Delivery,
+    );
+    expect(summary.attempts_pruned_at).toBe(prunedAt.toISOString());
+  });
+
+  it('reports a delivery whose attempt history is intact as not pruned', async () => {
+    const { deliveries, context } = await ledgerHarness();
+
+    const detail = await deliveries.get(context, LEDGER.deliveryOrderA1);
+
+    expect(detail.attempts_pruned_at).toBeNull();
+    expect(detail.attempts).not.toHaveLength(0);
   });
 
   it('redacts credential-shaped request headers but keeps the signature', async () => {
@@ -412,6 +474,75 @@ describe('replaying one delivery', () => {
     expect(rawDelivery(harness.db, LEDGER.deliveryOrderA1).replayOfDeliveryId).toBeNull();
   });
 
+  /**
+   * `deliveries.trace_context` is what the worker links each attempt's trace
+   * to. On a routing row the router writes its own span; on a replay the cause
+   * is the operator's request, and nothing else - not the original's context
+   * (a request from weeks ago), and not a trace invented for the occasion.
+   */
+  describe("carries the operator's trace context", () => {
+    let tracing: InMemoryTracing | undefined;
+    afterEach(async () => {
+      await tracing?.stop();
+      tracing = undefined;
+      setTracingEnabled(false);
+    });
+
+    it("stamps the current request span's traceparent on the new row", async () => {
+      tracing = startInMemoryTracing();
+      const harness = await ledgerHarness();
+
+      let request: SpanContext | undefined;
+      const result = await withSpan('POST /deliveries/:id/replay', {}, async (span) => {
+        request = span?.spanContext();
+        return harness.deliveries.replay(harness.context, LEDGER.deliveryOrderA1, {});
+      });
+
+      if (!request) throw new Error('the harness span never started');
+      const row = rawDelivery(harness.db, result.deliveries[0].id);
+      // A valid W3C traceparent: version 00, THIS trace, THIS span, sampled.
+      expect(row.traceContext).toBe(`00-${request.traceId}-${request.spanId}-01`);
+      expect(String(row.traceContext)).toHaveLength(TRACEPARENT_LENGTH);
+      expect(row.traceContext).toMatch(/^00-[0-9a-f]{32}-[0-9a-f]{16}-[0-9a-f]{2}$/);
+      // The original is what it was; it never inherits the replay's context.
+      expect(historyWrites(harness.db)).toEqual([]);
+    });
+
+    it('writes null with tracing off - it never invents a trace', async () => {
+      setTracingEnabled(false);
+      const harness = await ledgerHarness();
+
+      const result = await harness.deliveries.replay(harness.context, LEDGER.deliveryOrderA1, {});
+
+      expect(rawDelivery(harness.db, result.deliveries[0].id).traceContext).toBeNull();
+    });
+
+    it('writes null with tracing on but no span active', async () => {
+      tracing = startInMemoryTracing();
+      const harness = await ledgerHarness();
+
+      const result = await harness.deliveries.replay(harness.context, LEDGER.deliveryOrderA1, {});
+
+      expect(rawDelivery(harness.db, result.deliveries[0].id).traceContext).toBeNull();
+    });
+
+    it('one routing, one cause: every row of a replay-to-all carries the same context', async () => {
+      tracing = startInMemoryTracing();
+      const harness = await ledgerHarness();
+
+      const result = await withSpan('POST /events/:id/replay', {}, () =>
+        harness.events.replay(harness.context, LEDGER.eventOrder, {}),
+      );
+
+      const contexts = new Set(
+        result.deliveries.map((delivery) => rawDelivery(harness.db, delivery.id).traceContext),
+      );
+      expect(result.deliveries.length).toBeGreaterThan(1);
+      expect(contexts.size).toBe(1);
+      expect([...contexts][0]).toMatch(/^00-[0-9a-f]{32}-[0-9a-f]{16}-01$/);
+    });
+  });
+
   it('records the replay in the audit log with both sides of the mapping', async () => {
     const harness = await ledgerHarness();
 
@@ -491,15 +622,196 @@ describe('DeliveriesService.filterWhere', () => {
   });
 });
 
-/** A compile-time-ish reminder that the detail DTO really extends the list one. */
-it('the detail response is a superset of the list response', async () => {
+/**
+ * A compile-time-ish reminder that both DTOs really extend `DeliveryDto`.
+ *
+ * The three payload-preview fields are the ONE deliberate exception, and the
+ * direction of the exception matters: they are on the list row and NOT on the
+ * detail response. A `payload_preview: null` on a response that never read
+ * `payload_raw` would read as "this payload is unavailable", which is the only
+ * thing null is allowed to mean there; the detail screen gets the exact bytes
+ * from `GET /events/:id/payload` instead. See `DeliveryListItemDto`.
+ */
+it('the detail response carries every delivery field a list row does', async () => {
   const { deliveries, context } = await ledgerHarness();
   const detail: DeliveryDetailDto = await deliveries.get(context, LEDGER.deliveryOrderA1);
   const page = await deliveries.list(context, ALL);
   const summary = page.data.find((delivery) => delivery.id === detail.id);
 
+  const listOnly = new Set(['payload_preview', 'payload_size', 'payload_truncated']);
+
   expect(summary).toBeDefined();
   for (const key of Object.keys(summary ?? {})) {
+    if (listOnly.has(key)) {
+      expect(detail).not.toHaveProperty(key);
+      continue;
+    }
     expect(detail).toHaveProperty(key);
   }
+  for (const key of listOnly) expect(summary).toHaveProperty(key);
+});
+
+/**
+ * The payload preview on a list row.
+ *
+ * The point of the column is that "which order was that?" is answerable from the
+ * list, and the point of the bound is that answering it must not cost a
+ * megabyte a row. Both halves are asserted here: the content, and the number of
+ * statements it took.
+ */
+describe('the payload preview on a list row', () => {
+  const rowFor = (page: { data: DeliveryListItemDto[] }, id: string): DeliveryListItemDto => {
+    const row = page.data.find((delivery) => delivery.id === id);
+    if (!row) throw new Error(`no delivery ${id} in the page`);
+    return row;
+  };
+
+  it('carries a short body in full, with its real size and no truncation flag', async () => {
+    const { deliveries, context } = await ledgerHarness();
+
+    const page = await deliveries.list(context, ALL);
+    const row = rowFor(page, LEDGER.deliveryOrderA1);
+
+    expect(row.payload_preview).toBe('{"order_id":"41f9","amount":1250,"currency":"GHS"}');
+    expect(row.payload_size).toBe(50);
+    expect(row.payload_truncated).toBe(false);
+  });
+
+  it('caps a long body and says so, while reporting the WHOLE size', async () => {
+    const { deliveries, context } = await ledgerHarness();
+
+    const row = rowFor(await deliveries.list(context, ALL), LEDGER.deliveryLongBody);
+
+    expect(row.payload_preview).toHaveLength(PAYLOAD_PREVIEW_MAX_CHARS);
+    expect(row.payload_preview).toBe(LONG_BODY.slice(0, PAYLOAD_PREVIEW_MAX_CHARS));
+    expect(row.payload_size).toBe(LONG_BODY.length);
+    expect(row.payload_truncated).toBe(true);
+  });
+
+  it('never renders a replacement character when the byte slice cuts a code point', async () => {
+    const { deliveries, context } = await ledgerHarness();
+
+    const row = rowFor(await deliveries.list(context, ALL), LEDGER.deliveryMultibyte);
+
+    // 640 bytes of 3-byte characters ends one byte into the 214th. The partial
+    // character is dropped, not decoded.
+    expect(row.payload_preview).toBe(MULTIBYTE_CHAR.repeat(PAYLOAD_PREVIEW_MAX_CHARS));
+    expect(row.payload_preview).not.toContain('�');
+    expect(row.payload_size).toBe(Buffer.byteLength(MULTIBYTE_BODY, 'utf8'));
+    expect(row.payload_truncated).toBe(true);
+  });
+
+  it('has no preview for an OFFLOADED payload, and does not go looking for one', async () => {
+    const { deliveries, context, db } = await ledgerHarness();
+
+    const row = rowFor(await deliveries.list(context, ALL), LEDGER.deliveryPaused);
+
+    expect(row.payload_preview).toBeNull();
+    // The size is known from ingest without touching object storage.
+    expect(row.payload_size).toBe(4_194_304);
+    expect(row.payload_truncated).toBe(false);
+    // And the location is NOT on the wire here: the list row is not the place to
+    // hand out an S3 URI, and nothing on this path fetched it.
+    expect(JSON.stringify(row)).not.toContain('s3://');
+    expect(db.rows('event').get(LEDGER.eventOffloaded)?.payloadLocation).toBe(
+      's3://payloads/proj_a1/evt_a_big.json',
+    );
+  });
+
+  it('has no preview for a body that is not valid UTF-8', async () => {
+    const { deliveries, context } = await ledgerHarness();
+
+    const row = rowFor(await deliveries.list(context, ALL), LEDGER.deliveryNoisy);
+
+    expect(row.payload_preview).toBeNull();
+    expect(row.payload_size).toBe(5);
+    expect(row.payload_truncated).toBe(false);
+  });
+
+  it('is ONE statement for the page, however many rows it has', async () => {
+    const { deliveries, context, db } = await ledgerHarness();
+
+    db.queries.length = 0;
+    const page = await deliveries.list(context, ALL);
+
+    const heads = db.queries.filter((query) => query.op === 'payloadHead');
+    expect(heads).toHaveLength(1);
+    // Worth stating the size of what that one statement replaced: materialised
+    // routing means a page is mostly the same handful of events repeated.
+    expect(page.data.length).toBeGreaterThan(MAX_REPLAY_DELIVERIES);
+  });
+
+  it('asks about each event once, not once per delivery it fanned out to', async () => {
+    const { deliveries, context, db } = await ledgerHarness();
+
+    // `eventWide` alone routed to 55 endpoints, so this page is 55 rows about
+    // one event.
+    const page = await deliveries.list(context, { ...ALL, event_id: LEDGER.eventWide });
+    expect(page.data.length).toBe(WIDE_ENDPOINTS);
+
+    const asked = db.queries.filter((query) => query.op === 'payloadHead');
+    expect(asked).toHaveLength(1);
+    // Every row got the preview anyway.
+    expect(page.data.every((row) => row.payload_preview !== null)).toBe(true);
+  });
+
+  it('reads at most the preview slice per event, not the payload', async () => {
+    const { scopes, context } = await ledgerHarness();
+
+    const heads = await scopes
+      .for(context)
+      .eventPayloadHeads([LEDGER.eventLongBody], PAYLOAD_PREVIEW_READ_BYTES);
+    const head = heads.get(LEDGER.eventLongBody);
+
+    // 640 bytes out of 2011: the bound is enforced in the statement, which is the
+    // only place enforcing it saves anything.
+    expect(head?.head?.byteLength).toBe(PAYLOAD_PREVIEW_READ_BYTES);
+    // ...and the FULL length still comes back, which is what `payload_truncated`
+    // is derived from.
+    expect(head?.inline_bytes).toBe(LONG_BODY.length);
+  });
+
+  it("is absent for another tenant's event id, not fetched", async () => {
+    const { scopes, context } = await ledgerHarness();
+
+    const heads = await scopes
+      .for(context)
+      .eventPayloadHeads([IDS.eventB1, LEDGER.eventOrder], PAYLOAD_PREVIEW_READ_BYTES);
+
+    // Organization B's event is in the same table and does not come back; the
+    // predicate is the same `projectAndOrganization` the scoped repository uses.
+    expect([...heads.keys()]).toEqual([LEDGER.eventOrder]);
+  });
+
+  it('is absent for another PROJECT in the same organization', async () => {
+    const { scopes, context } = await ledgerHarness();
+
+    const heads = await scopes
+      .for(context)
+      .eventPayloadHeads([LEDGER.eventOtherProject], PAYLOAD_PREVIEW_READ_BYTES);
+
+    expect([...heads.keys()]).toEqual([]);
+  });
+
+  it('issues no statement at all for an empty page', async () => {
+    const { deliveries, context, db } = await ledgerHarness();
+
+    db.queries.length = 0;
+    const page = await deliveries.list(context, { ...ALL, endpoint_id: IDS.endpointB1 });
+
+    expect(page.data).toEqual([]);
+    expect(db.queries.filter((query) => query.op === 'payloadHead')).toEqual([]);
+  });
+
+  it("gives the same preview on an event's nested delivery list", async () => {
+    const { deliveries, context } = await ledgerHarness();
+
+    // `GET /events/:id/deliveries` is the same DTO out of the same method, so the
+    // column the dashboard renders on an event page is the same column.
+    const nested = await deliveries.listForEvent(context, LEDGER.eventLongBody, ALL);
+
+    expect(nested.data).toHaveLength(1);
+    expect(nested.data[0].payload_preview).toBe(LONG_BODY.slice(0, PAYLOAD_PREVIEW_MAX_CHARS));
+    expect(nested.data[0].payload_truncated).toBe(true);
+  });
 });

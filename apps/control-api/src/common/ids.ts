@@ -24,6 +24,8 @@ export const ID_PREFIX = {
   usage: 'usg',
   plan: 'plan',
   billing: 'bsub',
+  notificationDestination: 'ntd',
+  notificationDispatch: 'ntx',
   token: 'tok',
   session: 'ses',
 } as const;

@@ -9,6 +9,7 @@ import {
 } from '../authz';
 import { AppError } from '../common/errors';
 import { newId } from '../common/ids';
+import { EndpointHealthService } from './endpoint-health.service';
 import { EndpointSecretsService } from '../endpoint-secrets/endpoint-secrets.service';
 import {
   CreateEndpointDto,
@@ -64,12 +65,29 @@ type EndpointColumns = Partial<
  * ## Two flags, two owners
  *
  * `enabled` is operator intent - what a human asked for. `status` is the current
- * state, and `disabled_reason`/`disabled_at` belong to the circuit breaker in
- * the data plane. Pausing an endpoint from here therefore sets `enabled` and
- * `status` and deliberately does NOT write the breaker's columns; the reason a
- * human gave goes to the audit log, where a reason belongs. Enabling clears the
- * breaker's columns, because an operator re-enabling an auto-disabled endpoint
- * is exactly the deliberate override those columns are waiting for.
+ * state, and `disabled_reason`/`disabled_at` are the record of an AUTOMATIC
+ * disable. Pausing an endpoint from here therefore sets `enabled` and `status`
+ * and deliberately does NOT write those two columns; the reason a human gave
+ * goes to the audit log, where a reason belongs. Enabling clears them, because
+ * an operator re-enabling an auto-disabled endpoint is exactly the deliberate
+ * override they are waiting for.
+ *
+ * The automatic writer is `src/maintenance`, in THIS plane, not the data plane
+ * (which still issues no write against `endpoints` at all). Its docblock carries
+ * the argument for that split; what matters here is that the two writers never
+ * touch the same row from two processes without a predicate: the sweep's UPDATE
+ * repeats `status: 'active', enabled: true`, so an operator pause that lands
+ * first simply wins and no audit entry is filed for a disable that did not
+ * happen.
+ *
+ * ## The one thing this service writes outside `endpoints`
+ *
+ * `enable` nudges `endpoint_health.probe_after` - see `armBreakerProbe`. That
+ * table is otherwise the data plane's exclusively, and the exception is
+ * deliberately one column wide: without it, resuming a recovered endpoint means
+ * waiting out a cooldown that has doubled to its ten-minute ceiling, and with a
+ * fuller reset it means releasing the entire backlog at an endpoint whose
+ * recovery is still only a customer's assertion.
  */
 @Injectable()
 export class EndpointsService {
@@ -79,6 +97,7 @@ export class EndpointsService {
     private readonly scopes: TenantScopeFactory,
     private readonly audit: AuditService,
     private readonly secrets: EndpointSecretsService,
+    private readonly health: EndpointHealthService,
   ) {}
 
   /**
@@ -103,8 +122,26 @@ export class EndpointsService {
       take: query.limit,
       skip: query.offset,
     });
+
+    // ONE grouped read for the whole page, not one per row. `has_live_secret`
+    // is on every endpoint in the busiest listing in the operator UI; asked per
+    // endpoint, a page of MAX_PAGE_SIZE would be 200 extra round trips.
+    const ids = page.rows.map((endpoint) => endpoint.id);
+
+    // Health is computed BESIDE the list, not inside it, and a failure to
+    // compute it must not take the list down: this page is how you fix a
+    // broken endpoint, and it has to render when the thing it describes is on
+    // fire. An endpoint whose health is missing shows its configuration and
+    // says nothing about its rate, which is the honest degradation.
+    const [live, health] = await Promise.all([
+      this.secrets.liveSecretEndpointIds(context, ids),
+      this.health.summarise(context, ids).catch(() => new Map()),
+    ]);
+
     return {
-      data: page.rows.map(toEndpointDto),
+      data: page.rows.map((endpoint) =>
+        toEndpointDto(endpoint, live.has(endpoint.id), health.get(endpoint.id)),
+      ),
       has_more: page.hasMore,
       next_offset: page.nextSkip,
     };
@@ -119,7 +156,18 @@ export class EndpointsService {
    * unreadable.
    */
   async get(context: RequestContext, endpointId: string): Promise<EndpointDto> {
-    return toEndpointDto(await this.require(this.scopes.for(context), endpointId));
+    const endpoint = await this.require(this.scopes.for(context), endpointId);
+
+    const [hasLiveSecret, health] = await Promise.all([
+      this.secrets.hasLiveSecret(context, endpointId),
+      // Same degradation as the list: an endpoint whose health cannot be
+      // computed still shows its configuration. This route is how you find the
+      // URL behind a delivery in the ledger, and it must answer that when the
+      // delivery tables are unhappy.
+      this.health.summarise(context, [endpointId]).catch(() => new Map()),
+    ]);
+
+    return toEndpointDto(endpoint, hasLiveSecret, health.get(endpointId));
   }
 
   /**
@@ -221,7 +269,12 @@ export class EndpointsService {
     });
 
     return {
-      ...toEndpointDto(live),
+      // `mintInitial` has just committed a version 1 secret: active, no expiry.
+      // Both branches above reach here with it, so this is true even for the
+      // developer whose endpoint stays paused awaiting the key handover - which
+      // is the point, since `has_live_secret` is what tells the dashboard that
+      // enabling it would now succeed.
+      ...toEndpointDto(live, true),
       // Withheld from a caller who may create endpoints but not read their
       // secrets. The secret exists either way; only this response varies.
       secret: mayReceiveSecret ? minted.secret : null,
@@ -244,7 +297,10 @@ export class EndpointsService {
     if (dto.name !== undefined) data.name = dto.name;
     if (dto.url !== undefined) data.url = normaliseEndpointUrl(dto.url);
 
-    if (Object.keys(data).length === 0) return toEndpointDto(current);
+    // Nothing here touches `endpoint_secrets`, but the response shape carries
+    // the flag, so it is read rather than assumed. One row, one statement.
+    const live = await this.secrets.hasLiveSecret(context, endpointId);
+    if (Object.keys(data).length === 0) return toEndpointDto(current, live);
 
     const updated = await scope.endpoints.updateById(endpointId, data);
     await this.audit.recordFor(context, {
@@ -260,7 +316,7 @@ export class EndpointsService {
           : {}),
       },
     });
-    return toEndpointDto(updated);
+    return toEndpointDto(updated, live);
   }
 
   /**
@@ -270,6 +326,15 @@ export class EndpointsService {
    * with none is the exact state `signing.Header` returns `ErrNoSecrets` for, so
    * enabling would not produce deliveries - it would produce a queue of
    * permanently failing ones and a customer wondering why.
+   *
+   * ## This is the way back from an automatic disable
+   *
+   * `src/maintenance` switches off an endpoint whose circuit breaker has been
+   * open past the window. Auto-disable is only defensible because this route
+   * exists and is the ordinary `endpoints.write` one - a customer does not need
+   * support, a flag or a different permission to undo it. There is deliberately
+   * no separate "re-enable an auto-disabled endpoint" route: a second way to do
+   * the same thing is a second set of preconditions to keep in step.
    */
   async enable(context: RequestContext, endpointId: string): Promise<EndpointDto> {
     const scope = this.scopes.for(context);
@@ -293,13 +358,70 @@ export class EndpointsService {
       disabledReason: null,
       disabledAt: null,
     });
+    const probeArmed = await this.armBreakerProbe(scope, endpointId);
     await this.audit.recordFor(context, {
       action: 'endpoint.enabled',
       resourceType: 'endpoint',
       resourceId: endpointId,
-      metadata: { previous_status: current.status },
+      metadata: {
+        previous_status: current.status,
+        // Both halves of "what was this endpoint's state before I pressed the
+        // button" - the automatic reason that is about to be cleared, and
+        // whether the breaker was still tripped. Without them, an endpoint
+        // that was auto-disabled and re-enabled leaves no trace of the first
+        // half anywhere a customer can read.
+        previous_disabled_reason: current.disabledReason ?? null,
+        breaker_probe_armed: probeArmed,
+      },
     });
-    return toEndpointDto(updated);
+    // Proved live a few lines up, by the check that would have refused.
+    return toEndpointDto(updated, true);
+  }
+
+  /**
+   * Bring the circuit breaker's next probe forward to now, if it is tripped.
+   *
+   * ## Why re-enabling is not enough on its own
+   *
+   * `enabled`/`status` and `endpoint_health` are different facts with different
+   * owners. Clearing the first says "deliver here again"; it says nothing to the
+   * breaker, whose cooldown doubles per failure to a ten-minute ceiling. An
+   * endpoint that has been dark for days is at that ceiling, so a customer who
+   * has just fixed their consumer and pressed Resume watches nothing happen for
+   * up to ten minutes while every new delivery is claimed, refused and deferred.
+   *
+   * ## Why this is a nudge and not a reset
+   *
+   * The obvious move - set the health row back to `healthy` - is the thundering
+   * herd. `healthy` admits EVERY delivery, so the full ingest rate arrives at an
+   * endpoint whose recovery is still a customer's assertion rather than an
+   * observed fact; if they were wrong, we have just re-created the storm the
+   * breaker exists to prevent, at the worst possible moment.
+   *
+   * So this writes ONE column. The state machine is untouched, no counter is
+   * reset, and `probe_after <= now()` is precisely the condition
+   * `worker.ClaimProbe` looks for - a conditional UPDATE in which the predicate
+   * that admits a probe is also the write that withdraws the invitation. Exactly
+   * one worker wins it, exactly one delivery goes out, and the existing
+   * half-open protocol decides what happens next: one success closes the
+   * breaker and the backlog drains normally, one failure re-opens it with its
+   * cooldown intact. That is the same mechanism the breaker already uses for
+   * transient failure, borrowed rather than duplicated.
+   *
+   * `state IN ('open', 'half_open')` and nothing else. A healthy or degraded
+   * breaker is already admitting traffic and has no probe to bring forward, and
+   * the returned count is what tells the audit entry which case this was.
+   *
+   * `new Date()` is the API's clock while `probe_after <= now()` is the
+   * database's. A few seconds of skew either way costs at most one worker poll
+   * (250ms) of extra delay, which is why this is not worth a raw `now()`.
+   */
+  private async armBreakerProbe(scope: TenantScope, endpointId: string): Promise<boolean> {
+    const armed = await scope.endpointHealth.updateMany(
+      { endpointId, state: { in: ['open', 'half_open'] } },
+      { probeAfter: new Date() },
+    );
+    return armed > 0;
   }
 
   /**
@@ -329,7 +451,10 @@ export class EndpointsService {
       resourceId: endpointId,
       metadata: { previous_status: current.status, reason: reason ?? null },
     });
-    return toEndpointDto(updated);
+    // Pausing leaves the secrets alone, so this is read rather than assumed -
+    // and it is the field the dashboard reads next, to decide whether the
+    // "Resume deliveries" button it is about to render would actually work.
+    return toEndpointDto(updated, await this.secrets.hasLiveSecret(context, endpointId));
   }
 
   /**
