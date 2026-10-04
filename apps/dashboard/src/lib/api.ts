@@ -12,7 +12,6 @@
  * included — come from the generated OpenAPI document (ARCHITECTURE.md 7);
  * `src/types/api.ts` only gives them domain names.
  */
-import { apiUrl } from './api-base-url';
 import { mockRequest, MockHttpError } from './mock/server';
 import { isApiErrorCode } from '../types/api';
 import type { ApiErrorCode, ApiErrorDetails, ApiErrorPayload } from '../types/api';
@@ -148,18 +147,17 @@ type Transport = <T>(method: string, path: string, body?: unknown) => Promise<T>
  *     15_750   past this point the API is not going to answer, so waiting
  *              longer only lengthens the spinner.
  *
- * THE HOP TERM IS UNCHANGED AT 750 ms, and the path it covers did change: the
- * deleted Worker measured Worker→nginx→API, where this measures
- * browser→(Cloudflare, where the API hostname is proxied)→nginx→API, which adds
- * the client's own leg over a possibly-mobile network. 750 ms is thin for that
- * leg on a cold connection. It is kept anyway, because of WHEN the extra leg
- * can matter: it only costs us accuracy in the case where the API spends its
- * full 15 s and then answers, and a handler that has exhausted both Prisma
- * ceilings answers with a 500, not with data. So widening the term would buy a
- * better error MESSAGE in a case that is already an error, at the price of
- * every real timeout holding the spinner longer. The term is a margin, not a
- * measurement; if operators report timeouts on paths the API logs as having
- * succeeded, raise it — that is the signal, not a latency percentile.
+ * THE HOP TERM, 750 ms, covers browser→(Cloudflare, proxying the one
+ * hostname)→nginx→API — the client's own leg over a possibly-mobile network
+ * included. 750 ms is thin for that leg on a cold connection, and it is kept
+ * anyway, because of WHEN the extra leg can matter: it only costs us accuracy
+ * in the case where the API spends its full 15 s and then answers, and a
+ * handler that has exhausted both Prisma ceilings answers with a 500, not with
+ * data. So widening the term would buy a better error MESSAGE in a case that is
+ * already an error, at the price of every real timeout holding the spinner
+ * longer. The term is a margin, not a measurement; if operators report timeouts
+ * on paths the API logs as having succeeded, raise it — that is the signal, not
+ * a latency percentile.
  *
  * NOT AN UPPER BOUND ON THE API. `TenantTransactionRunner.run` retries a
  * SERIALIZABLE transaction up to `MAX_TRANSACTION_ATTEMPTS` (4) times, so a
@@ -177,8 +175,8 @@ const TIMEOUT_FOR_HUMANS = `${(API_REQUEST_TIMEOUT_MS / 1000).toFixed(1)} s`;
  *
  * They have to be told apart, because they send an operator to different
  * places: "your API is slow" is a look at the API's logs and its connection
- * pool, "your API is unreachable" is DNS, TLS, a dead process or CORS. One
- * message covering both is one message that helps with neither.
+ * pool, "your API is unreachable" is nginx, the API unit, or the `/v1` proxy
+ * block in between. One message covering both helps with neither.
  */
 export type TransportFailureKind = 'timeout' | 'unreachable';
 
@@ -224,8 +222,9 @@ export class ApiTransportError extends ApiRequestError {
  * to spend the time deliberately.
  *
  * AN UNREACHABLE HOST SHOULD BE. It fails in milliseconds, so two retries cost
- * ~3 s of backoff and genuinely recover a dropped connection on a phone. A CORS
- * misconfiguration is retried pointlessly, but just as cheaply.
+ * ~3 s of backoff and genuinely recover a dropped connection on a phone. A dead
+ * API unit is retried pointlessly, but just as cheaply — and the retries are
+ * what ride out the few seconds of 502 that a release's API restart produces.
  */
 const TIMEOUT_STATUS = 408;
 const UNREACHABLE_STATUS = 503;
@@ -239,16 +238,43 @@ function timeoutMessage(): string {
   );
 }
 
-function unreachableMessage(url: string): string {
-  // `location` is absent under vitest (no DOM environment), so the sentence has
-  // to work without naming this page's origin.
-  const origin = typeof location === 'undefined' ? 'this page’s origin' : location.origin;
+/**
+ * WHY CORS IS NOT IN THIS SENTENCE ANY MORE.
+ *
+ * The dashboard's assets and the control API are served from ONE origin: nginx
+ * serves the built bundle out of the release and proxies `/v1` to the API on
+ * the same hostname. `path` is therefore a same-origin request, and the browser
+ * applies no CORS check to one — there is no preflight, no
+ * `Access-Control-Allow-Origin` to get wrong, and `CORS_ORIGINS` on the API is
+ * not consulted. Naming it here would send an operator to edit an environment
+ * variable that cannot produce this failure, which is worse than saying
+ * nothing: it is a plausible wrong answer, and they will find it in the docs
+ * and believe it.
+ *
+ * What CAN produce it, all on the one box, in the order worth checking:
+ *  - nginx is not running, or not listening on this hostname — then the page
+ *    itself would not have loaded, so this is the case where it loaded a while
+ *    ago and nginx has since died;
+ *  - the control API unit is down or restarting, so nginx's proxy_pass gets a
+ *    refused connection and answers 502 — which arrives here as an HTTP status,
+ *    not as this error, UNLESS the body is not JSON and the response never
+ *    completes;
+ *  - the `location /v1` proxy block is missing or points at the wrong port,
+ *    so `/v1/...` falls through to the SPA fallback and returns `index.html`;
+ *  - the network between the browser and the box dropped — a phone changing
+ *    cells, a laptop sleeping, a tunnel closing.
+ *
+ * The first three are one `systemctl status` and one `nginx -T` away, which is
+ * why they are named and CORS is not.
+ */
+function unreachableMessage(path: string): string {
   return (
-    `The browser could not reach the control API at ${url}. fetch() does not report a reason ` +
-    `for this, by design, so it is one of: the API is down, its hostname does not resolve, ` +
-    `TLS failed, or the browser blocked the response because the API's CORS_ORIGINS does not ` +
-    `list ${origin}. A CORS rejection is indistinguishable from an outage from here — the ` +
-    `browser console names which one it was, and this message cannot.`
+    `The browser could not reach the control API at ${path}, on this page's own origin. ` +
+    `fetch() does not report a reason for this, by design, so it is one of: nginx is no ` +
+    `longer answering on this hostname, the control API unit is down or restarting, the ` +
+    `/v1 proxy block is misconfigured, or the browser lost its network connection. The ` +
+    `dashboard and the API share one origin, so this is not a CORS problem — check ` +
+    `nginx and the API unit on the box serving this page.`
   );
 }
 
@@ -269,18 +295,30 @@ function isTimeoutAbort(error: unknown): boolean {
 }
 
 async function httpTransport<T>(method: string, path: string, body?: unknown): Promise<T> {
-  // `apiUrl` prepends the control API's origin (`VITE_API_BASE_URL`). It is
-  // empty in development, where Vite proxies `/v1` and the path stays
-  // relative; in a production build it is a different hostname under the same
-  // registrable domain, which is why `credentials: 'include'` below is enough
-  // to carry the `SameSite=Lax` session cookie. See ./api-base-url.ts.
-  const url = apiUrl(path);
-
+  /*
+   * A BARE RELATIVE PATH, with nothing configurable in front of it.
+   *
+   * The dashboard is served from the same origin as the API — nginx serves
+   * `dist/` off the release and proxies `/v1` to the control API on the same
+   * hostname; `vite.config.ts` does the same job with its dev proxy. So
+   * `/v1/projects` resolves against the hostname that served this page, which
+   * is correct by construction in both. A configured API base URL used to be
+   * prepended here, for a cross-origin dashboard on Cloudflare; with one origin
+   * that variable had no right answer other than empty, and a build variable
+   * whose only correct value is "unset" is a variable that can only be set
+   * wrong.
+   */
   try {
-    const response = await fetch(url, {
+    const response = await fetch(path, {
       method,
-      // Sessions are HTTP-only cookies; no token is kept in localStorage
-      // (ARCHITECTURE.md 9).
+      /*
+       * Sessions are HTTP-only cookies; no token is kept in localStorage
+       * (ARCHITECTURE.md 9). `'include'` is redundant same-origin — the
+       * default `'same-origin'` already sends the cookie — and it is kept
+       * because it is correct either way and states the intent: this request
+       * carries credentials. It grants nothing extra; the server, not the
+       * caller, decides whether a cross-origin request may read a response.
+       */
       credentials: 'include',
       headers: body ? { 'Content-Type': 'application/json' } : undefined,
       body: body ? JSON.stringify(body) : undefined,
@@ -320,8 +358,9 @@ async function httpTransport<T>(method: string, path: string, body?: unknown): P
     }
     /*
      * A `TypeError` is how `fetch` reports "no response", for every reason at
-     * once: DNS, a refused connection, a TLS failure, and a CORS rejection,
-     * which is deliberately opaque so a page cannot probe another origin.
+     * once: a refused or reset connection, a dropped network, a response the
+     * browser abandoned. Same-origin, a CORS rejection is not among them —
+     * see `unreachableMessage` for why that matters to the copy.
      *
      * Anything else is not a transport failure — a `SyntaxError` from
      * `response.json()` on a body that is not JSON is the one that happens, and
@@ -329,7 +368,7 @@ async function httpTransport<T>(method: string, path: string, body?: unknown): P
      * DNS for a 200 that arrived. It propagates raw, as it did before.
      */
     if (error instanceof TypeError) {
-      throw new ApiTransportError('unreachable', UNREACHABLE_STATUS, unreachableMessage(url));
+      throw new ApiTransportError('unreachable', UNREACHABLE_STATUS, unreachableMessage(path));
     }
     throw error;
   }

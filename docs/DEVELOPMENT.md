@@ -73,9 +73,14 @@ organization owner, and billing beyond an honest empty state.
 ## Getting started
 
 ```bash
-cp .env.example .env                     # then fill JWT_SECRET, SESSION_SECRET, ENCRYPTION_KEY
-openssl rand -base64 48                  # JWT_SECRET / SESSION_SECRET
-openssl rand -base64 32                  # ENCRYPTION_KEY (must decode to exactly 32 bytes)
+# Configuration is THREE files, split by who reads it. ENCRYPTION_KEY and
+# DATABASE_URL live in the root one, ONCE, so the two planes cannot drift apart.
+cp .env.example                     .env   # the 9 both planes read
+cp apps/control-api/.env.example    apps/control-api/.env
+cp services/data-plane/.env.example services/data-plane/.env
+
+openssl rand -base64 48                  # JWT_SECRET / SESSION_SECRET -> apps/control-api/.env
+openssl rand -base64 32                  # ENCRYPTION_KEY (exactly 32 bytes decoded) -> .env
 
 pnpm install
 pnpm dev:infra                           # postgres + redis + minio + a webhook sink, dev only
@@ -85,6 +90,17 @@ pnpm dev:api                             # control plane  :3000  (/docs for Open
 pnpm dev:dashboard                       # dashboard      :5173
 pnpm dev:data-plane                      # webhookd all   :8080 ingest, :9090 probes/metrics
 ```
+
+The Go roles read the process environment, not a file, and their variables are
+now in two files. In any shell that runs one:
+
+```bash
+cd services/data-plane && set -a; source ../../.env; source .env; set +a
+```
+
+Common first, service-specific second — a later `source` wins, which is the same
+precedence systemd and the control API resolve to. `docs/LOCAL_SETUP.md` has the
+whole sequence.
 
 Tests:
 

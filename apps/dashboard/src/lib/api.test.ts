@@ -121,7 +121,7 @@ describe('a request that outlives the deadline', () => {
 });
 
 describe('a host the browser could not reach', () => {
-  it('is a DIFFERENT message from a timeout, and says CORS looks identical', async () => {
+  it('is a DIFFERENT message from a timeout, and names causes on this one box', async () => {
     const { api } = await loadHttpApi();
     stubFetch(new TypeError('Failed to fetch'));
 
@@ -134,11 +134,40 @@ describe('a host the browser could not reach', () => {
 
     expect(error.kind).toBe('unreachable');
     expect(error.body.message).toContain('could not reach the control API');
-    expect(error.body.message).toContain('CORS_ORIGINS');
     expect(error.body.message).toContain('/v1/projects');
+    // The three things an operator can actually check, all on the box serving
+    // this page. Asserted because the value of this message is entirely in
+    // where it sends them.
+    expect(error.body.message).toContain('nginx');
+    expect(error.body.message).toContain('control API unit');
+    expect(error.body.message).toContain('/v1 proxy block');
     // The two causes lead an operator to different places, so the copy must
     // not overlap: "slow" must not appear in the unreachable sentence.
     expect(error.body.message).not.toContain('did not answer within');
+  });
+
+  it('does not blame CORS, which cannot be the cause on one origin', async () => {
+    const { api } = await loadHttpApi();
+    stubFetch(new TypeError('Failed to fetch'));
+
+    const error = (await api.get('/v1/projects').catch((caught: unknown) => caught)) as {
+      body: { message: string };
+    };
+
+    /*
+     * A REGRESSION GUARD, not a copy preference.
+     *
+     * This message used to name `CORS_ORIGINS` as the likeliest cause, which
+     * was true when the dashboard was served from a different origin than the
+     * API. nginx now serves the bundle and proxies `/v1` on one hostname, so
+     * every request is same-origin and the browser runs no CORS check on it:
+     * `CORS_ORIGINS` cannot produce this failure at all. Naming it would send
+     * an operator to spend an outage editing an environment variable that is
+     * not involved — a plausible wrong answer is worse than no answer, because
+     * they will act on it.
+     */
+    expect(error.body.message).not.toContain('CORS_ORIGINS');
+    expect(error.body.message).toContain('not a CORS problem');
   });
 
   it('IS retried — it fails in milliseconds and a dropped connection recovers', async () => {
@@ -152,6 +181,39 @@ describe('a host the browser could not reach', () => {
 
     expect(error.status).toBe(503);
     expect(error.retryable).toBe(true);
+  });
+});
+
+describe('the request URL', () => {
+  it('is the path as given, with no origin prepended', async () => {
+    const { api } = await loadHttpApi();
+    const seen: Array<{ url: string; init?: RequestInit }> = [];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((url: string, init?: RequestInit) => {
+        seen.push({ url, init });
+        return Promise.resolve(new Response(null, { status: 204 }));
+      }),
+    );
+
+    await api.get('/v1/projects');
+
+    /*
+     * THE WHOLE POINT OF BEING SAME-ORIGIN.
+     *
+     * nginx serves this bundle and proxies `/v1` to the control API on the
+     * same hostname, so a bare relative path resolves against whatever
+     * hostname served the page — correct in production, in `pnpm dev` behind
+     * Vite's proxy, and on any future hostname, with nothing to configure. A
+     * configured base URL used to be prepended here; this asserts that
+     * nothing is, because a reintroduced prefix would be invisible in the UI
+     * until it hit a hostname where it was wrong.
+     */
+    expect(seen).toHaveLength(1);
+    expect(seen[0]?.url).toBe('/v1/projects');
+    // Redundant same-origin and kept deliberately: the default is
+    // `same-origin`, which already sends the session cookie.
+    expect(seen[0]?.init?.credentials).toBe('include');
   });
 });
 

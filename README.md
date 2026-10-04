@@ -7,14 +7,16 @@ delivery ledger you can actually answer "what happened to this event?" from —
 without opening psql.
 
 Runs as hosted SaaS, as a self-hosted Docker or Kubernetes deployment, or on a
-plain Ubuntu box with `make deploy` — always against **the customer's own
-PostgreSQL**.
+plain Ubuntu box with `make deploy-dev` / `make deploy-prod` — always against
+**the customer's own PostgreSQL**.
 
-The two halves ship separately. The control API and the Go data plane go to your
-own server; the React dashboard is a Cloudflare Worker that serves its own
-assets and proxies `/v1/*` back to that server, so the two sit on one hostname
-and Cloudflare builds and publishes the front end on every push. Containerise
-the whole thing instead and the dashboard image is still there — see
+**It all ships together, to one box per environment.** `make deploy-prod` builds
+the control API, the Go data plane and the React dashboard into one release, and nginx serves the
+dashboard's files and proxies `/v1/*` to the control API on the same hostname.
+One origin: relative `fetch('/v1/…')` is correct by construction, there is no
+CORS, and the session cookie never crosses an origin. Cloudflare sits in front
+as a proxy — TLS, caching, DDoS — and hosts nothing. Containerise the whole
+thing instead and the images are still there — see
 [Deploying it](#deploying-it).
 
 > **Renamed to HookuBit.** The npm scope is `@hookubit/*`, the Go module is
@@ -115,18 +117,26 @@ Full steps, including the gotchas, are in
 [docs/LOCAL_SETUP.md](docs/LOCAL_SETUP.md). The shape:
 
 ```bash
-cp .env.example .env         # PostgreSQL 15+, Redis, MinIO, Mailpit, and the four secrets
+# Three env files, split by who reads them. The nine variables BOTH planes read
+# live in the root one, exactly once, so they cannot drift apart.
+cp .env.example                     .env   # APP_ENV, DATABASE_URL, ENCRYPTION_KEY, REDIS_URL, ...
+cp apps/control-api/.env.example    apps/control-api/.env
+cp services/data-plane/.env.example services/data-plane/.env
 pnpm install
 pnpm dev:infra               # dev-only compose: postgres + redis + minio + mailpit
 pnpm generate && pnpm migrate:deploy
 pnpm dev:api & pnpm dev:dashboard & pnpm dev:data-plane
 ```
 
-Two things people trip on: the Go data plane does **not** read `.env` — export
-its variables or use the compose file; and with `SMTP_URL` unset the control
-plane uses a stub mailer that delivers nothing, so point it at Mailpit
-(`smtp://localhost:1025`, inbox at `http://localhost:8025`) or no account can be
-verified.
+Three things people trip on. The Go data plane does **not** read a file — it
+reads the process environment, so export **both** of its files in each shell that
+runs a Go role (`cd services/data-plane && set -a; source ../../.env; source
+.env; set +a`), common first. With `SMTP_URL` unset the control plane uses a stub
+mailer that delivers nothing, so point it at Mailpit (`smtp://localhost:1025`,
+inbox at `http://localhost:8025`) or no account can be verified. And the Prisma
+CLI reads `.env` from its working directory only, so use `pnpm generate` /
+`pnpm migrate:deploy` rather than calling `prisma` by hand — the package scripts
+export the common file for it.
 
 **Requires PostgreSQL 15 or newer** — the schema uses `NULLS NOT DISTINCT`
 unique indexes. The migration refuses to run on anything older.
@@ -151,10 +161,21 @@ Three paths, all documented in the self-hosting guide under `apps/docs/`:
 The bare-metal path is automated end to end:
 
 ```bash
-make deploy          # release directory, build, migrate, atomic symlink swap, health check
-dep hookubit:health  # just the probes, read-only
-dep rollback         # read deployments/deployer/README.md first — the database does not roll back
+make deploy-dev      # release directory, build, migrate, atomic symlink swap, health check
+make deploy-prod     # the same, to the live box
+make deploy          # refuses: there are two boxes and neither is the default
+
+make health-dev      # just the probes, read-only
+make plan-dev        # the task order, connecting to nothing
+make rollback-prod   # read deployments/deployer/README.md first — the database does not roll back
 ```
+
+**Two hosts, two machines, one branch each:** `dev` tracks `dev`, `prod` tracks
+`main`, and the environment is named in every command. They differ in nothing
+but their hostname, their branch and their three domains — same ports, same unit
+names, same `/opt/hookubit` on each, because they are separate boxes and nothing
+needs de-conflicting. A run that would cover both is refused unless you ask for
+it with `--multi-host`, and that applies to `rollback` as much as to `deploy`.
 
 It is a Deployer recipe, so the one file you edit is
 `deployments/deployer/hosts.yml`. It deploys a **pushed** git ref; it stops the
@@ -166,17 +187,31 @@ roll back for you after the symlink swap, deliberately.
 [deployments/deployer/README.md](deployments/deployer/README.md) is the
 reasoning.
 
-**It deploys the server side only.** The dashboard is static files that
-Cloudflare's git integration builds and publishes on push, served from
-`hookubit.com`, and it calls the control API on `api.hookubit.com` with
-`credentials: 'include'` — a different origin on the same registrable domain, so
-the `SameSite=Lax` session cookie is still sent. That costs the API two
-settings, both on the server: the dashboard's origin in `CORS_ORIGINS`, which
-fails closed, and `DASHBOARD_URL` for the links in outbound mail. See
-`apps/dashboard/README.md` and §8–§9 of the bare-metal guide. If you self-host
-the whole platform in containers instead,
-`deployments/docker/dashboard.Dockerfile` still builds and serves the dashboard
-from one origin.
+**It deploys the whole platform, dashboard included.** The dashboard is built
+into the release and nginx serves it off that release as the document root for
+`hookubit.com`, with `/v1/*` proxied to the control API on the same hostname.
+One origin, one deploy, one artifact set — the `current` symlink swaps all three
+together, so there is no state in which the front end and the API are from
+different commits.
+
+What that costs the API is **one** setting on the server: `DASHBOARD_URL`, the
+base of every link in outbound mail. `CORS_ORIGINS` stays empty, and empty is
+now the correct value — a same-origin request runs no CORS check at all, so
+there is no preflight to allow and no header to spell exactly.
+
+What it costs the nginx config is one thing worth knowing before you write it:
+with an SPA's `try_files $uri /index.html` fallback, a **missing `location /v1/`
+returns `index.html` with a `200`**, and the dashboard dies on `JSON.parse` of
+HTML with nothing naming the cause. §8 of the bare-metal guide leads with it,
+`hookubit:dashboard:check` asserts it on every deploy, and the one-line proof is
+
+```bash
+curl -s -o /dev/null -w '%{http_code} %{content_type}\n' https://hookubit.com/v1/auth/session
+```
+
+See `apps/dashboard/README.md` and §8–§9 of the bare-metal guide. If you
+self-host in containers instead,
+`deployments/docker/dashboard.Dockerfile` builds and serves the same bundle.
 
 ## Documentation for customers
 

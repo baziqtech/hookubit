@@ -2,11 +2,9 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import React from 'react';
 import ReactDOM from 'react-dom/client';
 import { RouterProvider } from 'react-router-dom';
-import { ApiConfigGate } from './components/ApiConfigErrorPanel';
 import { DemoDataBanner } from './components/DemoDataBanner';
 import './index.css';
 import { ApiRequestError } from './lib/api';
-import { apiConfigError } from './lib/api-base-url';
 import { router } from './routes/router';
 
 // Server state lives in TanStack Query; Zustand is reserved for state that is
@@ -33,33 +31,28 @@ const queryClient = new QueryClient({
 const root = ReactDOM.createRoot(document.getElementById('root')!);
 
 /*
- * THE CONFIG BRANCH, before anything is mounted.
+ * NOTHING STANDS BETWEEN THIS AND THE APP.
  *
- * `apiConfigError` is set when `VITE_API_BASE_URL` is missing or unusable in a
- * production build, which is a deploy that cannot work: see
- * ./lib/api-base-url.ts. Rendering the app anyway is not an option — it would
- * request relative `/v1` paths from the Cloudflare hostname and be served the
- * SPA shell with a 200. So the app does not mount, exactly as before; the only
- * change is that the reason is now ON THE PAGE instead of only in the console,
- * where the operator who caused it was never going to see it.
+ * There used to be an `ApiConfigGate` here that refused to mount when a
+ * base-URL build variable was missing from a production build. The dashboard and
+ * the control API now share one origin — nginx serves this bundle and proxies
+ * `/v1` to the API on the same hostname — so there is no base URL to configure,
+ * nothing to validate, and no deploy-time misconfiguration for a panel to
+ * report. See the note at the top of `./lib/api.ts`.
  *
- * The panel needs none of the providers below — see its own docblock. The
- * app's modules are still imported statically, which is a deliberate trade:
- * splitting them behind a dynamic `import()` would isolate the panel from any
- * OTHER module-load failure too, at the cost of a runtime-injected
- * modulepreload — one extra round trip before first paint on every healthy
- * load, which is all of them. The configuration refusal is the only
- * module-load throw this app has by design, and it no longer throws.
+ * `VITE_API_TRANSPORT` is the one build variable left that can ruin a deploy,
+ * and it CANNOT be checked here: unset means the in-memory mock, which is the
+ * correct and useful default for `pnpm dev`. `DemoDataBanner` below is the
+ * whole defence — a permanent banner on every page, including the auth pages
+ * outside the app shell, saying the data is not real.
  */
 root.render(
-  <ApiConfigGate configError={apiConfigError}>
-    <React.StrictMode>
-      <QueryClientProvider client={queryClient}>
-        {/* Above the router on purpose: the auth pages render outside the app
-            shell, and a build serving mock data must say so there too. */}
-        <DemoDataBanner />
-        <RouterProvider router={router} />
-      </QueryClientProvider>
-    </React.StrictMode>
-  </ApiConfigGate>,
+  <React.StrictMode>
+    <QueryClientProvider client={queryClient}>
+      {/* Above the router on purpose: the auth pages render outside the app
+          shell, and a build serving mock data must say so there too. */}
+      <DemoDataBanner />
+      <RouterProvider router={router} />
+    </QueryClientProvider>
+  </React.StrictMode>,
 );

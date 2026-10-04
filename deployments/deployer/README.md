@@ -3,11 +3,24 @@
 This is [apps/docs/self-hosting/09-bare-metal-ubuntu.md](../../apps/docs/self-hosting/09-bare-metal-ubuntu.md),
 automated. The guide is still the explanation; this is the procedure that runs.
 
+**Every command names its environment.** There are two hosts — `dev` and
+`prod`, two separate machines — and neither is the default. See
+[Two hosts, one per environment](#two-hosts-one-per-environment).
+
 ```
-make deploy             # the whole thing
-dep list                # every task
-dep hookubit:health     # just the probes, read-only
-dep rollback            # READ "Rollback" below first
+make deploy-dev                   # the whole thing, to the dev box    (branch dev)
+make deploy-prod                  # the whole thing, to the LIVE box   (branch main)
+make deploy                       # refuses, and names the two above
+
+make plan-dev   / plan-prod       # the task order, connecting to nothing
+make health-dev / health-prod     # just the probes, read-only
+make rollback-dev / rollback-prod # READ "Rollback" below first
+
+dep list                          # every task
+dep deploy dev                    # what make deploy-dev runs
+dep hookubit:host:guard prod      # which ref is prod pinned to? decided from
+                                  # hosts.yml alone — connects to nothing
+dep hookubit:dashboard:check dev  # "is the hostname serving this release", read-only
 ```
 
 Deployer is PHP, but nothing PHP runs on the server and the server needs neither
@@ -15,12 +28,137 @@ PHP nor Composer. It is here for three things a shell script does not give us:
 a release directory per deploy, an atomic `current` symlink swap, and a rollback
 that is one command.
 
-**This deploys the server side only: the control API and the data plane.** The
-dashboard is static files that Cloudflare's git integration builds and publishes
-on every push — a different trigger, a different timeline, and nothing here
-touches it. Its build settings live in `apps/dashboard/README.md` in the
-repository. "I deployed and my UI change is not there" is answered in
-Cloudflare's deployment log, not here.
+**This deploys the whole platform: the control API, the data plane and the
+dashboard.** The dashboard is built into the release and nginx serves it off that
+release, so one `make deploy-dev` ships all three and the `current` symlink swaps
+them together. There is no second deploy path and no state in which the front
+end and the API are from different commits. "I deployed and my UI change is not
+there" is answered by `hookubit:dashboard:check`, which the deploy runs for you.
+
+## Two hosts, one per environment
+
+```
+dev   branch dev    → its own machine, /opt/hookubit, :3000 / :9090
+prod  branch main   → its own machine, /opt/hookubit, :3000 / :9090
+```
+
+Two **separate machines**, one environment each, pinned to one branch each. That
+is the only reason this stays simple: because nothing is shared, nothing has to
+be de-conflicted. Both boxes run the same two unit names, listen on the same two
+ports and deploy into the same `/opt/hookubit`. There are no `-dev` unit
+suffixes, no port offsets and no path variants, and there should not be — that
+complexity buys you two installs on *one* machine, which is not what this is.
+
+**Five values differ, and that is the whole of `hosts.yml`'s per-host section:**
+
+| Key | `dev` | `prod` |
+|---|---|---|
+| `hostname` | **`REPLACE_ME`** — that box does not exist yet | `192.168.100.21` |
+| `branch` | `dev` | `main` |
+| `remote_user` | `deploy` | `naj` |
+| `dashboard_origin` | `https://dev.hookubit.com` | `https://hookubit.com` |
+| `ingest_base_url` | `https://hooks.dev.hookubit.com` | `https://hooks.hookubit.com` |
+
+Everything else — `repository`, `deploy_path`, both ports, both unit names,
+`service_group`, `keep_releases`, the `bin/*` paths, `default_timeout` — is in
+`hosts.yml`'s global `config:` block **once**. A dev/prod pair that has drifted
+on `bin/pnpm` is a confusing afternoon, and the only defence against that is for
+the value to exist in one place.
+
+`branch` is the exception that must *not* be global, and the recipe enforces it.
+Deployer's own default for `branch` is `HEAD`, which against the server's clone
+means the repository's default branch — so a host whose `branch:` line was
+forgotten would deploy `main` to the dev box, pass every probe and say nothing.
+`hookubit.php` therefore sets `branch` to the **empty string**, and
+`hookubit:host:guard` refuses a host that is not pinned.
+
+### A bare `dep deploy` would have hit both. What stops it now
+
+The hazard is real and worth being precise about, because the usual statement of
+it is wrong. In Deployer 7.5.12, `Command/SelectCommand.php::selectHosts` does
+**not** fall back to `all` when you omit the selector: with more than one host it
+opens a comma-separated **multi-select prompt** on a terminal, and throws
+`No host selected.` without one. (The `$selectors = ['all']` line people quote is
+in `complete()`, which feeds shell completion and nothing else.)
+
+So a bare `dep deploy` is not a silent fan-out *today*. What it is, is a prompt
+that lists `dev` and `prod` adjacent and accepts `0,1` — one comma between a dev
+deploy and a production deploy — and a `default_selector`, which `selectHosts`
+consults **before** giving up, would turn the omission into a real fan-out the
+moment anyone set it. `dep deploy all` does it today, in four characters. Two
+layers close it:
+
+**1. The Makefile names the environment in the target, not in a variable.**
+`make deploy` and `make rollback` take no argument and do nothing but refuse,
+printing the two targets that work. The environment is not a `HOST=` variable
+on purpose: a variable can be set from outside the command line — one
+`export HOST=prod` in a shell profile or a stray line in a CI job and a later
+bare `make deploy` is a production deploy with nothing on the command line to
+show for it. A target name cannot be set from the environment, and
+`make deploy-prod` is what ends up in shell history, in a runbook and in a chat
+message.
+
+**2. `hookubit:host:guard` refuses a run that covers more than one host.**
+Hooked `before('deploy')`, `before('rollback')`, `before('hookubit:health')` and
+`before('hookubit:dashboard:check')` — so going round the Makefile with a direct
+`dep` call does not get you a fan-out either, and a **rollback** to every host,
+which is every bit as bad as a deploy to every host, is refused the same way. It
+is the one task in the recipe that runs no remote command at all, so it decides
+from `hosts.yml` alone and every refusal it makes is free: nothing has connected
+to anything. On `rollback` it is registered **after**
+`hookubit:rollback:warn` and therefore runs **before** it — `Task::addBefore`
+`array_unshift`s — because "which box is this?" has to be answered before anyone
+is asked "roll back anyway?".
+
+It refuses three things, each naming the host:
+
+| Refusal | Means |
+|---|---|
+| this run covers 2 hosts | no `--multi-host`. One at a time: `make deploy-dev`, then `make deploy-prod` |
+| host `X` has no `branch:` pinned | the pairing is missing, and `HEAD` is not an answer. `--branch=` / `--tag=` / `--revision=` still override for one run, and the guard says out loud that it happened |
+| host `X` still has a placeholder hostname | `REPLACE_ME`. Only that host is affected; the other stays deployable |
+
+Before any of those, it prints what the host resolved to, so the pairing is
+visible rather than asserted:
+
+```
+$ dep hookubit:host:guard prod
+[prod] info prod → branch main · naj@192.168.100.21 · /opt/hookubit
+```
+
+**Both boxes in one run** is possible and has to be asked for:
+`dep deploy dev prod --multi-host`. It is a flag rather than "did you type both
+names" for a mechanical reason — `Master::createProcess` forks
+`dep worker --task … --host …` per task per host, and *that* argv carries no
+selector, so inside a task `dep deploy dev prod` and a `0,1` at the prompt are
+indistinguishable. Guessing was not worth it, and the sequential form is the
+better habit anyway: deploy `dev`, then `prod`, and prod only ever gets a
+release dev has already accepted.
+
+**What none of this protects against.** Naming the wrong host correctly.
+`dep deploy prod`, `make deploy-prod` and picking `prod` alone from the prompt
+are all exactly as deliberate as they look, and the guard lets all three
+through — its job is to stop the host you did *not* name, not the one you did.
+It also cannot help if someone sets `default_selector`, or runs
+`hookubit:build`, `hookubit:env` or `hookubit:migrate` directly rather than
+through `deploy`; those are unhooked, because they are steps of a deploy rather
+than things an operator reaches for.
+
+### Keeping your edits out of commits
+
+`hosts.yml` is **tracked**, and with two hosts it now carries more real detail
+than it used to: prod's address and login, and both environments' public
+hostnames. To keep your own edits out of commits while leaving the file tracked:
+
+```bash
+git update-index --skip-worktree deployments/deployer/hosts.yml
+```
+
+That is still the right advice and it is still per-clone and per-checkout — run
+it again after a fresh clone. Be clear about what it does and does not do: it
+makes git ignore **your** changes to that file; it does not retract what is
+already committed in it, and a `git pull` that changes the file will fail until
+you `--no-skip-worktree`, pull, and set it again.
 
 ## Files
 
@@ -28,16 +166,55 @@ Cloudflare's deployment log, not here.
 |---|---|
 | `../../deploy.php` | Entry point. `dep` finds it in the repo root. |
 | `hookubit.php` | All tasks. Short on purpose; the reasoning lives here. |
-| `hosts.yml` | **The only file you edit.** Hostname, user, deploy path, ports. |
+| `hosts.yml` | **The only file you edit.** Two hosts (`dev`, `prod`) carrying hostname, branch, user and the dashboard's two domains; everything the two boxes share, once, in `config:`. |
 | `systemd/*.service` | The two units, pointing at `current/`. |
 | `sudoers.d/hookubit-deploy` | The six privileged commands a deploy needs. |
 
-The recipe assumes four things on the host, all installed by §3 of the guide:
-`pnpm`, `go`, `systemctl` — and **`psql`**, which the migration guard uses to
-read `_prisma_migrations`. Without `postgresql-client` the guard refuses the
-deploy rather than guessing, and says so.
+The recipe assumes five things on the host, all installed by §3 of the guide:
+`pnpm`, `go`, `systemctl`, `curl` — and **`psql`**, which the migration guard
+uses to read `_prisma_migrations`. Without `postgresql-client` the guard refuses
+the deploy rather than guessing, and says so.
 
-## One-time server setup
+It also needs **two values per host in `hosts.yml`**, and refuses at the very
+start of `hookubit:build` without them, before anything is built, stopped or
+swapped:
+
+| Key | `prod`'s value | What it is |
+|---|---|---|
+| `dashboard_origin` | `https://hookubit.com` | the public origin nginx answers the dashboard **and** `/v1` on. Must equal `DASHBOARD_URL` in that box's `shared/apps/control-api/.env` |
+| `ingest_base_url` | `https://hooks.hookubit.com` | ingest's own hostname, compiled into the bundle as `VITE_INGEST_BASE_URL` |
+
+**Both are per-host, and with two environments that is load-bearing rather than
+tidy.** `hookubit:build` reads `{{ingest_base_url}}` in the *current* host's
+context, so `make deploy-dev` compiles dev's ingest hostname into dev's bundle
+and then greps dev's bundle for dev's value, and prod's deploy does the same with
+prod's. The same is true of `dashboard_origin` in `hookubit:dashboard:check`,
+which derives the `Host` header and SNI it probes loopback with from whichever
+host it is running against. Neither value is a literal anywhere in the recipe —
+the only `hookubit.com` strings in `hookubit.php` are inside the two refusal
+messages, as examples of the line to add. A refusal names the host whose block is
+short of it.
+
+Both are checked in `hookubit:build` even though only the first is *used* after
+the swap, because that is the one place a refusal is free. Failing at
+`hookubit:dashboard:check` over a missing line in `hosts.yml` would mean a red
+deploy over a release that is already live and probably fine.
+
+## One-time server setup — **run it once per box**
+
+There are two machines, so this whole section happens **twice**: once on the dev
+box and once on the prod box. It is the same procedure both times, with the same
+users, the same paths, the same unit names and the same ports — the boxes differ
+only in their hostname, their branch and their three domains
+(`dashboard_origin`, `ingest_base_url`, and the `DASHBOARD_URL` in the env file
+that must match the first). Nothing below is per-environment. Do not invent
+`-dev` suffixes for either box; each one is alone on its machine.
+
+Each box gets its own PostgreSQL database, its own Redis, its own three env
+files under its own `shared/`, and **its own `ENCRYPTION_KEY`** — never prod's.
+The dev box's deploy user needs its own SSH key in your `~/.ssh/config` and its
+own read-only GitHub deploy key; the server clones the repository, so both boxes
+clone it independently, each on its own branch.
 
 Follow §1–§5 and §7–§12 of the guide — database, Redis, toolchain, env file,
 systemd, nginx and its firewall, Cloudflare, first account. Three things differ
@@ -58,64 +235,179 @@ sudo usermod -aG systemd-journal deploy      # so the deploy can read the logs
 
 sudo mkdir -p /opt/hookubit
 sudo chown deploy:hookubit /opt/hookubit
-sudo chmod 2750 /opt/hookubit                # setgid: releases stay group-hookubit
+sudo chmod 2755 /opt/hookubit                # setgid: releases stay group-hookubit;
+                                             # world r-x: nginx traverses in. See below.
 ```
 
 Put your public key in `/home/deploy/.ssh/authorized_keys`, and a read-only
 GitHub deploy key in `/home/deploy/.ssh/` — the server clones the repository, not
 your laptop.
 
-**`2750`, and nothing for *other*.** Two users need to read this tree and both
-are named in the mode: `deploy` owns it and writes the releases, `hookubit` reads
-them as the group and runs them. Nobody else has any business in there — it holds
-`bin/webhookd`, the control API's `dist`, and a full `node_modules`.
+**`2755`, because there are now three readers, not two.** `deploy` owns the tree
+and writes the releases; `hookubit` reads them as the group and runs them; and
+**`www-data` reads them as *other***, because nginx serves
+`current/apps/dashboard/dist` straight off the release (guide §8). The
+world-execute bit is the search bit nginx needs to traverse in, and the
+world-read bit on the files is what lets it open them.
 
-If this server was set up when nginx served the dashboard off this disk, it is
-probably `2755`, because `www-data` needed a search bit to traverse into
-`current/apps/dashboard/dist`. **nginx serves no files here any more**, so that
-grant now buys nothing and widens the tree to every account on the box.
-Retighten it with the `chmod` above; nothing in the deploy or in either unit
-depends on the world bits, so it is safe while the platform is running.
-
-Do not put `www-data` in the `hookubit` group either. `/etc/hookubit/hookubit.env`
-is `0640 root:hookubit` (next section), so that would hand the web server
-`ENCRYPTION_KEY`, the database password and every other secret on the box — and
-there is no longer any question it was the answer to.
-
-One umask corollary survives: `hookubit` reads the release **as the group**, so
-the deploy user's umask must leave group-read on. Ubuntu's `022` does, `027`
-does, `077` in `/home/deploy/.profile` does not — and the symptom is a service
-user that cannot read the code it is supposed to run.
-
-**2. The env file is group-readable.** `prisma migrate deploy` and the migration
-guard run as the deploy user and need `DATABASE_URL` and `DIRECT_DATABASE_URL`:
+That is wider than `2750`, and it is the price of one deploy instead of two.
+What is in the tree is `bin/webhookd`, the control API's `dist`, a full
+`node_modules` and the dashboard bundle — code, no secrets. The secrets are in
+`shared/`, and they stay closed independently of this:
 
 ```bash
-sudo chown root:hookubit /etc/hookubit/hookubit.env
-sudo chmod 0640 /etc/hookubit/hookubit.env
+sudo chmod 0750 /opt/hookubit/shared
+sudo chmod 0750 /opt/hookubit/shared/apps /opt/hookubit/shared/apps/control-api \
+                /opt/hookubit/shared/services /opt/hookubit/shared/services/data-plane
 ```
 
-The trade: the deploy user can read every secret in that file, `ENCRYPTION_KEY`
+Do that explicitly rather than relying on `/opt/hookubit`'s mode, which is the
+whole point: widening the top of the tree then cannot widen anything that
+matters.
+
+::: danger Do not put `www-data` in the `hookubit` group
+It looks like the tidier answer and it is strictly the worse one. The three env
+files are `0640` with group `hookubit` (next section), so group membership hands
+the **web server** `ENCRYPTION_KEY`, the database password, `JWT_SECRET` and
+`SESSION_SECRET`. A web server is the process on this box most likely to be the
+one that gets exploited, and it has no business being able to read any of them.
+One world-execute bit on a directory of compiled code is a far smaller grant
+than membership of the group that owns the secrets.
+:::
+
+**The umask corollary changed with the mode, and it is stricter than before.**
+It used to be enough for the deploy user's umask to leave *group* read on,
+because only `hookubit` read the tree. nginx reads it as **other** now:
+
+| deploy user's umask | Release dirs/files | `hookubit` can run it | nginx can serve the bundle |
+|---|---|---|---|
+| `022` | `0755` / `0644` | yes | **yes** |
+| `027` | `0750` / `0640` | yes | **no — `403` on every asset** |
+| `077` | `0700` / `0600` | no | no |
+
+`022` is Ubuntu's default and is what this recipe assumes. A `027` in
+`/home/deploy/.profile` used to be fine and now produces a dashboard that `403`s
+while the API, both units, `hookubit:health` and every localhost probe are green
+— and it shows up one deploy *after* the change, because the live release still
+has the old modes. `hookubit:dashboard:check` catches it on the deploy that
+introduces it.
+
+If you would rather keep the release tree closed to the world, an ACL is the
+precise alternative — `setfacl -m u:www-data:rx` on `/opt/hookubit` and
+`releases/`, plus a **default** ACL on `releases/` so new release directories
+inherit it, and leave the path at `2750`. It is tighter and it is one more
+mechanism to remember when you are debugging a `403`. The guide's §8 has both
+forms; everything else here assumes `2755`.
+
+**2. Configuration is three files under `shared/`, and the deploy seeds them.**
+
+`/etc/hookubit/hookubit.env` is gone. The live files are:
+
+| File | Holds | Read by |
+|---|---|---|
+| `shared/.env` | the **nine** variables both planes read — `APP_ENV`, `DATABASE_URL`, `LOG_LEVEL`, `REDIS_URL`, `ENCRYPTION_KEY`, `ENCRYPTION_KEY_ID`, `ENCRYPTION_KEYS_RETIRED`, `OTEL_EXPORTER_OTLP_ENDPOINT`, `OTEL_SERVICE_NAMESPACE` | both units |
+| `shared/apps/control-api/.env` | the control plane's own — `JWT_SECRET`, `SESSION_SECRET`, `TRUST_PROXY_HOPS`, `DASHBOARD_URL`, `SMTP_URL`, `MAIL_FROM`, `DIRECT_DATABASE_URL`, … | `hookubit-api` only |
+| `shared/services/data-plane/.env` | the data plane's own — `S3_*`, `WORKER_*`, `ROUTER_*`, `EGRESS_*`, `BREAKER_*`, `INGEST_*`, `RETENTION_*`, … | `hookubit-data-plane` only |
+
+The nine live in **one** file precisely so they cannot drift. Two copies of
+`ENCRYPTION_KEY` that disagree means the control API encrypts endpoint signing
+secrets the worker cannot decrypt: both processes validate their own
+configuration happily and outbound signing breaks in silence. `DATABASE_URL` is
+the same class of fault — ingest writes events the router never reads.
+
+They are `shared_files`, so every release gets a symlink and
+`hookubit:env` copies each **missing** one from its `.env.example` **on the first
+deploy only**. You do not create them by hand. The first deploy will then refuse
+at `hookubit:migrate`, because the templates ship every required variable present
+and **empty** — that refusal names `DIRECT_DATABASE_URL` and says which file it
+goes in. Fill all three in and re-run.
+
+Edit them in place with your own editor; **no `sudo`**, because nothing in the
+platform's configuration is a root-owned file any more. The modes the deploy
+seeds, and why each half is needed:
+
+```bash
+# what hookubit:env creates — you should not have to run this
+install -m 0640 -g hookubit <template> /opt/hookubit/shared/.env
+```
+
+- **Owner, the deploy user, read-write.** `prisma migrate deploy` and the
+  migration guard run as that user over ssh and need `DATABASE_URL` (common file)
+  and `DIRECT_DATABASE_URL` (control-api file).
+- **Group `hookubit`, read.** This is the part that is easy to talk yourself out
+  of, because systemd reads an `EnvironmentFile=` as **root** in PID 1 before it
+  drops privileges — so the service user does not need it *for that*. It needs it
+  for something else: `@nestjs/config` does `existsSync()` and then
+  `readFileSync()` on `<release>/.env` and `<release>/apps/control-api/.env`,
+  which are symlinks to these files, and an `EACCES` there is a control API that
+  **does not boot at all**. Drop the group bit and you get a crash loop whose
+  message is about a file permission, not about configuration.
+- **Nothing for *other*.** `/opt/hookubit` is `2750` so nobody else can traverse
+  in anyway, but these files hold `ENCRYPTION_KEY` and a database password and
+  should not depend on a directory mode two levels up.
+
+What went away with `/etc/hookubit`: a root-owned file, `sudo` to edit
+configuration, and `chown root:hookubit` as a separate manual step. What did
+**not** go away is the deploy user's membership of the `hookubit` group — the
+seeding uses `install -g hookubit`, which a non-root user can only do as a member
+of that group.
+
+The trade is unchanged: the deploy user can read every secret, `ENCRYPTION_KEY`
 included. That is the price of not granting it a broad `sudo -u hookubit`, which
 would be strictly worse — an attacker with the deploy key could then run anything
 as the service user. The deploy user is a trusted identity; treat its SSH key
-like the env file itself.
+like the env files themselves.
 
-The recipe reads only those two keys, with `sed`, and never sources the file. It
-cannot: `MAIL_FROM=HookuBit <no-reply@example.com>` is valid for systemd's
+One thing the split **improves**: each unit now loads only its own file plus the
+common one, so the control API is no longer handed `S3_SECRET_KEY` and the data
+plane is no longer handed `JWT_SECRET` and `SESSION_SECRET`. The Kubernetes
+manifests have been asserting that property in CI for a while; bare metal has it
+now too.
+
+### How the recipe reads them
+
+`hb_env KEY` searches the two files the **control plane** reads, in precedence
+order, and the **first file that defines the key wins** — even if it defines it
+empty:
+
+```
+/opt/hookubit/shared/apps/control-api/.env     service-specific, searched first
+/opt/hookubit/shared/.env                      common
+```
+
+That order is not a preference, it is the only one that matches both real
+parsers. `@nestjs/config` walks `envFilePath` doing
+`Object.assign(dotenv.parse(file), config)`, so **earlier** entries win and
+`['.env', '../../.env']` means service-specific beats common. systemd arrives at
+the same answer from the other end, because a **later** `EnvironmentFile=` wins
+and the units list the common file first. A reader that resolved it differently
+from the processes would be worse than no reader at all — in particular,
+`DIRECT_DATABASE_URL=` present-and-empty in the service file **shadows** a value
+in the common file, for all three.
+
+`shared/services/data-plane/.env` is deliberately not in that list. No Node
+process reads it, and a third source with no defined precedence against the other
+two is how the migration ends up pointed at a different database than the
+services.
+
+It reads keys with `sed` and **never sources a file**. It cannot:
+`MAIL_FROM=HookuBit <no-reply@example.com>` is valid for systemd's
 `EnvironmentFile` and a redirection to `/bin/sh`. Reading it the way systemd does
 takes three more steps a bare `sed -n 's|^KEY=||p'` skips, each of which would
 otherwise hand Prisma a connection string that cannot connect: surrounding
 quotes (valid, and systemd strips them), a trailing `\r` from a CRLF file, and
 trailing blanks. `hb_env` strips all three and takes the **last** definition of a
-repeated key, which is also systemd's rule.
+repeated key within a file, which is also systemd's rule — so appending a
+corrected line to the end of a seeded template works, and leaves the empty one
+above it harmlessly.
 
 **Each value must be on one physical line.** systemd joins a value whose line
 ends in a backslash with the next line; `hb_env` reads one line, and a connection
 string cut at the backslash usually still parses — so the services and the
 migration would quietly use *different* databases. Rather than differ in silence,
-`hb_env` refuses such a value, and the empty result makes the migration guard
-refuse the deploy.
+`hb_env` refuses such a value, and so does the migration guard. It also refuses a
+file that exists but cannot be read, rather than falling through to the next one,
+for exactly the same reason.
 
 **3. Install the units and the sudoers file by hand.**
 
@@ -143,31 +435,72 @@ exclusion actually buys:
   root-owned and out of reach, so whatever the deploy user manages to run still
   runs as `hookubit`, confined, and not as root.
 
-**The units must point at `current/`.** The guide's §7 units reference fixed
-paths; with those, the atomic swap and `dep rollback` change nothing, because
-systemd keeps starting whatever is at the old path. Use the ones in `systemd/`.
-Nothing in the recipe checks this for you any more — it is a one-time install
-step, and `systemctl cat hookubit-api` is how you confirm it.
+**The units must point at `current/` for code and at `shared/` for
+configuration.** The guide's §7 units reference fixed code paths; with those, the
+atomic swap and `dep rollback` change nothing, because systemd keeps starting
+whatever is at the old path. The env files go the other way: they are read from
+`shared/` directly, **not** through `current/`, so a restart does not depend on
+which release is live or on the symlink swap having finished. Each unit carries
+two `EnvironmentFile=` lines, **common first**, and neither is `-`-prefixed —
+there is no state in which running without one of them is correct, and without
+the dash systemd fails before `ExecStart` with the missing path in the message.
+Use the units in `systemd/`. Nothing in the recipe checks this for you any
+more — it is a one-time install step, and `systemctl cat hookubit-api` is how you
+confirm it.
 
 ## What a deploy does, in order
 
-`dep deploy --plan` prints this; it is Deployer's stock `deploy` with three
-tasks hooked in.
+`dep deploy --plan dev` prints this (`make plan-dev`); it is Deployer's stock
+`deploy` with the host guard and three tasks hooked in.
 
+0. **`hookubit:host:guard`** — hooked `before('deploy')`, so it is the first
+   thing that runs, ahead of `deploy:info`. It runs no remote command: it checks
+   that the run covers one host, that the host is pinned to a branch, and that
+   its hostname is not a placeholder, prints `dev → branch dev · …`, and refuses
+   with nothing connected if any of the three is wrong. See
+   [Two hosts](#two-hosts-one-per-environment).
 1. `deploy:info`, `deploy:setup`, `deploy:lock`, `deploy:release`,
    `deploy:update_code` — a new release directory, code from the **pushed** ref.
-2. **`hookubit:build`** — `pnpm install --frozen-lockfile`, `pnpm generate`
-   (installing alone does not produce the Prisma client), the control API, and
-   the Go binary into `<release>/bin/webhookd`. It asserts both outputs exist,
-   because a release with no `dist/main.js` or no `webhookd` is the one failure
-   that reaches the restart and looks like something else. **No dashboard**:
-   Cloudflare builds that, and building it here would produce a bundle nobody
-   serves.
-3. `deploy:env`, `deploy:shared`, `deploy:writable` — no-ops here. `dotenv_example`
-   is deliberately pointed at a file that does not exist, so `deploy:env` copies
-   nothing: otherwise this repo's 12 KB `.env.example` would land as `.env` in
-   every release, and the control API reads `../../.env`. Configuration lives in
-   the env file systemd loads.
+2. **`hookubit:build`** — validates `dashboard_origin` and `ingest_base_url`,
+   then `pnpm install --frozen-lockfile`, `pnpm generate` (installing alone does
+   not produce the Prisma client), the control API, **the dashboard**, and the Go
+   binary into `<release>/bin/webhookd`. It asserts every output exists, because
+   a release with no `dist/main.js` or no `webhookd` is the one failure that
+   reaches the restart and looks like something else.
+
+   The dashboard is built with `VITE_API_TRANSPORT=http` (hardcoded in the
+   recipe — `mock` ships a convincing product backed by an in-memory fixture, so
+   a deploy must not be able to select it by typo) and
+   `VITE_INGEST_BASE_URL={{ingest_base_url}}`. A plain `VAR=value` prefix is
+   correct here because Deployer runs the command as the deploy user over ssh
+   with no `sudo` in it; the guide's `sudo -u hookubit` form needs
+   `sudo -u hookubit env VAR=value …`, because `env_reset` discards a prefix set
+   on `sudo` itself.
+
+   Then it **greps the built JS**: the configured ingest origin must be in it and
+   `http://localhost:8080` must not, and no `.map` may exist. The greps read
+   grep's status as three cases rather than two — `0` found, `1` not found,
+   anything else the check did not run — because a filter written after a `--`
+   becomes a filename, makes grep exit `2`, and would otherwise pass the negative
+   assertion while searching nothing.
+
+   **`hookubit:build` runs before `deploy:shared`, so no env file exists in the
+   release yet, and the dashboard build needs none.** Both its variables come
+   from the command line, and vite's `envDir` is `apps/dashboard/`, which has no
+   `.env` in it and is not one of the three `shared_files`. Nothing in the bundle
+   can be affected by the server's configuration — which is also why changing
+   configuration cannot fix a bundle, only a rebuild can.
+3. `deploy:env` — a **no-op**. The stock task copies one `dotenv_example` to one
+   `.env`, and there are three files in three directories; it is replaced by an
+   empty body rather than left pointed at a filename that does not exist.
+   **`hookubit:env`** — hooked `before('deploy:shared')` — copies each *missing*
+   `shared/<path>` from the release's `<path>.example`, `0640 <deploy>:hookubit`,
+   and refuses the deploy if a template is absent from the release.
+   `deploy:shared` then symlinks all three into the release
+   (`<release>/.env`, `<release>/apps/control-api/.env`,
+   `<release>/services/data-plane/.env`); its own "copy only when shared lacks
+   the file" is the backstop that makes "first deploy only" true. `deploy:writable`
+   is a no-op.
 4. **`hookubit:migrate`** — compares what the database has applied against what
    this release carries, refuses on any mismatch (below), and when migrations are
    pending stops `hookubit-data-plane` **before** applying them. With nothing
@@ -176,19 +509,28 @@ tasks hooked in.
 5. `deploy:symlink` — the atomic swap.
 6. **`hookubit:restart`** — restarts both units, then `hookubit:health`:
    `/health/live` on the control API and `/health/ready` on the data plane's
-   `:9090`, every two seconds for a minute. A failure here fails the deploy, and
-   says that the release is nevertheless live.
+   `:9090`, every two seconds for a minute. Then
+   **`hookubit:dashboard:check`** (below). A failure in either fails the deploy,
+   and says that the release is nevertheless live.
 7. `deploy:unlock`, `deploy:cleanup`, `deploy:success`.
 
-Two things this recipe deliberately no longer does, both of which it used to:
+**`hosts.yml` is checked before anything connects again, and it is the second
+host that brought the check back.** With one host, a `REPLACE_ME` hostname
+failed at the SSH connection and reading that error was cheaper than keeping a
+validator. With two it is no longer the same error: `could not resolve
+REPLACE_ME` does not say *which environment* was being deployed, and that answer
+now matters. `hookubit:host:guard` makes it, locally, naming the host — and the
+same task carries the "is this host pinned to a branch at all" check, which has
+no SSH-level symptom whatsoever. It is deliberately narrow: three questions
+decidable from `hosts.yml` alone, and nothing that needs the server to answer.
 
-- **It does not check your `hosts.yml` before connecting.** A `REPLACE_ME`
-  hostname now fails at the SSH connection instead of in a validator. Cheaper to
-  read the error than to maintain the validator.
+One thing this recipe still deliberately does not do:
+
 - **It does not compare your local tree against the remote ref.** Deployer
   deploys a **pushed** ref: if you have not pushed, you have not deployed, and
-  nothing warns you. `git push` first, and `dep deploy --plan` shows you which
-  ref is configured.
+  nothing warns you. `git push` first — to `dev` for the dev box, to `main` for
+  prod — and `dep hookubit:host:guard <host>` prints the ref that host is
+  pinned to without connecting to it.
 
 ### Why the data plane is stopped across the migration
 
@@ -230,12 +572,20 @@ answer the question that matters.**
 |---|---|
 | the database is **AHEAD** of this release | an applied migration is not in this release's `prisma/migrations` |
 | a migration never finished and was not rolled back | `finished_at IS NULL` with no `rolled_back_at` — Prisma's own definition of **failed**. It is absent from the applied list, so without this the comparison would come back clean over a half-applied schema |
-| `DIRECT_DATABASE_URL` came back empty | absent from the env file, or continued onto a second line with a backslash |
+| `DIRECT_DATABASE_URL` is defined in none of the env files | the usual first-deploy refusal: `shared/apps/control-api/.env` is still the unedited template. The message says which file and shows the line |
+| `DIRECT_DATABASE_URL` is defined, with an empty value | the line is there with nothing after the `=`. Check the control-api file first: an empty value there **shadows** the common file |
+| `DIRECT_DATABASE_URL` is continued onto a second line with a backslash | systemd would join the lines; `hb_env` will not guess |
+| an env file exists but could not be read | the mode or the group was changed. The refusal prints the `chmod`/`chgrp` and says why the service user needs the group bit too |
 | the release has no `prisma/migrations` | nothing to compare against |
 | the query did not run | no `psql`, an unreachable database, a wrong password. The message carries what `psql` said, with anything URL-shaped redacted, because that string holds the password |
 
 Everything except the first is a *could not prove*, and all of them refuse. That
 is the whole design: the guard will not print an all-clear it has not earned.
+**Each refusal now carries only advice that is true of it** — the `psql` failure
+no longer comes back with three paragraphs about the router not draining and a
+`SELECT` against a table the guard could not reach. All of them end with the one
+line that *is* true of all five: nothing was stopped and nothing was swapped,
+because the guard runs before the data-plane stop.
 A database with **no `_prisma_migrations` table at all** is the one case that
 proceeds — nothing is applied, so nothing can be ahead, and that is a first
 deploy.
@@ -246,8 +596,10 @@ existing table), before the symlink moves. Loud failures do not need a guard.
 
 ### Deploying an older ref
 
-`dep deploy --tag v1.3.0` is the documented way to put an older release back
-after a bad one — so it is a **recovery path**, not an unlikely accident, and it
+`dep deploy prod --tag v1.3.0` is the documented way to put an older release
+back after a bad one — the host is named here as everywhere else, and
+`hookubit:host:guard` reports the `--tag` as overriding that host's pinned
+branch for the one run — so it is a **recovery path**, not an unlikely accident, and it
 is the reason the guard exists at all.
 
 The release's `prisma/migrations` is then a strict *prefix* of what is applied,
@@ -274,6 +626,49 @@ duplicate-delivery warning in
 deliveries that had already succeeded before the backup point are re-attempted,
 and consumers see them again.
 
+## `hookubit:dashboard:check`
+
+It takes the hashed entry module out of the release's own
+`apps/dashboard/dist/index.html` — `/assets/index-<hash>.js` — and requires that
+exact filename in what the dashboard hostname serves. Then it asserts that
+`/v1/auth/session` comes back as `application/json` and not as HTML.
+
+It is read-only, it runs after `hookubit:health`, and you can run it on its own
+at any time.
+
+**Why it is back.** It was dropped while the dashboard was hosted elsewhere,
+when all it could have done is restate someone else's deployment log. nginx
+serves the bundle off the release now, and that brings back one failure that
+nothing else on the deploy path can see: **an nginx `root` that does not go
+through `current`**. Point it at `releases/7/apps/dashboard/dist`, or at an
+`/opt/hookubit/src` left over from a hand-built install, and every deploy
+afterwards succeeds completely — build, migrate, swap, both probes `200` — while
+the hostname keeps serving the bundle from whenever that path was last right.
+The old JS talks to the new API over `/v1` and mostly works, which is exactly
+what lets it survive unnoticed. Comparing one hash is the cheapest thing that
+notices.
+
+**It probes nginx on loopback, not the public name.** `curl --resolve` sends the
+right `Host` and SNI to `127.0.0.1`, with `-k`, because the origin certificate is
+a Cloudflare Origin CA cert that is not meant to be publicly trusted. Through
+real DNS the same request would also depend on Cloudflare's cache, Cloudflare's
+health and the guide's packet filter — none of which a deploy changed, and any of
+which could fail a release that is perfectly good. **A deploy must not go red
+because an edge cached an `index.html`.** The public path is a per-install check,
+by hand, in §9 of the guide.
+
+The three things it actually catches, and what each refusal says:
+
+| Refusal | Cause |
+|---|---|
+| `/v1` answered `text/html` | the `location ^~ /v1/` block is missing, or is written without `^~` and a regex location out-ranked it. Every screen in the dashboard is broken; this is the worst of the three and it is named first |
+| served HTML does not reference this release's entry module | nginx's `root` — almost always. Not the edge: this probe never left loopback |
+| nginx did not answer on loopback | the server block is in `sites-available` and not symlinked, or nginx is not running |
+
+What it cannot catch: whether the *public* hostname is reachable, and whether
+Cloudflare is serving a stale `index.html`. Both are §9 of the guide, and both
+are install-time rather than per-deploy.
+
 ## Health, and what a failure means
 
 `hookubit:health` polls both probes every two seconds for a minute, and prints
@@ -295,6 +690,14 @@ distinguishes two PostgreSQL stories that look identical from a dashboard:
 Where a failure leaves you depends on where it happened, and the task that was
 running tells you:
 
+- **In `hookubit:host:guard`** — nothing happened at all. It runs before
+  `deploy:lock`, so there is no lock to release and `deploy:failed`'s unlock is
+  **skipped** rather than run: the stock hook would follow a refusal that said
+  "nothing has connected to anything" with an `ssh` that did, and on a
+  `REPLACE_ME` host it would fail and print a second, more confusing error about
+  the cleanup. That skip is narrow — it applies only to a guard refusal and to a
+  host with no reachable hostname. Every later failure unlocks exactly as
+  before, because by then the lock really was taken.
 - **In `hookubit:build`** — nothing was stopped, nothing was swapped, the live
   release is untouched. The half-built release is left for inspection and
   `deploy:cleanup` will remove it on the next successful deploy.
@@ -303,17 +706,29 @@ running tells you:
 - **In `hookubit:migrate`, during `prisma migrate deploy`** — the data plane is
   **down** and the schema may have moved part-way. Nothing is being delivered,
   and ingest is answering `502` through nginx because ingest is part of the data
-  plane. Fix the cause and re-run `make deploy`: `prisma migrate deploy` is
+  plane. Fix the cause and re-run the same target (`make deploy-dev` /
+  `make deploy-prod`): `prisma migrate deploy` is
   idempotent, and a re-run restarts both units for you. Do not start the data
   plane by hand onto the *old* release if migrations were applied.
 - **After the swap** — the new release is live and unhealthy.
   `journalctl -u hookubit-api -u hookubit-data-plane -n 100` and the readiness
   body above. Rolling forward is usually faster than rolling back.
+- **In `hookubit:dashboard:check`** — the new release is live and the API is the
+  new one; only the bundle in front of it is in question. Nothing about it is
+  release-specific, so it will keep failing the same way on the next deploy
+  until nginx is fixed. It is the last task that can fail, deliberately: it is
+  the least urgent of the three failures and the one most likely to be a
+  one-time server misconfiguration rather than a bad release.
 
 ## Rollback
 
-> **`dep rollback` swaps the symlink. The database does not roll back.**
+> **`dep rollback <host>` swaps the symlink. The database does not roll back.**
 > This platform ships no down-migrations, by design.
+
+`make rollback-dev` and `make rollback-prod`; a bare `make rollback` refuses,
+and `hookubit:host:guard` refuses a `dep rollback` that would cover both boxes.
+It runs **before** `hookubit:rollback:warn`, so you are never asked "roll back
+anyway?" about a host nobody has named.
 
 So a rollback across a schema change runs **old code against a new schema**.
 Across `20260923000000_rename_fan_out_to_routing` that specifically means the
@@ -358,14 +773,14 @@ is the one resource worth counting:
 | `bin/webhookd` | 20–40 MB |
 | source checkout | a few MB; `update_code_strategy` is `archive`, so no `.git` |
 
-No `apps/dashboard/dist` row: it is not built here, which took 5–15 MB of
-sourcemapped bundle off every release.
+| `apps/dashboard/dist` | ~1 MB of real bytes — 12 files, and no sourcemap, because `vite.config.ts` sets `build.sourcemap: false`. With one it would be ~4 MB |
 
 Call it 150–250 MB of unique bytes per release, plus the shared pnpm store
 (roughly 1–2 GB, once) and the Go build cache. Three releases is **under a
 gigabyte** of real disk and buys you the live one, one to roll back to, and one
 spare for when the rollback target turns out to be broken too. Lowering it to 1
-means `dep rollback` has nothing to roll back to.
+means `dep rollback <host>` has nothing to roll back to. The two boxes count
+separately: three releases on each.
 
 `pnpm store prune` on the deploy user reclaims what no surviving release needs —
 safe to run after a deploy, never during one.
@@ -381,11 +796,18 @@ difference between doing it by hand once and doing it on every push:
    units in `systemd/`.
 2. **§4 and §14 build as `hookubit` in `/opt/hookubit/src`**; here a separate
    `deploy` user writes releases and the service user only reads them.
-3. **§5 sets the env file `0600`**; the migration step needs it `0640
-   root:hookubit`.
+3. **§5 and this page now describe the same three files in the same place** —
+   `shared/.env`, `shared/apps/control-api/.env`,
+   `shared/services/data-plane/.env`. The guide writes them by hand because it
+   has no deploy; here `hookubit:env` seeds them from the templates on the first
+   deploy and you fill them in. The guide's old `0600 hookubit:hookubit` is what
+   made a deploy fail — the deploy user could not read it — so the mode is
+   `0640` with group `hookubit` in both places.
 4. **§3 creates `/opt/hookubit/{src,bin}`** for a single-tree build. Here the
    deploy owns `releases/`, `shared/` and `current`, and neither `src` nor a
-   top-level `bin` is used.
+   top-level `bin` is used. nginx's `root` differs with it: §8's
+   `/opt/hookubit/current/apps/dashboard/dist` is the recipe's path, and a
+   single-tree install serves `/opt/hookubit/src/apps/dashboard/dist` instead.
 5. **§14 upgrades in place, in one tree.** Same order as here — build, migrate
    with the data plane stopped, restart, probe — but with no release directory,
    so there is nothing to roll back to and nothing to compare the applied

@@ -82,9 +82,19 @@ row — a dedicated, clearly-named account on a non-routable domain, hashed with
 the same argon2id parameters as `PasswordService` — and everything after that is
 HTTP. It never touches an account it did not create.
 
-**Which database.** Whatever `DATABASE_URL` in `.env` points at, because that is
-where the running services write; a load test against a different database than
-the data plane is not a load test. On a normal dev box that is `HookuBit`. It is
+**Which database.** Whatever `DATABASE_URL` in the repository-root `.env` points
+at, because that is where the running services write; a load test against a
+different database than the data plane is not a load test.
+
+`tests/load/scripts/support/env.mjs` reads **two** files, because what the suite
+needs is spread across them: `DATABASE_URL` from the root `.env` (the nine both
+planes read) and `INGEST_PORT`, `DATA_PLANE_METRICS_PORT`,
+`PAYLOAD_INLINE_MAX_BYTES` and `PAYLOAD_MAX_BYTES` from
+`services/data-plane/.env`. It loads the data-plane file **first**, so
+service-specific beats common — the same precedence the services themselves
+resolve to. It does not read `apps/control-api/.env`: nothing here needs a
+control-plane-only key, and loading it would put `JWT_SECRET` and
+`SESSION_SECRET` in this process's environment for no reason. On a normal dev box that is `HookuBit`. It is
 **not** `hookubit_test` — that belongs to the Go and Nest suites, and dropping a
 load run into it will make somebody's integration test fail for reasons they
 will not enjoy chasing. Point `LOAD_DATABASE_URL` and the service URLs at an
@@ -401,12 +411,18 @@ do to somebody else's process:
 
 ```bash
 # terminal running the data plane
-set -a; source .env; set +a
-CLAIM_STRATEGY=tenant_fair pnpm dev:data-plane
+cd services/data-plane
+set -a; source ../../.env; source .env; set +a
+CLAIM_STRATEGY=tenant_fair go run ./cmd/webhookd all
 
-# then
+# then, from the repository root
 pnpm load:tenants
 ```
+
+Common first, service-specific second: a later `source` wins, matching systemd
+and the control API. `CLAIM_STRATEGY` is a data-plane key, so the durable place
+for it is `services/data-plane/.env` — on the command line is right for an
+experiment you are about to undo.
 
 Compare `queue head-of-line delay` and the quiet group's p95 across the two runs.
 

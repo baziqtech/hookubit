@@ -7,6 +7,14 @@ import { TemplateContext } from './templates';
 /** APP_ENVs with no real inbox and no real users, where a logging stub is safe. */
 export const STUB_MAILER_ENVIRONMENTS: ReadonlySet<string> = new Set(['development', 'test']);
 
+/**
+ * Belt-and-braces, for the same reason as the `?? 'development'` in
+ * `selectMailer`: `env.schema.ts` no longer defaults DASHBOARD_URL and REQUIRES
+ * it under APP_ENV=staging|production, so a server that omitted it never gets
+ * this far. It is kept for a `ConfigService` built without the schema (unit and
+ * testing-module fixtures), where a `TemplateContext` with an empty base would
+ * produce relative nonsense in a rendered mail rather than an obvious failure.
+ */
 const DEFAULT_DASHBOARD_URL = 'http://localhost:5173';
 
 export interface MailerChoices<T> {
@@ -35,6 +43,22 @@ export function selectMailer<T>(
 ): T {
   if (transport) return choices.smtp(transport, templateContextFrom(config));
 
+  // KEPT ON PURPOSE, and it is NOT the schema default - `env.schema.ts` has
+  // none, because APP_ENV is required there. Through the normal boot path this
+  // `??` is therefore unreachable: a process whose environment lacked APP_ENV
+  // refused to start long before any module was constructed.
+  //
+  // It stays because this function's contract is a `ConfigService`, not a
+  // validated `Env`: the unit suites build one from a plain object, and so do
+  // `Test.createTestingModule` fixtures, neither of which goes through
+  // `validateEnv`. That is the case the doc comment above means by "a
+  // ConfigService that did not come through the schema" - this is the second
+  // of the two guards it promises, so removing it would make the promise false
+  // for the one caller shape that can still get here.
+  //
+  // Note the direction: a blank APP_ENV is NOT nullish, so `''` falls through
+  // to the refusal below (reported as `APP_ENV=`), while a genuinely absent
+  // one gets the stub. Blank is now refused at the edge by the schema anyway.
   const appEnv = config.get<string>('APP_ENV') ?? 'development';
   if (!STUB_MAILER_ENVIRONMENTS.has(appEnv)) {
     throw new Error(

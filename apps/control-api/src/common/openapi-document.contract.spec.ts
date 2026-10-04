@@ -3,7 +3,6 @@ import { NestFactory } from '@nestjs/core';
 import { OpenAPIObject } from '@nestjs/swagger';
 import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
-import { AppModule } from '../app.module';
 import { GLOBAL_PREFIX, GLOBAL_PREFIX_EXCLUDE, buildOpenApiDocument } from './openapi-document';
 
 /**
@@ -42,6 +41,32 @@ let app: INestApplication;
 let document: OpenAPIObject;
 
 beforeAll(async () => {
+  /**
+   * This is the ONE spec that instantiates the real `AppModule`, so it is the
+   * one spec that goes through `ConfigModule`'s `validate` - and APP_ENV is
+   * REQUIRED there, with no default, because a deployment identity must never
+   * be guessed (see config/env.schema.ts).
+   *
+   * It is declared HERE rather than left to the ambient environment because
+   * what supplied it before was an accident: requiring `@prisma/client` loads
+   * `apps/control-api/.env` and injects every key it finds into `process.env`,
+   * so on a developer's machine this spec was silently configured by a
+   * gitignored file, and in CI - where that file does not exist - by nothing at
+   * all. A real APP_ENV still wins; `test` because the document includes routes
+   * main.ts does not mount under `production`. A BLANK value counts as unset,
+   * matching the schema, so a developer with an empty APP_ENV exported does not
+   * get a confusing failure in a spec about documents.
+   *
+   * `AppModule` is therefore loaded DYNAMICALLY, after that assignment.
+   * `@Module({ imports: [ConfigModule.forRoot(...)] })` evaluates `forRoot` -
+   * and with it the whole of `validateEnv` - while the module file is being
+   * imported, and a static `import` is hoisted above everything in this
+   * function. Setting the variable in `beforeAll` and importing at the top
+   * would be setting it after the validation it is meant to satisfy.
+   */
+  if (!process.env.APP_ENV) process.env.APP_ENV = 'test';
+  const { AppModule } = await import('../app.module');
+
   app = await NestFactory.create(AppModule, { preview: true, logger: false });
   app.setGlobalPrefix(GLOBAL_PREFIX, { exclude: GLOBAL_PREFIX_EXCLUDE });
   document = buildOpenApiDocument(app);
